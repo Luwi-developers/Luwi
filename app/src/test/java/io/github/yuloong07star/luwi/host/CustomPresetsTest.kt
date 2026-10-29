@@ -16,10 +16,21 @@ import org.junit.Test
  */
 class CustomPresetsTest {
 
-    /** 那张行 id 表: 现在只剩探索那一份 (2026-10-18 手机/视频两条预设下线) */
+    /** 那张行 id 表: 探索与酒馆那两份 (2026-10-18 手机/视频两条预设下线; 2026-10-27 加回酒馆) */
     @Test
-    fun `随包发的模式预设只剩探索那一份`() {
-        assertEquals(listOf("preset-explore" to "explore"), CustomPresets.PRESET_ROWS)
+    fun `随包发的模式预设是探索与酒馆`() {
+        assertEquals(
+            listOf("preset-explore" to "explore", "preset-tavern" to "tavern"),
+            CustomPresets.PRESET_ROWS,
+        )
+    }
+
+    /** profile 要挂的两个包: 自定义模式进 bundle, 酒馆只做依赖 (它没有 bundle patch) */
+    @Test
+    fun `profile 里挂两个包且只有自定义模式是 bundle`() {
+        val entries = CustomPresets.PROFILE_PACKAGES
+        assertEquals(listOf("dsh-custom-mode", "luwi-tavern"), entries.map { it.name })
+        assertEquals(listOf(true, false), entries.map { it.bundle })
     }
 
     /** 下线的两条: 判据是那张名单本身, 别把 id 拼错 (拼错了就删不掉老机器里的那两段) */
@@ -138,6 +149,11 @@ class CustomPresetsTest {
         assertTrue(text.contains("\"@deepseek-ai/dsh-web-app\""))
         assertTrue(text.contains("\"dsh-custom-mode\""))
         assertTrue(text.contains("link:../../../plugins/dsh-custom-mode"))
+        // 酒馆那条只是依赖, 不进 bundles
+        assertTrue(text.contains("\"luwi-tavern\""))
+        assertTrue(text.contains("link:../../../host/node_modules/luwi-tavern"))
+        val bundles = text.substringAfter("\"bundles\": [").substringBefore("]")
+        assertFalse(bundles.contains("luwi-tavern"))
     }
 
     /** 已经有 profile 时: 别的键一个不动, 只加那两处 */

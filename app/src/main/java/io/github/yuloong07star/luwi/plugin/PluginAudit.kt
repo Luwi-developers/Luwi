@@ -49,4 +49,16 @@ internal object PluginAudit {
         if (!file.isFile) return emptyList()
         return file.readLines().filter { it.isNotBlank() }.takeLast(lines.coerceIn(1, 500))
     }
+
+    /** 卸载时把这家插件的那一本账整个删掉 (`plugins/.audit/` 里空出来的目录也顺手收掉) */
+    fun forget(context: Context, id: String) {
+        runCatching {
+            val file = PluginStore.auditFile(context, id)
+            file.delete()
+            val directory = file.parentFile
+            if (directory != null && directory.isDirectory && directory.list().isNullOrEmpty()) {
+                directory.delete()
+            }
+        }
+    }
 }

@@ -172,7 +172,11 @@ internal object PluginStore {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
     }.getOrDefault("0.0.0")
 
-    /** 卸掉之后留的那一条记录 (`plugins/.removed.json`), 谁都能读, 也谁都不改 */
+    /**
+     * 旧版卸掉之后留的那一条记录 (`plugins/.removed.json`)
+     *
+     * 2.7.10 起卸载**什么都不留**: 这个文件只用于清掉存量条目 (见 [forgetRemoved]), 不再写新记录
+     */
     @Serializable
     data class Removed(val id: String, val version: String, val at: Long)
 
@@ -182,9 +186,18 @@ internal object PluginStore {
         return runCatching { json.decodeFromString<List<Removed>>(file.readText()) }.getOrDefault(emptyList())
     }
 
-    fun removed(context: Context, id: String, version: String) {
-        val all = removed(context) + Removed(id, version, System.currentTimeMillis())
-        File(root(context), ".removed.json").writeText(json.encodeToString(all.takeLast(200)) + "\n")
+    /** 清掉某个 id 的存量卸载记录 (卸载它时调用); 没有这个 id 就一个字节都不动 */
+    fun forgetRemoved(context: Context, id: String) {
+        val file = File(root(context), ".removed.json")
+        if (!file.isFile) return
+        val all = removed(context)
+        val kept = all.filterNot { it.id == id }
+        if (kept.size == all.size) return
+        if (kept.isEmpty()) {
+            file.delete()
+        } else {
+            file.writeText(json.encodeToString(kept.takeLast(200)) + "\n")
+        }
     }
 
     /** 插件自己那一块可写的地方: `$DSH_HOME/plugins/<id>/.data/` */
@@ -212,5 +225,14 @@ internal object PluginStore {
         val known = leftovers(context).toMutableMap()
         known[id] = packageName
         File(root(context), LEFTOVERS).writeText(json.encodeToString(known.toMap()) + "\n")
+    }
+
+    /** 卸载这个 id 时把它那条"可以卸掉的老伴侣"提示也清掉: 插件都没了, 留着就是残留 */
+    fun forgetLeftover(context: Context, id: String) {
+        val known = leftovers(context)
+        if (id !in known) return
+        val kept = known - id
+        val file = File(root(context), LEFTOVERS)
+        if (kept.isEmpty()) file.delete() else file.writeText(json.encodeToString(kept) + "\n")
     }
 }

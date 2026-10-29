@@ -1,6 +1,7 @@
 package io.github.yuloong07star.luwi.host
 
 import android.content.Context
+import io.github.yuloong07star.luwi.ui.LuwiTavern
 import java.io.File
 
 /**
@@ -47,13 +48,17 @@ object PluginOverlay {
      * **`imagegen` 不在这张表里**: 它的渠道与密钥要在 dsh 的设置面板里改, 所以那一行归 [PluginRows]
      * (写 profile patch), 见文件头那一段
      */
-    private val PLUGINS = listOf(
+    private val PLUGINS = listOfNotNull(
         Row("luwi-channel", "node_modules/luwi-channel/index.mjs"),
         Row("dsh-web-mobile", "node_modules/dsh-web-mobile/lib/index.js"),
         // G1 会话同步 (2026-10-13): 上游 dsh-session-sync 的 vendored 拷贝, Luwi 改名 luwi-dsh-sync
         // (host-plugins/luwi-dsh-sync, 2026-10-14)。手机侧 git 经 Linux 沙盒执行, 电脑侧同一份包
         // 走 ctx.subprocess —— 见 docs/DSH-LW-3.0.0-G1-施工单.md 与 docs/Luwi-dsh-sync-设计.md
         Row("luwi-dsh-sync", "node_modules/luwi-dsh-sync/index.mjs"),
+        // 酒馆 (P1, 2026-10-24): 自己那一层小应用, 只 inject webServer + llm, 不建 DSH 会话也不碰记忆
+        // (见 docs/Luwi-酒馆-Silo-P1实现方案-20261024.md 与 host-plugins/luwi-tavern/README.md)
+        // 公开构建没有这个包, 行也不写
+        if (LuwiTavern.enabled) Row("luwi-tavern", "node_modules/luwi-tavern/index.mjs") else null,
         // 只含 CSS 覆盖的自有 client 包 (2.7.8 批次 4, D8 = b): 它没有配置要改, 所以挂在覆盖层上
         // (那两行要能被设置面板改的归 PluginRows)。宿主那一半是空的, 客户端那一半在 lib/client.js
         Row("luwi-ui-fix", "node_modules/luwi-ui-fix/index.mjs"),
@@ -82,10 +87,11 @@ object PluginOverlay {
      * 一点异常都看不见。`tools/check-image-edit.mjs` 会数这两张表里的行与 [PluginRows] 那份名单
      * (生图那一条现在归后者, 所以它不在下面这两张表里)
      */
-    private val OWN_PLUGINS = listOf(
+    private val OWN_PLUGINS = listOfNotNull(
         Row("luwi-channel", "node_modules/luwi-channel/index.mjs"),
         Row("dsh-web-mobile", "node_modules/dsh-web-mobile/lib/index.js"),
         Row("luwi-dsh-sync", "node_modules/luwi-dsh-sync/index.mjs"),
+        if (LuwiTavern.enabled) Row("luwi-tavern", "node_modules/luwi-tavern/index.mjs") else null,
         Row("luwi-ui-fix", "node_modules/luwi-ui-fix/index.mjs"),
         Row("lw-docx-preview", "node_modules/lw-docx-preview/index.mjs"),
     )

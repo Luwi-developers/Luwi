@@ -60,6 +60,11 @@ internal object PluginHost {
     /** 这个插件现在为什么不能干活; null 表示能 */
     fun problem(id: String): String? = problems[id]
 
+    /** 卸载之后把那句"为什么没接上"也忘掉: 插件都没了, 留着就是内存里的残留 */
+    fun forget(id: String) {
+        problems.remove(id)
+    }
+
     /**
      * 接上并把它叫起来
      *

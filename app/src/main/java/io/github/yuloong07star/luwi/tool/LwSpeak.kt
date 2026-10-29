@@ -86,14 +86,107 @@ internal object LwSpeak {
         "clip" -> clip(context, request)
         "stop" -> stop()
         "release" -> release()
+        // 音色库 (2026-10-25): 会话自己的文件工具被沙箱关在工作区, 看不到 $DSH_HOME, 所以登记走这里
+        "voice" -> voice(context, request)
         // 只读探针: 系统引擎到底把声音放在哪种属性上 (判据换不换得成, 靠它一句话定), 见 [probe]
         "probe" -> probe(context)
         // Edge 那条的体检 (2026-10-20): 走一趟完整握手与合成, 只收不播; 回执说清用的是本地还是远端令牌
         "edge" -> LwEdgeTts.probe(request.bool("remote", false))
         else -> throw IllegalArgumentException(
-            "op has to be status, speak, clip, stop, release, probe or edge, not \"$op\"",
+            "op has to be status, speak, clip, stop, release, voice, probe or edge, not \"$op\"",
         )
     }
+
+    /**
+     * 音色库那三个动作: `list` / `add` / `remove`
+     *
+     * 为什么不是让 agent 直接写 `$DSH_HOME/lw/tts-voices.json`: 会话自己的 `read` / `write` 被 dsh 的
+     * fs 沙箱关在工作区里 (与快捷指令、自动指令同一个理由), 而应用这一侧本来就能写那个目录 ——
+     * 于是"登记"这件事由应用代做, 格式与上限都在 [LwApiVoices] 里
+     */
+    private fun voice(context: Context, request: JsonObject): JsonObject {
+        val action = request.stringOrNull("action")?.trim()?.ifBlank { "list" } ?: "list"
+        return when (action) {
+            "list" -> {
+                val snapshot = LwApiVoices.read(context)
+                buildJsonObject {
+                    put("action", "list")
+                    put("voices", rows(snapshot.entries))
+                    put("count", snapshot.entries.size)
+                    put("path", LwApiVoices.file(context).absolutePath)
+                    put("note", snapshot.note)
+                    put(
+                        "detail",
+                        if (snapshot.entries.isEmpty()) {
+                            "no voices are registered yet"
+                        } else {
+                            "${snapshot.entries.size} voice(s) registered"
+                        },
+                    )
+                }
+            }
+
+            "add" -> {
+                val id = request.stringOrNull("id")?.trim().orEmpty()
+                if (id.isEmpty()) {
+                    throw IllegalArgumentException("op=voice action=add needs id=<the provider voice id>")
+                }
+                val entry = LwApiVoices.add(
+                    context = context,
+                    id = id,
+                    name = request.stringOrNull("name").orEmpty(),
+                    model = request.stringOrNull("model").orEmpty(),
+                    note = request.stringOrNull("note").orEmpty(),
+                )
+                buildJsonObject {
+                    put("action", "add")
+                    put("id", entry.id)
+                    put("name", entry.display)
+                    put("model", entry.model)
+                    put("count", LwApiVoices.read(context).entries.size)
+                    put("path", LwApiVoices.file(context).absolutePath)
+                    put(
+                        "detail",
+                        "registered ${entry.display} (${entry.id}); the settings page lists it, and" +
+                            " op=speak voice=${entry.id} uses it for one line",
+                    )
+                }
+            }
+
+            "remove" -> {
+                val wanted = request.stringOrNull("id")?.trim().orEmpty()
+                    .ifEmpty { request.stringOrNull("name")?.trim().orEmpty() }
+                if (wanted.isEmpty()) {
+                    throw IllegalArgumentException(
+                        "op=voice action=remove needs id=<the voice id or its registered name>",
+                    )
+                }
+                val removed = LwApiVoices.remove(context, wanted)
+                buildJsonObject {
+                    put("action", "remove")
+                    put("removed", removed)
+                    put("count", LwApiVoices.read(context).entries.size)
+                    put("path", LwApiVoices.file(context).absolutePath)
+                    put(
+                        "detail",
+                        if (removed) {
+                            "removed $wanted"
+                        } else {
+                            "no voice matched \"$wanted\"; nothing was removed"
+                        },
+                    )
+                }
+            }
+
+            else -> throw IllegalArgumentException("action has to be list, add or remove, not \"$action\"")
+        }
+    }
+
+    /** 音色库那一列: 与 `op=status` 的 `apiVoices` 同一个写法 */
+    private fun rows(entries: List<LwApiVoices.Entry>): String =
+        entries.joinToString(", ") { one ->
+            "${one.display} (${one.id})" + if (one.model.isNotBlank()) " model ${one.model}" else ""
+        }
 
     /**
      * 放一段预录填音 (T13)
@@ -141,6 +234,10 @@ internal object LwSpeak {
         val tts = attempt.getOrNull()
         val chinese = tts?.let { runCatching { it.setLanguage(Locale.CHINESE) }.getOrElse { -99 } }
         val voices = tts?.let { runCatching { it.voices }.getOrNull() }
+        // API 那四样与音色库都从磁盘现读: 宿主那一侧也可能先于界面问到这一句
+        val apiConfig = SpeakSettings.storedApi(context)
+        val library = LwApiVoices.read(context)
+        val apiEntry = library.entries.firstOrNull { it.id == apiConfig.voice }
         return buildJsonObject {
             put("engine", tts?.defaultEngine ?: "unavailable")
             put("voices", voices?.size ?: 0)
@@ -169,10 +266,17 @@ internal object LwSpeak {
             put("onDeviceModel", SpeakSettings.model ?: "")
             put("edgeVoice", SpeakSettings.edgeVoice)
             // API 那条: 地址与模型/音色照报, **密钥只报"有没有"** (它不该出现在任何回执或日志里)
-            put("apiUrl", SpeakSettings.apiUrl)
-            put("apiKeySet", SpeakSettings.apiKey.isNotBlank())
-            put("apiModel", SpeakSettings.apiModel)
-            put("apiVoice", SpeakSettings.apiVoice)
+            put("apiUrl", apiConfig.url)
+            put("apiKeySet", apiConfig.key.isNotBlank())
+            put("apiModel", apiConfig.model)
+            put("apiVoice", apiConfig.voice)
+            // 设计出来的音色 (2026-10-25): 设置页那一列读的就是这一份, 这里把实况一并报出去 ——
+            // "列表为什么是空的"与"选中的那条还在不在"都不用只能靠猜
+            put("apiVoiceName", apiEntry?.name.orEmpty())
+            put("apiVoiceModel", apiEntry?.model?.takeIf { it.isNotBlank() } ?: apiConfig.model)
+            put("apiVoices", rows(library.entries))
+            put("apiVoiceLibrary", LwApiVoices.file(context).absolutePath)
+            put("apiVoiceLibraryNote", library.note)
             put(
                 "onDeviceVoices",
                 LwTts.list(context).joinToString(", ") { voice ->
@@ -374,11 +478,13 @@ internal object LwSpeak {
             val asked = request.numberOrNull("rate")?.toFloat()
             val speed = (asked ?: SpeakSettings.rate).coerceIn(0.5f, 2.0f)
             val edge = SpeakSettings.usesEdge()
+            // 本次点名的音色 (id 或音色库里那个名字): 只对 API 那条有意义, 优先于设置页
+            val askedVoice = request.stringOrNull("voice")
             val answer = if (edge) {
                 LwEdgeTts.speak(context, text, speed)
             } else {
                 // 没填地址时这一句会直说缺什么 (见 LwApiTts.speak), 所以这里不另设闸
-                LwApiTts.speak(context, text, speed)
+                LwApiTts.speak(context, text, speed, askedVoice)
             }
             val failed = !answer.startsWith("said ")
             // 在线那两条的播放器 (LwVoiceClip 里那个 MediaPlayer) 也在本进程: 同上, 判据只认播放标记
@@ -402,10 +508,17 @@ internal object LwSpeak {
                     put("edgeDetail", answer)
                 }
             }
+            val api = SpeakSettings.storedApi(context)
+            val apiVoice = LwApiSpeech.effectiveVoice(askedVoice, api.voice)
             return buildJsonObject {
                 put("spoken", !failed)
                 put("readingWith", if (edge) "edge" else "api")
-                put("voice", if (edge) SpeakSettings.edgeVoice else SpeakSettings.apiVoice)
+                put("voice", if (edge) SpeakSettings.edgeVoice else apiVoice)
+                if (!edge) {
+                    val entry = LwApiVoices.find(context, apiVoice)
+                    put("model", entry?.model?.takeIf { it.isNotBlank() } ?: api.model)
+                    put("voiceRegistered", entry != null)
+                }
                 put("rate", speed.toDouble())
                 put("text", text)
                 put("characters", text.length)
@@ -413,6 +526,12 @@ internal object LwSpeak {
                 put("volumeIgnored", askedVolume)
                 if (askedVolume) {
                     put("volumeNote", "the online engine keeps its own loudness, so that number did not apply")
+                }
+                // 点名的音色只对 API 那条成立: Edge 那边是它自己那份固定清单
+                val voiceIgnored = edge && !askedVoice.isNullOrBlank()
+                put("voiceIgnored", voiceIgnored)
+                if (voiceIgnored) {
+                    put("voiceNote", "only the API engine takes a voice id; Edge keeps its own list")
                 }
                 put("detail", answer)
             }

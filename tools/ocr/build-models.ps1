@@ -11,6 +11,12 @@
 # pin them (640x640 for det, 48x320 for rec). Everything else is left alone on purpose —
 # see docs/step8-record.md for the two routes that were tried and what each cost.
 #
+# Two knobs, both off by default (the shipped shape is still 640 / batch 1):
+#   -DetSize 960   square detector input side
+#   -RecBatch 4    recogniser batch; QNN HTP accepts it, but the 2026-10-28 measurement found the
+#                  per-sample cost linear, so batching buys nothing on this device
+# They exist for the A/B only; see docs/step8-record.md for the numbers and the decision.
+#
 # The mirror is not a preference. huggingface.co itself does not answer from this network (curl
 # exits 28 after the whole timeout, on every one of the three files), while hf-mirror.com serves
 # the same paths. Override -Base when that stops being true.
@@ -27,7 +33,14 @@ param(
     [string]$Work = '',
     # Where the APK picks them up
     [string]$Out = '',
-    [string]$Base = 'https://hf-mirror.com'
+    [string]$Base = 'https://hf-mirror.com',
+    # 方形 detector 的边长 (0 = 640 缺省). 2026-10-28 的 A/B 用 `-DetSize 960` 出一份候选,
+    # 再拿同一个页面比小字与 detMs; 采用与否由判据决定, 不是这里
+    [int]$DetSize = 0,
+    # recogniser 的 batch (0 = 1 缺省). QNN HTP 认不认 batch>1 只有真机试了才知道
+    [int]$RecBatch = 0,
+    # detector 的来源仓库: 换更强的 det 只改这一个 (tiny / small / medium 都在同一套导出里)
+    [string]$DetRepo = 'PaddlePaddle/PP-OCRv6_tiny_det_onnx'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,7 +53,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $models = @(
-    @{ name = 'det'; kind = 'det'; repo = 'PaddlePaddle/PP-OCRv6_tiny_det_onnx' },
+    @{ name = 'det'; kind = 'det'; repo = $DetRepo },
     @{ name = 'rec'; kind = 'rec'; repo = 'PaddlePaddle/PP-OCRv6_tiny_rec_onnx' }
 )
 
@@ -51,6 +64,9 @@ foreach ($model in $models) {
     $name = $model.name
     $raw = Join-Path $Work "$name.onnx"
     $pinned = Join-Path $Out "$name.onnx"
+    $shapeArgs = @()
+    if ($model.kind -eq 'det' -and $DetSize -gt 0) { $shapeArgs = @('--det-size', "$DetSize") }
+    if ($model.kind -eq 'rec' -and $RecBatch -gt 0) { $shapeArgs = @('--rec-batch', "$RecBatch") }
     Write-Host "=== $name"
     if (-not (Test-Path $raw)) {
         $url = "$Base/$($model.repo)/resolve/main/inference.onnx"
@@ -58,7 +74,7 @@ foreach ($model in $models) {
         curl.exe -sL --max-time 300 --retry 2 $url -o $raw
         if ($LASTEXITCODE -ne 0) { throw "could not fetch $url (curl exit $LASTEXITCODE)" }
     }
-    & $Python $rewrite --kind $model.kind --input $raw --output $pinned
+    & $Python $rewrite --kind $model.kind --input $raw --output $pinned @shapeArgs
     if ($LASTEXITCODE -ne 0) { throw "pinning failed for $name" }
 }
 

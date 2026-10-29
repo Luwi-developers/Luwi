@@ -61,6 +61,8 @@ internal object PluginManager {
     /** 强制下一次读盘 (装 / 卸 / 改状态之后调) */
     fun invalidate() {
         loadedFrom = null
+        // 装着的东西变了: 留在返回栈里的插件列表要当场重读, 不能等它自己刷新
+        PluginUi.bump()
     }
 
     /** 现在装着的那一份 */
@@ -100,8 +102,10 @@ internal object PluginManager {
             synchronized(lock) {
                 writeState(context) { it.copy(enabled = it.enabled - id) }
             }
+            PluginUi.bump()
             return "启用失败: $problem"
         }
+        PluginUi.bump()
         return "${manifest.name} 已经上岗"
     }
 
@@ -112,33 +116,44 @@ internal object PluginManager {
         synchronized(lock) {
             writeState(context) { it.copy(enabled = it.enabled - id) }
         }
+        PluginUi.bump()
         return "${entry.name} 已经停用"
     }
 
-    /** 卸载: 先停 → 撤注册 → (问过的那一句由界面负责) → 删目录 → 留一条记录 */
-    fun uninstall(context: Context, id: String, keepData: Boolean): String {
+    /**
+     * 卸载: **一个动作, 什么都不留**
+     *
+     * 顺序是: 先停 → 撤注册 → 清桌面槽 / 外观选择 → 删整个 `<id>/` (含 `.data` 与所有版本) →
+     * 删审计 → 清 `.leftovers.json` 与 `.removed.json` 里的旧条目 → 落状态。删不干净 (目录还在)
+     * 时先把状态停掉再如实报错, 不假装成功
+     *
+     * 伴侣 APK **不自动卸**: 它是另一个应用, 里面可能有主人自己放进去的东西; 详情页只提示可以卸掉
+     */
+    fun uninstall(context: Context, id: String): String {
         val entry = entries(context).firstOrNull { it.id == id } ?: return "没装过这个插件: $id"
-        val version = entry.version
         PluginHost.disconnect(context, id)
+        PluginHost.forget(id)
         // 桌面那一格跟着收口 (方案 3.1): 先把它从槽里摘掉再重画 —— 少了这一步, 那一格会挂着一条
         // 已经删掉的插件, "插件没了"与"主人故意清空"两种状态就分不清了
         if (WidgetSlots.clear(context, id).isNotEmpty()) WidgetHost.refreshAll(context)
         // 浮标外观那一条同理: 挑中的那一份被卸掉就回内置画法 (协议 10.1)
         if (BallTheme.currentId(context) == id) BallTheme.choose(context, null)
         val home = java.io.File(PluginStore.root(context), id)
-        if (keepData) {
-            val data = java.io.File(home, ".data")
-            home.listFiles()?.forEach { if (it != data) it.deleteRecursively() }
-        } else {
-            home.deleteRecursively()
-        }
-        PluginStore.removed(context, id, version)
+        home.deleteRecursively()
+        PluginAudit.forget(context, id)
+        PluginStore.forgetLeftover(context, id)
+        PluginStore.forgetRemoved(context, id)
         synchronized(lock) {
             writeState(context) {
                 it.copy(enabled = it.enabled - id, grants = it.grants - id)
             }
         }
-        return "${entry.name} 已经卸掉" + if (keepData) " (它那份数据留下了)" else ""
+        PluginUi.bump()
+        return if (!home.exists()) {
+            "${entry.name} 已经彻底删掉 (数据、审计与记录一起清了)"
+        } else {
+            "${entry.name} 没删干净: ${home.absolutePath} 还在, 已经先停用; 查一下是不是有文件被占用"
+        }
     }
 
     /** 授权 / 撤权一条能力: 只能授权插件自己声明过的那些 */
@@ -156,6 +171,7 @@ internal object PluginManager {
                 it.copy(grants = it.grants + (id to manifest.declared.filter { one -> one in current }))
             }
         }
+        PluginUi.bump()
         return if (allowed) "已经允许 \"$capability\"" else "已经收回 \"$capability\""
     }
 

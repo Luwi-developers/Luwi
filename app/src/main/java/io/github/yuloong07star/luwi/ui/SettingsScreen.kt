@@ -78,6 +78,7 @@ import io.github.yuloong07star.luwi.lock.LockSetting
 import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreStatus
 import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.LwApiVoices
 import io.github.yuloong07star.luwi.tool.LwCamera
 import io.github.yuloong07star.luwi.tool.LwAutomation
 import io.github.yuloong07star.luwi.tool.LwLinux
@@ -91,6 +92,7 @@ import io.github.yuloong07star.luwi.tool.bytes
 import java.io.File
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.voice.VoiceSettings
+import io.github.yuloong07star.luwi.voice.SpeechModelDownload
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.host.DshHost
@@ -100,7 +102,6 @@ import io.github.yuloong07star.luwi.plugin.PluginDownload
 import io.github.yuloong07star.luwi.plugin.PluginIndex
 import io.github.yuloong07star.luwi.overlay.BallGeometry
 import io.github.yuloong07star.luwi.overlay.BallSize
-import io.github.yuloong07star.luwi.overlay.BallFeel
 import io.github.yuloong07star.luwi.overlay.BallSpot
 import io.github.yuloong07star.luwi.overlay.BallSwitch
 import io.github.yuloong07star.luwi.overlay.OverlayState
@@ -111,6 +112,7 @@ import io.github.yuloong07star.luwi.plugin.PluginInstaller
 import io.github.yuloong07star.luwi.plugin.PluginManager
 import io.github.yuloong07star.luwi.plugin.PluginManifest
 import io.github.yuloong07star.luwi.plugin.PluginStore
+import io.github.yuloong07star.luwi.plugin.PluginUi
 import io.github.yuloong07star.luwi.plugin.PluginSignature
 import io.github.yuloong07star.luwi.plugin.PluginTrust
 import io.github.yuloong07star.luwi.plugin.widget.WidgetHost
@@ -140,6 +142,7 @@ import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.update.AboutSettings
 import io.github.yuloong07star.luwi.update.UpdateCheck
+import io.github.yuloong07star.luwi.util.BatteryWhitelist
 import io.github.yuloong07star.luwi.util.Grant
 import io.github.yuloong07star.luwi.util.PermissionCatalog
 import io.github.yuloong07star.luwi.util.PermissionGate
@@ -200,19 +203,6 @@ private val themeModes = listOf(
 )
 
 
-/**
- * 浮标手势灵敏度那两项 (见 [BallFeel]): **顺序就是下拉里从上到下那两行**
- *
- * 防误触排第一: 它是缺省那一档, 于是"点开下拉最上面那个就是现在生效的"这件事在多数人那里一眼可见
- */
-private val ballFeels = listOf(BallFeel.GUARD, BallFeel.STANDARD)
-
-/** 那一档的名字 */
-private fun feelLabel(feel: BallFeel): Int = when (feel) {
-    BallFeel.STANDARD -> R.string.settings_ball_feel_standard
-    BallFeel.GUARD -> R.string.settings_ball_feel_guard
-}
-
 /** 调色板风格与色彩规范直接取 Miuix 的枚举名, 它们是 Google 那边的术语 */
 private val paletteStyles = ThemePaletteStyle.entries.map { it.name }
 private val colorSpecs = ThemeColorSpec.entries.map { it.name }
@@ -230,12 +220,12 @@ private val CollapsedSections = listSaver<Set<String>, String>(
 )
 
 /**
- * 官网的登录页 (2026-10-24 主人: ⋮ 里的「sync 签到」改成「签到」, 跳到登录界面)
+ * 官网的登录页 (2026-10-25 主人: ⋮ 里那一行改成「账号」, 仍然跳到登录界面)
  *
- * 2026-10-19 定的是"签到页不进包, 那个按钮跳转官网的签到页", 现在跳的是 `login`:
- * 没有会话的浏览器进 login 会被它自己送去账号页, 已登录的则直接落在账号页, 从那里再进同步页签到。
- * **只有一个入口**: ⋮ 里那一行; 「关于」里不放第二个。账号与签到都在 `luwi.dpdns.org` 上,
- * 应用不随包、也不带任何账号数据面
+ * 2026-10-19 定的是"签到页不进包, 那个按钮跳转官网的签到页"; 2026-10-24 改成跳 `login`;
+ * 签到 2026-10-26 已在官网恢复, 这一行只负责把人送到官网账号页: 没有会话的浏览器进 login 会被它自己送去账号页,
+ * 已登录的则直接落在账号页, 从那里进酒馆页签到或购买。**只有一个入口**: ⋮ 里那一行;
+ * 「关于」里不放第二个。账号与付费都在 `luwi.dpdns.org` 上, 应用不随包、也不带任何账号数据面
  */
 private const val SIGN_IN_URL = "https://luwi.dpdns.org/login"
 
@@ -260,10 +250,10 @@ internal val SettingsSectionsAlwaysOpenKeys = listOf(
 /** 白名单的集合形态, 给 [defaultCollapsed] 算差集用 */
 internal val SettingsSectionsAlwaysOpen: Set<String> = SettingsSectionsAlwaysOpenKeys.toSet()
 
-/** 「能力」那一组的 12 段, 缺省全收着 (装完之后偶尔来调一次的那些) */
+/** 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern) */
 private val AbilitySectionKeys = listOf(
     "notifications", "screenshot", "look", "lock",
-    "explore", "automation", "quick", "plugin", "skills", "linux", "sync", "permissions",
+    "explore", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
 )
 
 /**
@@ -273,7 +263,8 @@ private val AbilitySectionKeys = listOf(
  * 漏掉它不会报错, 只是那一段会恰好展开着 (与 D2 那条"新加的段就收着"相反), 界面上一点异常都看不出来,
  * 所以 `tools/check-settings-sections.mjs` 把这一份与下面那些 `settingsSection(key = …)` 逐个对齐 (顺序也管)
  */
-internal val SettingsSectionKeys: List<String> = SettingsSectionsAlwaysOpenKeys + AbilitySectionKeys
+internal val SettingsSectionKeys: List<String> = (SettingsSectionsAlwaysOpenKeys + AbilitySectionKeys)
+    .filter { it != "tavern" || LuwiTavern.enabled }
 
 /**
  * 缺省收起来的那几段 = 页面上所有段 - 白名单
@@ -325,11 +316,28 @@ private fun LazyListScope.settingsSection(
     onToggle: (String) -> Unit,
     content: @Composable () -> Unit,
 ) {
+    settingsSection(key, title, { stringResource(summary) }, collapsed, onToggle, content)
+}
+
+/**
+ * 同一段, 但那一句摘要要按状态算 (酒馆那一段: 未绑定 / 已绑定 / 不匹配 / 关着)
+ *
+ * 摘要只能**在 item 里面**取: 调用点那一层是 [LazyListScope], 不是组合上下文, 所以这里收的是
+ * 一个 composable 的 lambda 而不是一个值
+ */
+internal fun LazyListScope.settingsSection(
+    key: String,
+    title: Int,
+    summary: @Composable () -> String,
+    collapsed: Set<String>,
+    onToggle: (String) -> Unit,
+    content: @Composable () -> Unit,
+) {
     item {
         val closed = key in collapsed
         SectionTitle(
             title = stringResource(title),
-            summary = stringResource(summary),
+            summary = summary(),
             collapsed = closed,
             onToggle = { onToggle(key) },
         )
@@ -374,6 +382,10 @@ fun SettingsScreen() {
         sessionCollapsed = collapsed
     }
 
+    // 「酒馆」那一段的摘要要**在收起时就对** (未绑定 / 已绑定 / 不匹配 / 关着), 所以读一次读数这件事
+    // 挂在这一层, 不挂在段里 —— 段里的 LaunchedEffect 只有展开之后才会跑
+    LuwiTavern.summaryEffect(reload)
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
@@ -388,7 +400,7 @@ fun SettingsScreen() {
                         )
                     }
                 },
-                // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 签到 / 关于 / 要重启 host 才
+                // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 账号 / 关于 / 要重启 host 才
                 // 生效的改动
                 // 页面上就不必每个面板各放一个按钮 (2026-10-08 加了前三条, 见开发计划 2.4 与 2.14)
                 // **G1-D 那几行「打开 <对端名>」2026-10-17 撤掉了** (主人: "没用就删掉"): 它载入的
@@ -427,10 +439,10 @@ fun SettingsScreen() {
                                     },
                                 ),
                                 DropdownItem(
-                                    text = stringResource(R.string.settings_menu_sync),
-                                    summary = stringResource(R.string.settings_menu_sync_summary),
-                                    // 2026-10-24: 文案改成「签到」, 打开的是官网登录页 —— 未登录先登录,
-                                    // 已登录会被那一页送去账号页, 再进同步页签到
+                                    text = stringResource(R.string.settings_menu_account),
+                                    summary = stringResource(R.string.settings_menu_account_summary),
+                                    // 2026-10-25: 文案改成「账号」—— 打开的是官网登录页,
+                                    // 未登录先登录, 已登录会被那一页送去账号页, 从那里进酒馆签到或购买
                                     onClick = {
                                         openPage(context, SIGN_IN_URL)?.let { problem ->
                                             Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
@@ -728,6 +740,12 @@ fun SettingsScreen() {
                     Card { SyncItems() }
                 }
 
+                // 酒馆那一段 (P1, 2026-10-24): 一场多人对谈, 一轮一个人说话。它不建 DSH 会话、不碰
+                // 记忆, 数据只写 `$DSH_HOME/lw/tavern` —— 所以这一段只有开关 / 绑定 / 两个入口,
+                // 角色卡与会话都在它自己那一页 (TavernManageScreen) 里; 段本身归 LuwiTavern
+                // (公开构建换成 stub 就不画)
+                LuwiTavern.tavernSection(this, collapsed, toggleSection)
+
                 // 工作区与网络这两段已经从这里撤掉 (主人 2026-10-06): 工作区落在哪是 host 启动时按
                 // Workspace.resolve 那三档自己挑的, 网络那个开关改完也要重启 host —— 两件事都是"平时
                 // 不用动"的, 留在这里只把下面那些常用的段推得更远。**能力一个都没删**: 三档解析、
@@ -744,6 +762,18 @@ fun SettingsScreen() {
                     onToggle = toggleSection,
                 ) {
                     Card { PermissionsItems() }
+                }
+
+                // 开屏接口文档 (2026-10-25 主人: "不要加这个版块，你在设置末尾加个接口文档，能让用户用
+                // agent 自行设计开屏动画"): 不给一组开关, 只在最末放一份**文档** + 三个动作 (见 [ApiItems])
+                settingsSection(
+                    key = "api",
+                    title = R.string.settings_section_api,
+                    summary = R.string.settings_section_api_summary,
+                    collapsed = collapsed,
+                    onToggle = toggleSection,
+                ) {
+                    ApiItems()
                 }
             }
         }
@@ -848,7 +878,45 @@ private fun ChannelItems() {
                 }
             },
         )
+        // 后台保活 (2026-10-28 主人: "把后台保活放到允许luwi自启动下方"): 从「省电」段挪到这里 ——
+        // 两行都是"要人去系统页点一下"的入口, 挨着比夹在省电那几档中间好找
+        KeepAliveRow()
     }
+}
+
+/**
+ * 「后台保活」那一行 (`BatteryWhitelist`): 不是"现在别听", 而是"别让系统把 host 冻住" —— 不在名单里
+ * 时, 息屏之后网络与后台都会被收, 回来就得重载。从系统页回来要重读 (ON_RESUME)
+ *
+ * 2026-10-26 加的这一条, 2026-10-28 从「省电」段挪到「连接」段「允许 Luwi 自启动」下方
+ */
+@Composable
+private fun KeepAliveRow() {
+    val context = LocalContext.current
+    var whitelisted by remember { mutableStateOf(BatteryWhitelist.ignored(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) whitelisted = BatteryWhitelist.ignored(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    ArrowPreference(
+        title = stringResource(R.string.settings_power_keepalive),
+        summary = if (whitelisted) {
+            stringResource(R.string.settings_power_keepalive_granted)
+        } else {
+            stringResource(R.string.settings_power_keepalive_missing)
+        },
+        onClick = {
+            // 系统框是异步的, 这一下只把"可能已经变了"读一次; 真正的答案在 ON_RESUME 那一次
+            if (BatteryWhitelist.request(context) == null) {
+                Toast.makeText(context, R.string.settings_power_keepalive_failed, Toast.LENGTH_LONG).show()
+            }
+            whitelisted = BatteryWhitelist.ignored(context)
+        },
+    )
 }
 
 /**
@@ -1884,7 +1952,7 @@ private fun PluginItems() {
     var slotDialog by remember { mutableStateOf<String?>(null) }
     // 浮标外观 (协议 10.1): 挑一个主题插件, 或者换回内置画法
     var themeDialog by remember { mutableStateOf(false) }
-    val entries = remember(revision) { PluginManager.entries(context) }
+    val entries = remember(revision, PluginUi.revision) { PluginManager.entries(context) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -1923,7 +1991,7 @@ private fun PluginItems() {
         stringResource(R.string.settings_widget_section) + " · " + stringResource(R.string.settings_widget_section_summary),
     )
     WidgetSlot.PLUGIN_FILLED.forEach { slot ->
-        val holder = remember(revision) { WidgetSlots.holder(context, slot) }
+        val holder = remember(revision, PluginUi.revision) { WidgetSlots.holder(context, slot) }
         val holderName = holder?.let { id ->
             entries.firstOrNull { it.id == id }?.name ?: id
         }
@@ -1938,7 +2006,7 @@ private fun PluginItems() {
     }
 
     // 浮标外观那一条 (协议 10.1 / 方案 3.2): 多个主题插件可以同时装着, 同一时刻只生效一个
-    val themeId = remember(revision) { BallTheme.currentId(context) }
+    val themeId = remember(revision, PluginUi.revision) { BallTheme.currentId(context) }
     val themeName = themeId.takeIf { it.isNotBlank() }?.let { id ->
         entries.firstOrNull { it.id == id }?.name ?: id
     } ?: stringResource(R.string.settings_theme_builtin)
@@ -2496,7 +2564,6 @@ private fun PluginIndexDialog(
                     tooNew -> minLwLine
                     else -> ""
                 }).filter { it.isNotBlank() }.joinToString("\n")
-                val selectable = !sameOrNewer && !tooNew
                 // 选中态: 前面打一个勾 (Miuix 那一层没有"选中"这个参数, 而勾是最省事又看得见的说法)
                 val shown = if (selected?.id == entry.id) "\u2713 " else ""
                 ArrowPreference(
@@ -2505,12 +2572,13 @@ private fun PluginIndexDialog(
                     summary = summary,
                     onClick = {
                         haptic.contextClick()
-                        // 点一下只是选中; 不能装的那两条当场把原因说出来, 别让人以为是没反应
+                        // 点一下只是选中; 再点同一条就取消 (2026-10-28 主人: 选中后再点一次要能取消),
+                        // 于是底部按钮从「安装」回到「完成」。不能装的那两条当场把原因说出来
                         when {
                             sameOrNewer -> onMessage(installedLine)
                             tooNew -> onMessage(minLwLine)
                             else -> {
-                                selected = entry
+                                selected = if (selected?.id == entry.id) null else entry
                                 onMessage("")
                             }
                         }
@@ -2735,17 +2803,7 @@ private fun PluginDialog(
                 onClick = {
                     haptic.confirm()
                     scope.launch {
-                        onChanged(withContext(Dispatchers.IO) { PluginManager.uninstall(context, id, keepData = false) })
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            TextButton(
-                text = stringResource(R.string.settings_plugin_uninstall_keep),
-                onClick = {
-                    haptic.confirm()
-                    scope.launch {
-                        onChanged(withContext(Dispatchers.IO) { PluginManager.uninstall(context, id, keepData = true) })
+                        onChanged(withContext(Dispatchers.IO) { PluginManager.uninstall(context, id) })
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -3124,6 +3182,22 @@ private fun ExploreItems() {
             editingAt = true
         },
     )
+    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 夜里到点那一下手机多半是锁着的, 这一条让排期用「锁屏」
+    // 那一段录的解把屏让开 —— 与那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (喊一声 / 到点了)
+    SwitchPreference(
+        title = stringResource(R.string.settings_explore_unlock),
+        summary = stringResource(R.string.settings_explore_unlock_summary),
+        checked = plan.unlock,
+        onCheckedChange = { on ->
+            save(plan.copy(unlock = on))
+            // 开着但还没录过时不拦 (它至少会点亮一次屏), 只是把"现在只能做到哪一步"说清
+            message = if (on && !LockSetting.unlockable(context)) {
+                context.getString(R.string.settings_explore_unlock_missing)
+            } else {
+                null
+            }
+        },
+    )
     // 每场预算 (2.7.9 第 8 条 T2): 两条都在这里, 仍然**没有"现在开一场"** —— 主人 2026-10-17 那条口径
     // 一个字没动。分钟用滑块 (拖动时只改草稿, 松手才落盘, 免得每一帧都写一次文件并重排闹钟)
     var minutesDraft by remember(revision) { mutableIntStateOf(plan.minutes) }
@@ -3197,7 +3271,13 @@ private fun ExploreItems() {
     )
     plan.last?.let { last ->
         val said = if (last.outcome == "started") {
-            context.getString(R.string.settings_explore_last_started, scheduleStamp(last.at))
+            // `why` 里可能有两件事 (卡是空的 / 到点屏是锁着的), 有就跟着这一行一起说
+            val note = last.why
+            if (note.isNullOrBlank()) {
+                context.getString(R.string.settings_explore_last_started, scheduleStamp(last.at))
+            } else {
+                context.getString(R.string.settings_explore_last_started_note, scheduleStamp(last.at), note)
+            }
         } else {
             context.getString(
                 if (last.outcome == "skipped") R.string.settings_explore_last_skipped
@@ -4933,6 +5013,66 @@ private fun SpeakItems() {
             summary = SpeakSettings.apiModel,
             onClick = { editing = SpeakText.API_MODEL },
         )
+        // 音色库 (2026-10-25): 设计出来的音色登记在 `$DSH_HOME/lw/tts-voices.json`, **agent 写、应用只读**
+        // (见 LwApiVoices)。这里读出来逐个列出, 文件一改就自动重读 —— 不用重启 host, 也不用退回上一页
+        var library by remember { mutableStateOf<LwApiVoices.Snapshot?>(null) }
+        val rescan: () -> Unit = {
+            scope.launch { library = withContext(Dispatchers.IO) { LwApiVoices.read(context) } }
+        }
+        LaunchedEffect(Unit) { rescan() }
+        DisposableEffect(Unit) {
+            val watch = LwApiVoices.Watch { rescan() }
+            watch.start(context)
+            onDispose { watch.stop() }
+        }
+        val listed = library
+        when {
+            listed == null -> ArrowPreference(
+                title = stringResource(R.string.settings_speak_api_voices),
+                summary = stringResource(R.string.settings_speak_api_voices_scanning),
+                onClick = rescan,
+            )
+
+            listed.entries.isEmpty() -> ArrowPreference(
+                title = stringResource(R.string.settings_speak_api_voices),
+                summary = if (listed.note.isBlank()) {
+                    stringResource(R.string.settings_speak_api_voices_none)
+                } else {
+                    stringResource(R.string.settings_speak_api_voices_broken, listed.note)
+                },
+                onClick = rescan,
+            )
+
+            else -> {
+                listed.entries.forEach { entry ->
+                    val suffix = buildString {
+                        if (entry.model.isNotBlank()) {
+                            append(" · ")
+                            append(context.getString(R.string.settings_speak_api_voice_model, entry.model))
+                        }
+                        if (SpeakSettings.apiVoice == entry.id) {
+                            append(" · ")
+                            append(context.getString(R.string.settings_speak_voice_current))
+                        }
+                    }
+                    ArrowPreference(
+                        title = entry.display,
+                        summary = entry.id + suffix,
+                        onClick = { SpeakSettings.setApiVoice(context, entry.id) },
+                    )
+                }
+                // 路径与条数也得露出来: 不然没人知道该把登记表放哪, 也看不出"只读到了几条"
+                ArrowPreference(
+                    title = stringResource(R.string.settings_speak_api_voices),
+                    summary = stringResource(
+                        R.string.settings_speak_api_voices_summary,
+                        LwApiVoices.file(context).absolutePath,
+                        listed.entries.size,
+                    ) + if (listed.note.isBlank()) "" else "\n${listed.note}",
+                    onClick = rescan,
+                )
+            }
+        }
         ArrowPreference(
             title = stringResource(R.string.settings_speak_api_voice),
             summary = SpeakSettings.apiVoice,
@@ -5113,21 +5253,18 @@ private fun VoiceSilenceItem() {
 @Composable
 private fun BallItems() {
     val context = LocalContext.current
-    val haptic = LocalHapticFeedback.current
     var on by remember { mutableStateOf(BallSpot.on(context)) }
     var permission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var showing by remember { mutableStateOf(OverlayState.showing) }
     var edge by remember { mutableStateOf(BallSpot.read(context)?.first ?: BallGeometry.EDGE_RIGHT) }
     var hostUp by remember { mutableStateOf(DshHost.status is HostStatus.Running) }
     var hideProblem by remember { mutableStateOf<String?>(null) }
-    var feel by remember { mutableStateOf(BallSpot.feel(context)) }
     LaunchedEffect(Unit) {
         while (true) {
             permission = Settings.canDrawOverlays(context)
             showing = OverlayState.showing
             edge = BallSpot.read(context)?.first ?: BallGeometry.EDGE_RIGHT
             hostUp = DshHost.status is HostStatus.Running
-            feel = BallSpot.feel(context)
             // **开关跟的是球的真实存在, 不是"上一次点了什么"** (2026-10-06): 菜单里、通知栏上、
             // 或者服务自己那边都能把球收掉, 那几条路都不会回来改这个页面里的记忆值 —— 只认本地那一个
             // 记号的话, 球被菜单关掉之后这个开关会一直画着"开", 而屏幕上什么都没有。
@@ -5139,16 +5276,15 @@ private fun BallItems() {
     }
     Column(modifier = Modifier.fillMaxWidth().padding(UiSpacing.Large)) {
         Text(
-            text = when {
-                !permission -> stringResource(R.string.settings_ball_permission)
-                showing -> stringResource(
+            text = if (showing) {
+                stringResource(
                     R.string.settings_ball_state_up,
                     stringResource(
                         if (edge == BallGeometry.EDGE_LEFT) R.string.ball_dock_left else R.string.ball_dock_right,
                     ),
                 )
-
-                else -> stringResource(R.string.settings_ball_state_down)
+            } else {
+                stringResource(R.string.settings_ball_state_down)
             },
         )
         if (showing && !hostUp) {
@@ -5172,6 +5308,44 @@ private fun BallItems() {
             )
         }
     }
+    // 悬浮窗权限那一行 (2026-10-28 主人: "把悬浮窗的权限申请放浮标一直在的上方"): 先看得见缺哪一条,
+    // 再谈开不开球 —— 从前这条只写在那三行状态文字里, 要往上翻才知道缺什么。
+    // 点法与「权限」段同一条链 (PermissionGate: 能弹框就弹, 特殊访问退系统页), 状态跟着上面那秒级轮询走
+    val activity = LocalActivity.current
+    val overlayCapability = remember {
+        PermissionCatalog.special.firstOrNull {
+            it.settings?.action == Settings.ACTION_MANAGE_OVERLAY_PERMISSION
+        }
+    }
+    ArrowPreference(
+        title = stringResource(R.string.settings_ball_overlay),
+        summary = buildString {
+            append(
+                stringResource(
+                    if (permission) R.string.settings_permission_granted else R.string.settings_permission_denied,
+                ),
+            )
+            append(" · ")
+            append(stringResource(R.string.settings_ball_overlay_summary))
+        },
+        onClick = {
+            val capability = overlayCapability
+            if (capability != null) {
+                if (!(activity != null && PermissionGate.ask(activity, capability))) {
+                    PermissionGate.openSettings(context, capability)
+                }
+            } else {
+                // 兜底: 目录里那一条被改名/挪走时仍然摸得到系统页
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, "package:${context.packageName}".toUri()),
+                    )
+                }
+            }
+            // 系统页是另一个界面, 回来时这一秒的轮询会跟上; 这里先读一遍, 免得那一秒里显示旧的
+            permission = Settings.canDrawOverlays(context)
+        },
+    )
     SwitchPreference(
         title = stringResource(R.string.settings_ball_on),
         summary = stringResource(R.string.settings_ball_on_summary),
@@ -5183,19 +5357,8 @@ private fun BallItems() {
             showing = OverlayState.showing
         },
     )
-    // 手势有多严 (2026-10-08 第 13 条那一档): 两套常数都在 BallMinutes 里, 这一行只挑一个名字。
-    // **换了当场生效**: 那两个门槛是球每次手指按下时读的 (见 BallView.onTouchEvent), 不必重开服务
-    OverlayDropdownPreference(
-        title = stringResource(R.string.settings_ball_feel),
-        summary = stringResource(R.string.settings_ball_feel_summary, stringResource(feelLabel(feel))),
-        items = ballFeels.map { stringResource(feelLabel(it)) },
-        selectedIndex = ballFeels.indexOf(feel).coerceAtLeast(0),
-        onSelectedIndexChange = { index ->
-            val picked = ballFeels[index.coerceIn(0, ballFeels.lastIndex)]
-            feel = picked
-            BallSpot.setFeel(context, picked)
-        },
-    )
+    // 手势灵敏度那一行 2026-10-28 撤掉了 (主人: "去掉手势灵敏度, 只使用防误触"): 门槛固定走
+    // [BallFeel.GUARD], 见 BallSpot.feel —— 那一档本来就是"更不容易误触"的那一支
     // 球多大 (主人 2026-10-15: "在 luwi 浮标设置里, 增加 ball 尺寸大小")
     //
     // **两个来源取大的那个** (见 [BallSize.resolve]): 这一档是主人设的基准, 而外观插件可以声明
@@ -5204,7 +5367,7 @@ private fun BallItems() {
     BallSizeSlider()
     // 休闲那两个开关 (2026-10-15 主人: "在浮标设置里加上半透明和半隐藏开关"; 2026-10-17 主人把叫法
     // 定成: **「半隐」= 淡下去那一档, 「半藏」= 挪一半到屏幕外那一档**): 两档**同一个 5 秒到点**
-    // (主人: "时间与透明度都和以前的一样" + "0.35"), 上一行是半隐 (淡到三成半), 下一行是半藏
+    // (主人 2026-10-25: "半隐改为一半透明度" —— 数值 0.5), 上一行是半隐 (淡到一半), 下一行是半藏
     // (把球挪出去一半) —— 各管一个状态, 判据仍旧只有 `BallRest.wait` 那一处
     //
     // **不必重启**: 那个 alpha 是 `OverlayService.waitNow()` 每一拍 (400 ms) 校正的, 改完当场看得见
@@ -5310,7 +5473,12 @@ private fun BallSizeSlider() {
  * - **定时那一段**: `23:00-07:00` 这种一段, 到点自己进省电、出了时段自己回来 (解析在 [PowerWindow])
  * - **省电时停自动指令**: 第 15 条那一条, 此刻只记选择 (自动指令在批次 8 才落地)
  *
- * 每秒看一眼: 三个偏好都可能被别的入口改 (定时那一段是到点自己生效的), 不轮询界面就是死的
+ * 2026-10-26 多一行**后台保活** (`BatteryWhitelist`): 它不是"现在别听", 而是"别让系统把 host 冻住"
+ * —— 不在电池优化名单里时, 息屏之后网络与后台都会被收, 切回来就得重载。它与「权限」段那条是同一份
+ * 系统页, 只是这里点一下直接弹确认框, 更少两步
+ *
+ * 每秒看一眼: 三个偏好都可能被别的入口改 (定时那一段是到点自己生效的), 不轮询界面就是死的;
+ * 白名单那一条只在回前台时重读一次 (系统页是另一块界面, 它不会发通知回来)
  */
 @Composable
 private fun PowerItems() {
@@ -5399,6 +5567,8 @@ private fun PowerItems() {
             LwWakeWord.setPowerSaveAutomation(context, wanted)
         },
     )
+    // 后台保活那一行 2026-10-28 挪到「连接」段「允许 Luwi 自启动」下面了 (见 [KeepAliveRow]):
+    // 两行都是"去系统页点一下"的入口, 夹在省电这几档中间不好找
     if (editingWindow) {
         PowerWindowDialog(
             initial = window,
@@ -5456,9 +5626,13 @@ private fun WakeItems() {
     // 省电模式此刻生不生效: 那三行搬去 [PowerItems] 了, 而状态那一行还要拿它说"为什么没在听"
     var powerSave by remember { mutableStateOf(LwWakeWord.powerSave(context)) }
     var ready by remember { mutableStateOf(WakeWordDownload.readyCount(context)) }
+    // 语音模型 (SenseVoice + VAD) 的下载状态: 与唤醒词那一行各一套, 但同一个段里
+    var speechReady by remember { mutableStateOf(SpeechModelDownload.readyCount(context)) }
     var note by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf(false) }
     val total = WakeWordDownload.files.size
+    val speechTotal = SpeechModelDownload.files.size + 1
+    val speechBytes = SpeechModelDownload.files.sumOf { it.bytes } + SpeechModelDownload.vad.bytes
     val microphone = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
         PackageManager.PERMISSION_GRANTED
     // 这几句是给开关那些分支念的, 而 stringResource 不能进 when 的 lambda 里之后再取, 所以先取出来
@@ -5466,6 +5640,7 @@ private fun WakeItems() {
     val micMissing = stringResource(R.string.settings_wake_mic_missing)
     LaunchedEffect(Unit) {
         WakeWordDownload.refresh(context)
+        SpeechModelDownload.refresh(context)
         while (true) {
             allowWake = LwWakeWord.allow(context)
             onHit = LwWakeWord.onHit(context)
@@ -5475,6 +5650,7 @@ private fun WakeItems() {
             hits = WakeWordState.hits
             powerSave = LwWakeWord.powerSave(context)
             ready = WakeWordDownload.readyCount(context)
+            speechReady = SpeechModelDownload.readyCount(context)
             names = LwWakeWord.names(context)
             delay(POLL_MS)
         }
@@ -5624,6 +5800,41 @@ private fun WakeItems() {
                                 ?: "$said, 已重新开始听唤醒词"
                         }
                     }.getOrElse { it.message ?: it.toString() }
+                }
+            }
+        },
+    )
+    // 语音模型 (SenseVoice + VAD): 唤醒词只负责"叫醒", 出字与切句靠它; 首启弹窗错过的在这里补
+    ArrowPreference(
+        title = stringResource(R.string.settings_wake_speech),
+        summary = when {
+            SpeechModelDownload.phase == SpeechModelDownload.Phase.DOWNLOADING -> stringResource(
+                R.string.settings_wake_downloading,
+                "%.1f MB".format(SpeechModelDownload.received / 1024.0 / 1024.0),
+                "%.1f MB".format(SpeechModelDownload.total / 1024.0 / 1024.0),
+            )
+
+            SpeechModelDownload.phase == SpeechModelDownload.Phase.FAILED ->
+                stringResource(R.string.settings_wake_failed, SpeechModelDownload.detail)
+
+            speechReady == speechTotal -> stringResource(
+                R.string.settings_wake_speech_ready,
+                "%.1f MB".format(speechBytes / 1024.0 / 1024.0),
+            )
+
+            speechReady == 0 -> stringResource(
+                R.string.settings_wake_speech_missing,
+                "%.1f MB".format(speechBytes / 1024.0 / 1024.0),
+            )
+
+            else -> stringResource(R.string.settings_wake_speech_partial, speechReady, speechTotal)
+        },
+        onClick = {
+            if (SpeechModelDownload.phase == SpeechModelDownload.Phase.DOWNLOADING) return@ArrowPreference
+            scope.launch {
+                note = withContext(Dispatchers.IO) {
+                    runCatching { SpeechModelDownload.download(context) }
+                        .getOrElse { it.message ?: it.toString() }
                 }
             }
         },

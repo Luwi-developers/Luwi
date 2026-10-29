@@ -44,6 +44,13 @@ function Iso([string]$name, [string]$email, [string]$stamp) {
     return @{ name = $name; email = $email; date = $when.ToString("yyyy-MM-ddTHH:mm:sszzz") }
 }
 
+# 酒馆闭源 (2026-10-29): 推送前先看**历史**里有没有酒馆实现 —— 删掉只影响最新树, 不影响历史,
+# c6aa501 那条链照样翻得到; 公开仓必须从 public/main (2c61255 起家) 上推
+$tavernHistory = @(git rev-list HEAD -- 'app/src/main/java/io/github/yuloong07star/luwi/tavern' 'app/src/main/java/io/github/yuloong07star/luwi/ui/Tavern*.kt' 'host-plugins/luwi-tavern' 'presets/tavern' 2>$null)
+if ($tavernHistory.Count -gt 0) {
+    throw "HEAD 的历史里有酒馆 ($($tavernHistory.Count) 个提交, 最早 $($tavernHistory[-1].Substring(0,7))) —— 公开仓不能推, 先跑 tools/lw-export-public.ps1 并切到 public/main"
+}
+
 $base = (git rev-parse $RemoteRef).Trim()
 $remoteTree = (& $Gh api "repos/$Repo/git/commits/$base" --jq '.tree.sha').Trim()
 $localTree = (git rev-parse "$base^{tree}").Trim()

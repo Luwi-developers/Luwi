@@ -420,7 +420,7 @@ internal object OverlayState {
     var ballWait: String = "waiting"
 
     /**
-     * 球此刻的不透明度 (1 = 全亮, 0.35 = 半隐那一档 (半藏只挪位置, 不改它))
+     * 球此刻的不透明度 (1 = 全亮, 0.5 = 半隐那一档 (半藏只挪位置, 不改它))
      *
      * 它是"到点了却没变淡"那条账上**唯一说得清的数** (2026-10-17 加): [ballWait] 里的 `pale`
      * 只说"判据认为该淡了", 而真正落到 View 上的是这个值 —— 写它的是 [setBallAlpha] 那一处
@@ -537,6 +537,8 @@ class OverlayService : Service() {
 
     private var stripView: View? = null
     private var stripParams: WindowManager.LayoutParams? = null
+    /** 输入条里那块 dsh WebView 现在加载的是哪条地址 (host 重启换 token 时据此只重载一次) */
+    private var stripUrl: String? = null
     private var web: WebView? = null
     private var stripTitle: TextView? = null
 
@@ -813,6 +815,15 @@ class OverlayService : Service() {
     )
 
     /**
+     * 球闲下来会不会收着: 半隐 / 半藏**任一开着**
+     *
+     * 两个都关着时球一直全亮全露 —— 于是**没有"召出"那一步**, 单击当场就开语音 (主人 2026-10-25:
+     * "当半隐和半藏都关闭时, 则只用点一次即可语音输入, 不用再点一次唤醒")。这个值同时喂给
+     * [BallTouch.opensVoiceNow] 与 [BallCommit.deferMs], 两处必须是同一份答案
+     */
+    private fun ballCanRest(): Boolean = BallSpot.translucent(this) || BallSpot.autoPeek(this)
+
+    /**
      * 常驻语音此刻开着没有
      *
      * 读的是切模式那一步写下的**那个记号** ([LwWakeWord.residentWanted]) —— 与 `lw_wakeword op=status`
@@ -991,6 +1002,7 @@ class OverlayService : Service() {
         ballParams = null
         stripView = null
         stripParams = null
+        stripUrl = null
         stripTitle = null
         boxView = null
         boxRoot = null
@@ -1315,6 +1327,7 @@ class OverlayService : Service() {
                         word = lastWord,
                         summonFresh = BallMinutes.summonIsFresh(now, summonedAt),
                         replyBox = OverlayState.replyTarget() != null,
+                        canRest = ballCanRest(),
                         feel = feel,
                     )
                     if (wait <= 0L) {
@@ -1435,6 +1448,10 @@ class OverlayService : Service() {
             // 全露着的时候点一下: 只有**刚被召出来那一下**之后的第一击才算"第二次点击",
             // 其余的一律当第一次 (也就是只召出, 不开口)。判据是"这一击是不是紧跟着那一次召出"
             //
+            // **半隐与半藏都关着时没有"召出"这一步** (主人 2026-10-25: "当半隐和半藏都关闭时, 则只用
+            // 点一次即可语音输入, 不用再点一次唤醒"): 球一直全亮全露, 先记一个召出时刻只是白让人多点
+            // 一下 —— 那一击当场开口 (见 [ballCanRest])
+            //
             // **回复框在屏上且有回复时是例外** (2026-10-06 主人: "有回复窗时也可以点击小球进行语音
             // 输入"): 那时人已经在那块框上说话了, 再要他点两下是多余的 —— 这一下当场开口
             // (判据是纯函数 [BallTouch.opensVoiceNow], 见 BallTest)
@@ -1451,6 +1468,7 @@ class OverlayService : Service() {
                     BallTouch.opensVoiceNow(
                         BallMinutes.summonIsFresh(now, summonedAt),
                         OverlayState.replyTarget() != null,
+                        ballCanRest(),
                     )
                 ) {
                     summonedAt = 0L
@@ -1768,6 +1786,10 @@ class OverlayService : Service() {
      */
     private fun waitNow() {
         val now = System.currentTimeMillis()
+        // 「这一刻该不该收边」整条判据单独算一份: 下面回弹那一条要用它, **不能拿 `wait.peek` 当判据**
+        // (已经收着时 `BallRest.wait` 会先命中 `peeked` 那条, 回的是 reason=asleep / peek=false ——
+        // 用 wait.peek 判断"该出来"会变成每 400 ms 收一下放一下, 2026-10-28 装到真机上当场就抖了)
+        val idleDueNow = BallMinutes.idleDue(now, lastActiveAt) && BallSpot.autoPeek(this)
         val wait = BallRest.wait(
             phase = phase,
             peeked = peeked,
@@ -1778,7 +1800,7 @@ class OverlayService : Service() {
             channelOpen = boxOnScreen,
             // 「休闲半隐藏」关着时, 那一条闸永远不成立 —— 于是纯函数 [BallRest.wait] 与它的单测
             // 一个字都不用改 (2026-10-15 主人要的是开关, 不是改判据)
-            idleDue = BallMinutes.idleDue(now, lastActiveAt) && BallSpot.autoPeek(this),
+            idleDue = idleDueNow,
             // 两个状态**同一个 5 秒到点** (主人 2026-10-17: "时间与透明度都和以前的一样"), 各看各的
             // 开关: 半隐那一档问 [BallSpot.translucent], 半藏那一档问 [BallSpot.autoPeek]
             translucentDue = BallMinutes.idleDue(now, lastActiveAt) && BallSpot.translucent(this),
@@ -1786,6 +1808,10 @@ class OverlayService : Service() {
         OverlayState.ballWait = wait.reason
         traceIdle(wait)
         if (wait.peek) hideNow()
+        // 反过来也要收口 (2026-10-28 主人: "补一下, 我要看到其它动作"): 收边的条件**整条不成立**时
+        // (开关被关掉 / 不再闲置) 球要回停靠位。判据是 [idleDueNow] 而不是 `!wait.peek` —— 后者在
+        // 已经收着时也是 false, 会让球每 400 ms 收一下放一下。拖拽与滑行动画中不动手, 交给它们收尾
+        else if (peeked && !idleDueNow && !ballDragging && snap?.isRunning != true) unpeek()
         // 两个开关都可能在设置里刚被改过: 没在收边、也没有滑行动画时校正一次 (改完当场看得见)
         if (!peeked && snap?.isRunning != true) {
             setBallAlpha(BallMinutes.alphaFor(wait.translucent))
@@ -1795,7 +1821,7 @@ class OverlayService : Service() {
     /**
      * 把不透明度改过去 (变淡与变亮都带一小段过渡)
      *
-     * 从全亮直接跳到三成半会看着像闪一下, 而休闲本来就是慢慢来的 —— 时长取 [BallMinutes.EDGE_SNAP_MS],
+     * 从全亮直接跳到半亮会看着像闪一下, 而休闲本来就是慢慢来的 —— 时长取 [BallMinutes.EDGE_SNAP_MS],
      * 与收边那一下同一个节拍。**目标值已经对上就一个字节都不动**: 这一拍是 400 ms 一次, 反复启动
      * 同一条动画会让它永远走不完
      *
@@ -1823,8 +1849,27 @@ class OverlayService : Service() {
         }
         // 两块可获焦的窗不该同时开着 (它们会抢输入法): 通道让位, 页面那一块上
         closeChannel()
-        if (stripView != null) {
+        val existing = stripView
+        if (existing != null) {
+            // 收起 / 被别的入口摘下来之后重新展开: **把原来那一块挂回去**, 不重建也不重载。
+            // 以前这里只改 expanded 就 return, 于是收起过的输入条再也挂不回来 (2026-10-28 查到的)
+            val previous = stripParams
+            if (existing.parent == null && previous != null) {
+                val added = runCatching { manager.addView(existing, previous) }
+                if (added.isFailure) {
+                    fail(getString(R.string.overlay_refused, added.exceptionOrNull()?.message ?: "addView refused"))
+                    return
+                }
+                Log.i(TAG, "strip: reattached without a reload")
+            }
+            // host 重启之后 token URL 会变: 页面还挂着旧的就会 401, 换一条只重载一次
+            if (stripUrl != url) {
+                web?.loadUrl(url)
+                stripUrl = url
+                Log.i(TAG, "strip: the host url changed, reloading once")
+            }
             OverlayState.expanded = true
+            OverlayState.url = url
             return
         }
         val metrics = resources.displayMetrics
@@ -1857,6 +1902,7 @@ class OverlayService : Service() {
         }
         stripView = view
         stripParams = layout
+        stripUrl = url
         stripBaseY = layout.y
         OverlayState.expanded = true
         OverlayState.url = url
@@ -3572,7 +3618,8 @@ class OverlayService : Service() {
 
         // **"半隐时那点透明度"那个常量已经不在了** (2026-10-17 主人: "改的应该是状态而不是时间"):
         // 半隐藏只挪位置, 不再顺手把球压暗 —— 那个 0.5 与"半透明"的 0.7 相乘出来的 0.35 正是主人
-        // 点名不要的耦合。现在两颗球各说各的: 淡由 [BallMinutes.alphaFor] 一个人回答, 藏只看坐标
+        // 点名不要的耦合。现在两颗球各说各的: 淡由 [BallMinutes.alphaFor] 一个人回答 (2026-10-25 起它
+        // 就是一半, 0.5), 藏只看坐标
 
         /** 与唤醒词服务那个观察者同一个节奏: 400 ms 一次, 只在变了的时候重画 */
         private const val TICK_MS = 400L

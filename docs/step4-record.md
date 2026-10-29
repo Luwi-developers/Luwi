@@ -292,3 +292,29 @@ Scaffold
 - 工具面最小集: `lw_screen` (状态) / `lw_screenshot` (图) / `lw_tap` / `lw_swipe` / `lw_launch`
 - 截图要能被模型"看到": 现在落在 `cacheDir/screen.png`, 工具得把它当成图片附件交回去 (dsh 的 `present` / attachment 那条路, 第 2 步记过它的接口面)
 - 坐标别让模型猜: 第 7 步的无障碍映射才是正解, 在那之前截图 + 提示里给上分辨率
+
+## 第四轮 (2026-10-28: 单槽 + 取帧改进程内 ImageReader)
+
+**起因**: K40 (MT6893 / Android 13) 上 `screencap -d` 对虚拟屏**恒返回 0 字节**, `dumpsys display` 里那块屏又没有名字 —— 屏建出来了, 但截图 / OCR / 预览全瞎。主人拿来的那份 2.7.9-k40 包把取帧搬进 ImageReader, 这里按同一目标在 2.7.10 上重做
+
+**做法**:
+
+- 屏的输出面改成 app 进程里**常驻**的 `ImageReader` (`channel/FrameCache.kt`, 取代 `ScreenKeeper`), 建屏时直接交给 `createDisplay`; 缓存最新一帧 (有预览 66 ms / 无预览 250 ms 节流), 截图与 OCR 读缓存, **虚拟屏不再跑 `screencap`**
+- 预览改成**镜像**: app 从缓存 `lockCanvas` + `drawBitmap`, 有新帧才画; 面没了 (切后台 / 收起预览) 屏照旧合成, 照旧能拍 (以前靠保活面, 现在 reader 本身就是输出面)
+- `LwCapture` 只剩 `capturePrimary()` (display 0 仍走 `screencap -p`)
+- **同一时刻只允许一块**: 应用 `VirtualScreen.create()` 先关旧再建, 特权 `LwVirtualDisplay.create()` 建前 `releaseAll()`; 桥回 `replaced` / `replacedLabel`
+- 与那份 K40 包的差别: 那头把 reader 放在**特权进程**并跨进程镜像; 这里的保活面本来就在 app 进程, 帧可以直接交给 OCR, 省掉「特权写 PNG → app 再读」一趟, 也不必跨进程画预览
+
+**实测** (22041216C / Android 14 / 1080x2460, Shizuku shell):
+
+| 项 | 值 |
+| :-- | :-- |
+| 建屏 | displayId 27, `Luwi 1`, 1080x2230 @440dpi |
+| 再建一次 | 旧 27 当场释放, 新 28 `Luwi 2`; `dumpsys display` 只剩一块, 桥答案 `replaced=27` |
+| 截图 | 1080x2400, 128,724 字节, 颜色与 MIUI 设置页一致 |
+| resize 1080x1600 后立刻截图 | 1080x1600 (不用重试, 老路要按 PNG 宽高重拍) |
+| 取帧 | `captureMs` **4~8 ms** (老路在 K40 上是 291 ms) |
+| app 切后台 / 预览已拆 | 截图 1080x2230 / 73,324 字节, OCR 照常 (`captureMs` 6) |
+| 释放 | `dumpsys display` 里 Luwi 计数 0 |
+
+**为什么不再有"截图链路间歇失效"**: 以前那张图是 `screencap` 临时跑出来的, 换面 / 换尺寸 / 合成器名单更新都会让它空手而归; 现在帧一直在 reader 里, 拿不到只有一种原因 —— 屏上真的什么都没画过 (答案会这么说)

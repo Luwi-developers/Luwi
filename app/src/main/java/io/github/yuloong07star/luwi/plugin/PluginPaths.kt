@@ -100,10 +100,15 @@ internal object PluginPaths {
         spec.states.forEach { (state, path) ->
             resolveFile(directory, path, "theme/ball.json 的 states.$state")
         }
-        spec.frames.forEach { (state, frames) ->
-            resolveDirectory(directory, frames.dir, "theme/ball.json 的 frames.$state 的 dir")
-            frames.frameNames().forEach { name ->
-                resolveFile(directory, "${frames.dir}/$name", "theme/ball.json 的 frames.$state")
+        spec.frames.forEach { (state, actions) ->
+            // 一档可以有好几支动作 (2026-10-25), 所以这里逐支走一遍 —— 只查第一支的话, 少了一帧的
+            // 那支要到演到它那一刻才露出来
+            actions.forEachIndexed { index, frames ->
+                val what = "theme/ball.json 的 frames.$state[$index] 的 dir"
+                resolveDirectory(directory, frames.dir, what)
+                frames.frameNames().forEach { name ->
+                    resolveFile(directory, "${frames.dir}/$name", "theme/ball.json 的 frames.$state[$index]")
+                }
             }
         }
     }

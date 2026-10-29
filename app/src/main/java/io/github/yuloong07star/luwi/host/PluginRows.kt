@@ -66,7 +66,12 @@ internal object PluginRows {
         val id: String,
         val entry: String,
         val config: (Context) -> List<String> = { emptyList() },
-    )
+    ) {
+        /** 包名: `node_modules/` 之后那一段 (带 scope 的是两段), 判"同一包"只认它 */
+        val packageName: String = entry.substringAfter("node_modules/").let { rest ->
+            if (rest.startsWith("@")) rest.split('/').take(2).joinToString("/") else rest.substringBefore('/')
+        }
+    }
 
     private val OWNED = listOf(
         Owned("imagegen", "node_modules/@dickpy/dsh-imagegen/lib/index.js"),
@@ -75,11 +80,24 @@ internal object PluginRows {
             "node_modules/@modusensus/dsh-mneme/lib/index.js",
             config = ::memoryConfig,
         ),
+        Owned(
+            "free-model",
+            "node_modules/dsh-our-free-model/index.js",
+            config = { MANAGED_DISTRIBUTION },
+        ),
     )
 
     /** 记忆库落在 `$DSH_HOME/memory`, 不落在工作区的 `~/.dsh/memory` (见 [Owned]) */
     private fun memoryConfig(context: Context): List<String> =
         listOf("memoryDir: '${File(File(context.filesDir, DshHost.HOME_DIR), "memory").absolutePath}'")
+
+    /**
+     * 免费模型插件按"整合包安装"这一档跑 (2026-10-25 随包)
+     *
+     * 它自带应用内升级 / 公告 feed / 热重载; 这三件在手机上必须由 APK 说了算 —— 同一份字节被两个
+     * 写入方改, 它自己的 README 写的就是"目录损坏"。`managed` 只停这三件, 模型通道照常
+     */
+    private val MANAGED_DISTRIBUTION = listOf("distribution: 'managed'")
 
 
     /**
@@ -102,7 +120,30 @@ internal object PluginRows {
         for (row in OWNED) {
             val target = File(root, row.entry)
             val config = row.config(context)
+            // **先看本体, 有就不装** (2026-10-25 主人: "对于预装的插件要先检查本体有没有才安装, 不覆盖安装")
+            //
+            // 两条判据都算"设备上已经有一份能用的":
+            //   · 盘上已经有**别人**留下的挂载行 (2026-10-16 手工装进 `plugins-src/` 那种)
+            //   · profile 的 `node_modules` 里这个包指向**宿主树之外** (主人自己那份的软链/目录)
+            //
+            // 命中就让位: 不删它那一行, 也不往它的目录里写任何东西 —— 那份是主人装的, 什么时候退役由
+            // 主人决定。两行同时在的结果不是"用了新的那一份", 而是启动时一句
+            // "an adapter for provider ... is already registered", 谁先谁后全看 patch 里的次序。
+            //
+            // 反过来, 只有**一条可用本体都没有**时才装随包这份; 树里那份进 APK 是给新机器的
+            val mountedByRow = mountsPackage(patch, row.packageName, row.id)
+            val userCopy = if (mountedByRow) null else userInstallOf(context, row.packageName, root)
+            val taken = mountedByRow || userCopy != null
             patch = when {
+                taken && hasInsertRow(patch, row.id) -> withoutRow(patch, row.id).also {
+                    Log.w(TAG, "${row.packageName} is already installed (${reasonOf(mountedByRow, userCopy)}),"
+                        + " so ${row.id} stood down")
+                }
+                taken -> {
+                    Log.i(TAG, "${row.packageName} is already installed (${reasonOf(mountedByRow, userCopy)}),"
+                        + " so ${row.id} stays out")
+                    patch
+                }
                 target.isFile -> ensuredRow(patch, row.id, target.absolutePath, config)
                 hasInsertRow(patch, row.id) -> withoutRow(patch, row.id).also {
                     Log.w(TAG, "the host tree carries no ${row.entry}, so the ${row.id} row was removed")
@@ -274,6 +315,106 @@ internal object PluginRows {
         while (lines.isNotEmpty() && lines.last().isBlank()) lines.removeAt(lines.size - 1)
         val content = lines.count { it.isNotBlank() && !it.trimStart().startsWith("#") }
         return (if (content == 0) lines + "[]" else lines).joinToString("\n").trimEnd() + "\n"
+    }
+
+    /**
+     * 盘上是不是**已经有别的行**挂着同一个包 (2026-10-25)
+     *
+     * 背景: 主人 2026-10-16 在手机上手工装过一份 `dsh-our-free-model` (源码在 `plugins-src/`,
+     * profile `node_modules` 里一条软链, patch 里一条 `id: our-free-model`), 而 2.7.10 起随包也发一份。
+     * 两行同时在的结果不是"用了新的那一份", 而是启动时一句
+     * `an adapter for provider "our-free-model" is already registered` —— 先挂上的赢, 后挂上的整块塌,
+     * 而谁先全看 patch 里的次序
+     *
+     * 判据是**包名**而不是路径: 旧的写法是裸包名 (`name: 'dsh-our-free-model'`, 靠 profile 的软链解析),
+     * 我们写的是 `file://` 形态的绝对路径, 两种都要认出来
+     * @param patch - 整份 patch
+     * @param packageName - 包名 (`dsh-our-free-model` / `@modusensus/dsh-mneme`)
+     * @param exceptId - 自己那一行的 id (它不算"别的行")
+     * @returns 别人挂着它就是 true
+     */
+    fun mountsPackage(patch: String, packageName: String, exceptId: String = ""): Boolean {
+        val lines = patch.lines()
+        for (index in lines.indices) {
+            val line = lines[index]
+            if (indentOf(line) <= 0) continue
+            if (!line.trimStart().startsWith("- id: ")) continue
+            val id = line.trimStart().removePrefix("- id: ").trim()
+            if (id == exceptId) continue
+            val indent = indentOf(line)
+            for (scan in index + 1 until lines.size) {
+                if (lines[scan].isNotBlank() && indentOf(lines[scan]) <= indent) break
+                val entry = lines[scan].trimStart()
+                if (!entry.startsWith("name:")) continue
+                val value = entry.removePrefix("name:").trim().trim('"', '\'')
+                if (packageOf(value) == packageName) return true
+                break
+            }
+        }
+        return false
+    }
+
+    /**
+     * 一条挂载 (`name:` 那一行的值) 指的是哪个包
+     *
+     * 两种写法都要认: 裸包名 (`dsh-our-free-model`, 靠 profile 的软链解析) 与绝对路径
+     * (`file://…/node_modules/dsh-our-free-model/index.js`)。路径那一档取 `node_modules/` 之后那一段
+     * (带 scope 的两段); 不在 `node_modules` 里的 (旧的手工装法, 源码放 `plugins-src/`) 取入口文件
+     * 所在目录名 —— 那种装法的入口都在包根上
+     * @param value - `name:` 的值
+     * @returns 包名 (认不出来时就是原文)
+     */
+    fun packageOf(value: String): String {
+        val path = value.removePrefix("file://")
+        if (!path.contains('/')) return path
+        val at = path.lastIndexOf("/node_modules/")
+        if (at >= 0) {
+            val parts = path.substring(at + "/node_modules/".length).split('/')
+            if (parts.isEmpty()) return path
+            return if (parts[0].startsWith("@") && parts.size > 1) "${parts[0]}/${parts[1]}" else parts[0]
+        }
+        return path.substringBeforeLast('/', "").substringAfterLast('/').ifEmpty { path }
+    }
+
+    /**
+     * profile 的 `node_modules` 里, 这个包是不是**宿主树之外**的一份 (主人自己装的)
+     *
+     * 看的是解析之后的真实路径: 指向 `files/host/...` 的那种链接是随包这棵树的别名, 不算主人的 ——
+     * 把它算进来, 随包那份就永远挂不上, 而它本来就是树里的那一份
+     * @param context - 应用
+     * @param packageName - 包名 (`dsh-our-free-model` / `@modusensus/dsh-mneme`)
+     * @param hostRoot - 宿主树根 (`files/host`)
+     * @returns 那一份的真实路径; 没有、或者是树里那份时 null
+     */
+    private fun userInstallOf(context: Context, packageName: String, hostRoot: File): String? {
+        val base = File(File(File(File(context.filesDir, DshHost.HOME_DIR), "profiles"), PROFILE), "node_modules")
+        val candidate = File(base, packageName)
+        if (!candidate.exists()) return null
+        val path = runCatching { candidate.canonicalPath }.getOrNull() ?: return candidate.absolutePath
+        return if (isUserCopy(path, hostRoot.absolutePath)) path else null
+    }
+
+    /**
+     * 这条真实路径算不算"主人自己那份" (纯函数, 判据在 PluginRowsTest)
+     *
+     * 树里那份 == 随包这份: 它也在 `node_modules/<包>` 底下, 差别只有根在哪
+     * @param candidate - 解析之后的绝对路径
+     * @param hostRoot - 宿主树根
+     * @returns 在树外就是 true
+     */
+    fun isUserCopy(candidate: String, hostRoot: String): Boolean {
+        if (candidate.isEmpty()) return false
+        if (hostRoot.isEmpty()) return true
+        val host = hostRoot.trimEnd('/', '\\')
+        if (candidate == host) return false
+        return !candidate.startsWith("$host/") && !candidate.startsWith("$host\\")
+    }
+
+    /** 让位那句话里"为什么"那半句 */
+    private fun reasonOf(mountedByRow: Boolean, userCopy: String?): String = when {
+        mountedByRow && userCopy != null -> "mounted by another row + a profile copy at $userCopy"
+        mountedByRow -> "mounted by another row"
+        else -> "the profile resolves a copy at ${userCopy.orEmpty()}"
     }
 
     private fun indentOf(line: String): Int = line.length - line.trimStart().length

@@ -16,7 +16,8 @@ import java.time.ZoneId
  * 三个地方错了都不会当场报错, 只会在"该跑的那天没跑"或"到点了却跳过了"上表现出来:
  *
  * - [ExploreSchedule.nextAt]: 今天还没到就今天, 过了就明天; 时刻认不出来就是 null
- * - [ExploreSchedule.skipReason]: 宿主 / 省电 / 上一场三条, 顺序不能反
+ * - [ExploreSchedule.skipReason]: 宿主 / 上一场两条, 顺序不能反 (**省电从 2026-10-26 起不在这两条里**,
+ *   它只进 `last.why`, 所以这一条判据要钉住"省电开着也不跳过")
  * - [ExploreSchedule.planOf]: 读坏了退回"关着 + 03:00", 而不是让整段设置页炸掉
  */
 class ExploreScheduleTest {
@@ -58,17 +59,17 @@ class ExploreScheduleTest {
 
     @Test
     fun theSkipReasonsComeInOrder() {
-        assertEquals("宿主没在跑", ExploreSchedule.skipReason(hostRunning = false, powerSave = false, running = false))
+        // 省电不在参数里 (2026-10-26): 签名少一个布尔, 于是"省电里跳过"这件事在类型上就写不出来
+        assertEquals("宿主没在跑", ExploreSchedule.skipReason(hostRunning = false, running = false))
         assertEquals(
             "宿主没在跑",
-            ExploreSchedule.skipReason(hostRunning = false, powerSave = true, running = true),
+            ExploreSchedule.skipReason(hostRunning = false, running = true),
         )
-        assertEquals("现在在省电模式", ExploreSchedule.skipReason(hostRunning = true, powerSave = true, running = false))
         assertEquals(
             "上一场探索还在跑",
-            ExploreSchedule.skipReason(hostRunning = true, powerSave = false, running = true),
+            ExploreSchedule.skipReason(hostRunning = true, running = true),
         )
-        assertNull(ExploreSchedule.skipReason(hostRunning = true, powerSave = false, running = false))
+        assertNull(ExploreSchedule.skipReason(hostRunning = true, running = false))
     }
 
     @Test
@@ -94,14 +95,14 @@ class ExploreScheduleTest {
     fun theLastRunIsReadBack() {
         val plan = ExploreSchedule.planOf(
             json.parseToJsonElement(
-                """{"enabled":true,"at":"21:30","last":{"at":123,"outcome":"skipped","why":"现在在省电模式"}}""",
+                """{"enabled":true,"at":"21:30","last":{"at":123,"outcome":"skipped","why":"宿主没在跑"}}""",
             ) as JsonObject,
         )
 
         assertEquals("21:30", plan.at)
         assertEquals(123L, plan.last?.at)
         assertEquals("skipped", plan.last?.outcome)
-        assertEquals("现在在省电模式", plan.last?.why)
+        assertEquals("宿主没在跑", plan.last?.why)
         assertTrue(ExploreSchedule.describeLast(plan.last!!).startsWith("没跑"))
     }
 
@@ -151,5 +152,39 @@ class ExploreScheduleTest {
         assertEquals(1, ExploreSchedule.clamp(-5, ExploreSchedule.MINUTES_RANGE))
         assertEquals(180, ExploreSchedule.clamp(500, ExploreSchedule.MINUTES_RANGE))
         assertEquals(60, ExploreSchedule.clamp(null, ExploreSchedule.STEPS_RANGE, ExploreSchedule.STEPS_DEFAULT))
+    }
+
+    /* ── 允许锁屏解锁 (2.7.10, 主人 2026-10-25) ───────────────────────────── */
+
+    /** 老文件没有这个键: 就是关着 (夜里不自己去解屏) */
+    @Test
+    fun aMissingUnlockSwitchMeansOff() {
+        val plan = ExploreSchedule.planOf(JsonObject(emptyMap()))
+
+        assertEquals(false, plan.unlock)
+    }
+
+    /** 写进去的那个 true 读回来还是 true, 认不出来的值一律按关 */
+    @Test
+    fun theUnlockSwitchIsReadBack() {
+        val on = ExploreSchedule.planOf(
+            json.parseToJsonElement("""{"enabled":true,"at":"03:00","unlock":true}""") as JsonObject,
+        )
+        val broken = ExploreSchedule.planOf(
+            json.parseToJsonElement("""{"unlock":"随便写点什么"}""") as JsonObject,
+        )
+
+        assertEquals(true, on.unlock)
+        assertEquals(false, broken.unlock)
+    }
+
+    /** 那行读数把"开始前屏幕怎么了"也带上; why 空着时不多那一个点 */
+    @Test
+    fun theLastRunSentenceCarriesTheNote() {
+        val withNote = ExploreSchedule.Last(1L, "started", "到点先把锁屏解开了")
+        val without = ExploreSchedule.Last(1L, "started", null)
+
+        assertEquals("开始了一场探索 · 到点先把锁屏解开了", ExploreSchedule.describeLast(withNote))
+        assertEquals("开始了一场探索", ExploreSchedule.describeLast(without))
     }
 }

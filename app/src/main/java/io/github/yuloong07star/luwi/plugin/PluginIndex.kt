@@ -49,7 +49,15 @@ internal object PluginIndex {
 
     private const val USER_AGENT = "Luwi-plugin-index"
 
-    /** 内容 tag: 索引换了内容就换新 tag (jsDelivr 对旧 tag 的边缘缓存刷不掉, 见 packages/README.md) */
+    /**
+     * 内容 tag: 索引换了内容就换新 tag (jsDelivr 对旧 tag 的边缘缓存刷不掉, 见 packages/README.md)
+     *
+     * **2026-10-28 主人定: "退一下版本, 等 2.7.10 发布了再推"** —— 线上 `index-10` 那份索引里
+     * 鲸鱼娘外观 1.1.2 的 minLw 是 2.7.10, 而 2.7.10 还没发布, 现网设备一律过不了版本闸
+     * (点安装只弹「需要 Luwi ≥ 2.7.10」), 所以先退回 2.7.9 发布时那一对 (七条全装得上);
+     * 2.7.10 发布时再把这对抬回 `index-10` / `index-9` (那两个 tag 已在线上, 不用重推;
+     * 注意 index-9 里 1.1.2 的 minLw 还是 2.8.0, 只当兜底用, 别当现行)
+     */
     private const val REF_CURRENT = "index-8"
 
     /** 上一份内容 tag: 兜底 (新 tag 还没推上去 / 新 tag 那条链路坏了时, 旧的一份照样能用) */

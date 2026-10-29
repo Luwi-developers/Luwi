@@ -43,8 +43,9 @@ internal object LwSpeech {
     /** 切段那个 silero 模型住在同一层的另一个子目录里, 两者互不相干 */
     const val VAD_NAME = "silero-vad"
 
-    private const val MODEL_FILE = "model.int8.onnx"
-    private const val TOKENS_FILE = "tokens.txt"
+    /** 识别模型的两个文件名: 下载器 (SpeechModelDownload) 与库都按这一份来 */
+    const val MODEL_FILE = "model.int8.onnx"
+    const val TOKENS_FILE = "tokens.txt"
 
     /** 录音与模型都按这个采样率, 别处对不上就是别处错 */
     private const val SAMPLE_RATE = 16000
@@ -75,6 +76,9 @@ internal object LwSpeech {
         val directory = modelDirectory(context)
         return File(directory, MODEL_FILE).isFile && File(directory, TOKENS_FILE).isFile
     }
+
+    /** 切段模型在不在位: 缺了它语音输入切不出句子 */
+    fun vadReady(context: Context): Boolean = vadModel(context).let { it.isFile && it.length() > 0 }
 
     fun dispatch(context: Context, request: JsonObject): JsonObject = when (val op = request.string("op")) {
         "status" -> status(context, request)

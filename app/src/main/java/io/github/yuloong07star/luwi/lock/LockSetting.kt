@@ -91,13 +91,22 @@ internal object LockSetting {
     }
 
     /**
+     * 这一台机器现在**有没有可放的东西**: 录过一串, 或者开着注入而密码格里有一段打得出来的密码
+     *
+     * 「唤醒时自动解锁」与「探索时允许锁屏解锁」两道门问的是同一句: 没有它, 打开开关只是"到点了什么都
+     * 放不出来", 而那是最难查的一档
+     */
+    fun unlockable(context: Context): Boolean =
+        recorded(context) || (injectUnlock(context) && typable(context))
+
+    /**
      * 拨自动解锁这一条
      *
      * **打开之前先看有没有可放的东西**: 没有录过就打开, 结果只是"喊了没反应", 那是最难查的一档 ——
      * 所以这里让它开不起来, 并回一句为什么
      */
     fun setAutoUnlock(context: Context, on: Boolean): String? {
-        if (on && !recorded(context) && !(injectUnlock(context) && typable(context))) {
+        if (on && !unlockable(context)) {
             return "there is nothing to unlock with yet: record the unlock, or set the password" +
                 " under \"inject password\" and turn injection on (both of those rows are above" +
                 " this switch)"

@@ -48,6 +48,16 @@ internal object LwApiSpeech {
         }.toString()
 
     /**
+     * 这一次真正用哪个音色
+     *
+     * 优先级: **调用点名的 > 设置页那个 > 缺省**。调用点名的那个可能是音色库里登记的 id, 也可能是
+     * 服务商原样的标识 (见 `lw_speak voice=`) —— 这一层只做"选谁", 不去查表
+     */
+    fun effectiveVoice(asked: String?, stored: String): String =
+        asked?.trim()?.takeUnless { it.isEmpty() }
+            ?: stored.trim().ifBlank { DEFAULT_VOICE }
+
+    /**
      * 回来的字节是什么格式: 只有 `Content-Type` 说了算
      *
      * 后缀本身不影响播放, 但 MediaPlayer 会拿它当线索, 所以宁可猜一个也不留 `.tmp`; 认不出来就按 mp3

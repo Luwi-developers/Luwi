@@ -147,4 +147,82 @@ class PluginRowsTest {
         assertEquals(withOthers + "\n", PluginRows.withoutRow(withOthers + "\n", row))
         assertEquals(template, PluginRows.withoutRow(template, row))
     }
+
+    /** 2026-10-16 主人在手机上手工装的那一条 (裸包名 + plugins-src 软链), 两个形态都要认出来 */
+    private val legacyRow = """
+        - insert:
+            - id: our-free-model
+              name: 'dsh-our-free-model'
+            - id: legacy-by-path
+              name: 'file:///data/user/0/pkg/files/dsh-home/plugins-src/dsh-free-search/index.js'
+    """.trimIndent()
+
+    private val ourFreeModel = "/data/user/0/pkg/files/host/node_modules/dsh-our-free-model/index.js"
+
+    @Test
+    fun `同一个包已经被别人挂着时认得出来`() {
+        // 裸包名那一档 (靠 profile 的软链解析)
+        assertTrue(PluginRows.mountsPackage(legacyRow, "dsh-our-free-model"))
+        // 自己那一行不算 (否则每次都让位, 随包那份永远挂不上)
+        assertFalse(PluginRows.mountsPackage(legacyRow, "dsh-our-free-model", "our-free-model"))
+        // 路径那一档 (`plugins-src` 里那种手工装法)
+        assertTrue(PluginRows.mountsPackage(legacyRow, "dsh-free-search"))
+        assertFalse(PluginRows.mountsPackage(template, "dsh-our-free-model"))
+    }
+
+    @Test
+    fun `带 scope 的包名按两段算, 相邻的包不误伤`() {
+        val patch = """
+            - insert:
+                - id: mneme
+                  name: 'file:///data/user/0/pkg/files/host/node_modules/@modusensus/dsh-mneme/lib/index.js'
+                - id: imagegen
+                  name: 'file:///data/user/0/pkg/files/host/node_modules/@dickpy/dsh-imagegen/lib/index.js'
+        """.trimIndent()
+        assertTrue(PluginRows.mountsPackage(patch, "@modusensus/dsh-mneme"))
+        assertFalse(PluginRows.mountsPackage(patch, "@modusensus/dsh-mneme", "mneme"))
+        assertFalse(PluginRows.mountsPackage(patch, "dsh-our-free-model"))
+        // `dsh-mneme` 不该被当成 `dsh-mneme-something` 的前缀命中, 反之亦然
+        assertFalse(PluginRows.mountsPackage(patch, "dsh-mneme"))
+    }
+
+    @Test
+    fun `被占时自己那一行会被摘掉, 别人那几行一个字节都不动`() {
+        val occupied = PluginRows.withRow(legacyRow, "free-model", PluginRows.fileUrlOf(ourFreeModel))
+        assertTrue(PluginRows.hasInsertRow(occupied, "free-model"))
+        val next = PluginRows.withoutRow(occupied, "free-model")
+        assertFalse(PluginRows.hasInsertRow(next, "free-model"))
+        assertTrue(next.contains("id: our-free-model"))
+        assertTrue(next.contains("id: legacy-by-path"))
+    }
+
+    /* ── 先看本体: profile 里那一份是不是主人的 (2026-10-25 主人: 不覆盖安装) ───────────────── */
+
+    private val host = "/data/user/0/pkg/files/host"
+
+    @Test
+    fun `树里那份不算主人的, 树外那份算`() {
+        // 随包这棵树 (软链绕回树里也一样, 判的是解析后的真实路径)
+        assertFalse(PluginRows.isUserCopy("$host/node_modules/dsh-our-free-model", host))
+        // 主人 2026-10-16 手工装的那一份
+        assertTrue(
+            PluginRows.isUserCopy(
+                "/data/user/0/pkg/files/dsh-home/plugins-src/dsh-our-free-model",
+                host,
+            ),
+        )
+        // 同一棵树但路径带了尾斜杠时也要认成"树里"
+        assertFalse(PluginRows.isUserCopy("$host/node_modules/x", "$host/"))
+        // 树根本身不是"某一份"
+        assertFalse(PluginRows.isUserCopy(host, host))
+        // 没有树根可言时按"主人的"算 (保守: 让位总比盖掉一份好)
+        assertTrue(PluginRows.isUserCopy("/somewhere/else", ""))
+        assertFalse(PluginRows.isUserCopy("", host))
+    }
+
+    @Test
+    fun `前缀相同的兄弟目录不被当成树里那份`() {
+        // `files/hosted/...` 不是 `files/host` 里面的东西 (少切一刀就会误判成随包那份)
+        assertTrue(PluginRows.isUserCopy("/data/user/0/pkg/files/hosted/node_modules/dsh-our-free-model", host))
+    }
 }

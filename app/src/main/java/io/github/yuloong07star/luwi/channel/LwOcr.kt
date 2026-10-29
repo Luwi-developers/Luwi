@@ -418,6 +418,17 @@ object LwOcr {
         val detMs: Long,
         val recMs: Long,
         val error: String? = null,
+        /** 被当成图标丢掉的框, 给调试图与"丢了几条"的答案用 */
+        val dropped: List<Line> = emptyList(),
+        /** 有几行因为太宽被切成多段识别 */
+        val segmented: Int = 0,
+        /** 这次跑了几次识别 (一段一行算一次): 批量重导要量的就是它与 [recTotalMs] */
+        val recCalls: Int = 0,
+        /** 识别一共花了多久, 不含 det 与取帧 */
+        val recTotalMs: Long = 0,
+        /** 两个模型这次用的输入形状, 一眼看出装的是哪份模型 */
+        val detInput: String = "",
+        val recInput: String = "",
     )
 
     /**
@@ -466,30 +477,118 @@ object LwOcr {
             val characterTable = table()
 
             val recStarted = System.nanoTime()
-            val lines = ArrayList<Line>(boxes.size)
-            var attempts = 0
-            for (box in boxes) {
-                if (lines.size >= maxLines) break
+            var segmented = 0
+            // 先按框排出"要认的段" (超宽行拆成几段), 再按模型的 batch 分组跑: 一次调用认 batch 段,
+            // 每段的固定开销就只付一次。batch=1 的模型与逐段跑完全等价
+            val rects = arrayOfNulls<Rect>(boxes.size)
+            val pieces = ArrayList<OcrPiece>()
+            for ((index, box) in boxes.withIndex()) {
                 val rect = toScreen(box, scale, padX.toFloat(), padY.toFloat(), bitmap) ?: continue
-                val pixels = resized(bitmap, rect, recHeight, recWidth)
-                val logits = run(
-                    rec,
-                    recInput,
-                    recShape,
-                    recType,
-                    recognitionInput(pixels.first, pixels.second, recHeight, recWidth),
-                )
-                attempts++
-                val decoded = OcrDecode.greedy(logits, steps, classes, characterTable)
-                if (decoded.text.isBlank() || decoded.score < minScore) continue
+                rects[index] = rect
+                val slices = OcrBoxes.segments(rect.left, rect.right, rect.height(), recWidth, recHeight)
+                if (slices.isEmpty()) {
+                    pieces.add(OcrPiece(rect, index))
+                } else {
+                    segmented += 1
+                    for (slice in slices) {
+                        pieces.add(OcrPiece(Rect(slice.left, rect.top, slice.right, rect.bottom), index))
+                    }
+                }
+            }
+
+            val batch = recShape[0].toInt().coerceAtLeast(1)
+            val decoded = arrayOfNulls<OcrText>(pieces.size)
+            var calls = 0
+            for (group in OcrBatch.groups(pieces.size, batch)) {
+                val sample = 3 * recHeight * recWidth
+                val planes = FloatArray(batch * sample)
+                var filled = 0
+                for (index in group) {
+                    val part = resized(bitmap, pieces[index].rect, recHeight, recWidth)
+                    val one = recognitionInput(part.first, part.second, recHeight, recWidth)
+                    System.arraycopy(one, 0, planes, filled * sample, one.size)
+                    filled++
+                }
+                val logits = run(rec, recInput, recShape, recType, planes)
+                calls++
+                var slot = 0
+                for (index in group) {
+                    decoded[index] = OcrDecode.greedy(
+                        logits,
+                        steps,
+                        classes,
+                        characterTable,
+                        offset = slot * steps * classes,
+                    )
+                    slot++
+                }
+            }
+
+            // 按框把各段拼回去, 顺序仍是检测给的顺序
+            val byBox = mutableMapOf<Int, MutableList<OcrText>>()
+            for (index in pieces.indices) {
+                val text = decoded[index] ?: continue
+                byBox.getOrPut(pieces[index].box) { ArrayList() }.add(text)
+            }
+
+            val lines = ArrayList<Line>(boxes.size)
+            val dropped = ArrayList<Line>()
+            for ((index, _) in boxes.withIndex()) {
+                if (lines.size >= maxLines) break
+                val rect = rects[index] ?: continue
+                val parts = byBox[index] ?: continue
+                val text: String
+                val score: Float
+                if (parts.size == 1) {
+                    text = parts[0].text
+                    score = parts[0].score
+                } else {
+                    var joined = ""
+                    var weighted = 0f
+                    var characters = 0
+                    for (part in parts) {
+                        if (part.text.isBlank()) continue
+                        joined = OcrBoxes.joinOverlap(joined, part.text)
+                        weighted += part.score * part.text.length
+                        characters += part.text.length
+                    }
+                    text = joined
+                    score = if (characters == 0) 0f else weighted / characters
+                }
+                if (text.isBlank()) continue
+                // 头像 / 表情 / 喇叭 / 底部导航都是近正方形、小、分数低的框; 抬分数线会先误杀夜里的灰字
+                // 设置页右侧那种单独的 ">" 箭头形状不方、分数又高, 由"只有符号"那一条收掉
+                if (
+                    OcrBoxes.isIconLike(rect.width(), rect.height(), score) ||
+                    OcrBoxes.isSymbolOnly(text)
+                ) {
+                    dropped.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
+                    continue
+                }
+                if (score < minScore) continue
                 // 图标会被认成单个字, 分数也低 (实测 C / 8 / 心 / A 都在 0.5-0.7), 丢掉;
                 // 真的有意义的单字 (列表序号之类) 分数在 0.9 以上, 留得住
-                if (decoded.text.length == 1 && decoded.score < SINGLE_CHARACTER_SCORE) continue
-                lines.add(Line(decoded.text, decoded.score, rect.left, rect.top, rect.right, rect.bottom))
+                if (text.length == 1 && score < SINGLE_CHARACTER_SCORE) continue
+                lines.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
             }
-            val recMs = if (attempts == 0) 0L else (System.nanoTime() - recStarted) / 1_000_000 / attempts
-            note = "det ${detMs}ms / rec ${recMs}ms × ${lines.size}"
-            Outcome(lines, unit.label, captureMs, detMs, recMs)
+            val recTotalMs = (System.nanoTime() - recStarted) / 1_000_000
+            val recMs = if (calls == 0) 0L else recTotalMs / calls
+            note = "det ${detMs}ms / rec ${recMs}ms × ${lines.size}, dropped ${dropped.size}" +
+                (if (segmented > 0) ", split $segmented" else "") +
+                (if (batch > 1) ", batch $batch" else "")
+            Outcome(
+                lines,
+                unit.label,
+                captureMs,
+                detMs,
+                recMs,
+                dropped = dropped,
+                segmented = segmented,
+                recCalls = calls,
+                recTotalMs = recTotalMs,
+                detInput = "${detWidth}x$detHeight",
+                recInput = "${recShape[0]}x${recHeight}x$recWidth",
+            )
         } catch (problem: Throwable) {
             Log.w(TAG, "recognize failed: ${problem.message}")
             note = "识别失败: ${problem.message}"
@@ -717,3 +816,6 @@ object LwOcr {
         return (sign or (shifted shl 10) or ((mantissa + 0x1000) shr 13)).toShort()
     }
 }
+
+/** 一段要认的图与它属于哪个检测框 (超宽行拆段时一个框会有几段) */
+private data class OcrPiece(val rect: Rect, val box: Int)

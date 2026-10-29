@@ -59,10 +59,7 @@ internal object LwPlugin {
         "enable" -> buildJsonObject { put("text", PluginManager.enable(context, request.string("id"))) }
         "disable" -> buildJsonObject { put("text", PluginManager.disable(context, request.string("id"))) }
         "uninstall" -> buildJsonObject {
-            put(
-                "text",
-                PluginManager.uninstall(context, request.string("id"), request.bool("keepData", false)),
-            )
+            put("text", PluginManager.uninstall(context, request.string("id")))
         }
         "audit" -> audit(context, request)
         OP_SNAPSHOT -> PluginManager.snapshot(context)

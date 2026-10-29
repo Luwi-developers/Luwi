@@ -9,7 +9,7 @@
  *      "新加的段就收着"相反), 而且 `SettingsSectionsTest` 也看不出来 (那份测的是纯函数,
  *      不知道页面上真有几段)
  *
- * 所以这份脚本把**页面里那 18 个 `settingsSection(key = …)` 的实况**与名单逐个对齐 (顺序也管),
+ * 所以这份脚本把**页面上那 20 个 `settingsSection(key = …)` 的实况**与名单逐个对齐 (顺序也管),
  * 与 `check-automations.mjs` / `check-mode-model.mjs` 那种"两处名单必须一致"同一个道理
  *
  * 跑法: node tools/check-settings-sections.mjs   (不需要设备)
@@ -22,6 +22,12 @@ const screen = await readFile(
   new URL('app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt', root),
   'utf8',
 )
+// 2026-10-29: 酒馆那一段搬进 LuwiTavern.kt (C 方案第 1 步), 页面实况要两处拼起来看 ——
+// 那份文件最终会落在私有目录, 所以读不到时按"这一段不在这一份构建里"算
+const tavern = await readFile(
+  new URL('app/src/main/java/io/github/yuloong07star/luwi/ui/LuwiTavern.kt', root),
+  'utf8',
+).catch(() => '')
 
 let failures = 0
 let checks = 0
@@ -45,8 +51,10 @@ function listOf(name) {
 
 const open = listOf('SettingsSectionsAlwaysOpenKeys')
 const ability = listOf('AbilitySectionKeys')
-/** 页面实况: 每个 `settingsSection(` 后面那个 key, 按出现顺序 */
-const page = [...screen.matchAll(/settingsSection\(\s*key = "([a-z-]+)"/gu)].map((m) => m[1])
+/** 页面实况: 每个 `settingsSection(` 后面那个 key, 按出现顺序 (酒馆那一段的定义在 LuwiTavern.kt,
+ *  调用点在 SettingsScreen.kt 的同一位置, 所以这里把调用点当作一段 "tavern") */
+const page = [...screen.matchAll(/settingsSection\(\s*key = "([a-z-]+)"|LuwiTavern\.tavernSection\(/gu)]
+  .map((m) => m[1] ?? 'tavern')
 
 /* ── 一、名单本身 ─────────────────────────────────────────────────────── */
 
@@ -54,12 +62,12 @@ check('白名单就是 D1 那六段 (省电 + 常用五段; 导航那一段 2026
   'power', 'appearance', 'channel', 'ball', 'wake', 'speak',
 ])
 
-check('能力那一组 12 段 (无障碍与 OCR 2026-10-19 并进「特权通道」了)', ability, [
+check('能力那一组 14 段 (接口 2026-10-25 加在最末)', ability, [
   'notifications', 'screenshot', 'look', 'lock',
-  'explore', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'permissions',
+  'explore', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'tavern', 'permissions', 'api',
 ])
 
-check('页面上真是 18 段', page.length, 18)
+check('页面上真是 20 段', page.length, 20)
 
 check('两份名单拼起来与页面逐个对齐 (顺序也管)', [...(open ?? []), ...(ability ?? [])], page)
 

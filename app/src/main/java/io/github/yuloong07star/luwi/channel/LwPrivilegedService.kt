@@ -88,8 +88,6 @@ class LwPrivilegedService(private val context: Context?) : Binder() {
             LwServiceProtocol.DISPLAY_RELEASE -> answering(data, reply) {
                 val displayId = data.readInt()
                 display.release(displayId)
-                // A screen that went away takes the capturer's idea of its compositor id with it
-                capture.forget()
             }
 
             LwServiceProtocol.INPUT_TAP -> answering(data, reply) {
@@ -134,18 +132,13 @@ class LwPrivilegedService(private val context: Context?) : Binder() {
             LwServiceProtocol.SCREENSHOT -> answering(data, reply) {
                 val displayId = data.readInt()
                 val path = data.readString().orEmpty()
-                // The phone's own screen is the one display with no name of ours to look up, and
-                // naming no display at all is how `screencap` is asked for it
+                // 虚拟屏的截图已经不走这里了: 它们的帧就在 app 进程里 (FrameCache), 拍一张只是把
+                // 那一帧写下来。这里只剩手机自己那块屏 —— 它是唯一需要 shell uid 才拍得到的
                 val problem = if (displayId == LwServiceProtocol.MAIN_DISPLAY) {
                     capture.capturePrimary(path)
                 } else {
-                    val name = display.nameOf(displayId)
-                    if (name == null) {
-                        "displayId $displayId is not one of this app's screens any more: it was" +
-                            " closed, so create another one (lw_screen_create) and launch the app on it"
-                    } else {
-                        capture.capture(name, path)
-                    }
+                    "displayId $displayId is one of our virtual screens, and its pictures are now" +
+                        " taken inside the app; ask the app for a screenshot instead of the channel"
                 }
                 writeString(problem)
             }

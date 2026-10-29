@@ -137,7 +137,8 @@ check(
 )
 check(
   '每次重放都在通知栏留一行',
-  [replay.includes('lastReport = sentence'), replay.includes('post(app, "Unlocking by voice", sentence)')],
+  // 2026-10-25: 标题不再写 "by voice" —— 排期那一趟探索也会走到这里
+  [replay.includes('lastReport = sentence'), replay.includes('post(app, "Unlocking the screen", sentence)')],
   [true, true],
 )
 check(
@@ -151,9 +152,13 @@ check(
 check(
   // 2026-10-09: 口径从"没录过就不许开"放宽成"没录过也能开, 只要注入解锁开着而密码格里有一段可注入的
   // 密码" —— 「注入密码」那一行让这条路不必先录手势 (判据在 LockSteps.injected 与 LockSetting.typable)
+  // 2026-10-25: 这一句收成 `unlockable` (探索那一档的开关问的是同一句, 只有一处写法)
   '没录过也不许把自动解锁打开, 除非注入解锁开着而密码格里有可注入的密码',
-  setting.includes('if (on && !recorded(context) && !(injectUnlock(context) && typable(context)))'),
-  true,
+  [
+    setting.includes('if (on && !unlockable(context))'),
+    setting.includes('recorded(context) || (injectUnlock(context) && typable(context))'),
+  ],
+  [true, true],
 )
 
 /* ── 四、亮屏三条路与预算 ───────────────────────────────────────────────── */

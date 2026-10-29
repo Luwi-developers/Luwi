@@ -53,6 +53,9 @@ class DshHostService : Service() {
         LwModes.ensureDefault(this)
         // 随包那六项 (四份技能 + 两条样例快捷指令): 技能缺什么补什么, 样例只发一次
         LwSeed.ensure(this)
+        // 开放接口那份文档 (2026-10-25): 跟"应用又活了"走同一个钩子 —— agent 不用等谁打开设置页,
+        // 也不用等开屏画出来, 进程一起来 `$DSH_HOME/lw/interfaces.md` 就在那儿了 (内容一致不重写)
+        LwInterfaces.seed(this)
         // 探索那张任务卡 (2.7.8 批次 8): 首启/升级后第一次把初始卡抄进来 (已经有就一个字节不动);
         // 排期按主人设的那个时刻排上 (关着就撤) —— 它与宿主的存活无关, 但到点那一下要宿主在跑
         ExploreTask.ensure(this)
@@ -121,6 +124,10 @@ class DshHostService : Service() {
         val alone = applicationContext
         Thread({
             try {
+                // 随包那个浮标外观 (2026-10-25 主人: "将鲸鱼娘插件入包, 不用用户自己安装"): 与"从链接
+                // 装入"同一条链, 装完首启替主人挑上它。**排在 restore 前面** —— 它要先把包装进盘里,
+                // restore 才有得恢复; 而且两者都在这一条线程上, 不会一边装一边恢复
+                LwPluginSeed.ensure(alone)
                 PluginManager.restore(alone)
             } catch (error: Throwable) {
                 Log.w(TAG, "restoring the enabled plugins failed", error)

@@ -24,21 +24,31 @@ object OcrDecode {
     const val BLANK = ""
 
     /**
-     * [logits] 是 `[steps, classes]` 拉平的输出
+     * [logits] 是一批 `[batch, steps, classes]` 拉平后的输出
      *
      * **这份导出已经是 softmax 之后的概率了** (实测每一行加起来是 1.0), 所以置信度直接取那一步的
      * 最大值; 再套一次 softmax 会把它压到 1e-4 那个量级, 然后被任何阈值统统滤掉 —— 这个坑踩过
      *
      * 置信度取被留下的那些步的平均 —— 与 PaddleOCR 的口径一致, 重复步与 blank 不计入
+     *
+     * @param offset 这一条在本批里的起点 (batch 里第几条), 单条调用时为 0
      */
-    fun greedy(logits: FloatArray, steps: Int, classes: Int, table: List<String>): OcrText {
-        require(logits.size >= steps * classes) { "logits are ${logits.size}, expected ${steps * classes}" }
+    fun greedy(
+        logits: FloatArray,
+        steps: Int,
+        classes: Int,
+        table: List<String>,
+        offset: Int = 0,
+    ): OcrText {
+        require(logits.size >= offset + steps * classes) {
+            "logits are ${logits.size}, expected ${offset + steps * classes}"
+        }
         val text = StringBuilder()
         var total = 0f
         var kept = 0
         var previous = -1
         for (step in 0 until steps) {
-            val base = step * classes
+            val base = offset + step * classes
             var best = base
             for (index in 1 until classes) {
                 if (logits[base + index] > logits[best]) best = base + index

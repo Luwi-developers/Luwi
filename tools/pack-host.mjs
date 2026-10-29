@@ -8,7 +8,7 @@
  * what `scripts/release/verify-packed-install.ts` exercises in upstream CI - so this script
  * drives exactly that and leaves a plain, symlink-free `node_modules` behind
  *
- * usage: node tools/pack-host.mjs --dsh <checkout> --out <dir> [--install] [--skip-build]
+ * usage: node tools/pack-host.mjs --dsh <checkout> --out <dir> [--install] [--skip-build] [--tavern-root <dir>]
  */
 
 import { execFileSync } from 'node:child_process'
@@ -306,6 +306,7 @@ const { values } = parseArgs({
     out: { type: 'string' },
     install: { type: 'boolean', default: false },
     'skip-build': { type: 'boolean', default: false },
+    'tavern-root': { type: 'string' },
   },
   allowPositionals: false,
 })
@@ -315,6 +316,12 @@ if (values.dsh === undefined || values.out === undefined) {
 
 const dsh = resolve(values.dsh)
 const out = resolve(values.out)
+// 酒馆的源在仓库外 (2026-10-29, C 方案): 公开仓没有它, 传了 --tavern-root 才拷进树
+const tavernRoot = values['tavern-root'] === undefined ? '' : resolve(values['tavern-root'])
+const withTavern = tavernRoot !== '' && existsSync(tavernRoot)
+if (values['tavern-root'] !== undefined && !withTavern) {
+  throw new Error(`--tavern-root ${tavernRoot} is not a directory`)
+}
 if (!existsSync(join(dsh, 'pnpm-workspace.yaml'))) throw new Error(`${dsh} is not a dsh checkout`)
 if (values.install) {
   run('pnpm', ['install', '--frozen-lockfile'], dsh)
@@ -606,6 +613,88 @@ console.log(
   `pack-host: installed ${mnemePlugin.name}@${mnemePlugin.version} from ${npmRegistry}`,
 )
 
+// 随包发的第三个第三方插件: `dsh-our-free-model` (免费模型通道 + 渠道管理面板)
+//
+// **为什么取 git 而不取 registry**: 它在 npm 上只停到 2.1.0, 而仓库已经走到 2.7.x —— 拿 npm 那一份
+// 会缺掉整条渠道链。于是这一条锁 commit (与 dsh submodule 的 pin 同一条纪律: 只认推上去过的提交)。
+// `npm pack` 对 git spec 也只打**包自己**一个 tarball, 装不进任何依赖, 与上面两条同一个形状
+//
+// **托管安装**: 插件自带"应用内升级 / 公告 feed / 热重载"三件套, 而这三件在手机上必须由 APK 说了算
+// —— 同一份字节被两个写入方改, 结果是目录损坏 (它 README 的原话)。`distribution: 'managed'` 那
+// 一行由 [PluginRows] 写进 profile patch, 这里只管把包放到位
+//
+// **必须整包**: `adapter/` / `src/` / `locale/` / `vendor/channel-pack/` 少一样, 渠道就加载失败
+// (不是"少个功能", 是整块面板起不来), 所以下面那一段会把关键件逐个点一遍
+const freeModelPlugin = {
+  name: 'dsh-our-free-model',
+  version: '2.7.1',
+  commit: 'e164fea59e0293ab6284fd62d25d3ab8a4f459ce',
+}
+
+const freeModelStage = join(out, '.free-model-stage')
+mkdirSync(freeModelStage, { recursive: true })
+run(
+  'npm',
+  [
+    'pack',
+    `github:Ebony-Vinyl/dsh-our-free-model#${freeModelPlugin.commit}`,
+    '--pack-destination', freeModelStage,
+  ],
+  freeModelStage,
+)
+const freeModelTarball = readdirSync(freeModelStage).find(name => name.endsWith('.tgz'))
+if (freeModelTarball === undefined) {
+  throw new Error(
+    `npm pack produced no tarball for ${freeModelPlugin.name}@${freeModelPlugin.version}: it ships`
+      + ' from git, so the build machine needs git and a route to github.com',
+  )
+}
+run('tar', ['-xzf', join(freeModelStage, freeModelTarball), '-C', freeModelStage], freeModelStage)
+const freeModelRoot = join(out, 'node_modules', ...freeModelPlugin.name.split('/'))
+mkdirSync(dirname(freeModelRoot), { recursive: true })
+cpSync(join(freeModelStage, 'package'), freeModelRoot, { recursive: true })
+rmSync(freeModelStage, { recursive: true, force: true })
+
+// 点一遍关键件: 渠道包 / 浏览器半身 / 补丁层各少一样时的表现都不是一句安装错误
+for (const relative of [
+  'index.js',
+  'client.js',
+  'cordis.patch.yml',
+  'adapter/kernel.js',
+  'vendor/channel-pack/pack.js',
+  'vendor/channel-pack/qoder-auth-wasm.wasm',
+]) {
+  if (!existsSync(join(freeModelRoot, relative))) {
+    throw new Error(
+      `${freeModelPlugin.name}: ${relative} is missing from the packed tarball; its "files" list`
+        + ' changed upstream, so the bundle has to be revisited before shipping',
+    )
+  }
+}
+
+/**
+ * 裁掉 `vendor/magpie/`: 它整包 65 MB, 而唯一那一份二进制是 `magpie-win32-x64.exe`
+ *
+ * 那个东西是它"出网代理"那一档的引擎 (`src/magpie-engine.js` 按 `magpie-${platform}-${arch}` 找),
+ * 安卓上没有对应平台的二进制 —— 留着不会让代理能跑, 只会让 APK 白胖 65 MB。引擎找不到那一份时
+ * 自己降级 (那一档在手机上本来就起不来), 与"根本没拷进来"同一条路
+ */
+rmSync(join(freeModelRoot, 'vendor', 'magpie'), { recursive: true, force: true })
+
+const freeModelManifest = JSON.parse(readFileSync(join(freeModelRoot, 'package.json'), 'utf8'))
+const freeModelEntry = typeof freeModelManifest.main === 'string' ? freeModelManifest.main : 'index.js'
+try {
+  await import(pathToFileURL(join(freeModelRoot, freeModelEntry)).href)
+} catch (error) {
+  throw new Error(
+    `${freeModelPlugin.name} cannot be imported after installation (${error?.message ?? error}): it is`
+      + ' missing a dependency it actually imports, or it needs a package this tree does not carry',
+  )
+}
+console.log(
+  `pack-host: installed ${freeModelPlugin.name}@${freeModelManifest.version} (${freeModelPlugin.commit.slice(0, 7)}) from git`,
+)
+
 // Luwi's own host plugin is copied in rather than packed: it is a few hundred lines of
 // plain ESM with no build step, and it has to sit under node_modules so that its import of
 // @deepseek-ai/dsh-tools resolves to the same copy the host itself uses
@@ -675,6 +764,34 @@ execFileSync(process.execPath, [
 console.log('pack-host: luwi-dsh-sync imports cleanly')
 
 /**
+ * 酒馆 (P1, 2026-10-24): 与 luwi-dsh-sync 同一条路 —— 拷进 `node_modules/luwi-tavern`, 由
+ * [PluginOverlay] 那一行挂载
+ *
+ * 它只认 `node:*` 与 `ctx` (webServer + llm), 没有任何外部依赖; `web/` 必须一起拷 —— 聊天页、六套
+ * 主题与 `themes.json` 都在里面, 宿主自己按路径去读它们。
+ *
+ * 装完 import 一次, 理由与上面两步一样: 少一样东西时 npm 不会说话, 而它要到加载时才会抛 ——
+ * 设备上的表现会是"设置里那一段没了", 而不是一句安装错误
+ */
+const tavern = withTavern ? join(tavernRoot, 'host-plugins', 'luwi-tavern') : ''
+if (withTavern) {
+  const tavernInstalled = join(out, 'node_modules', 'luwi-tavern')
+  cpSync(tavern, tavernInstalled, { recursive: true })
+  for (const name of ['test', 'node_modules', 'docs']) {
+    rmSync(join(tavernInstalled, name), { recursive: true, force: true })
+  }
+  console.log(`pack-host: installed luwi-tavern from ${tavern}`)
+  execFileSync(process.execPath, [
+    '--input-type=module',
+    '-e',
+    `await import(${JSON.stringify(pathToFileURL(join(tavernInstalled, 'index.mjs')).href)})`,
+  ], { cwd: out, stdio: 'inherit' })
+  console.log('pack-host: luwi-tavern imports cleanly')
+} else {
+  console.log('pack-host: no --tavern-root, so luwi-tavern is not in this tree')
+}
+
+/**
  * 内置的 dsh-custom-mode: 让新机开箱就有那个 `custom` 预设 (2026-10-09 主人报的那条)
  *
  * 与 luwi-channel 同一条路 —— 拷进 node_modules; 而"它是不是这一棵树的一个 bundle"由
@@ -687,22 +804,28 @@ cpSync(customMode, customInstalled, { recursive: true })
 console.log(`pack-host: installed dsh-custom-mode from ${customMode}`)
 
 /**
- * 随树走的那份预设声明 (探索模式), 落在 `lw-presets/` 下
+ * 随树走的那几份预设声明, 落在 `lw-presets/` 下
  *
  * 它的正文本来就是仓库里的 `presets/<名字>/cordis.patch.yml`; 应用那一侧要把开头那段 `- insert:`
  * 追加进 profile patch, 而它读不到仓库 —— 所以这里拷进树里
  *
- * **2026-10-18 起只剩探索那一份**: 手机模式与视频模式那两份声明下线了 (主人: "删除手机模式和视频模式,
- * 因为已经在自定义模式里了") —— 那两套提示词本来就装在 `assets/modes/*.md` 里, 切模式时由应用写进
+ * **2026-10-18 起手机模式与视频模式那两份声明下线了** (主人: "删除手机模式和视频模式, 因为已经在
+ * 自定义模式里了") —— 那两套提示词本来就装在 `assets/modes/*.md` 里, 切模式时由应用写进
  * 自定义模式的 `prompt.md`, 单独的预设只是同一个东西的第二份
+ *
+ * **2026-10-27 起多一份 `tavern`** (酒馆接 DSH 会话): 它的 persona 是酒馆协议, `config.plugins` 里
+ * 那一行 `luwi-tavern/preset/tavern-tools.mjs` 要靠 profile 的 link 才解析得到 (见
+ * `host/CustomPresets.kt` 的 `PROFILE_PACKAGES`)
  */
 const presetSeed = join(out, 'lw-presets')
 mkdirSync(presetSeed, { recursive: true })
-for (const name of ['explore']) {
-  cpSync(
-    fileURLToPath(new URL(`../presets/${name}/cordis.patch.yml`, import.meta.url)),
-    join(presetSeed, `${name}.patch.yml`),
-  )
+const presets = ['explore']
+if (withTavern) presets.push('tavern')
+for (const name of presets) {
+  const source = name === 'tavern'
+    ? join(tavernRoot, 'presets', 'tavern', 'cordis.patch.yml')
+    : fileURLToPath(new URL(`../presets/${name}/cordis.patch.yml`, import.meta.url))
+  cpSync(source, join(presetSeed, `${name}.patch.yml`))
 }
 console.log(`pack-host: staged the preset declarations in ${presetSeed}`)
 

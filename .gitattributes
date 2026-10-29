@@ -8,3 +8,6 @@
 *.webp binary
 *.so binary
 *.keystore binary
+# 插件包与 npm tarball 都是二进制 (仓库里已有后一种, 见 host-plugins/luwi-dsh-sync)
+*.lwp binary
+*.tgz binary

@@ -30,6 +30,32 @@ val shippedSkills = listOf("web-search", "weather", "calendar", "photo-edit")
 /** 随包发的样例快捷指令: 文件名去掉 `.md` 就是它在设置页里的名字 */
 val shippedQuickCommands = listOf("制定旅游计划", "今天要做什么")
 
+/**
+ * 随包的浮标外观插件 (2.7.10 起, 主人: "将鲸鱼娘插件入包, 不用用户自己安装")
+ *
+ * **源在仓库外**: 签好的 `.lwp` 只住在插件仓库那一侧 (`D:\apk\luwi-plugins\packages\`), 主人
+ * 2026-10-11 定过 "`.lwp` 不进 Luwi 仓库" —— 所以按相对路径从兄弟目录取, 落地形状是
+ * `assets/lw-plugins/`, 由 `host/LwPluginSeed.kt` 首启装进 `$DSH_HOME`
+ *
+ * 这里先把它变成 `File`: 配置缓存**不许**动作里碰脚本级的 project / directory 对象
+ * (见下面 `fetchSherpaOnnxAar` 那段注释), 而 `File` 是可以带进动作的
+ */
+val bundledBallTheme: File =
+    rootProject.file("../luwi-plugins/packages/whalegirl-balltheme-1.1.3.lwp")
+
+/**
+ * 酒馆的源码在仓库外 (2026-10-29, C 方案): 公开仓只留 `LuwiTavernStub.kt`, 完整版构建把这份
+ * 私有目录并进来
+ *
+ * `-PluwiTavernDir=<目录>` 可以指到别处 (另一次导出 / 另一台机器); 目录不存在就按公开构建算 ——
+ * stub 进编译, 自定义预设与宿主插件也不装
+ */
+val tavernRoot: File? = run {
+    val dir = File(providers.gradleProperty("luwiTavernDir").orNull ?: "D:/apk/Luwi-private/tavern")
+    if (dir.isDirectory) dir else null
+}
+val withTavern: Boolean = tavernRoot != null
+
 
 // 语音转写要的那套 sherpa-onnx 不在 Maven 上: 上游只把它发成 GitHub Release 里的 AAR, 所以这
 // 一个依赖由构建自己取。app/libs/sherpa-onnx.aar 放了本地文件就用那一份 (离线构建、或用自己
@@ -115,6 +141,7 @@ val packHostTree = tasks.register<Exec>("packHostTree") {
         "--dsh", dshCheckout.asFile.absolutePath,
         "--out", hostTree.get().asFile.absolutePath,
         "--install",
+        *(if (tavernRoot != null) arrayOf("--tavern-root", tavernRoot.absolutePath) else emptyArray()),
     )
     inputs.file(rootProject.file("tools/pack-host.mjs"))
     // The plugin is copied into the tree rather than built, so its sources are an input too
@@ -127,6 +154,8 @@ val packHostTree = tasks.register<Exec>("packHostTree") {
     // 三份预设声明与内置的 dsh-custom-mode 也从仓库拷进树 (见 tools/pack-host.mjs 那两段),
     // 所以 preset 那几份源码也是这一步的输入
     inputs.dir(rootProject.file("presets"))
+    // 酒馆在仓库外: 它的源进了构建, 改了就得重打这棵树
+    tavernRoot?.let { inputs.dir(it) }
     inputs.property("dshPin", dshPin)
     inputs.files(dshSources)
     outputs.dir(hostTree)
@@ -172,6 +201,27 @@ val copySeedAssets = tasks.register<Copy>("copySeedAssets") {
     // 应用对应的那一份技能目录 (2.7.0 那一批): 整目录抄, 条数由 catalog.json 自己说了算 —— 加一条
     // 只写两个文件 (catalog.json 一行 + 一个 SKILL.md), 不用回来动构建脚本
     from(rootProject.layout.projectDirectory.dir("app-skills")) { into("app-skills") }
+    // 随包的浮标外观插件 (见上面 [bundledBallTheme]): 文件在不在由下面 doFirst 当场说, Copy 自己遇到
+    // 缺文件是静默跳过的 —— 那种结果是一个没有外观的包, 而"球变回内置画法"没人会去查
+    //
+    // **先落到一个本地 val 再用**: 动作里引用脚本级的属性等于把整个脚本对象塞进任务, 配置缓存会以
+    // "cannot serialize Gradle script object references" 拒绝 (与 `fetchSherpaOnnxAar` 那条同一个坑)
+    val bundle = bundledBallTheme
+    // 同理: 脚本级的 `seedAssets` 是个 Provider, 带进动作一样会被配置缓存拒掉 —— 先落成 File
+    val seedRoot = seedAssets.get().asFile
+    from(bundle) { into("lw-plugins") }
+    doFirst {
+        if (!bundle.isFile) {
+            throw GradleException(
+                "随包的浮标外观不在 ${bundle.absolutePath} —— 先把 " +
+                    "whalegirl-balltheme-1.1.3.lwp 放进 luwi-plugins/packages (它由 ball-art 的签名那一步产出)",
+            )
+        }
+        // **先清掉上一个版本那么一份**: 换文件名时 Copy 不会删旧文件, 不清的话 APK 里会同时躺着
+        // 1.1.0 与 1.1.1 两份 17 MB 的素材, 而 LwPluginSeed 只认新的那一份 (2026-10-25 撞上)
+        val old = seedRoot.resolve("lw-plugins")
+        if (old.isDirectory) old.deleteRecursively()
+    }
     into(seedAssets)
 }
 
@@ -226,8 +276,13 @@ android {
         // 2.7.9: 自动更新提示 / 删捐赠页 (签到那一页不进包, 只留 ⋮ 一行) / docx 与 pptx 进右栏预览 /
         // 探索预算两条滑块与四项读数 / 无障碍与 OCR 并进特权通道 / 手机锁竖屏 / 设置页 ⋮ 第一条反馈 /
         // 语音预录填音与只读状态出口 / 同步插件 0.3.5 (扫码配对、P2P 卡、签到) / dsh 升到 0.2.1-rc.3
-        versionCode = 17
-        versionName = "2.7.9"
+        // 2.7.10: 酒馆 (角色卡/故事书/存档/主题/主动说话, 最多十人一桌) / 账号与签到 (官网设备码登录,
+        // 签到只在官网, 应用里没有写操作) / 开屏 (图标 + 转圈 + 加载日志, splash.json 可配) /
+        // 老 WebView 兼容层 (文档开始垫 polyfill, 还缺就弹窗让人去更新) / 一状态多支动作 (ball.json 的
+        // frames 收数组) / 立绘按高贴满 / 半隐改一半 (0.35 → 0.5) / 鲸鱼娘外观随包发 / API 音色库 /
+        // 接口文档那一段
+        versionCode = 18
+        versionName = "2.7.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -320,6 +375,14 @@ android {
     sourceSets["main"].assets.srcDir(hostAssets.get().asFile)
     // 随包的技能与样例快捷指令同理: 源在仓库里, 进包的形状由 copySeedAssets 拼
     sourceSets["main"].assets.srcDir(seedAssets.get().asFile)
+    // 酒馆 (C 方案): 有私有目录就用它, 没有就用 `src/tavern-stub` 那份空实现 —— 两份声明的是
+    // 同一个 object, 所以两个目录永远只会进来一个
+    if (tavernRoot != null) {
+        sourceSets["main"].kotlin.srcDir(File(tavernRoot, "app/src/main/java"))
+        sourceSets["test"].kotlin.srcDir(File(tavernRoot, "app/src/test/java"))
+    } else {
+        sourceSets["main"].kotlin.srcDir("src/tavern-stub/java")
+    }
 }
 
 // Every variant's asset merge has to wait for the archive. `tasks.named` fails the build if AGP
@@ -371,6 +434,11 @@ dependencies {
     implementation(project(":lwplugin-api"))
     // 「Edge 在线」那条朗读引擎: 那条接口是 WebSocket, 用它比手写握手可靠
     implementation(libs.okhttp)
+    // 老 WebView 那条兼容层 (2.7.10): dsh 的前端产物用了 `Promise.withResolvers` (Chrome 119 才有),
+    // 而 22 年出厂、一直没更新过 WebView 的机器停在 100~116 —— 界面会永远停在"连接中"。这一条依赖
+    // 只为了拿到 `WebViewCompat.addDocumentStartJavaScript` (文档开始前注入一段 polyfill),
+    // WebView 自己那一层没有等价的钩子
+    implementation(libs.androidx.webkit)
 
     // The privileged channel: Shizuku's API and provider, plus libsu for the root shell
     implementation(libs.shizuku.api)

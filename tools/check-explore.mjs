@@ -10,8 +10,8 @@
  *      (D9 拍板闸在提示词层), 漂开一个字都没有第二道闸兜住
  *   3. **预算**: 30 / 60 / 3 / 两个范围 / 8000 字 / 留 30 份, 以及 [exploreBudget] 那张真值表
  *      (59 / 60 / 61 步, 到点前一拍与当拍, over 之后不再判)
- *   4. **落位与收尾**: 工作区注册路 / 省电闸 / 数步只数不拒 / `lw_explore` 的工具面 /
- *      摘要的文件形状
+ *   4. **落位与收尾**: 工作区注册路 / 省电只当读数 (2026-10-26 起不再有一道闸) / 数步只数不拒 /
+ *      `lw_explore` 的工具面 / 摘要的文件形状
  *   5. **预算透传** (2.7.9 第 8 条 T4): 排期文件的两个键 → 收件箱那一行 → 宿主 `startExplore`,
  *      三处的键名 / 缺省 / 范围必须一致, 老文件 (没有那两个键) 仍落 30 / 60
  *   6. **工作区与读数** (2.7.9 T5): 宿主起来就注册 `Luwi` 工作区、status 四项写进 `explore.json`、
@@ -226,14 +226,15 @@ check('不叠权限档也不 deny 工具 (D9)', [
   !/toolFilter/u.test(section),
 ], [true, true, true])
 
-/* ── 五、省电闸 ───────────────────────────────────────────────────────── */
+/* ── 五、省电只当读数 (2026-10-26 主人: "探索功能当前被省电模式阻止启动，看能不能忽略省电") ── */
 
-check('省电探针与判据都在', [
+check('省电探针还在 (给 status 与设置页读数) 但它不再拒', [
   /call\('wakeword', \{ op: 'status' \}\)/u.test(section),
   /status\?\.powerSave === true/u.test(section),
-  /the phone is in power save mode right now, so an exploration is not opened/u.test(section),
-], [true, true, true])
-check('探针抛错就放行并记 powerSaveUnknown', [
+  !/refused: 'powerSave'/u.test(section),
+  !/the phone is in power save mode right now/u.test(section),
+], [true, true, true, true])
+check('探针抛错只记 powerSaveUnknown, 仍照开', [
   /powerSave: null, why: String\(error\?\.message \?\? error\)/u.test(section),
   /if \(!power\.known\) exploreState\.powerSaveUnknown = true/u.test(section),
 ], [true, true])
@@ -428,8 +429,16 @@ check('排期: 每天一个时刻 / 缺省 03:00 / requestCode 42', [
   /const val DEFAULT_AT = "03:00"/.test(schedule),
   /private const val REQUEST = 42/.test(schedule),
   /fun nextAt\(at: String, now: Long/.test(schedule),
-  /fun skipReason\(hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
+  /fun skipReason\(hostRunning: Boolean, running: Boolean\)/.test(schedule),
 ], [true, true, true, true])
+
+check('探索不再被省电拦: 跳过只剩宿主与上一场, 省电只进读数', [
+  !/fun skipReason\(hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
+  /val skip = skipReason\(\s*hostRunning = DshHost\.status is HostStatus\.Running,\s*running = ExploreTask\.running\(context, now\) != null,\s*\)/u.test(schedule),
+  /省电模式里照常开了/.test(schedule),
+  /设备在深度省电 \(Doze\) 里, 网络可能要等维护窗口/.test(schedule),
+  /isDeviceIdleMode\(\)/.test(schedule),
+], [true, true, true, true, true])
 
 check('到点那几件事都在: 读卡 / 写收件箱 / 记 last', [
   /ExploreTask\.read\(context\)/.test(schedule),
@@ -601,6 +610,68 @@ check('排期没开成时给一条通知 (不只是写文件)', [
   // 两条"没开成"的路径各调一次: 三条闸跳过的 skipped 与收件箱写不进去的 failed
   (schedule.match(/report\(context, /gu) ?? []).length >= 2,
 ], [true, true, true])
+
+/* ── 十五、探索时允许锁屏解锁 (2.7.10) ─────────────────────────────────── */
+
+const lockTool = await read('app/src/main/java/io/github/yuloong07star/luwi/lock/LwLock.kt')
+const lockSettings = await read('app/src/main/java/io/github/yuloong07star/luwi/lock/LockSetting.kt')
+const resZh = await read('app/src/main/res/values-zh/strings.xml')
+const resEn = await read('app/src/main/res/values/strings.xml')
+
+check('排期文件多一个 unlock 键 (老文件就是关着)', [
+  schedule.includes('put("unlock", plan.unlock)'),
+  /val unlock = root\["unlock"\]\?\.jsonPrimitive\?\.booleanOrNull \?: false/.test(schedule),
+  /val unlock: Boolean = false/.test(schedule),
+], [true, true, true])
+check('到点先解屏再投那一行 (否则模型第一眼看到的是锁屏)', [
+  /val unlockNote = if \(current\.unlock\) unlockForExplore\(context\) else null/.test(schedule),
+  schedule.indexOf('unlockForExplore(context)') < schedule.indexOf('VoiceInbox.append('),
+], [true, true])
+check('解屏走「锁屏」那一段: 点亮 / 没录过不放 / 失败太多次不放', [
+  /fun unlockForExplore\(context: Context\): String\?/.test(schedule),
+  /LockReplay\.wakeScreen\(context, allowConnecting = true\)/.test(schedule),
+  /LockReplay\.replayNow\(context, "the scheduled exploration"\)/.test(schedule),
+  /if \(!LockSetting\.unlockable\(context\)\)/.test(schedule),
+  /if \(LockTries\.exhausted\(LockSetting\.tries\(context\)\)\)/.test(schedule),
+], [true, true, true, true, true])
+check('"有没有可放的东西"只有一处 (两条开关问同一句)', [
+  /fun unlockable\(context: Context\): Boolean/.test(lockSettings),
+  /if \(on && !unlockable\(context\)\)/.test(lockSettings),
+], [true, true])
+check('探索里 lw_lock 解屏要过那道开关 (关着就如实拒, 不悄悄解开)', [
+  /ExploreTask\.running\(app\) != null && !ExploreSchedule\.plan\(app\)\.unlock/.test(lockTool),
+  lockTool.includes('"explore-unlock-off"'),
+  lockTool.includes('允许锁屏解锁'),
+], [true, true, true])
+check('设置页那一行: 标题 / 说明 / 落盘 / 没录过时说一句', [
+  exploreItems.includes('R.string.settings_explore_unlock'),
+  exploreItems.includes('R.string.settings_explore_unlock_summary'),
+  exploreItems.includes('R.string.settings_explore_unlock_missing'),
+  exploreItems.includes('plan.copy(unlock ='),
+  exploreItems.includes('LockSetting.unlockable(context)'),
+], [true, true, true, true, true])
+check('读数那句带上"开始前屏幕怎么了"', [
+  screen.includes('R.string.settings_explore_last_started_note'),
+  /"started" -> "开始了一场探索" \+ \(last\.why\?\.let \{ " · \$it" \} \?: ""\)/.test(schedule),
+], [true, true])
+check('三条字符串两边都在, 先后顺序也一致', [
+  ['settings_explore_unlock', 'settings_explore_unlock_summary', 'settings_explore_unlock_missing',
+    'settings_explore_last_started_note']
+    .every((key) => resZh.includes(`name="${key}"`) && resEn.includes(`name="${key}"`)),
+  // 两边的相对顺序相同 (一处加、另一处忘了加就会在这里红)
+  (() => {
+    const inOrder = (text) => {
+      const at = ['settings_explore_unlock', 'settings_explore_unlock_missing', 'settings_explore_last_started_note']
+        .map((key) => text.indexOf(`name="${key}"`))
+      return at.every((one, index) => one > 0 && (index === 0 || one > at[index - 1]))
+    }
+    return inOrder(resZh) && inOrder(resEn)
+  })(),
+], [true, true])
+check('persona 写清锁屏那一条 (解不开就记进摘要, 不绕)', [
+  persona.includes('lw_lock op=unlock'),
+  persona.includes('不绕'),
+], [true, true])
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 

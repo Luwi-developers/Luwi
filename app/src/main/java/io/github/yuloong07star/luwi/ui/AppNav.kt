@@ -51,6 +51,43 @@ sealed interface Screen : NavKey {
     /** 设置 → 插件 → 某一只插件的那一页 (2.7.8 批次 6): 停用 / 它自己的设置 / 卸载与数据 */
     @Serializable
     data class PluginDetail(val id: String) : Screen
+
+    /**
+     * 会话界面右上角那个菜单 → 酒馆首页 (2026-10-24 主人)
+     *
+     * 从这里进的是首页 (进入酒馆 / 选择存档 / 选择主题 / 打开配置); 2026-10-24 晚主人又定了一条:
+     * 设置页那一段的"打开酒馆"也改成进首页 (原来它直奔聊天页)
+     */
+    @Serializable
+    data object TavernHome : Screen
+
+    /** 设置 → 酒馆 → 聊天页 (P1): 一块独立的 WebView, 不挂 dsh 的任何桥 */
+    @Serializable
+    data object TavernChat : Screen
+
+    /** 配置页: 资料 / 角色卡 / 故事书 (首页的「打开配置」与设置段那条「配置」都落这儿) */
+    @Serializable
+    data object TavernConfig : Screen
+
+    /** 酒馆里那几页 (从首页或设置段进去): 资料 / 角色卡 / 故事书 / 存档(会话) / 主题 */
+    @Serializable
+    data object TavernProfile : Screen
+
+    @Serializable
+    data object TavernCards : Screen
+
+    @Serializable
+    data object TavernWorldbooks : Screen
+
+    @Serializable
+    data object TavernSessions : Screen
+
+    /** 新建存档 (2026-10-25 主人: "新建存档新开页面"): 主角 / 角色 / 故事书 / 背景各一个二级界面 */
+    @Serializable
+    data object TavernNewSave : Screen
+
+    @Serializable
+    data object TavernThemes : Screen
 }
 
 /** 谁想换页就问它, 页面自己不持有返回栈 */
@@ -96,8 +133,11 @@ fun LuwiApp() {
     ) {
         settings.controller()
     }
-    // 2026-10-17 主人: 导航那一段整段撤掉 —— 只用 Miuix 那一套转场, 横滑返回一直开着。
-    // 于是这里没有分支可看: 两个值都写死 (存过的旧 pref 不再有人读)
+    // 2026-10-27 主人: "取消左右跳转, 直接跳转" —— 那天把全局转场换成 NavTransitions.None;
+    // 2026-10-27 晚主人补一句: "除酒馆页面, 跳转继续用左右翻转进入" —— 所以全局转场恢复
+    // MiuixDefault (左右滑动进场), 只有酒馆那几页在 entry 上单独钉 None (进出酒馆都不扫光,
+    // 避开两页亮度差被整片扫过的闪)。
+    // 注意: 横滑返回的登记仍在每个 entry 上 (swipeDismiss), 只是 None 这一档没有跟手位移
     val swipe = NavSwipeDirection.LeftToRight
     val transition = NavTransitions.MiuixDefault
 
@@ -138,7 +178,9 @@ fun LuwiApp() {
                 enableCornerClip = true,
                 cornerClipRadius = cornerRadius,
                 cornerClipMode = NavCornerClipMode.Leading,
-                dimAmount = 0.5f,
+                // 2026-10-25 主人: 进场那一瞬上一页被压暗 (录屏亮度 45.6→35.1→54, 约 100 ms)
+                // 看着就是"还会闪"; 转场本身仍是 MiuixDefault, 只把这一层 dim 收掉
+                dimAmount = 0f,
                 blockInputDuringTransition = true,
                 backdropColor = backdrop,
             )
@@ -159,7 +201,13 @@ fun LuwiApp() {
                 entry<Screen.SkillsInstalled>(swipeDismiss = swipe) { SkillsInstalledScreen() }
                 entry<Screen.SkillsAvailable>(swipeDismiss = swipe) { SkillsAvailableScreen() }
                 entry<Screen.PluginDetail>(swipeDismiss = swipe) { key -> PluginDetailScreen(key.id) }
+                // 酒馆那几页的 entry 全在 LuwiTavern 里 (公开构建换成 stub 就一条都不登记)
+                LuwiTavern.tavernEntries(this)
             }
+            // 酒馆聊天页那一秒盖板 (2026-10-27 主人: 进出聊天页时铺一秒全屏主题背景, 把 WebView 那
+            // 几百毫秒的闪挡掉)。**必须画在 NavDisplay 上层**: 盖板要是放在聊天页里, 退出那一刻它跟着
+            // 页面一起没了, 正好漏掉要挡的那一下。只有聊天页会调 `TavernWipe.show`, 别的页面不受影响
+            LuwiTavern.overlays()
             // 冷启动查到的那个新版本 (2.7.9 第 3 条): 只在新版本真的到了才有内容 —— 状态是自动那条
             // 自己的一份 (AutoUpdatePrompt), 与设置页手动「检测更新」那一趟的账互不覆盖
             val context = LocalContext.current
@@ -177,6 +225,9 @@ fun LuwiApp() {
                     },
                 )
             }
+            // 首启的模型说明 (2026-10-28 主人): 缺唤醒词 / 语音模型时弹一次, 只弹一次;
+            // 检测与"弹过了"都记在 ModelSetup 里, 这里只负责把它挂到每一页之上
+            ModelSetupPrompt()
             // **返回键的最后一道**: 没被接住的那一下是平台的默认行为 —— 把这个 activity 关掉, 于是
             // host 与虚拟屏一起没了。所以这里兜底: 要么弹提示, 要么把任务放到后台, 两者都不结束任何
             // 东西
@@ -190,6 +241,8 @@ fun LuwiApp() {
             // 而手机上那一格是全屏的, 会话被整个盖住 —— 那时按返回只会弹「再按一次退出」。网页里
             // 收得掉这一层就把这一下交给它 (见 [PageBack]), 收不掉才走下面那条
             BackHandler {
+                // 酒馆新建存档的二级界面先回上一层 (它不是独立路由, 见 LuwiTavern.handleBack)
+                if (LuwiTavern.handleBack()) return@BackHandler
                 if (backStack.size > 1) {
                     navigator.pop()
                     return@BackHandler

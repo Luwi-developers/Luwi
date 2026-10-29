@@ -185,7 +185,7 @@ const hostEnums = [.../enum: \['list', 'read', 'install', 'enable', 'disable', '
 check('lw_plugin 的 op 名单两侧一致', hostEnums, operations)
 check('snapshot 只在桥上', [lwPlugin.includes('const val OP_SNAPSHOT = "snapshot"'), operations.includes('snapshot')], [true, false])
 
-check('工具数的下限抬到 65', Number(/(?:const FLOOR = )(\d+)/.exec(hostCheck)[1]), 65)
+check('工具数的下限抬到 66', Number(/(?:const FLOOR = )(\d+)/.exec(hostCheck)[1]), 66)
 check('宿主里注册了 lw_plugin', host.includes("'lw_plugin',"), true)
 check('宿主里注册了 lw_explore (2.7.8 批次 7 那一档)', host.includes("'lw_explore',"), true)
 check('设置页有插件那一段', settings.includes('key = "plugin"'), true)
@@ -470,6 +470,9 @@ const pluginPaths = await read('app/src/main/java/io/github/yuloong07star/luwi/p
 const pluginTrust = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginTrust.kt')
 const pluginInstaller = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginInstaller.kt')
 const pluginManager = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginManager.kt')
+const pluginStore = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginStore.kt')
+const pluginAudit = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginAudit.kt')
+const detail = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PluginDetailScreen.kt')
 const inlineService = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/inline/InlineHostService.kt')
 const inlineHost = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/inline/InlineHost.kt')
 const signTool = await read('tools/lw-plugin-sign.mjs')
@@ -514,6 +517,51 @@ check(
   ],
   [true, true, true],
 )
+// 卸载 (2026-10-28 主人): **一个键, 什么都不留**。删掉目录之后还要清审计、leftovers、removed 与
+// 内存里那句 problem; UI 那边只许有一个卸载调用, 否则"留数据"的第二个答案会从死代码里长回来
+check(
+  '卸载只有一个键, 而且连数据 / 审计 / 旧记录一起删',
+  [
+    pluginManager.includes('fun uninstall(context: Context, id: String): String'),
+    !pluginManager.includes('keepData'),
+    pluginManager.includes('PluginAudit.forget(context, id)'),
+    pluginManager.includes('PluginStore.forgetLeftover(context, id)'),
+    pluginManager.includes('PluginStore.forgetRemoved(context, id)'),
+    pluginManager.includes('PluginHost.forget(id)'),
+    (detail.match(/PluginManager\.uninstall\(/g) ?? []).length,
+    !detail.includes('settings_plugin_uninstall_keep'),
+  ],
+  [true, true, true, true, true, true, 1, true],
+)
+check(
+  '审计与两本旧账都有"按 id 清掉"的入口',
+  [
+    pluginAudit.includes('fun forget(context: Context, id: String)'),
+    pluginStore.includes('fun forgetLeftover('),
+    pluginStore.includes('fun forgetRemoved('),
+    !/fun removed\(context: Context, id: String, version: String\)/.test(pluginStore),
+  ],
+  [true, true, true, true],
+)
+check(
+  '宿主工具不再有 keepData (提示词与 schema 一起收)',
+  [!host.includes('keepData'), !lwPlugin.includes('keepData')],
+  [true, true],
+)
+check(
+  '插件索引再点一次同一条会取消选中',
+  settings.includes('selected = if (selected?.id == entry.id) null else entry'),
+  true,
+)
+check(
+  '插件状态变化会让列表当场重读 (PluginUi 信号一处发, 列表一处收)',
+  [
+    /PluginUi\.bump\(\)/.test(pluginManager),
+    !/PluginUi\.bump\(\)/.test(detail),
+    settings.includes('remember(revision, PluginUi.revision)'),
+  ],
+  [true, true, true],
+)
 check(
   '开机那一条只补授权与重画 (不起 host)',
   [widgetRegrant.includes('WidgetHost.refreshAll'), widgetRegrant.includes('startService')],
@@ -542,7 +590,6 @@ const widgetSpecKt = await read('app/src/main/java/io/github/yuloong07star/luwi/
 const slotReceivers = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/widget/WidgetSlotReceivers.kt')
 const pluginManifest = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginManifest.kt')
 const pluginSettings = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginSettings.kt')
-const detail = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PluginDetailScreen.kt')
 const gif = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/PluginGif.kt')
 // 气泡区改成集合型组件 (ListView + RemoteViewsService): 列表项与字号都在那个 service 里
 const listService = await read('app/src/main/java/io/github/yuloong07star/luwi/plugin/widget/WidgetChatListService.kt')

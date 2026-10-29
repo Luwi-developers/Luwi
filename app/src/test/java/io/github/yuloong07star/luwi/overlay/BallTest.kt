@@ -570,9 +570,31 @@ class BallTest {
      */
     @Test
     fun `回复框在屏上时点球一下就直接开口`() {
-        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = false, replyBox = true))
-        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = true, replyBox = false))
-        assertEquals(false, BallTouch.opensVoiceNow(summonFresh = false, replyBox = false))
+        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = false, replyBox = true, canRest = true))
+        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = true, replyBox = false, canRest = true))
+        assertEquals(false, BallTouch.opensVoiceNow(summonFresh = false, replyBox = false, canRest = true))
+    }
+
+    /**
+     * **半隐与半藏都关着时, 点一下就直接开口** (主人 2026-10-25: "当半隐和半藏都关闭时, 则只用点一次
+     * 即可语音输入, 不用再点一次唤醒")
+     *
+     * 球一直全亮全露, 没有"召出"这一步 —— 于是 [BallTouch.opensVoiceNow] 的 `canRest = false` 那一支
+     * 盖过"刚召出才开"那条老规矩; 两个开关里**任一开着**都还是老规矩 (那说明球会收着, 先召出有意义)
+     */
+    @Test
+    fun `半隐半藏都关着时点一下就开口`() {
+        // 没刚召出、也没有回复框: 老规矩是只记召出, 两个开关都关着时这一下直接开
+        assertEquals(false, BallTouch.opensVoiceNow(summonFresh = false, replyBox = false, canRest = true))
+        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = false, replyBox = false, canRest = false))
+        // 另外两条 (刚召出 / 有回复框) 在 canRest = false 时也照样开 —— 不能因为多了一个开关反而变严
+        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = true, replyBox = false, canRest = false))
+        assertEquals(true, BallTouch.opensVoiceNow(summonFresh = false, replyBox = true, canRest = false))
+        // 两个开关里任一开着 = 球会收着: 还是"先召出"
+        assertEquals(
+            false,
+            BallTouch.opensVoiceNow(summonFresh = false, replyBox = false, canRest = true),
+        )
     }
 
     /* ── 收边那一档: 六条闸与"为什么没收边" ───────────────────────────────── */
@@ -793,9 +815,10 @@ class BallTest {
      */
     @Test
     fun `半藏不改不透明度`() {
-        assertEquals(0.35f, BallMinutes.alphaFor(translucent = true))
+        // 数值钉一次 (主人 2026-10-25: "半隐改为一半透明度"), 下面改用常量引用免得改数就假红
+        assertEquals(0.5f, BallMinutes.TRANSLUCENT_ALPHA)
+        assertEquals(BallMinutes.TRANSLUCENT_ALPHA, BallMinutes.alphaFor(translucent = true))
         assertEquals(1f, BallMinutes.alphaFor(translucent = false))
-        assertEquals(BallMinutes.TRANSLUCENT_ALPHA, BallMinutes.alphaFor(true))
     }
 
     /**
@@ -811,16 +834,16 @@ class BallTest {
             idleDue = false, translucentDue = true)
         assertEquals(true, translucentOnly.translucent)
         assertEquals(false, translucentOnly.peek)
-        assertEquals(0.35f, BallMinutes.alphaFor(translucentOnly.translucent))
+        assertEquals(BallMinutes.TRANSLUCENT_ALPHA, BallMinutes.alphaFor(translucentOnly.translucent))
         // 只开半藏: 半藏着, 但全不透明
         val peekOnly = BallRest.wait(BallPhase.SUMMONED, false, false, false, false, false, false,
             idleDue = true, translucentDue = false)
         assertEquals(true, peekOnly.peek)
         assertEquals(false, peekOnly.translucent)
         assertEquals(1f, BallMinutes.alphaFor(peekOnly.translucent))
-        // 都开: 又淡又藏, 而那个淡仍是 0.35 (不相乘); 都关: 全亮全露
+        // 都开: 又淡又藏, 而那个淡仍是半亮 (不相乘); 都关: 全亮全露
         val both = BallRest.wait(BallPhase.SUMMONED, false, false, false, false, false, false, true, true)
-        assertEquals(0.35f, BallMinutes.alphaFor(both.translucent))
+        assertEquals(BallMinutes.TRANSLUCENT_ALPHA, BallMinutes.alphaFor(both.translucent))
         val neither = BallRest.wait(BallPhase.SUMMONED, false, false, false, false, false, false, false, false)
         assertEquals(1f, BallMinutes.alphaFor(neither.translucent))
     }
@@ -1115,6 +1138,19 @@ class BallTest {
         assertEquals(
             0L,
             BallCommit.deferMs(BallAct.LISTEN, null, summonFresh = false, replyBox = false, feel = feel),
+        )
+        // 半隐与半藏都关着 (canRest = false): 这一下真的会开麦, 于是**照样**等确认窗 —— 双击 / 三击
+        // 还得能在窗里把它取消掉 (主人 2026-10-25 的那一条只改"点几次", 不改防误触)
+        assertEquals(
+            feel.commitWindowMs,
+            BallCommit.deferMs(
+                BallAct.LISTEN,
+                null,
+                summonFresh = false,
+                replyBox = false,
+                canRest = false,
+                feel = feel,
+            ),
         )
         // 其余三个动作一个都不排队
         for (act in listOf(BallAct.SUMMON, BallAct.HUSH, BallAct.STOP, BallAct.NOTHING)) {

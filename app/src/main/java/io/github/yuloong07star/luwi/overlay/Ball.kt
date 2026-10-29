@@ -4,6 +4,8 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
@@ -16,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.graphics.Bitmap
+import io.github.yuloong07star.luwi.plugin.theme.BallFaceDrawable
 import io.github.yuloong07star.luwi.plugin.theme.BallTheme
 import io.github.yuloong07star.luwi.R
 import kotlin.math.abs
@@ -236,10 +239,13 @@ internal object BallSpot {
     private const val KEY_Y = "ball-y"
 
     /**
-     * 手势灵敏度那一档的键 (2026-10-08 主人: "增加 ball 各操作的防误触" + "做成设置页一档")
+     * 手势灵敏度那一档 (2026-10-08 主人: "增加 ball 各操作的防误触" + "做成设置页一档")
      *
-     * 存的是 [BallFeel] 的枚举名, 认不出来的写法一律落回 [BallFeel.GUARD] —— 那一档是**更严**
-     * 的那个, 于是"存坏了"的结果是"更不容易误触", 不是"球变得一碰就开"
+     * **2026-10-28 主人: "去掉手势灵敏度, 只使用防误触"** —— 设置页那一行撤掉了, 门槛固定走
+     * [BallFeel.GUARD] (更严的那档: 220 / 450 / 1500 ms)。枚举本身留着: 判据 ([BallTaps] /
+     * [BallFeel.thinkingTapMs]) 与单测都还在用它, `STANDARD` 只是没有入口了
+     *
+     * 旧机器上那个 `ball-feel` 偏好一律不再读 —— 存的是什么都按防误触走
      */
     private const val KEY_FEEL = "ball-feel"
 
@@ -247,7 +253,7 @@ internal object BallSpot {
      * 「半透明」那一档 (2026-10-15 主人: "在浮标设置里加上半透明和半隐藏开关")
      *
      * 2026-10-17 改的**只是它什么时候生效**: 从前开着就常驻压到七成, 主人点名那与他要的
-     * "休闲时才淡"不符 —— 现在它是休闲那一档「半隐」(闲 5 s 淡到三成半, 见 `BallMinutes.alphaFor`),
+     * "休闲时才淡"不符 —— 现在它是休闲那一档「半隐」(闲 5 s 淡到一半, 见 `BallMinutes.alphaFor`),
      * 而同一个文件里那个 [KEY_AUTOPEEK] 是另一档「半藏」(同一个 5 s 把球挪一半到屏幕外)
      */
     private const val KEY_TRANSLUCENT = "ball-translucent"
@@ -261,13 +267,12 @@ internal object BallSpot {
         prefs(context).edit().putBoolean(KEY_ON, on).apply()
     }
 
-    /** 手势灵敏度: 缺省 [BallFeel.GUARD] (防误触) */
-    fun feel(context: Context): BallFeel =
-        BallFeel.of(prefs(context).getString(KEY_FEEL, null))
-
-    fun setFeel(context: Context, feel: BallFeel) {
-        prefs(context).edit().putString(KEY_FEEL, feel.name).apply()
-    }
+    /**
+     * 手势门槛: **固定防误触那一档** (2026-10-28 主人: "去掉手势灵敏度, 只使用防误触")
+     *
+     * 从前它读偏好 (设置页那一行), 现在一律 [BallFeel.GUARD]; 那个偏好键不再读也不再写, 老值留着无害
+     */
+    fun feel(@Suppress("UNUSED_PARAMETER") context: Context): BallFeel = BallFeel.GUARD
 
     /**
      * 休闲半透明: 缺省**开** (2026-10-17 主人: "休闲分两个阶段, 两个开关都开")
@@ -434,6 +439,32 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
     private var faceIndex = 0
     private var faceIntervalMs = 0
     private val faceAdvance = Runnable { advanceFace() }
+
+    /**
+     * 这一套外观要的是哪种摆法 ([BallTheme.Fit])
+     *
+     * 帧是在 [advanceFace] 那一拍换的, 那里手上没有 `Face` 这个对象, 所以起头时把它记在这儿 ——
+     * `contain` (立绘那一档) 与 `cover` (圆球那一档) 的差别见 [faceDrawable]
+     */
+    private var faceFit: BallTheme.Fit = BallTheme.Fit.COVER
+
+    /**
+     * 「一个状态好几支动作」那一摊 (2026-10-25)
+     *
+     * 进这一档时随机挑一支开始演 ([BallTheme.startAction]), 演完一圈换下一支 ([BallTheme.nextAction])。
+     * 换的那一支**提前在后台解好**, 因为一次解 120 张图要一两百毫秒, 落在换动作那一拍上就是看得见的卡
+     *
+     * - [faceState] 只用来判"是不是真换了一个状态": 环色变了、半藏变了都要重画, 但**不重抽**动作
+     * - [MAX_DECODED_FRAMES] 是这一摊的内存闸: 当前那一支与预解那一支同时留在堆上, 两截加起来超过
+     *   它就不预解 (宁可这一圈不换, 也不让低端机撞 OOM)
+     */
+    private var faceActions: List<BallTheme.Frames> = emptyList()
+    private var faceActionIndex = 0
+    private var faceState: String = ""
+    private var facePendingIndex = -1
+    private var facePendingFrames: List<Bitmap> = emptyList()
+    private var faceDecodeIndex = -1
+    private var faceDecodeToken = 0
 
     /**
      * 现在这颗球多大 (dp): **有主题 72 / 没主题 48** (主人 2026-10-15 定的两档, 见 [BALL_THEME_DP])
@@ -731,11 +762,22 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
             hideBuiltinText = false
             core.clipToOutline = true
             core.background = circle
+            faceActions = emptyList()
+            faceState = ""
+            faceFit = BallTheme.Fit.COVER
             return false
         }
         hideBuiltinText = face.hideBuiltinText
+        faceFit = face.fit
         val maxPx = dp(ballDrawDp()).coerceAtLeast(96)
-        val frames = face.frames?.let { spec ->
+        // 这一档有几支动作: 换状态才重抽起头那一支 (环色变 / 半藏变不重抽, 否则每次重画都在跳动作)
+        faceActions = face.actions
+        if (state != faceState || faceActionIndex !in face.actions.indices) {
+            faceState = state
+            faceActionIndex = BallTheme.startAction(face.actions.size)
+        }
+        val action = face.actions.getOrNull(faceActionIndex)
+        val frames = action?.let { spec ->
             BallTheme.framesOf(context, state, spec)?.mapNotNull { file -> BallTheme.decode(file, maxPx) }
         }.orEmpty()
         // 立绘那一档不裁圆; 圆球那一档照旧 (clipToOutline 会把 bitmap 裁成圆)
@@ -743,7 +785,7 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         if (frames.size >= 2) {
             faceFrames = frames
             faceIndex = 0
-            faceIntervalMs = face.frames?.intervalMs ?: 100
+            faceIntervalMs = action?.intervalMs ?: 100
             core.background = faceDrawable(frames[0])
             postDelayed(faceAdvance, faceIntervalMs.toLong())
             return true
@@ -761,23 +803,89 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
     }
 
     /**
-     * 主题给的那张图怎么摆
+     * 主题给的那张图怎么摆 (by [faceFit])
      *
-     * `FILL` 是"按比例缩到刚好装下, 多出来的居中" —— 正是 `fit: contain` 要的, 而立绘四周本来就是
-     * 透明的, 缩完留白也看不出来。用 `BitmapDrawable` 而不是 `ImageView`, 是因为球体那一层得留着
-     * 当容器 (拖动缩放、圆裁剪都落在它身上)
+     * `cover` 那一档照旧走 `BitmapDrawable` 的 `Gravity.FILL`: 圆球那一类外观的素材本来就是方的,
+     * 填满方窗正是它要的
+     *
+     * `contain` 那一档**不能**用 `FILL`: 它是**两个方向各缩一次**把图拉满方窗, 而立绘素材是按
+     * **同一高度**出、宽度随动作变的 (成品里 175~255 px) —— 硬拉的结果是越窄的动作被拉得越宽,
+     * 人物横向被压扁 (2026-10-25 主人: "东张西望动作左右比例被挤压了")。这一档改由
+     * [BallFaceDrawable] 按高贴满、宽度按比例居中, 宽出来的两边裁在窗里, 与成品预览 GIF 同一个摆法
+     *
+     * 用 `Drawable` 而不是 `ImageView`, 是因为球体那一层得留着当容器 (拖动缩放、圆裁剪都落在它身上)
      */
-    private fun faceDrawable(bitmap: Bitmap): android.graphics.drawable.BitmapDrawable =
-        android.graphics.drawable.BitmapDrawable(resources, bitmap).apply {
-            gravity = android.view.Gravity.FILL
+    private fun faceDrawable(bitmap: Bitmap): Drawable =
+        if (faceFit == BallTheme.Fit.CONTAIN) {
+            BallFaceDrawable(bitmap)
+        } else {
+            BitmapDrawable(resources, bitmap).apply {
+                gravity = Gravity.FILL
+            }
         }
 
-    /** 帧序列那一拍: 换下一张, 排下一拍 */
+    /** 帧序列那一拍: 换下一张, 排下一拍; 转到头了就轮到下一支动作 (见 [faceActions]) */
     private fun advanceFace() {
         if (faceFrames.size < 2) return
-        faceIndex = (faceIndex + 1) % faceFrames.size
+        val wrapped = faceIndex + 1 >= faceFrames.size
+        if (wrapped && faceActions.size > 1) {
+            val next = BallTheme.nextAction(faceActionIndex, faceActions.size)
+            // 预解好了就换过去 (它在上一圈里已经解完, 这一拍只换引用)
+            if (takePendingAction(next)) return
+            // 还没解好: 这一圈继续演当前这支, 同时把下一支放出去解 —— 下一圈就换得上
+            prefetchFaceAction(next)
+            faceIndex = 0
+        } else {
+            faceIndex = if (wrapped) 0 else faceIndex + 1
+        }
         core.background = faceDrawable(faceFrames[faceIndex])
         postDelayed(faceAdvance, faceIntervalMs.toLong())
+    }
+
+    /** 预解好的那一支就是 [next] 时换上它 (换成了返回 true, 并把下一拍排好) */
+    private fun takePendingAction(next: Int): Boolean {
+        if (facePendingIndex != next || facePendingFrames.size < 2) return false
+        val frames = facePendingFrames
+        facePendingIndex = -1
+        facePendingFrames = emptyList()
+        faceActionIndex = next
+        faceFrames = frames
+        faceIndex = 0
+        faceIntervalMs = faceActions[next].intervalMs
+        core.background = faceDrawable(frames[0])
+        postDelayed(faceAdvance, faceIntervalMs.toLong())
+        return true
+    }
+
+    /**
+     * 把下一支动作放到后台解 (同一支正在解 / 已经解好时什么都不做)
+     *
+     * 解完回到 UI 线程装进 pending; **[faceDecodeToken] 变过就整批丢掉** —— 那是"这中间换了状态或
+     * 换了外观"的记号, 装上去就是另一档的脸
+     */
+    private fun prefetchFaceAction(index: Int) {
+        if (index !in faceActions.indices) return
+        if (index == facePendingIndex || index == faceDecodeIndex) return
+        // 内存闸: 当前那一支 + 预解那一支一起留在堆上, 超过 [MAX_DECODED_FRAMES] 就宁可这一圈不换
+        if (faceFrames.size + faceActions[index].count > MAX_DECODED_FRAMES) return
+        val token = faceDecodeToken
+        val state = faceState
+        val spec = faceActions[index]
+        val maxPx = dp(ballDrawDp()).coerceAtLeast(96)
+        faceDecodeIndex = index
+        Thread({
+            val decoded = runCatching {
+                BallTheme.framesOf(context, state, spec)?.mapNotNull { file -> BallTheme.decode(file, maxPx) }
+            }.getOrNull().orEmpty()
+            post {
+                if (token != faceDecodeToken) return@post
+                faceDecodeIndex = -1
+                if (decoded.size >= 2) {
+                    facePendingIndex = index
+                    facePendingFrames = decoded
+                }
+            }
+        }, "lw-ball-face").apply { isDaemon = true }.start()
     }
 
     private fun stopFace() {
@@ -785,6 +893,11 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         faceFrames = emptyList()
         faceFrame = null
         faceIndex = 0
+        // 预解那一批跟着作废: 这中间状态或外观可能已经换了 (那个 token 就是它们的记号)
+        faceDecodeToken += 1
+        faceDecodeIndex = -1
+        facePendingIndex = -1
+        facePendingFrames = emptyList()
     }
 
     /** 按下 / 拖动那两档尺寸: 手指按住要有回应, 拖起来要像"拿起来了" (缩的是球体那一层) */
@@ -893,6 +1006,15 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
          * 的话放大之后四边会被窗口裁掉一圈, 主人 2026-10-05 报过 "球形四边会超出边框")
          */
         fun drawDp(sizeDp: Int): Int = (sizeDp * 94 / 100).coerceAtLeast(1)
+
+        /**
+         * 「当前那一支 + 预解那一支」两截加起来最多几张 (2026-10-25, 一状态多动作那一摊)
+         *
+         * 一帧按球上那个解码尺寸约 160 KB (180×224 RGBA), 192 张约 31 MB —— 与 [BallTheme.MAX_FRAMES]
+         * 那一支 128 张的上限是同一笔账: 只有"两支都很长"时才会撞上它, 那时宁可这一圈不换动作, 也不让
+         * 低端机在堆上同时压着两批 120 帧
+         */
+        private const val MAX_DECODED_FRAMES = 192
 
         private const val LABEL_SP = 20f
 

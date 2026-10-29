@@ -5,11 +5,15 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import android.util.Log
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.lock.LockReplay
+import io.github.yuloong07star.luwi.lock.LockSetting
+import io.github.yuloong07star.luwi.lock.LockTries
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -33,10 +37,15 @@ import java.util.concurrent.Executors
  *
  * 1. 主人设定 `HH:mm` 与总开关 (缺省关)
  * 2. [arm] 把下一次排进 `AlarmManager` (精确优先, 退 `setAndAllowWhileIdle`)
- * 3. 到点 [fire]: 宿主没在跑 / 省电 / 上一场还在跑 → 跳过并记读数; 否则读 [ExploreTask] 的卡
+ * 3. 到点 [fire]: 宿主没在跑 / 上一场还在跑 → 跳过并记读数; 否则读 [ExploreTask] 的卡
  *    (空就是"自由探索这台手机"), 写一行收件箱 (`source:"explore"`, 带着每场预算 `minutes` / `steps`)
  *    —— 宿主那边照批次 7 的 `startExplore` 开一场, `Luwi` 工作区 / `explore` 预设都不变
  * 4. 不管跑没跑, 都写一份 `last` 读数并重排明天
+ *
+ * **省电模式不拦这一档** (2026-10-26 主人: "探索功能当前被省电模式阻止启动，看能不能忽略省电"):
+ * 省电那两档开关 (`LwWakeWord.powerSave`) 管的是"现在别听", 而探索是按主人自己定的时刻干活, 不是
+ * 麦克风那一笔账; 所以这里不再跳过, 只把"省电里照常开了"与"Doze 里网络可能要等维护窗口"写进
+ * `last.why`。宿主那一侧的省电闸同样拆掉了 (见 `host-plugin/index.mjs` 的 `startExplore`)
  *
  * 配置与读数都落在 `$DSH_HOME/lw/explore-schedule.json` (应用单写者); `explore.json` 是宿主的账,
  * 这里只读 [ExploreTask.running]
@@ -74,13 +83,14 @@ internal object ExploreSchedule {
     /** 上一次排期的那一趟 (给人看的三个值) */
     data class Last(val at: Long, val outcome: String, val why: String?)
 
-    /** 排期配置: 开没开 / 每天几点 / 每场预算 / 上一趟 */
+    /** 排期配置: 开没开 / 每天几点 / 每场预算 / 到点允不允许解屏 / 上一趟 */
     data class Plan(
         val enabled: Boolean,
         val at: String,
         val last: Last?,
         val minutes: Int = MINUTES_DEFAULT,
         val steps: Int = STEPS_DEFAULT,
+        val unlock: Boolean = false,
     )
 
     /**
@@ -119,7 +129,9 @@ internal object ExploreSchedule {
         }
         val minutes = clamp(root["minutes"]?.jsonPrimitive?.intOrNull, MINUTES_RANGE, MINUTES_DEFAULT)
         val steps = clamp(root["steps"]?.jsonPrimitive?.intOrNull, STEPS_RANGE, STEPS_DEFAULT)
-        return Plan(enabled, at, last, minutes, steps)
+        // 允许锁屏解锁 (2.7.10): 老文件没有这个键, 那就是关着 —— 与别的开关同一个"缺省关"的规矩
+        val unlock = root["unlock"]?.jsonPrimitive?.booleanOrNull ?: false
+        return Plan(enabled, at, last, minutes, steps, unlock)
     }
 
     /** 写配置 + 重排闹钟 (单写者, 原子写) */
@@ -134,6 +146,8 @@ internal object ExploreSchedule {
             // 每场预算 (2.7.9 第 8 条 T2): 落盘也夹一遍, 别让手改的文件写进一个越界的数
             put("minutes", clamp(plan.minutes, MINUTES_RANGE))
             put("steps", clamp(plan.steps, STEPS_RANGE))
+            // 到点允不允许解屏 (2.7.10): 它与「锁屏」那段的自动解锁是两个开关, 各管一条路
+            put("unlock", plan.unlock)
             plan.last?.let { last ->
                 put("last", buildJsonObject {
                     put("at", last.at)
@@ -173,11 +187,10 @@ internal object ExploreSchedule {
     /**
      * 到点这一趟要不要跳过 (纯函数): 跳过的原因 (中文) 或 null
      *
-     * 顺序就是"先看宿主活没活, 再看省电, 最后看上一场": 三条都成立时报最靠前的那一条
+     * 只剩两条, 顺序也是"先看宿主活没活, 再看上一场": **省电不在其中** (见文件头那一段)
      */
-    fun skipReason(hostRunning: Boolean, powerSave: Boolean, running: Boolean): String? = when {
+    fun skipReason(hostRunning: Boolean, running: Boolean): String? = when {
         !hostRunning -> "宿主没在跑"
-        powerSave -> "现在在省电模式"
         running -> "上一场探索还在跑"
         else -> null
     }
@@ -240,9 +253,10 @@ internal object ExploreSchedule {
     private fun fire(context: Context, now: Long) {
         val current = plan(context)
         if (!current.enabled) return
+        // 省电只当读数 (2026-10-26): 它不再是跳过的一条 —— 顺序里只剩宿主与上一场
+        val powerSave = LwWakeWord.powerSave(context)
         val skip = skipReason(
             hostRunning = DshHost.status is HostStatus.Running,
-            powerSave = LwWakeWord.powerSave(context),
             running = ExploreTask.running(context, now) != null,
         )
         if (skip != null) {
@@ -252,6 +266,9 @@ internal object ExploreSchedule {
             report(context, skip)
             return
         }
+        // 允许锁屏解锁 (2.7.10): 先让屏幕亮起来并解开, 再投那一行 —— 模型一开口看到的就是能用的屏,
+        // 而不是一块锁屏; 开关关着时这一段一个字都不走 (与 2.7.9 的行为一模一样)
+        val unlockNote = if (current.unlock) unlockForExplore(context) else null
         val card = ExploreTask.read(context)
         val text = card.ifEmpty { ExploreTask.FALLBACK_TEXT }
         // 预算跟着这一行走 (2.7.9 第 8 条 T1): 宿主那一侧照着 `minutes` / `steps` 开这一场, 老行没有
@@ -269,7 +286,14 @@ internal object ExploreSchedule {
             report(context, "收件箱写不进去")
             return
         }
-        val why = if (card.isEmpty()) "卡是空的, 按自由探索投的" else null
+        // 几句话都进 `why` (设置页那行"上一次"带着它): 卡是空的 / 到点屏是锁着的 / 省电里照常开了 /
+        // 设备在 Doze 里 (这一条是"开了却没跑成"最可能的那个解释, 所以照样写进读数)
+        val why = listOfNotNull(
+            if (card.isEmpty()) "卡是空的, 按自由探索投的" else null,
+            unlockNote,
+            if (powerSave) "省电模式里照常开了" else null,
+            if (doze(context)) "设备在深度省电 (Doze) 里, 网络可能要等维护窗口" else null,
+        ).joinToString("; ").ifEmpty { null }
         Log.i(
             TAG,
             "the scheduled exploration was queued as line #$seq"
@@ -278,9 +302,46 @@ internal object ExploreSchedule {
         save(context, current.copy(last = Last(now, "started", why)))
     }
 
+    /**
+     * 到点那一趟先把锁屏让开 (2.7.10, 主人 2026-10-25: "探索时使用锁屏的解锁功能")
+     *
+     * 走的就是「锁屏」那一段的 [LockReplay]: 三条点亮路 + 主人自己录的那一串 (或注入密码); 回一句
+     * **"开始前屏幕怎么了"**, 没什么可做的就回 null —— 它进 `last.why`, 设置页那行"上一次"带着它;
+     * 屏幕本来就亮着并解开着时不留话, 那不是这一条做的事
+     *
+     * 三条边界都在这里: **没录过就不放**(只会白点亮一次屏), **失败太多次也不放**(那是 `LockTries`
+     * 的闸, 别让排期把自动解锁的计数蹭光), 而**放不出去也不挡这一场** —— 探索照开, 只是停在锁屏
+     */
+    private fun unlockForExplore(context: Context): String? {
+        if (LockSetting.unlocked(context)) return null
+        LockReplay.wakeScreen(context, allowConnecting = true)
+        if (!LockSetting.screenOn(context)) return "屏幕没点亮 (这一场可能看不见东西)"
+        if (!LockSetting.locked(context)) return null
+        if (!LockSetting.unlockable(context)) return "屏还锁着, 而且还没有录过解锁"
+        if (LockTries.exhausted(LockSetting.tries(context))) {
+            return "屏还锁着, 解锁连着失败太多次已经停了"
+        }
+        val report = LockReplay.replayNow(context, "the scheduled exploration")
+        return if (report.ok) {
+            "到点先把锁屏解开了"
+        } else {
+            "到点没解开锁屏 (到「锁屏」那一段看哪一步没成)"
+        }
+    }
+
+    /**
+     * 设备现在在不在 Doze 里
+     *
+     * **只当读数**: 那一档不是"不跑", 而是"跑起来可能拿不到网" —— Doze 会挂起应用的网络, 模型请求
+     * 要等下一个维护窗口; 把它写进 `last.why`, 主人看设置页时才知道"投出去了却没回音"是哪一层
+     */
+    private fun doze(context: Context): Boolean = runCatching {
+        context.getSystemService(PowerManager::class.java)?.isDeviceIdleMode() == true
+    }.getOrDefault(false)
+
     /** 设置页那行读数用: `started` / `skipped` / `failed` -> 一句中文 */
     fun describeLast(last: Last): String = when (last.outcome) {
-        "started" -> "开始了一场探索"
+        "started" -> "开始了一场探索" + (last.why?.let { " · $it" } ?: "")
         "skipped" -> "没跑: ${last.why.orEmpty()}"
         "failed" -> "没投出去: ${last.why.orEmpty()}"
         else -> last.outcome

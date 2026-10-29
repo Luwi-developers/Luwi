@@ -402,6 +402,28 @@ internal object LwWakeWord {
     }
 
     /**
+     * 模型刚下完时那几件事 (设置页与首启弹窗共用): 补缺省词表, 再看许可 / 麦克风 / 是否已经在听
+     *
+     * 回的是给人看的一句 —— **许可关着时不替人打开**: 模型放好就到此为止, "允不允许听"是另一个决定
+     */
+    internal fun afterModelDownload(context: Context): String {
+        val total = WakeWordDownload.files.size
+        if (WakeWordDownload.readyCount(context) < total) return "模型还没齐, 先把缺的几个下完"
+        if (names(context).isEmpty()) {
+            runCatching { setWords(context, WakeWordWords.defaultText()) }
+        }
+        if (!allow(context)) return "模型已就位; 打开「允许唤醒」才会开始听"
+        if (PermissionGate.refusal(context, microphone) != null) {
+            return "模型已就位; 还缺麦克风权限, 去设置页的「权限」里给一下"
+        }
+        if (WakeWordState.listening) return "模型已就位, 已经在听唤醒词了"
+        return runCatching { listen(context) }.fold(
+            onSuccess = { "模型已就位, 已经开始听唤醒词" },
+            onFailure = { "模型已就位, 但没能开始听: ${it.message ?: it}" },
+        )
+    }
+
+    /**
      * 收下设置页编辑过的那段文本: 先逐行对符号表, 全对才写, 写完把友好格式一起存下来
      *
      * 抛出来的句子直接给界面念 —— 对不上 token 时说清是哪一个, 不装作写成功了

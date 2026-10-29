@@ -434,7 +434,8 @@ internal object LockReplay {
         }
         lastReport = sentence
         Log.i(TAG, sentence)
-        post(app, "Unlocking by voice", sentence)
+        // 标题不再写 "by voice" (2.7.10): 排期那一趟也会走到这里, 而那不是喊一声来的
+        post(app, "Unlocking the screen", sentence)
         return result.copy(detail = sentence)
     }
 

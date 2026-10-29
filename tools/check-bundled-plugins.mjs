@@ -50,9 +50,15 @@ function check(name, got, want) {
 
 const image = /const imagePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
 const mneme = /const mnemePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
+const freeModel = /const freeModelPlugin = \{\s*name: '([^']+)',\s*version: '([^']+)',\s*commit: '([0-9a-f]+)',\s*\}/.exec(packer)
 
 check('生图插件仍按自己那份声明取进树', [image?.[1], image?.[2]], ['@dickpy/dsh-imagegen', '1.6.7'])
 check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.9.0'])
+check(
+  '免费模型插件按 git 的 40 位 commit 取 (npm 上那份停在 2.1.0, 取不得)',
+  [freeModel?.[1], freeModel?.[2], freeModel?.[3]?.length],
+  ['dsh-our-free-model', '2.7.1', 40],
+)
 
 check(
   '两个包都走 `npm pack` + 解 tarball (不装依赖树), 并且各自 import 一次',
@@ -75,17 +81,67 @@ check(
   [true, true, true],
 )
 
+// 免费模型插件: 关键件少一样时渠道整块起不来, 而 65 MB 的 Windows 代理引擎带上就是白胖
+check(
+  '免费模型插件装完点一遍关键件, 并裁掉只有 Windows 才有的 vendor/magpie',
+  [
+    packer.includes("'vendor/channel-pack/pack.js'"),
+    packer.includes("'vendor/channel-pack/qoder-auth-wasm.wasm'"),
+    packer.includes("'adapter/kernel.js'"),
+    packer.includes("rmSync(join(freeModelRoot, 'vendor', 'magpie'), { recursive: true, force: true })"),
+    packer.includes('await import(pathToFileURL(join(freeModelRoot, freeModelEntry)).href)'),
+  ],
+  [true, true, true, true, true],
+)
+
+check(
+  '免费模型插件按"整合包安装"跑 (distribution: managed, 停在应用内升级/公告/热重载三件)',
+  [
+    rows.includes("config = { MANAGED_DISTRIBUTION }"),
+    rows.includes('distribution: \'managed\''),
+  ],
+  [true, true],
+)
+
+// 2026-10-16 主人在手机上手工装过一份 (plugins-src + 裸包名那一行): 两行同时挂在启动时会报
+// "an adapter for provider ... is already registered", 谁先全看 patch 次序 —— 所以被占时我们让位
+check(
+  '同一个包已被别人挂着时, 随包那一行主动让位 (不删别人的行)',
+  [
+    rows.includes('fun mountsPackage(patch: String, packageName: String, exceptId: String = ""): Boolean'),
+    rows.includes('val mountedByRow = mountsPackage(patch, row.packageName, row.id)'),
+    rows.includes('taken && hasInsertRow(patch, row.id) -> withoutRow(patch, row.id)'),
+    rows.includes('fun packageOf(value: String): String'),
+  ],
+  [true, true, true, true],
+)
+
+// 2026-10-25 主人: "对于预装的插件要先检查本体有没有才安装, 不覆盖安装" —— 光看 patch 行不够,
+// 主人自己那份可能只落在 profile 的 node_modules 里 (软链到 plugins-src), 而那一份同样会被 loader 解析
+check(
+  '先看本体: profile 里指向树外的那一份算"已经装了", 随包这行不覆盖也不装',
+  [
+    rows.includes('val userCopy = if (mountedByRow) null else userInstallOf(context, row.packageName, root)'),
+    rows.includes('val taken = mountedByRow || userCopy != null'),
+    rows.includes('fun isUserCopy(candidate: String, hostRoot: String): Boolean'),
+    // 判的是解析之后的真实路径: 软链绕回树里那份时不能算成"主人的"
+    rows.includes('candidate.canonicalPath'),
+  ],
+  [true, true, true, true],
+)
+
 /* ── 二、挂在哪一层 ────────────────────────────────────────────────────── */
 
 /** `PluginRows` 的 OWNED 表: 每一行的 id 与入口 (config 那一段另算) */
 const owned = [...rows.matchAll(/Owned\(\s*"([^"]+)",\s*"([^"]+)"/g)].map((one) => [one[1], one[2]])
 
 check(
-  'profile patch 里那两行指的都是树里的 lib/index.js',
+  'profile patch 里那三行指的都是树里的入口文件',
   owned,
   [
     ['imagegen', 'node_modules/@dickpy/dsh-imagegen/lib/index.js'],
     ['mneme', 'node_modules/@modusensus/dsh-mneme/lib/index.js'],
+    ['free-model', 'node_modules/dsh-our-free-model/index.js'],
   ],
 )
 

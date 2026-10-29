@@ -1,6 +1,8 @@
 package io.github.yuloong07star.luwi.lock
 
 import android.content.Context
+import io.github.yuloong07star.luwi.tool.ExploreSchedule
+import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.string
 import io.github.yuloong07star.luwi.tool.stringOrNull
 import io.github.yuloong07star.luwi.tool.text
@@ -118,9 +120,26 @@ internal object LwLock {
      *
      * 先点亮: 熄屏的机器上注入的触摸唤不醒屏, 而这一条既要从设置页点, 也可能从 `lw_lock` 调 ——
      * 两种情况的屏幕都可能灭着
+     *
+     * **探索那一场多一道闸** (2.7.10): 设置页「探索」那段的「允许锁屏解锁」关着时, 探索里不许解屏 ——
+     * 那一档是夜里自己开的, 主人不在跟前; 关着时如实回一句并让它记进摘要, 而不是悄悄解开
      */
     private fun unlock(context: Context): JsonObject {
         val app = context.applicationContext
+        if (ExploreTask.running(app) != null && !ExploreSchedule.plan(app).unlock) {
+            return buildJsonObject {
+                put("woke", false)
+                put("unlocked", false)
+                put("blocked", "explore-unlock-off")
+                put(
+                    "text",
+                    "nothing was unlocked: this exploration is not allowed to unlock the lock screen" +
+                        " (the owner turns that on in the explore section — 允许锁屏解锁). Stay on the" +
+                        " screens you can reach, and write down in the summary that those paths stayed" +
+                        " behind the lock screen",
+                )
+            }
+        }
         // 这条路上允许为了点亮去连一次通道: 它不是唤醒词那条路, 不在采集线程上, 等得起
         val wake = LockReplay.wakeScreen(app, allowConnecting = true)
         val report = LockReplay.replayNow(app, "lw_lock op=unlock")

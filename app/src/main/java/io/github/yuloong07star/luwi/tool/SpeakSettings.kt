@@ -22,7 +22,15 @@ import androidx.compose.runtime.setValue
 object SpeakSettings {
 
     /** 与 [io.github.yuloong07star.luwi.host.HostSettings] 同一个偏好文件, 全 app 一个 */
-    private const val STORE = "luwi"
+    internal const val STORE = "luwi"
+
+    /**
+     * API 那四样 (地址 / 密钥 / 模型 / 音色) 的键前缀
+     *
+     * 接口文档里写着这四样的实况, 所以**改任意一样都得重写那份文档** —— [io.github.yuloong07star.luwi.host.LwInterfaces]
+     * 就按这个前缀盯偏好
+     */
+    internal const val API_KEY_PREFIX = "speak-api-"
 
     private const val FOLLOW_KEY = "speak-rate-follows-system"
     private const val RATE_KEY = "speak-rate"
@@ -124,6 +132,20 @@ object SpeakSettings {
     /** Edge 那条不用别的条件: 选了就走, 音色有缺省 */
     fun usesEdge(): Boolean = engine == Engine.EDGE
 
+    /**
+     * API 那一条的四样 (地址 / 密钥 / 模型 / 音色), 从偏好里读出来的实况
+     *
+     * 单独留一份是因为**接口文档要在"应用没有界面"的时候也写出实况**: 进程被系统重启时
+     * [DshHostService][io.github.yuloong07star.luwi.host.DshHostService] 可能先于 Activity 起来, 那
+     * 时这一份 `mutableStateOf` 还没 [initialize], 照它写进文档的就是一句旧值
+     */
+    internal data class ApiConfig(
+        val url: String,
+        val key: String,
+        val model: String,
+        val voice: String,
+    )
+
     /** API 那条的地址 (人填的原样; 补全发生在调用时, 见 [LwApiSpeech.endpoint]) */
     var apiUrl: String by mutableStateOf("")
         private set
@@ -154,6 +176,24 @@ object SpeakSettings {
     /** 出字那一刻要的那个数: null 表示"别动引擎的语速, 让它用系统那个" */
     fun effectiveRate(): Float? = if (followsSystem) null else rate
 
+    /**
+     * API 那四样的**磁盘实况**: 与 [initialize] 用的是同一套缺省, 但**不依赖内存态**
+     *
+     * 调用它的有三处: 接口文档 (服务先起来时也要写对), 朗读那一趟 (念之前现读一次, 不靠 Activity
+     * 有没有画过), `lw_speak op=status`
+     */
+    internal fun storedApi(context: Context): ApiConfig {
+        val stored = preferences(context)
+        return ApiConfig(
+            url = stored.getString(API_URL_KEY, "").orEmpty().trim(),
+            key = stored.getString(API_KEY_KEY, "").orEmpty().trim(),
+            model = stored.getString(API_MODEL_KEY, LwApiSpeech.DEFAULT_MODEL).orEmpty().trim()
+                .ifBlank { LwApiSpeech.DEFAULT_MODEL },
+            voice = stored.getString(API_VOICE_KEY, LwApiSpeech.DEFAULT_VOICE).orEmpty().trim()
+                .ifBlank { LwApiSpeech.DEFAULT_VOICE },
+        )
+    }
+
     /** 从磁盘读一次, 在第一帧之前调, 免得先按默认值画一遍再跳 */
     fun initialize(context: Context) {
         val stored = preferences(context)
@@ -168,12 +208,12 @@ object SpeakSettings {
             .coerceIn(volumeRange.start, volumeRange.endInclusive)
         edgeVoice = stored.getString(EDGE_VOICE_KEY, LwEdgeSpeech.DEFAULT_VOICE).orEmpty()
             .ifBlank { LwEdgeSpeech.DEFAULT_VOICE }
-        apiUrl = stored.getString(API_URL_KEY, "").orEmpty()
-        apiKey = stored.getString(API_KEY_KEY, "").orEmpty()
-        apiModel = stored.getString(API_MODEL_KEY, LwApiSpeech.DEFAULT_MODEL).orEmpty()
-            .ifBlank { LwApiSpeech.DEFAULT_MODEL }
-        apiVoice = stored.getString(API_VOICE_KEY, LwApiSpeech.DEFAULT_VOICE).orEmpty()
-            .ifBlank { LwApiSpeech.DEFAULT_VOICE }
+        // API 那四样只读一次磁盘, 与 [storedApi] 共用同一份缺省 (两处各写一遍就会漂)
+        val api = storedApi(context)
+        apiUrl = api.url
+        apiKey = api.key
+        apiModel = api.model
+        apiVoice = api.voice
     }
 
     /** 收下 Edge 那条的音色名; 空 = 回到缺省 */

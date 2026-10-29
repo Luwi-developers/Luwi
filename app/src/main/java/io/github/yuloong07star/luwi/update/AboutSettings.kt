@@ -11,8 +11,8 @@ import android.content.SharedPreferences
  * 再加一条镜像 (与 [io.github.yuloong07star.luwi.wake.WakeWordDownload] 同一个套路: `ghfast.top`
  * 那一条只是把原地址当路径接在后面), 以及一个自己填的口子 (自建 / 别的镜像)
  *
- * **sync 签到不在这里**: 那一页 (2.7.9 第 4 条) 这一版只做壳, 数据面在 `sync/SyncAccount.kt` —— 这一份
- * 偏好里因此只有更新源一件事
+ * **账号与时长不在这里**: 它们只在官网 (`luwi.dpdns.org` 的账号页与酒馆页) 与
+ * `account/` 那一层, 这一份偏好里因此只有更新源一件事
  */
 internal object AboutSettings {
 

@@ -16,6 +16,7 @@ import io.github.yuloong07star.luwi.channel.LwOcr
 import io.github.yuloong07star.luwi.channel.PreviewControl
 import io.github.yuloong07star.luwi.channel.ScreenshotBudget
 import io.github.yuloong07star.luwi.host.BallReturn
+import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.DshHostService
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.overlay.OverlayService
@@ -25,6 +26,7 @@ import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.tool.VideoLooks
 import io.github.yuloong07star.luwi.ui.LuwiApp
+import io.github.yuloong07star.luwi.ui.LuwiTavern
 import io.github.yuloong07star.luwi.update.AutoUpdate
 import io.github.yuloong07star.luwi.util.PermissionRequests
 import io.github.yuloong07star.luwi.util.PortraitPolicy
@@ -121,6 +123,23 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * 回前台那一下顺手把 host 自愈回来 (2026-10-26 主人: "切后台回来就重载")
+     *
+     * 后台那一阵里最坏的情况是**服务被系统收掉**: 服务不在, host 也跟着 `onDestroy` 停了, 而没人
+     * 再把它拉起来 —— 以前只有下一次冷启动 (或主人手动点重启) 才会。这里每一趟回前台都问一次:
+     * 服务不在就把它拉回来, 在就只走一次 `onStartCommand` -> `DshHost.start` (幂等,
+     * host 已经活着时它什么都不做)
+     *
+     * 那一行日志是"回前台到底有没有活着"的判据: 切出去再回来时 `host Running` 说明这一趟没重载
+     */
+    override fun onResume() {
+        super.onResume()
+        runCatching { DshHostService.start(this) }
+            .onFailure { Log.w(TAG, "the host service did not come back: ${it.message}") }
+        Log.i(TAG, "resumed with host ${DshHost.status}")
+    }
+
+    /**
      * 「回应用」再点一次时走这一条 (SINGLE_TOP: 界面已经在栈里就不再新建一个)
      *
      * 那一件事本身 (让会话界面切到浮标那一场) 走 [BallReturn]: 这一次的 intent 里带没带那个 id 都要
@@ -206,6 +225,18 @@ class MainActivity : ComponentActivity() {
     override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
         super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
         applyPortraitPolicy()
+    }
+
+    /**
+     * Activity 真的要没了: 把那块缓存的酒馆 WebView 一并放掉
+     *
+     * 它平时退出聊天页只摘不 destroy (为的是下次进来不重载), 但那个实例的 context 属于这一页 ——
+     * 页面销毁之后还留着就是泄漏, 而且新一页拿到旧 context 的 WebView 也不安全。配置变化 (平板转屏)
+     * 也走这里, 代价只是再加载一次
+     */
+    override fun onDestroy() {
+        super.onDestroy()
+        runCatching { LuwiTavern.releaseCache() }
     }
 
     private companion object {

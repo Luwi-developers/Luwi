@@ -219,3 +219,93 @@ python build/ocr-spike/pipeline.py --image build/ocr-spike/shot.png
 
 第 3 节那条 ctx 路的原始命令留在 `docs/step8-plan.md` 与 `build/ocr-spike/` (gitignored) 里,
 QAIRT 2.46 整个包也解在那里 (约 1.1 GB, 免得重下重解)。
+
+## 图标过滤与长行切段 (2026-10-28)
+
+**问题** (K40 那份改动说明里那两条): `MIN_TEXT_SCORE = 0.35` 会把头像 / 表情 / 喇叭 / 底部导航 / 设置页右侧箭头当文字报出来; 长行在 48x320 的识别输入里被横向挤压
+
+**做法** (都不抬分数线):
+
+- 形状: 近方形 (两条边差 < 长边的 0.35) + 边长 < 96 + 分数 < 0.85 → 当图标丢掉 (`OcrBoxes.isIconLike`)
+- 符号: 一个框里连一个字母 / 数字 / 汉字都没有 → 丢掉 (`OcrBoxes.isSymbolOnly`), 专收设置页那种单独的 `>`
+- 长行: 读代码确认 `resized()` 是**横向挤压**而不是裁掉; 挤压到 1.5 倍以上才切段 (`segments` + `joinOverlap`, 重叠 12 px)。6.67~10 之间**不切** —— 实测切了会在接缝多认一个标点 ("云服务、会员权益" 变 "云服务。、会员权益")
+- 调试图: `lw_ocr debug=true` 才落 `getExternalFilesDir("ocr")/overlay.png|txt` (绿框保留 / 红框 + × 丢弃, 每框标分数), 不进相册, 350 ms 一次的 `lw_wait_text` 轮询里一次都不写
+
+**实测** (22041216C, 同一页 MIUI 设置):
+
+| 项 | 中间版 (形状过滤 + 6.67 切段) | 终版 (形状 + 符号过滤, 1.5× 才切) |
+| :-- | :-- | :-- |
+| kept / boxes | 20 / 30 | 17 / 25 |
+| dropped | 7 | 8 |
+| 切段 | 2 行, 接缝多出一个 "。" | 0 |
+| 单独出现的 `>` | 5 条混在正文里 | 7 条全进 DROPPED |
+| 那行 11 字 | "账号、云服务。、会员权益等" 0.96 | "账号、云服务、会员权益等" 1.000 |
+
+调试图里红框 + × 的就是丢掉的那 8 条 (7 个箭头 + 1 个 0.378 的图标)
+
+**真旧版** (2.7.9, 只有 `MIN_TEXT_SCORE` 0.35 与单字 0.75 两道) 会把这 7 个箭头也留下 —— 它们分数 0.97~0.99, 单字门槛拦不住, 所以"箭头混进正文"是旧版的真实表现, 不是中间版才有的 (由终版 overlay 里每条分数反推); 只有那个 0.378 的单字图标会被旧规则挡掉
+
+**没做**: det 640→960 与 rec 批量重导 (先量后定, 另一件事) —— 一天后量完了, 见下
+
+## det 960 与 rec 批量的 A/B (2026-10-28 晚, 结论: 两个都不采用)
+
+**先量**: `LwOcr.Outcome` 与桥的 `ocr` 答案加了 `recCalls` / `recTotalMs` / `detInput` / `recInput`, 用它量同一页。
+
+**基线** (22041216C, 640 + batch 1, 设置页):
+
+| 页面 | kept | recCalls | recTotal | det |
+| :-- | :-- | :-- | :-- | :-- |
+| 设置首页 | 17~18 | 25~29 | 325~423 ms | 72~139 ms |
+| 我的设备 (小字密) | 14 | 15 | 205~261 ms | 113~127 ms |
+
+每段识别 ≈ 12~14 ms, 而且**不随一批里的段数变** (换行数只改 calls, 不改每段耗时) —— 也就是说这笔钱主要是每段的计算, 不是"每次调用"的固定开销。
+
+**det 640→960** (`build-models.ps1 -DetSize 960`, on-device JIT, 不用重编 QNN 图):
+
+| 页面 | kept | det 640 | det 960 |
+| :-- | :-- | :-- | :-- |
+| 设置首页 | 18 / 18 | 72~139 ms | 184~240 ms |
+| 我的设备 | 14 / 14 | 113~127 ms | 212~240 ms |
+
+两页**一条字都没多**, 而 det 慢 1.8~2.6 倍 —— 按判据 (小字多认 ≥2 行或 det ≤2.5 倍) 不采用, 保持 640。960 的候选仍在 `build/ocr-work/models-960/` (gitignored), 换回去只要 `build-models.ps1 -DetSize 960`。
+
+**rec batch 4** (`build-models.ps1 -RecBatch 4`; QNN HTP **收下了** batch>1, `backend=NPU`, `recInput=4x48x320`):
+
+| 项 | batch 1 | batch 4 |
+| :-- | :-- | :-- |
+| recCalls | 25~29 | 7 |
+| recTotal | 325~423 ms | 321~358 ms |
+
+调用数掉了 3/4, 总时长却几乎不动 —— HTP 对 batch 里的样本是线性处理的, 每行该花多少还是多少, "每次调用固定开销" 在这台 NPU 上并不存在 (或小到被噪声盖住)。按判据 (总延迟降 ≥20%) 不采用, 保持 batch 1。
+
+代码里那条批量路径**留着**: `LwOcr` 从 `recShape[0]` 读 batch, 模型是 1 时它与逐段跑完全等价 (`OcrBatch.groups` + `OcrBatchTest` 钉住边界), 以后要是遇到别的引擎再放一份 batch 模型进来即可。
+
+**复现**:
+
+```powershell
+# 候选模型 (不进 git, 落 build/ocr-work/)
+pwsh -File tools/ocr/build-models.ps1 -DetSize 960 -Out build\ocr-work\models-960
+pwsh -File tools/ocr/build-models.ps1 -RecBatch 4 -Out build\ocr-work\models-b4
+# 换进 assets 后 assembleDebug + 装机, 用 lw-channel-call 的 ocr 读 detInput / recInput / recCalls / recTotalMs
+```
+
+**装机坑** (这一轮踩到两次): Luwi 在前台时 `adb install` 与 `pm install` 都报 `INSTALL_FAILED_USER_RESTRICTED` (字面是 "Install canceled by user", 其实是 MIUI 拦的) —— 先 `input keyevent KEYCODE_HOME` 把它放到后台, 再 `adb install -r -t -i com.miui.packageinstaller` 就过; 如果还不行, **同一条命令连着重试**, MIUI 那个确认框超时会先报失败, 第三次左右会过 (2026-10-28 实测 3 次里第 3 次 Success)
+
+## 更强的 det: small / medium (2026-10-28 晚, 结论: 都不采用)
+
+同一套导出与钉 shape 的脚本 (`-DetRepo … -DetSize 640`), 三个都在 22041216C 上 `backend=NPU` 跑通:
+
+| det | 文件 | 设置首页 (kept / det) | 我的设备 (kept / det) |
+| :-- | :-- | :-- | :-- |
+| tiny (现用) | 1.7 MB | 17~18 / 72~139 ms | 14 / 113~127 ms |
+| small | 9.9 MB | 19 / 183~240 ms | 14 / 199~219 ms |
+| medium | 62 MB | 17 / 877~967 ms | 14 / 1012~1080 ms |
+
+两页都**没有多出真实文字**: small 在首页多出的 2 条是单字图标噪声 ("0" "D" 分数 0.92 / 0.94), 我的设备页三条模型的正文完全一样; "销屏"/"∪LOCNXM" 那种是识别错, 不是漏检。再叠加 960 也测过 (字数不变), 所以结论是 **换更大的 det 不是这条链的瓶颈** —— 瓶颈在输入尺度与 UI 汉字的识别, 不在检测容量。
+
+命令 (候选不进 git, 落 `build/ocr-work/`):
+
+```powershell
+pwsh -File tools/ocr/build-models.ps1 -DetRepo PaddlePaddle/PP-OCRv6_small_det_onnx  -Work build\ocr-work\small  -Out build\ocr-work\small-640
+pwsh -File tools/ocr/build-models.ps1 -DetRepo PaddlePaddle/PP-OCRv6_medium_det_onnx -Work build\ocr-work\medium -Out build\ocr-work\medium-640
+```

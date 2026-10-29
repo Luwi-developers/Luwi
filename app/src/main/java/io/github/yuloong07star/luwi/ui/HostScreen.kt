@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -23,13 +24,22 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -37,9 +47,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -52,6 +65,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,13 +79,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -88,7 +109,6 @@ import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.sync.SyncSetting
-import io.github.yuloong07star.luwi.tool.LwSpeak
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OpenFile
 import androidx.core.content.ContextCompat
@@ -97,6 +117,7 @@ import io.github.yuloong07star.luwi.voice.VoiceState
 import io.github.yuloong07star.luwi.wake.WakeWordService
 import io.github.yuloong07star.luwi.wake.WakeWordState
 import org.json.JSONObject
+import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.DropdownEntry
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
@@ -114,6 +135,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.menu.OverlayIconCascadingDropdownMenu
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 /**
@@ -159,8 +181,37 @@ fun HostScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 when (val status = DshHost.status) {
-                    is HostStatus.Running -> HostWebView(url = status.url, modifier = Modifier.weight(1f))
-                    else -> HostBootPanel(status = status, modifier = Modifier.weight(1f))
+                    is HostStatus.Running -> {
+                        // host 一就绪 WebView 就挂上, 而它把八百多 KB 的前端跑起来还要一两秒 —— 那一段
+                        // 原来是纯白屏。开屏那块**不能盖在 WebView 上面** (它是同一个窗口里的子 View,
+                        // 永远在组合绘制内容之上), 所以反过来: 页面先以 alpha 0 挂着加载, 开屏那块画在
+                        // 它底下; 页面 ready 之后它淡进来, 淡到 1 才把开屏撤掉
+                        var pageUp by remember(status) { mutableStateOf(false) }
+                        val alpha by animateFloatAsState(
+                            targetValue = if (pageUp) 1f else 0f,
+                            animationSpec = tween(260),
+                            label = "page-fade",
+                        )
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            HostWebView(
+                                url = status.url,
+                                modifier = Modifier.fillMaxSize(),
+                                alpha = alpha,
+                                onReady = { pageUp = true },
+                                // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
+                                // 一块空白的子 View 等新页面加载
+                                onLost = { pageUp = false },
+                            )
+                            if (alpha < 1f) {
+                                HostBootPanel(
+                                    status = status,
+                                    pageStage = stringResource(R.string.boot_stage_page),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+                    }
+                    else -> HostBootPanel(status = status, modifier = Modifier.weight(1f).fillMaxWidth())
                 }
             }
             // 小窗直接挂在 Scaffold 的内容里, **中间不留任何一层容器**: 拖动范围就是这一层按 inset
@@ -179,6 +230,7 @@ fun HostScreen(modifier: Modifier = Modifier) {
             FloatingBall(
                 selected = selected,
                 onSettings = { navigator.push(Screen.Settings) },
+                onTavern = { navigator.push(Screen.TavernHome) },
                 windowHidden = windowHidden,
                 onToggleWindow = { windowHidden = !windowHidden },
                 modifier = Modifier.padding(innerPadding),
@@ -203,6 +255,7 @@ fun HostScreen(modifier: Modifier = Modifier) {
 private fun MenuButton(
     selected: ScreenState?,
     onSettings: () -> Unit,
+    onTavern: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -213,6 +266,7 @@ private fun MenuButton(
         entries = mainMenu(
             selected = selected,
             onSettings = onSettings,
+            onTavern = onTavern,
             windowHidden = windowHidden,
             onToggleWindow = onToggleWindow,
         ),
@@ -391,6 +445,7 @@ private fun FloatingScreenWindow(
 private fun FloatingBall(
     selected: ScreenState?,
     onSettings: () -> Unit,
+    onTavern: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -507,6 +562,7 @@ private fun FloatingBall(
             MenuButton(
                 selected = selected,
                 onSettings = onSettings,
+                onTavern = onTavern,
                 windowHidden = windowHidden,
                 onToggleWindow = onToggleWindow,
                 // 球的底由外面这层给, 菜单按钮自己就不用再画一层
@@ -531,24 +587,14 @@ private fun FloatingBall(
 private fun mainMenu(
     selected: ScreenState?,
     onSettings: () -> Unit,
+    onTavern: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
 ): List<DropdownEntry> {
     val context = LocalContext.current
     val screens = VirtualScreen.screens
-    // 「停止朗读」那一条要知道现在有没有在念: `LwSpeak` 那个标记不是 Compose 状态, 而菜单是随手打开
-    // 的, 所以这里半秒看一眼 (两次 volatile 读, 可以忽略), 一次都没念过时也就多几次空转
-    //
-    // 判据与球上、与半双工那道闸**同一个** (`talking`): 只认 `speakingNow` 时, 尾巴窗口里写着「正在说」
-    // 而这一条却说自己没东西可停 (2026-10-16 一起对齐)
-    var voiceSpeaking by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            voiceSpeaking = LwSpeak.talking(context)
-            delay(500)
-        }
-    }
-    val idleHint = stringResource(R.string.menu_stop_speaking_idle)
+    // 「停止朗读」那一条 2026-10-24 撤掉了 (主人: "设置浮标的停止说话去掉") —— 球与设置页里都停得掉,
+    // 菜单里再留一条只是占位置; 那 500 ms 一拍的状态轮询跟着一起去掉
     // 「同步」那一行 (2026-10-14 主人: 加在"进设置之前的那个菜单按钮"里): 它与设置页那一段是**同一件事**
     // —— `session-sync.json` 里的远端地址配没配。插件是**挂载时**读配置的, 所以这一个动作要顺带重启
     // host, 否则这一行等于没点。`SyncSetting.revision` 是它在文件被改过之后重读的记号 (菜单自己改的
@@ -562,7 +608,7 @@ private fun mainMenu(
     )
     return listOf(
         DropdownEntry(
-            items = listOf(
+            items = listOfNotNull(
                 DropdownItem(
                     text = "虚拟屏",
                     summary = selected?.label,
@@ -625,20 +671,6 @@ private fun mainMenu(
                     selected = PreviewControl.allowed,
                     onClick = { PreviewControl.set(context, !PreviewControl.allowed) },
                 ),
-                // 停止朗读放一级菜单: 念一段长回答时要用它, 而那时人大多不在这块页面上, 一级菜单是
-                // 这个界面里最短的一条路 (设置页那一行也能停, 但要先进设置)
-                DropdownItem(
-                    text = stringResource(R.string.menu_stop_speaking),
-                    summary = if (voiceSpeaking) stringResource(R.string.menu_stop_speaking_now)
-                    else stringResource(R.string.menu_stop_speaking_idle),
-                    onClick = {
-                        if (voiceSpeaking) {
-                            LwSpeak.stop()
-                        } else {
-                            Toast.makeText(context, idleHint, Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                ),
                 // 「同步」: 与设置页那一段同一个开关 (默认关)。关→开需要先有仓库地址, 没有就把人送到
                 // 设置页那一段去填; 改完必须重启 host 才生效, 所以这一下顺手重启 (主人点的那一下)
                 DropdownItem(
@@ -662,6 +694,18 @@ private fun mainMenu(
                         }
                     },
                 ),
+                // 酒馆 (2026-10-24 主人: "在会话界面右上角加入「酒馆」选项, 点击进入"): 从这里进的是
+                // **首页** (进入酒馆 / 选择存档 / 选择主题 / 打开配置 都在那儿); 设置页那一段的
+                // "打开酒馆"仍然直奔聊天页 —— 两条路进的是同一套数据, 只是落点不同。
+                // 公开构建 (LuwiTavern.enabled = false) 就不画这一行
+                if (LuwiTavern.enabled) {
+                    DropdownItem(
+                        text = "酒馆",
+                        onClick = onTavern,
+                    )
+                } else {
+                    null
+                },
                 DropdownItem(
                     text = "设置",
                     onClick = onSettings,
@@ -680,11 +724,25 @@ private fun mainMenu(
  *
  * What a browser is expected to do beyond rendering - pick a file, save a download - needs an
  * activity behind it, so those two requests are routed out of the page here
+ *
+ * **切后台回来不重载** (2026-10-26 主人: "切后台回来就重载"): 两件事都在这一块里做 ——
+ * renderer 的优先级钉住 (不因为不可见就被降级回收), 以及 renderer 真死时自己换一块新的
+ * (那只的缺省行为是把整个应用进程一起带走, 而进程里还有 host 与虚拟屏)
+ *
  * @param url the token-carrying URL the host printed once its tree settled.
  * @param modifier layout modifier from the caller.
+ * @param alpha 页面还没画出来时给 0: 开屏那块画在它底下, 靠这一层透明才看得见 (见调用处那段注释)
+ * @param onReady 页面真的画出东西了 (`root` 有子节点) 时叫一次
+ * @param onLost renderer 死了、这一页要重建时叫一次 (调用方据此把开屏盖回去)
  */
 @Composable
-private fun HostWebView(url: String, modifier: Modifier = Modifier) {
+private fun HostWebView(
+    url: String,
+    modifier: Modifier = Modifier,
+    alpha: Float = 1f,
+    onReady: () -> Unit = {},
+    onLost: () -> Unit = {},
+) {
     val context = LocalContext.current
     // 「回应用」那一跳: **请求一变就跑一次** (见下面那个 LaunchedEffect), 而不押在 `AndroidView` 的
     // update 上 —— update 什么时候被叫到是 Compose 的事, 而这一跳是主人点名要的反馈 (2026-10-07:
@@ -692,10 +750,27 @@ private fun HostWebView(url: String, modifier: Modifier = Modifier) {
     val ballRequest = BallReturn.request
     // WebView 实例与"这个文档加载完过几次": 切换那一步要拿它跑 JS, 还要等重载真的落地
     var page by remember { mutableStateOf<WebView?>(null) }
+    // 2026-10-28: 键盘起来时这块 WebView 让出贴底键盘那一段 (悬浮键盘不让), 否则会话输入框被压在键盘后面
+    val imeLift = rememberImeLift()
     var finishes by remember { mutableIntStateOf(0) }
+    // renderer 是 Chrome 那边独立的一个进程: 它一死这块 WebView 就再也不能用, 只能整块重建 ——
+    // generation 一变就换一块新的 (key 在 AndroidView 外面), rebuilds 是"同一个窗最多自动重建几次";
+    // halted 是额度用完之后那一档: 那时 composition 里干脆不挂 WebView, 免得还有代码去碰那块
+    // 已经 destroy 掉的旧实例
+    var generation by remember { mutableIntStateOf(0) }
+    var rebuilds by remember { mutableIntStateOf(0) }
+    var halted by remember { mutableStateOf(false) }
     // A file input can only be answered by an activity, so the page's request parks here until
     // the picker it launched comes back
     var pending by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    // 老 WebView 那一摊 (2.7.10, 见 [WebCompat]): 那段 polyfill 是"文档开始"注入的, 垫的是
+    // `Promise.withResolvers` 这类 Chrome 119 才有的 API; 页面还会把"还缺什么"报回来
+    val compat = remember(context) { WebCompat.script(context) }
+    val webInfo = remember(context) { WebCompat.info(context) }
+    var compatMissing by remember { mutableStateOf<List<String>>(emptyList()) }
+    // `root` 有子节点就算起来了 —— 那是"界面真的画出来"的判据 (与 SHELL_PROBE 那个日志同一件事)
+    var readyAt by remember { mutableIntStateOf(0) }
+    var stuck by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val answer = pending ?: return@rememberLauncherForActivityResult
         pending = null
@@ -703,155 +778,285 @@ private fun HostWebView(url: String, modifier: Modifier = Modifier) {
         // URI or the clip data of a multiple selection
         answer.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
     }
-    AndroidView(
-        modifier = modifier,
-        factory = { viewContext ->
-            CookieManager.getInstance().setAcceptCookie(true)
-            WebView(viewContext).apply {
-                settings.javaScriptEnabled = true
-                // dsh keeps theme and font size in localStorage, which is also how a phone and
-                // a desktop browser reach the same server with different appearance settings
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = false
-                // dsh 的朗读在页面里播放音频, 而 WebView 默认要有用户手势才放音: 消息到了
-                // 自动朗读会在没有手势的时候被拦掉, 这一条就是给它的 (系统引擎那一路走
-                // 通道的 speak, 不经页面, 不受这条影响)
-                settings.mediaPlaybackRequiresUserGesture = false
-                // Compose sizes an AndroidView through the modifier and leaves layoutParams at
-                // WRAP_CONTENT, and a WebView in that state resolves every viewport unit to 0,
-                // which collapses the dialogs, menus and directory picker dsh measures in vh,
-                // the visible size in Compose has nothing to do with it, so this has to be set
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                // 输入框旁边那个麦克风指示器要问的两件事都在 app 这一侧 (服务在不在听、点一下停)
-                addJavascriptInterface(WakeBridge(viewContext.applicationContext), WAKE_BRIDGE)
-                // The page is the whole product surface, so its own failures need somewhere to
-                // show up: status codes, load errors, and browser console lines all go to logcat
-                webViewClient = object : WebViewClient() {
-                    // Only the host's own pages belong in this view: everything here is one document,
-                    // so a link that navigates this view away **replaces the whole GUI** and there is
-                    // no way back to the session (2026-10-18: 轨迹 那个详情预览里的链接就是一例, 点完
-                    // 屏幕上只剩那个网站). 别处的链接交给系统浏览器 (主人手机上一直这么用), 非页面
-                    // 的 scheme (mail / app) 一律拒掉并记一行, 免得平台弹一个"打开方式"盖住 GUI
-                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                        val target = request.url
-                        // 预览里那颗「用系统文件管理器打开」: 文档是老格式 (.doc/.ppt), 网页读不了,
-                        // 把**已经授权过的绝对路径**交回来, 由这里换成 content:// 再交给系统
-                        // (页面自己拿不到 FileProvider, 也不该直接拿到一条 startActivity 的路)
-                        if (target.scheme == OPEN_SCHEME) {
-                            openWithSystem(view.context, target.getQueryParameter(OPEN_PATH_PARAM))
+    // **已经交给 WebView 的那一条地址** (不是 `view.url`): host 打印的 token URL 会 302 到根路径,
+    // 所以 `view.url` 永远不等于它 —— 拿这两者比, 每一次重组 (开屏淡出那一串 alpha 就是几十次)
+    // 都会再 loadUrl 一次, 表现出来是"开屏那几帧里页面重载两三次" (2026-10-26 真机日志: 4 秒 3 条
+    // finished)。只有"要打开的地址"真的换了 (重启 host) 才该重载
+    val launched = remember { arrayOfNulls<String>(1) }
+    // renderer 死了就整块换新的 (见下面 onRenderProcessGone): key 一变 AndroidView 就重建;
+    // halted 那一档整块不挂, 所以不会有人再去用已经 destroy 的旧实例
+    if (!halted) key(generation) {
+        AndroidView(
+            modifier = modifier.padding(bottom = imeLift),
+            factory = { viewContext ->
+                CookieManager.getInstance().setAcceptCookie(true)
+                WebView(viewContext).apply {
+                    settings.javaScriptEnabled = true
+                    // dsh keeps theme and font size in localStorage, which is also how a phone and
+                    // a desktop browser reach the same server with different appearance settings
+                    settings.domStorageEnabled = true
+                    settings.allowFileAccess = false
+                    // dsh 的朗读在页面里播放音频, 而 WebView 默认要有用户手势才放音: 消息到了
+                    // 自动朗读会在没有手势的时候被拦掉, 这一条就是给它的 (系统引擎那一路走
+                    // 通道的 speak, 不经页面, 不受这条影响)
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    // Compose sizes an AndroidView through the modifier and leaves layoutParams at
+                    // WRAP_CONTENT, and a WebView in that state resolves every viewport unit to 0,
+                    // which collapses the dialogs, menus and directory picker dsh measures in vh,
+                    // the visible size in Compose has nothing to do with it, so this has to be set
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                    // **切后台回来整页重载的根因就在这一行**: renderer 是独立进程, 视图不可见时
+                    // 缺省允许被降级甚至回收, 回到前台只能从头加载。这里把它钉在 BOUND (可见那一档,
+                    // 不是 IMPORTANT 那档"关键任务"), 并且**不可见时也不豁免** (第二个参数 true 才是
+                    // "不可见就降成 WAIVED"), 代价是这个 renderer 在后台也占着内存 —— 那是
+                    // "回来不重载"要付的那一笔
+                    runCatching {
+                        setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, false)
+                    }.onFailure { Log.w(WEB_TAG, "the renderer priority could not be pinned", it) }
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    // 输入框旁边那个麦克风指示器要问的两件事都在 app 这一侧 (服务在不在听、点一下停)
+                    addJavascriptInterface(WakeBridge(viewContext.applicationContext), WAKE_BRIDGE)
+                    // 老 WebView 那一档: 先把桥挂上 (页面把"还缺什么"报回来), 再让 polyfill 在文档
+                    // **开始**时跑 —— 顺序不能反, 反了那段报告就没人接
+                    addJavascriptInterface(
+                        WebCompat.Bridge { missing, fixed ->
+                            // 每次开屏一行: 这一行就是"这台机器上 polyfill 到底垫了什么"的现场记录
+                            Log.i(WEB_TAG, "compat: filled ${fixed.joinToString().ifEmpty { "nothing" }}, missing ${missing.joinToString().ifEmpty { "nothing" }}")
+                            if (missing.isNotEmpty()) {
+                                Log.w(WEB_TAG, "the page is missing ${missing.joinToString()} after the polyfill")
+                                compatMissing = missing
+                            }
+                        },
+                        WebCompat.BRIDGE,
+                    )
+                    Log.i(WEB_TAG, "webview ${webInfo.label} (major ${webInfo.major})")
+                    if (webInfo.isOld) {
+                        // 这一行是老机器上唯一一句"为什么以前会卡在连接中": 版本号在这儿, polyfill 装没装上看下一行
+                        Log.w(WEB_TAG, "this WebView is older than Chrome ${WebCompat.MIN_MAJOR}: ${webInfo.label}")
+                    }
+                    WebCompat.install(this, compat)
+                    // The page is the whole product surface, so its own failures need somewhere to
+                    // show up: status codes, load errors, and browser console lines all go to logcat
+                    webViewClient = object : WebViewClient() {
+                        /**
+                         * renderer 死了 (OOM / 被系统回收): **缺省行为是把整个应用进程一起带走**
+                         *
+                         * 这个进程里还有 host 与虚拟屏, 一起死掉等于"回来要从解压与起 host 重来一遍"。
+                         * 所以这里接住: 拆掉这一块已经不能用的 WebView (之后一个方法都不许再调它),
+                         * 换一块新的重新加载同一页; 返回 true = "我自己处理了", 别动进程
+                         *
+                         * 连着死超过 [MAX_PAGE_REBUILDS] 次就不再自动重建 (那会变成重建循环),
+                         * 直接把"还缺什么"那个真 Dialog 摆出来
+                         */
+                        override fun onRenderProcessGone(
+                            view: WebView,
+                            detail: RenderProcessGoneDetail,
+                        ): Boolean {
+                            Log.w(WEB_TAG, "renderer gone (crashed=${detail.didCrash()}), rebuilding the page")
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            runCatching { view.destroy() }
+                            if (page === view) page = null
+                            rebuilds += 1
+                            if (rebuilds > MAX_PAGE_REBUILDS) {
+                                Log.w(WEB_TAG, "the renderer died $rebuilds times; asking the person instead")
+                                // 不重建了: halted 让 composition 把 WebView 摘掉, 开屏盖回去,
+                                // 决定权交给那个更新弹窗
+                                halted = true
+                                stuck = true
+                                onLost()
+                                return true
+                            }
+                            stuck = false
+                            compatMissing = emptyList()
+                            readyAt = 0
+                            generation += 1
+                            onLost()
                             return true
                         }
-                        if (target.scheme != "http" && target.scheme != "https") {
-                            Log.w(WEB_TAG, "blocked navigation to $target")
+
+                        // Only the host's own pages belong in this view: everything here is one document,
+                        // so a link that navigates this view away **replaces the whole GUI** and there is
+                        // no way back to the session (2026-10-18: 轨迹 那个详情预览里的链接就是一例, 点完
+                        // 屏幕上只剩那个网站). 别处的链接交给系统浏览器 (主人手机上一直这么用), 非页面
+                        // 的 scheme (mail / app) 一律拒掉并记一行, 免得平台弹一个"打开方式"盖住 GUI
+                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                            val target = request.url
+                            // 预览里那颗「用系统文件管理器打开」: 文档是老格式 (.doc/.ppt), 网页读不了,
+                            // 把**已经授权过的绝对路径**交回来, 由这里换成 content:// 再交给系统
+                            // (页面自己拿不到 FileProvider, 也不该直接拿到一条 startActivity 的路)
+                            if (target.scheme == OPEN_SCHEME) {
+                                openWithSystem(view.context, target.getQueryParameter(OPEN_PATH_PARAM))
+                                return true
+                            }
+                            if (target.scheme != "http" && target.scheme != "https") {
+                                Log.w(WEB_TAG, "blocked navigation to $target")
+                                return true
+                            }
+                            if (sameOrigin(target, Uri.parse(url))) return false
+                            val problem = openPage(view.context, target.toString())
+                            if (problem == null) Log.i(WEB_TAG, "handed $target to the system browser")
+                            else Log.w(WEB_TAG, problem)
                             return true
                         }
-                        if (sameOrigin(target, Uri.parse(url))) return false
-                        val problem = openPage(view.context, target.toString())
-                        if (problem == null) Log.i(WEB_TAG, "handed $target to the system browser")
-                        else Log.w(WEB_TAG, problem)
-                        return true
-                    }
 
-                    override fun onPageFinished(view: WebView, finishedUrl: String) {
-                        Log.i(WEB_TAG, "finished $finishedUrl")
-                        // A page that loads without any HTTP or console error can still be blank,
-                        // so the shell state itself is asked for and logged
-                        view.evaluateJavascript(SHELL_PROBE) { result ->
-                            Log.i(WEB_TAG, "shell $result")
+                        override fun onPageFinished(view: WebView, finishedUrl: String) {
+                            Log.i(WEB_TAG, "finished $finishedUrl")
+                            // A page that loads without any HTTP or console error can still be blank,
+                            // so the shell state itself is asked for and logged
+                            view.evaluateJavascript(SHELL_PROBE) { result ->
+                                Log.i(WEB_TAG, "shell $result")
+                            }
+                            // `root` 有没有子节点 = 界面画出来了没有 (上面那句是给人看的读数, 这一句是判据)
+                            view.evaluateJavascript(READY_PROBE) { result ->
+                                if (result.trim('"').toIntOrNull()?.let { it > 0 } == true) {
+                                    readyAt += 1
+                                    // 这一页真的画出来了: 上一次那几笔 renderer 事故就不该再
+                                    // 占着"最多重建几次"的额度
+                                    rebuilds = 0
+                                    onReady()
+                                }
+                            }
+                            // 每次文档加载都把那个指示器装回去: 它是我们画在页面上的, 换一次文档就没了
+                            view.evaluateJavascript(WAKE_BADGE_JS, null)
+                            // 「回应用」那一跳在等"页面什么时候回来" (重载 / 冷启动那两档都是它)
+                            finishes += 1
                         }
-                        // 每次文档加载都把那个指示器装回去: 它是我们画在页面上的, 换一次文档就没了
-                        view.evaluateJavascript(WAKE_BADGE_JS, null)
-                        // 「回应用」那一跳在等"页面什么时候回来" (重载 / 冷启动那两档都是它)
-                        finishes += 1
-                    }
 
-                    override fun onReceivedHttpError(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        errorResponse: WebResourceResponse,
-                    ) {
-                        Log.w(WEB_TAG, "http ${errorResponse.statusCode} for ${request.url}")
-                    }
+                        override fun onReceivedHttpError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            errorResponse: WebResourceResponse,
+                        ) {
+                            Log.w(WEB_TAG, "http ${errorResponse.statusCode} for ${request.url}")
+                        }
 
-                    override fun onReceivedError(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        error: WebResourceError,
-                    ) {
-                        Log.w(WEB_TAG, "error ${error.errorCode} ${error.description} for ${request.url}")
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError,
+                        ) {
+                            Log.w(WEB_TAG, "error ${error.errorCode} ${error.description} for ${request.url}")
+                        }
                     }
+                    webChromeClient = object : WebChromeClient() {
+                        // dsh 的语音输入是页面自己录音 (getUserMedia + MediaRecorder), 而 WebView 不覆写
+                        // 这一条就等于不给页面麦克风: 请求到这里没人应, Chromium 按拒绝处理。只放音频,
+                        // 摄像头与 MIDI 仍然拒掉; 系统侧的 RECORD_AUDIO 由设置页那一项运行时权限管。
+                        // http://127.0.0.1 属安全上下文 (localhost 例外), 所以按 host 判不会把自己拦掉
+                        override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
+                            val audio = request.resources.filter {
+                                it == android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                            }
+                            if (request.origin.host != "127.0.0.1" || audio.isEmpty()) {
+                                Log.w(WEB_TAG, "denied ${request.resources.joinToString()} for ${request.origin}")
+                                request.deny()
+                                return
+                            }
+                            Log.i(WEB_TAG, "granting ${audio.joinToString()} to ${request.origin}")
+                            request.grant(audio.toTypedArray())
+                        }
+                        override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                            Log.i(WEB_TAG, "console ${message.messageLevel()} ${message.message()}")
+                            return true
+                        }
+
+                        // A popup cannot become a second view here, and leaving the request to
+                        // Chromium is what can put a platform chooser over the GUI, so the attempt
+                        // is refused and logged rather than answered
+                        override fun onCreateWindow(
+                            view: WebView,
+                            isDialog: Boolean,
+                            isUserGesture: Boolean,
+                            resultMsg: Message?,
+                        ): Boolean {
+                            Log.w(WEB_TAG, "blocked popup dialog=$isDialog gesture=$isUserGesture")
+                            return false
+                        }
+
+                        // dsh attaches files through a plain file input, and the chooser it needs is
+                        // an activity the page cannot open itself
+                        override fun onShowFileChooser(
+                            view: WebView,
+                            callback: ValueCallback<Array<Uri>>,
+                            params: FileChooserParams,
+                        ): Boolean {
+                            Log.i(WEB_TAG, "file chooser ${params.acceptTypes.joinToString()}")
+                            // A second request supersedes the first, and every callback has to be
+                            // answered exactly once
+                            pending?.onReceiveValue(null)
+                            pending = callback
+                            return try {
+                                picker.launch(params.createIntent())
+                                true
+                            } catch (error: ActivityNotFoundException) {
+                                Log.w(WEB_TAG, "no picker for ${params.acceptTypes.joinToString()}: ${error.message}")
+                                pending = null
+                                callback.onReceiveValue(null)
+                                true
+                            }
+                        }
+                    }
+                    setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
+                        startDownload(context, downloadUrl, contentDisposition, mimeType)
+                    }
+                    loadUrl(url)
+                    launched[0] = url
                 }
-                webChromeClient = object : WebChromeClient() {
-                    // dsh 的语音输入是页面自己录音 (getUserMedia + MediaRecorder), 而 WebView 不覆写
-                    // 这一条就等于不给页面麦克风: 请求到这里没人应, Chromium 按拒绝处理。只放音频,
-                    // 摄像头与 MIDI 仍然拒掉; 系统侧的 RECORD_AUDIO 由设置页那一项运行时权限管。
-                    // http://127.0.0.1 属安全上下文 (localhost 例外), 所以按 host 判不会把自己拦掉
-                    override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
-                        val audio = request.resources.filter {
-                            it == android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE
-                        }
-                        if (request.origin.host != "127.0.0.1" || audio.isEmpty()) {
-                            Log.w(WEB_TAG, "denied ${request.resources.joinToString()} for ${request.origin}")
-                            request.deny()
-                            return
-                        }
-                        Log.i(WEB_TAG, "granting ${audio.joinToString()} to ${request.origin}")
-                        request.grant(audio.toTypedArray())
-                    }
-                    override fun onConsoleMessage(message: ConsoleMessage): Boolean {
-                        Log.i(WEB_TAG, "console ${message.messageLevel()} ${message.message()}")
-                        return true
-                    }
-
-                    // A popup cannot become a second view here, and leaving the request to
-                    // Chromium is what can put a platform chooser over the GUI, so the attempt
-                    // is refused and logged rather than answered
-                    override fun onCreateWindow(
-                        view: WebView,
-                        isDialog: Boolean,
-                        isUserGesture: Boolean,
-                        resultMsg: Message?,
-                    ): Boolean {
-                        Log.w(WEB_TAG, "blocked popup dialog=$isDialog gesture=$isUserGesture")
-                        return false
-                    }
-
-                    // dsh attaches files through a plain file input, and the chooser it needs is
-                    // an activity the page cannot open itself
-                    override fun onShowFileChooser(
-                        view: WebView,
-                        callback: ValueCallback<Array<Uri>>,
-                        params: FileChooserParams,
-                    ): Boolean {
-                        Log.i(WEB_TAG, "file chooser ${params.acceptTypes.joinToString()}")
-                        // A second request supersedes the first, and every callback has to be
-                        // answered exactly once
-                        pending?.onReceiveValue(null)
-                        pending = callback
-                        return try {
-                            picker.launch(params.createIntent())
-                            true
-                        } catch (error: ActivityNotFoundException) {
-                            Log.w(WEB_TAG, "no picker for ${params.acceptTypes.joinToString()}: ${error.message}")
-                            pending = null
-                            callback.onReceiveValue(null)
-                            true
-                        }
-                    }
+            },
+            update = { view ->
+                // 只有"要打开的地址"变了才重载 (比的是上一次交出去的, 不是 302 之后的 view.url)
+                if (launched[0] != url) {
+                    launched[0] = url
+                    view.loadUrl(url)
                 }
-                setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
-                    startDownload(context, downloadUrl, contentDisposition, mimeType)
-                }
-                loadUrl(url)
-            }
+                // 开屏淡出那一档: alpha 由外面推, 页面自己是不知道的
+                if (view.alpha != alpha) view.alpha = alpha
+                page = view
+            },
+        )
+    }
+
+    // 12 秒还没画出界面: 那就不是"慢", 是老 WebView 在解析期就死了 (或者别的硬故障) —— 弹窗说清,
+    // 别让人对着"连接中"干等
+    //
+    // 计时从**每一次文档加载完成**起算 (`finishes` 变一次就重排一次); 「重试」是换一块新的从头加载,
+    // 那时 `generation` 也变一次。判据是"这一窗里 readyAt 涨没涨" —— **平时不能在这里把它清成 0**:
+    // 探针那个回调与这一次重组谁先到说不准, 清了就会把"其实画出来了"判成卡住。**只有 generation 变
+    // (renderer 死了换了一块新的) 才清**: 那一档是一次全新的加载, 计时窗也该重新开始, 所以 generation
+    // 也进这个 key
+    LaunchedEffect(url) {
+        // 换了一个 host 地址 (重启 host 那一档): 上一轮的额度与停摆都不作数了
+        halted = false
+        rebuilds = 0
+    }
+    LaunchedEffect(url, finishes, generation) {
+        stuck = false
+        val seen = readyAt
+        delay(STUCK_SECONDS * 1000L)
+        if (readyAt == seen) {
+            stuck = true
+            Log.w(WEB_TAG, "the page never rendered within ${STUCK_SECONDS}s on ${webInfo.label}")
+        }
+    }
+    WebViewTroubleDialog(
+        info = webInfo,
+        missing = compatMissing,
+        stuck = stuck,
+        onDismiss = {
+            compatMissing = emptyList()
+            stuck = false
         },
-        update = { view ->
-            if (view.url != url) view.loadUrl(url)
-            page = view
+        onRetry = {
+            // 「重试」= 换一块新的从头加载: 走的不是 reload —— renderer 死过 / 卡住两档里, 旧的
+            // 那一块要么已经 destroy, 要么这一页本来就画不出来, reload 它没有意义
+            stuck = false
+            halted = false
+            rebuilds = 0
+            readyAt = 0
+            generation += 1
         },
     )
 
@@ -1127,6 +1332,14 @@ private val WINDOW_START_TOP = 120.dp
 private const val WEB_TAG = "DshWebView"
 
 /**
+ * renderer 死了之后**同一个窗最多自动换几次新的**
+ *
+ * 一次是正常的恢复 (系统回收 / OOM 各是一次意外); 连着死三次还自动重建就是在重建循环里烧电,
+ * 那时把手交给那个真 Dialog, 让主人自己决定要不要重试
+ */
+private const val MAX_PAGE_REBUILDS = 3
+
+/**
  * 预览里那颗「用系统文件管理器打开」用的自定义 scheme
  *
  * 网页那一半只知道**工作区的相对路径**, 而交给系统要的是一条能读的 `content://`。两条路都不该让页面
@@ -1219,8 +1432,7 @@ private const val PAGE_BACK_JS = """
 """
 
 /** Shell facts worth logging after a load: boot globals, DOM size, and whatever text rendered */
-private const val SHELL_PROBE = """
-(function () {
+private const val SHELL_PROBE = """(function () {
   var root = document.getElementById('root')
   var probe = document.createElement('div')
   probe.style.cssText = 'position:absolute;left:-1px;width:1px;height:100vh'
@@ -1239,6 +1451,14 @@ private const val SHELL_PROBE = """
   })
 })()
 """
+
+/**
+ * "界面画出来了没有"的判据 (2.7.10): `root` 里有几个子节点, `-1` = 连 root 都没有
+ *
+ * 它比上面那句 [SHELL_PROBE] 窄得多, 只回答一件事 —— 那一段是给人看的读数, 这一句是**弹不弹窗**
+ * 的判据, 所以两者分开: 读数那句改了不该动到弹窗的门槛
+ */
+private const val READY_PROBE = "(function(){var r=document.getElementById('root');return r?r.childElementCount:-1})()"
 
 /** The name the page sees for the bridge above: `window.Luwi` */
 private const val WAKE_BRIDGE = "Luwi"
@@ -1466,30 +1686,300 @@ private const val WAKE_BADGE_JS = """
 """
 
 /**
- * What the host is doing while there is no page to show yet
+ * 开屏那一块 (2026-10-25 主人: "增加开屏加载动画，图标+转圈，图标下方放个加载日志，最底下加 power by
+ * deepseek harness 小字")
+ *
+ * 它是"host 还没起来"那一段唯一的画面, 而这一段从**首启解压三万多文件**开始, 到 node 起来、dsh 打出
+ * 那一行 `dsh web:` 为止 —— 老机器上要好几十秒。所以这里给三样:
+ *
+ * 1. 品牌标记 + 一圈转 (那一圈是这里自己画的: Miuix 没有进度环, 而 material3 不是本项目依赖)
+ * 2. 图标下面一行**加载日志** —— 取 host 自己最后一行输出 ([DshHost.log]), 换一行就淡入换一次;
+ *    点一下展开完整那份 (老那一版整屏 300 行的诊断能力不丢), 失败时默认就是展开的
+ * 3. 最底下一行 `powered by deepseek harness`
+ *
+ * 解压那一档有真实进度 (`Installing(done, total)`), 所以日志下面多一条细的定长进度条; 别的阶段只有那
+ * 一圈转 —— 那些阶段没有可报的数 (node 起来要多久只有它自己知道)
+ *
  * @param status the state to describe.
  * @param modifier layout modifier from the caller.
  */
 @Composable
-private fun HostBootPanel(status: HostStatus, modifier: Modifier = Modifier) {
-    val headline = when (status) {
-        is HostStatus.Idle -> stringResource(R.string.host_status_idle)
+private fun HostBootPanel(
+    status: HostStatus,
+    modifier: Modifier = Modifier,
+    /** host 已经就绪、只剩页面还在加载时的那一句 (那一档 [HostStatus] 自己说不出来) */
+    pageStage: String? = null,
+) {
+    val colors = MiuixTheme.colorScheme
+    val context = LocalContext.current
+    val failure = status as? HostStatus.Failed
+    // 失败时一进来就是展开的: 那时日志就是唯一的线索, 不该再让人点一下
+    var expanded by remember(failure) { mutableStateOf(failure != null) }
+    // 主人 / agent 写的那份 splash.json (见 [SplashSetting]): 每次进来现读, 改完下一次开屏就是新的
+    val splash = SplashSetting.config(context)
+    // 自己那张图标: 只在文件真的换了 (大小/时间变了) 才重新解一遍
+    val stamp = remember(splash.icon) { SplashSetting.stamp(splash.icon) }
+    val custom = remember(stamp) { SplashSetting.decode(splash.icon) }
+    val accent = splash.accent?.let { Color(it) } ?: colors.primary
+    val background = splash.background?.let { Color(it) } ?: colors.surface
+    // 自己配了底色就得自己挑字色: 深底上还用主题那个深字, 整屏字就"消失"了 (2026-10-25 第一次
+    // 用深色样例时当场看见的)。没配底色时照旧跟着主题走
+    val onBackground = when {
+        splash.background == null -> colors.onSurface
+        SplashSetting.isDark(splash.background) -> Color.White
+        else -> Color.Black
+    }
+    val onBackgroundDim = onBackground.copy(alpha = 0.66f)
+    val stage = pageStage ?: when (status) {
+        is HostStatus.Idle -> stringResource(R.string.boot_stage_preparing)
         is HostStatus.Installing -> stringResource(R.string.host_status_installing, status.done, status.total)
         is HostStatus.Starting -> stringResource(R.string.host_status_starting)
         is HostStatus.Failed -> stringResource(R.string.host_status_failed, status.reason)
         is HostStatus.Running -> stringResource(R.string.host_status_running)
     }
-    LazyColumn(
-        modifier = modifier,
-        contentPadding = PaddingValues(16.dp),
-    ) {
-        item {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(text = headline)
+    // title 写了就用它顶替阶段话 (agent 自己设计的台词); 没写就照旧按阶段说
+    val headline = splash.title.ifBlank { stage }
+    val lastLog = DshHost.log.lastOrNull { it.isNotBlank() }.orEmpty()
+    Box(modifier.fillMaxSize().background(background)) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (custom != null) {
+                Image(
+                    bitmap = custom.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(112.dp),
+                )
+            } else {
+                Image(
+                    painter = painterResource(R.drawable.ic_launcher_foreground),
+                    contentDescription = null,
+                    modifier = Modifier.size(112.dp),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            BootIndicator(
+                color = if (failure != null) colors.error else accent,
+                motion = splash.motion,
+            )
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = headline,
+                style = MiuixTheme.textStyles.body2,
+                color = if (failure != null) colors.error else onBackground,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (splash.subtitle.isNotBlank()) {
+                Text(
+                    text = splash.subtitle,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = onBackgroundDim,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                )
+            }
+            (status as? HostStatus.Installing)?.let { installing ->
+                if (installing.total > 0) {
+                    Spacer(Modifier.height(10.dp))
+                    BootProgress(
+                        ratio = installing.done.toFloat() / installing.total,
+                        color = colors.primary,
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            if (!splash.showLog) {
+                // 主人把日志关了: 只留那一句阶段话 (失败时仍然展开: 找不到原因比"多一行"更糟)
+                if (expanded) {
+                    BootLogExpanded(
+                        onCollapse = { expanded = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        hintColor = onBackgroundDim,
+                    )
+                }
+            } else if (expanded) {
+                BootLogExpanded(
+                    onCollapse = { expanded = false },
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                    hintColor = onBackgroundDim,
+                )
+            } else {
+                // 换了一行就淡一下: 老机器上"它还在动"这件事, 大半靠这一下看得出来
+                Crossfade(
+                    targetState = lastLog.ifBlank { stringResource(R.string.boot_log_waiting) },
+                    animationSpec = tween(220),
+                    label = "boot-log",
+                ) { line ->
+                    Text(
+                        text = line,
+                        // 等宽 + 压暗: 它是 host 的原话, 不是我们写给人看的句子 —— 这样看着才像"日志",
+                        // 也免得一行路径被当成出错信息
+                        style = MiuixTheme.textStyles.footnote1.copy(fontFamily = FontFamily.Monospace),
+                        color = onBackgroundDim,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { expanded = true },
+                    )
+                }
+                if (DshHost.log.isNotEmpty()) {
+                    Text(
+                        text = stringResource(R.string.boot_log_hint),
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = onBackgroundDim.copy(alpha = 0.5f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .clickable { expanded = true },
+                    )
+                }
             }
         }
-        items(DshHost.log) { line ->
-            Text(text = line, modifier = Modifier.fillMaxWidth())
+        if (splash.credit.isNotBlank()) {
+            Text(
+                text = splash.credit,
+                style = MiuixTheme.textStyles.footnote1,
+                color = onBackgroundDim.copy(alpha = 0.45f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 26.dp),
+            )
         }
     }
+}
+
+/** 中间那一个动效: 主人可以在设置页里选转圈 / 呼吸 / 不转 ([SplashSetting.Motion]) */
+@Composable
+private fun BootIndicator(color: Color, motion: SplashSetting.Motion) {
+    when (motion) {
+        SplashSetting.Motion.NONE -> Unit
+        SplashSetting.Motion.SPIN -> BootSpinner(color)
+        SplashSetting.Motion.PULSE -> BootPulse(color)
+    }
+}
+
+/** 呼吸那一档: 一整圈淡底 + 一圈忽明忽暗、忽大忽小的环 (不转, 但看得出来它还在动) */
+@Composable
+private fun BootPulse(color: Color) {
+    val breath = rememberInfiniteTransition(label = "boot-pulse")
+    val level by breath.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "boot-pulse-level",
+    )
+    Canvas(modifier = Modifier.size(26.dp)) {
+        val width = size.minDimension * 0.12f
+        val maxRadius = size.minDimension / 2f - width / 2f
+        drawCircle(
+            color = color.copy(alpha = 0.16f),
+            radius = maxRadius,
+            style = Stroke(width = width),
+        )
+        drawCircle(
+            color = color.copy(alpha = level),
+            // 环自己也在缩一点: 只变亮度的话在深色壁纸上几乎看不出来
+            radius = maxRadius * (0.62f + 0.38f * level),
+            style = Stroke(width = width, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** 那一圈转: 一圈淡底 + 一段圆弧绕着转 (自己画, 不引依赖) */
+@Composable
+private fun BootSpinner(color: Color) {
+    val spin = rememberInfiniteTransition(label = "boot-spinner")
+    val angle by spin.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 900, easing = LinearEasing)),
+        label = "boot-spinner-angle",
+    )
+    Canvas(modifier = Modifier.size(26.dp)) {
+        val width = size.minDimension * 0.12f
+        drawArc(
+            color = color.copy(alpha = 0.16f),
+            startAngle = 0f,
+            sweepAngle = 360f,
+            useCenter = false,
+            style = Stroke(width = width, cap = StrokeCap.Round),
+        )
+        drawArc(
+            color = color,
+            startAngle = angle,
+            sweepAngle = 100f,
+            useCenter = false,
+            style = Stroke(width = width, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** 解压那一档的定长进度条 (只有它有真实数字) */
+@Composable
+private fun BootProgress(ratio: Float, color: Color) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth(0.6f)
+            .height(3.dp)
+            .clip(CircleShape)
+            .background(color.copy(alpha = 0.16f)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(ratio.coerceIn(0f, 1f))
+                .fillMaxHeight()
+                .background(color),
+        )
+    }
+}
+
+/**
+ * 完整日志 (点开那一档): 与老那一版同一个内容, 只是塞进一块半高的卡片里, 点一下收起
+ *
+ * `heightIn` 是必须的 —— [LazyColumn] 在无界高度里量不出来; 上限取屏高的一半, 剩下的留给开屏那三样
+ */
+@Composable
+private fun BootLogExpanded(onCollapse: () -> Unit, modifier: Modifier = Modifier, hintColor: Color = MiuixTheme.colorScheme.onSurfaceVariantSummary) {
+    Card(modifier = modifier.clickable { onCollapse() }) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 260.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            items(DshHost.log) { line ->
+                Text(
+                    text = line,
+                    style = MiuixTheme.textStyles.footnote1,
+                    // 卡片里面是主题底色, 所以这里照旧用主题的字色 (外面那屏才可能换过底色)
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+    Text(
+        text = stringResource(R.string.boot_log_collapse),
+        style = MiuixTheme.textStyles.footnote1,
+        color = hintColor.copy(alpha = 0.5f),
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .clickable { onCollapse() },
+    )
 }

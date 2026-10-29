@@ -9,6 +9,8 @@ import io.github.yuloong07star.luwi.plugin.PluginStore
 import io.github.yuloong07star.luwi.plugin.widget.WidgetHost
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -24,6 +26,8 @@ import java.io.File
  *
  * - 每个状态 (`idle` / `listening` / `thinking` / `speaking` / `failed`) 可以给一张图
  * - 也可以给一串帧 (`frames`: 目录 + 张数 + 每秒几张), 球的 `BallView` 按那个节奏换
+ * - 一个状态还能给**一组**帧序列 (2026-10-25 主人: "一个状态里加入多个动作"): 进这一档随机挑一支
+ *   开始演, 演完一圈换下一支 ([startAction] / [nextAction])
  * - 读不到 / 解不出来**一律回退内置画法** —— "换一套图标生效; 删掉插件回退内置" 那一条验收
  *
  * 路径那两条纪律在这里同样管: 解出来的图必须落在插件目录里 (装的时候查一次, 读的这一刻再兜一次)
@@ -38,16 +42,30 @@ internal object BallTheme {
      * 2026-10-15 由 32 一路提到 **128**: 主人报"帧率有点低" —— 32 帧盖一个动作周期只有 4 fps,
      * 确实卡。现在这一档配 12 fps 用 (覆盖 10.67 s, 原片 10 s, 动作速度几乎不变)。
      *
+     * 2026-10-28 由 128 提到 **240**: 主人要"整段放慢一半, 但帧率别降" —— 20 s 一圈要 240 帧
+     * (原片 24 fps 的 241 帧按 12 fps 播, 动作就是半速), 而 128 装不下, 写进去会**整份主题解析失败**
+     * 退回内置画法
+     *
      * 卡这个数的**不是包体而是内存**: 解码后的帧同时只留当前那一个状态
-     * ([BallView.faceFrames] 换状态就整批换掉), 128 帧按球上那个解码尺寸约 16 MB; 再往上翻
-     * 就得先想清楚低端机那点堆
+     * ([BallView.faceFrames] 换状态就整批换掉), 240 帧按球上那个解码尺寸 (198x224) 约 **42 MB**,
+     * 而进这一档时是**主线程把这一档的帧全解一遍** (239 张约 1 s 的顿)。所以再往上翻之前先想清楚
+     * 低端机那点堆 —— 常规动作仍然按 120 帧 / 12 fps 出
      *
      * 它是 `internal` 而不是 `private`: 那张判据 (`PluginV2Test.ballThemeSpecIsChecked`) 要拿
      * "上限 + 1"去钉"超过就要拒", 写死一个数的话上限一改那条就假红 —— 2026-10-15 提到 128 时
      * 测试里那个 99 就是这么红的
      */
-    internal const val MAX_FRAMES = 128
+    internal const val MAX_FRAMES = 240
     private const val MAX_FPS = 30
+
+    /**
+     * 一个状态里最多几支动作 (2026-10-25 主人: "一个状态里加入多个动作")
+     *
+     * 这个数管的是**清单体积**而不是内存: 解码永远只留"当前演的那一支" (见 [BallView.faceFrames]),
+     * 所以八支 120 帧与一支 120 帧占的堆一样多。上限只防手滑写一百支 —— 那种包会先把 APK 与下载
+     * 撑爆, 而观感上根本看不出差别
+     */
+    internal const val MAX_ACTIONS_PER_STATE = 8
 
     @Serializable
     data class Choice(val id: String = "")
@@ -78,7 +96,13 @@ internal object BallTheme {
         val name: String,
         val hideBuiltinText: Boolean,
         val states: Map<String, String>,
-        val frames: Map<String, Frames>,
+        /**
+         * 每个状态一到几支动作, **顺序也留住了** (`frames.<state>` 是数组时的下标)
+         *
+         * 2026-10-25 起这个值可以是"一支"也可以是"一组": 球进这一档时随机挑一支开始演, 演完一圈
+         * 换下一支 (见 [startAction] / [nextAction])。老包只写一支, 解出来是 `listOf(那一支)`
+         */
+        val frames: Map<String, List<Frames>>,
         /** 每个状态一个环色 (已解析成 ARGB), 缺哪个状态就回内置那一套 */
         val rings: Map<String, Int>,
         /** 素材怎么装 (见 [Fit]), 缺省 [Fit.COVER] */
@@ -105,8 +129,20 @@ internal object BallTheme {
     /** 现在生效的那一份 */
     data class Active(val id: String, val directory: File, val spec: BallSpec)
 
-    /** 某个状态那一张脸: 一张图, 或者一串帧 */
-    data class Face(val file: File, val frames: Frames?, val hideBuiltinText: Boolean, val fit: Fit)
+    /**
+     * 某个状态那一张脸: 一张图, 或者一串帧
+     *
+     * @property frames 这一档的**第一支**动作 (老形状那一支, 也是桌面组件与静态兜底图用的那一份) ——
+     *   `frames.<state>` 写成数组时, 球那边按 [actions] 轮换, 而它们俩指的是同一份清单
+     * @property actions 这一档的每一支动作 (至少一支; 只写一支时就是 `listOf(frames)`)
+     */
+    data class Face(
+        val file: File,
+        val frames: Frames?,
+        val actions: List<Frames>,
+        val hideBuiltinText: Boolean,
+        val fit: Fit,
+    )
 
     private val json = Json { prettyPrint = false; ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -147,7 +183,8 @@ internal object BallTheme {
             PluginPaths.resolve(active.directory, path, "theme/ball.json 的 states.$state")
         }.getOrNull() ?: return null
         if (!file.isFile) return null
-        return Face(file, active.spec.frames[state], active.spec.hideBuiltinText, active.spec.fit)
+        val actions = active.spec.frames[state].orEmpty()
+        return Face(file, actions.firstOrNull(), actions, active.spec.hideBuiltinText, active.spec.fit)
     }
 
     /** 一帧序列里每一张的位置 (同样每张再解一次路径) */
@@ -173,7 +210,9 @@ internal object BallTheme {
      */
     fun frameFile(context: Context, state: String, name: String): File? {
         val active = active(context) ?: return null
-        val frames = active.spec.frames[state] ?: return null
+        // 桌面那一格只认**第一支动作** (与 [Face.frames] 同一份): 它一帧一图过 `content://`, 而
+        // "这一档有好几支"是球那边的事
+        val frames = active.spec.frames[state]?.firstOrNull() ?: return null
         if (name !in frames.frameNames()) return null
         val file = runCatching {
             PluginPaths.resolve(active.directory, "${frames.dir}/$name", "theme/ball.json 的 frames.$state")
@@ -222,21 +261,7 @@ internal object BallTheme {
                 ?: throw IllegalArgumentException("theme/ball.json 的 states 里每一张都要是一个路径")
         }
         val frames = (root["frames"] as? JsonObject).orEmpty().mapValues { (state, value) ->
-            val one = value as? JsonObject
-                ?: throw IllegalArgumentException("theme/ball.json 的 frames.$state 要是一个对象")
-            val dir = (one["dir"] as? JsonPrimitive)?.content.orEmpty()
-            if (dir.isBlank()) throw IllegalArgumentException("theme/ball.json 的 frames.$state 缺 dir")
-            val count = (one["count"] as? JsonPrimitive)?.longOrNull?.toInt()
-                ?: throw IllegalArgumentException("theme/ball.json 的 frames.$state 的 count 要是整数")
-            val fps = (one["fps"] as? JsonPrimitive)?.longOrNull?.toInt()
-                ?: throw IllegalArgumentException("theme/ball.json 的 frames.$state 的 fps 要是整数")
-            if (count !in 1..MAX_FRAMES) {
-                throw IllegalArgumentException("theme/ball.json 的 frames.$state 的 count 要在 1..$MAX_FRAMES 之间")
-            }
-            if (fps !in 1..MAX_FPS) {
-                throw IllegalArgumentException("theme/ball.json 的 frames.$state 的 fps 要在 1..$MAX_FPS 之间")
-            }
-            Frames(dir, count, fps)
+            parseActions(state, value)
         }
         if (states.isEmpty() && frames.isEmpty()) {
             throw IllegalArgumentException("theme/ball.json 里 states 与 frames 至少要有一段")
@@ -259,6 +284,65 @@ internal object BallTheme {
         }
         return BallSpec(name, hide, states, frames, rings, fit, minDp)
     }
+
+    /**
+     * `frames.<state>` 的两副形状: 一个对象 (一支动作, 老写法) 或一组对象 (多支, 2026-10-25 起)
+     *
+     * 认不出来时**整份主题都不生效** (抛出去由 [parse] 那一层说清), 而不是"这一支不用" —— 少解一支
+     * 动作会变成"动作少了一个", 那种半好最难看懂; 而这一份是主人能手工改的地方, 说清哪一行错了比
+     * 猜着跑更有用
+     */
+    private fun parseActions(state: String, value: JsonElement?): List<Frames> = when (value) {
+        is JsonArray -> {
+            if (value.isEmpty()) {
+                throw IllegalArgumentException("theme/ball.json 的 frames.$state 是空数组, 至少要给一支动作")
+            }
+            if (value.size > MAX_ACTIONS_PER_STATE) {
+                throw IllegalArgumentException(
+                    "theme/ball.json 的 frames.$state 有 ${value.size} 支动作, 上限是 $MAX_ACTIONS_PER_STATE",
+                )
+            }
+            value.mapIndexed { index, one -> parseAction("frames.$state[$index]", one) }
+        }
+        is JsonObject -> listOf(parseAction("frames.$state", value))
+        else -> throw IllegalArgumentException("theme/ball.json 的 frames.$state 要是一个对象或一组对象")
+    }
+
+    /** 一支动作: 目录 + 张数 + 每秒几张 (名字里带 `frames.<状态>[下标]`, 报错时点得清) */
+    private fun parseAction(what: String, value: JsonElement): Frames {
+        val one = value as? JsonObject ?: throw IllegalArgumentException("theme/ball.json 的 $what 要是一个对象")
+        val dir = (one["dir"] as? JsonPrimitive)?.content.orEmpty()
+        if (dir.isBlank()) throw IllegalArgumentException("theme/ball.json 的 $what 缺 dir")
+        val count = (one["count"] as? JsonPrimitive)?.longOrNull?.toInt()
+            ?: throw IllegalArgumentException("theme/ball.json 的 $what 的 count 要是整数")
+        val fps = (one["fps"] as? JsonPrimitive)?.longOrNull?.toInt()
+            ?: throw IllegalArgumentException("theme/ball.json 的 $what 的 fps 要是整数")
+        if (count !in 1..MAX_FRAMES) {
+            throw IllegalArgumentException("theme/ball.json 的 $what 的 count 要在 1..$MAX_FRAMES 之间")
+        }
+        if (fps !in 1..MAX_FPS) {
+            throw IllegalArgumentException("theme/ball.json 的 $what 的 fps 要在 1..$MAX_FPS 之间")
+        }
+        return Frames(dir, count, fps)
+    }
+
+    /**
+     * 进这一档时先演哪一支: **随机起头**
+     *
+     * 不随机的话,"一个状态好几支动作"在短会话里永远只看得到第一支, 等于白加。每次进状态重新抽一次,
+     * 同一次状态里 (环色变、半藏变) 不重抽 —— 那两件事不是"换了个状态"
+     */
+    fun startAction(count: Int, random: kotlin.random.Random = kotlin.random.Random.Default): Int =
+        if (count <= 1) 0 else random.nextInt(count)
+
+    /**
+     * 这一支演完一圈之后换哪一支: 按顺序轮 (抽签只决定"从哪儿起头")
+     *
+     * `current` 越界时从头开始 —— 那不是一个理论上的分支: 清单在演到一半时被换掉 (主人改了插件),
+     * 旧下标就可能落在新清单外面, 而那时"回到第一支"是唯一说得通的动作
+     */
+    fun nextAction(current: Int, count: Int): Int =
+        if (count <= 1 || current !in 0 until count) 0 else (current + 1) % count
 
     /**
      * 解一个 `#RRGGBB` / `#AARRGGBB` 的颜色

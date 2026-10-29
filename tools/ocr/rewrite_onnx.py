@@ -30,7 +30,9 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 # The recognizer is exported with the 320-wide bucket PaddleOCR recommends for a
-# 48-pixel line height, the detector with a square 640
+# 48-pixel line height, the detector with a square 640. These are the defaults; `--det-size`
+# and `--rec-batch` below are the two knobs the 2026-10-28 A/B needed, and leaving them out
+# keeps the exact shape the APK has shipped with
 SHAPES = {
     "det": (1, 3, 640, 640),
     "rec": (1, 3, 48, 320),
@@ -282,13 +284,31 @@ def main():
         default="keep",
         help="'rewrite' splits HardSigmoid into Mul/Add/Clip; not needed in fp16, kept for experiments",
     )
+    ap.add_argument(
+        "--det-size",
+        type=int,
+        default=0,
+        help="square detector input side (0 = the 640 default); the device's NPU compiles the graph"
+        " from this shape on first use, so nothing else has to be rebuilt",
+    )
+    ap.add_argument(
+        "--rec-batch",
+        type=int,
+        default=0,
+        help="recogniser batch (0 = the batch-1 default); only worth it if QNN HTP accepts it",
+    )
     args = ap.parse_args()
 
     model = onnx.load(args.input, load_external_data=True)
     print(f"loaded {args.input}: ir={model.ir_version} opset={[o.version for o in model.opset_import]}")
 
-    model, dynamic = pin_input_shape(model, SHAPES[args.kind], args.kind)
-    print(f"pinned input to {SHAPES[args.kind]}, still-dynamic value infos: {dynamic or 'none'}")
+    shape = SHAPES[args.kind]
+    if args.kind == "det" and args.det_size > 0:
+        shape = (1, 3, args.det_size, args.det_size)
+    if args.kind == "rec" and args.rec_batch > 0:
+        shape = (args.rec_batch, 3, shape[2], shape[3])
+    model, dynamic = pin_input_shape(model, shape, args.kind)
+    print(f"pinned input to {shape}, still-dynamic value infos: {dynamic or 'none'}")
 
     before = len(model.graph.node)
     hs = rewrite_hardsigmoid(model) if args.hardsigmoid == "rewrite" else 0

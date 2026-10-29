@@ -25,7 +25,7 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 
 /** Set by the app when it starts the host; both absent everywhere else */
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
@@ -210,18 +210,30 @@ function warn(ctx, message) {
 /** The display a call is about, which is the id `lw_screen` reports and nothing else */
 const DISPLAY_ID = {
   type: 'integer',
-  required: true,
   description:
-    'The displayId of the screen to act on, exactly as lw_screen reports it. Display 0 is the '
+    'The displayId of the screen to act on, exactly as lw_screen reports it. **Leave it out and '
+    + 'the call follows the screen already in hand**: the one shown in the phone\'s preview if '
+    + 'there is one, otherwise the newest virtual screen, and display 0 only when no virtual screen '
+    + 'exists at all. Name it when the user points at their own phone, or when the call that just '
+    + 'failed named a different screen. Display 0 is the '
     + "phone's own screen, the glass the person holding it is looking at; every other id is a "
     + 'virtual screen this host made. Prefer a virtual screen whenever the user has not named one: '
     + 'display 0 is the phone in somebody\'s hand, so anything aimed at it takes the phone away '
     + 'from them. Make one with lw_screen_create instead of reaching for the id that is '
     + 'already there. When a call comes back saying the screen is gone or is paused, read the '
-    + 'reason it gives: the user did it from the phone, or an agent closed '
-    + 'it with lw_screen_release. Either way stop, say which screen it is, and ask the user what '
+    + 'reason it gives: the user did it from the phone, an agent closed '
+    + 'it with lw_screen_release, or a newer screen replaced it - only one virtual screen may exist '
+    + 'at a time. Either way stop, say which screen it is, and ask the user what '
     + 'they want - do not retry the id, and do not move on to another screen on your own.',
 }
+
+/**
+ * 省略 displayId 等于"每一块屏"的那几个工具, 见文件下半部分的 [defineTool] 包装
+ *
+ * **声明必须在 `TOOLS` 数组之前**: `const` 不提升, 而那张表是模块级的, 放到下面就是模块求值期
+ * 抛错 "Cannot access ... before initialization", 整包一个工具都不剩
+ */
+const WATCH_ALL_TOOLS = new Set(['lw_events_subscribe', 'lw_events_wait'])
 
 /**
  * 屏参数的另一版: 可以省略, 省了就是"每一块屏"
@@ -753,7 +765,7 @@ const CAMERA_OWNER_STALE_MS = 20 * 60 * 1000
 const VIDEO_MODE_DENIED = new Set([
   // 读屏
   'lw_screenshot', 'lw_screen', 'lw_screen_create', 'lw_screen_resize', 'lw_screen_rotate',
-  'lw_screen_release', 'lw_ui', 'lw_ui_dump', 'lw_ocr',
+  'lw_screen_release', 'lw_ui', 'lw_ui_dump', 'lw_ocr', 'lw_wait_text',
   'lw_events_subscribe', 'lw_events_wait', 'lw_wait_for',
   // 在屏上动手
   'lw_tap', 'lw_swipe', 'lw_type', 'lw_key', 'lw_key_combo', 'lw_gesture', 'lw_pinch',
@@ -2045,14 +2057,17 @@ const TOOLS = [
   defineTool({
     name: 'lw_screen_create',
     description:
-      'Create a virtual screen on the Android device and answer with its displayId. This is the '
+      'Create a virtual screen on the Android device and answer with its displayId. **Only one '
+      + 'virtual screen may exist at a time**: creating one closes the screen that is already '
+      + 'there, and whatever was running on it, so the old displayId is dead the moment this '
+      + 'returns - the answer names it. This is the '
       + 'usual way to work: a screen of its own leaves the phone in the user\'s hands, where '
       + 'acting on display 0 would take it away from them. The screen '
       + 'starts empty: nothing is drawn on it until an app is launched onto it with lw_launch, and '
       + 'the apps you launch stay on the display you launched them on - so **give launch=<app> when '
       + 'you already know what the screen is for**, and read the answer either way: an empty screen '
-      + 'is black, and a black screenshot is not a failure. Give it a name to tell your '
-      + 'screens apart - a name that is taken gets a number appended. Width, height and dpi default '
+      + 'is black, and a black screenshot is not a failure. Give it a name if you like - it is '
+      + 'only the label every answer uses. Width, height and dpi default '
       + "to the device's own screen, so leave them out to get a screen the size of the phone, and "
       + 'give them when you already know the shape the app wants - a game or any other '
       + 'landscape-only app wants a width larger than its height, and an app that declares an '
@@ -2238,13 +2253,109 @@ const TOOLS = [
       + 'down, so small text stays readable. Prefer lw_ui whenever that answers: it is exact and '
       + 'free, while this is a reading of a picture, and it can mistake an icon for a character '
       + '(those come back with a low score).',
-    parameters: { displayId: DISPLAY_ID, note: NOTE },
+    parameters: {
+      displayId: DISPLAY_ID,
+      debug: {
+        type: 'boolean',
+        description: 'Also write a debug overlay of what was kept and what was dropped (green box'
+          + ' = kept, red box + x = dropped as an icon, each with its score) and answer with the'
+          + ' two file paths. Off by default because it costs a full-screen PNG per read - turn it'
+          + ' on only when the filter itself is in question',
+      },
+      note: NOTE,
+    },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
       return said(formatOcr(await call('ocr', drop(args, 'note'))), args?.note)
+    },
+  }),
+
+  defineTool({
+    name: 'lw_wait_text',
+    description:
+      'Wait until a screen **shows** the given text, reading the pixels with the on-device OCR, '
+      + 'and answer with where that text ended up plus how long it took. This is the waiting tool '
+      + 'for a screen that has no control tree - a game, a WebGL canvas, a chat app that draws '
+      + 'everything itself - which is exactly where lw_wait_for cannot help, because that one '
+      + 'searches the accessibility tree and a self-drawn screen has none. Use it after every '
+      + 'action that makes a self-drawn screen change, instead of screenshotting in a loop: one '
+      + 'call reads the screen every ~350ms and returns the moment the text turns up. A line that '
+      + '**contains** the text counts, so a short fragment is enough and the whole line is answered '
+      + 'back. Nothing is written and nothing is pressed - this only watches. Times out with the '
+      + 'lines that were on the screen, which is the answer to "did it never appear, or did it '
+      + 'appear as something else".',
+    parameters: {
+      displayId: DISPLAY_ID,
+      text: {
+        type: 'string',
+        required: true,
+        description: 'The text to wait for, or a fragment of it. The comparison is plain substring '
+          + 'matching on each recognised line, so a few characters are enough',
+      },
+      timeoutMs: {
+        type: 'integer',
+        description: 'How long to keep reading before giving up. Default 15000, at most 90000',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const wanted = String(args?.text ?? '').trim()
+      if (wanted === '') throw new Error('lw_wait_text needs the text to wait for')
+      const timeout = Math.min(Math.max(Number(args?.timeoutMs ?? 15_000) || 15_000, 1_000), 90_000)
+      const started = Date.now()
+      let reads = 0
+      let last = []
+      while (Date.now() - started < timeout) {
+        reads += 1
+        let result
+        try {
+          result = await call('ocr', { displayId: args.displayId })
+        } catch (error) {
+          return said(
+            `could not read displayId ${args.displayId} while waiting for "${wanted}": ${error.message}`,
+            args.note,
+          )
+        }
+        if (result?.error) {
+          return said(
+            `displayId ${args.displayId} could not be read while waiting for "${wanted}": ${result.error}`,
+            args.note,
+          )
+        }
+        last = Array.isArray(result?.lines) ? result.lines : []
+        const exact = last.find((line) => String(line?.text ?? '').trim() === wanted)
+        const partial = last.find((line) => String(line?.text ?? '').includes(wanted))
+        const hit = exact ?? partial
+        if (hit) {
+          const box = hit.box ?? []
+          const centre = hit.center ?? []
+          return said(
+            `"${hit.text}" appeared on displayId ${args.displayId} after `
+            + `${formatMs(Date.now() - started)}, ${reads} read${reads === 1 ? '' : 's'}: `
+            + `[${box.join(',')}] centre ${centre.join(',')} score ${(hit.score ?? 0).toFixed(2)}`
+            + `${exact ? '' : ' (a line containing it, not the whole line)'}. `
+            + 'Press it with lw_tap(x=..., y=...) at that centre.',
+            args.note,
+          )
+        }
+        await new Promise((resume) => setTimeout(resume, WAIT_TEXT_POLL_MS))
+      }
+      const seen = last.length === 0
+        ? 'and the screen showed no text at all'
+        : `and the screen was showing:\n${last.slice(0, 10).map((line) =>
+          `  [${(line.box ?? []).join(',')}] ${JSON.stringify(line.text ?? '')}`).join('\n')}`
+      return said(
+        `"${wanted}" did not appear on displayId ${args.displayId} within ${formatMs(timeout)} `
+        + `(${reads} read${reads === 1 ? '' : 's'}) ${seen}`,
+        args.note,
+      )
     },
   }),
 
@@ -2950,7 +3061,9 @@ const TOOLS = [
     + ' wait unlocked - with 0 to 1 ratios for coordinates, or the JSON the app itself writes. A'
     + ' bad script is refused with the line number. All of it'
     + ' needs the privileged channel: without one, a wake word can only light the screen up to the'
-    + ' lock screen.',
+    + ' lock screen. Inside an exploration, unlock is refused unless the owner turned on'
+    + ' 允许锁屏解锁 in that section: that refusal is the answer - write it into the summary'
+    + ' instead of working around it.',
     'lock',
     {
       op: {
@@ -3841,12 +3954,17 @@ const TOOLS = [
       + 'engine keeps its own volume and follows the phone\'s media volume; an imported on-device '
       + 'voice reads at its own quiet level and has a volume (percent) the settings page owns; the '
       + 'free Edge online engine and a self-hosted OpenAI-compatible endpoint (address and key live '
-      + 'on the settings page) both take their loudness from the service they talk to.',
+      + 'on the settings page) both take their loudness from the service they talk to. On that API '
+      + 'engine, op=speak takes an optional voice=<id or name> for one line. op=voice manages the '
+      + 'voices designed through the provider: action=list shows them, action=add registers one '
+      + '(id is what the provider calls it; name and model are optional), action=remove drops one. '
+      + 'They are what the settings page lists, and $DSH_HOME/lw/interfaces.md has the address, key, '
+      + 'model and the registration rules.',
     parameters: {
       op: {
         type: 'string',
         required: true,
-        description: 'status, speak, stop or release',
+        description: 'status, speak, stop, release or voice (voice takes action=list|add|remove)',
       },
       text: {
         type: 'string',
@@ -3867,6 +3985,34 @@ const TOOLS = [
           + 'exists on the on-device engine — the system engine and both online engines keep their '
           + 'own loudness, and the answer says so when a number is ignored',
       },
+      voice: {
+        type: 'string',
+        description: 'Only for op=speak and only on the API engine: a provider voice id, or the name '
+          + 'of one registered in $DSH_HOME/lw/tts-voices.json (the settings page lists those). It '
+          + 'overrides the voice the settings page holds for this one line, without changing it',
+      },
+      action: {
+        type: 'string',
+        description: 'Only for op=voice: list, add or remove (default list)',
+      },
+      id: {
+        type: 'string',
+        description: 'Only for op=voice: the provider voice id. Required for add; for remove it may '
+          + 'also be the registered name',
+      },
+      name: {
+        type: 'string',
+        description: 'Only for op=voice: how the voice shows up in the settings list (default: the id)',
+      },
+      model: {
+        type: 'string',
+        description: 'Only for op=voice action=add: the model this one voice belongs to, when the '
+          + 'provider keeps designed voices on another model than the settings page holds',
+      },
+      note: {
+        type: 'string',
+        description: 'Only for op=voice action=add: a short remark kept with the entry (not spoken)',
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -3878,13 +4024,40 @@ const TOOLS = [
       if (args.interrupt !== undefined) request.interrupt = args.interrupt
       if (args.rate !== undefined) request.rate = args.rate
       if (args.volume !== undefined) request.volume = args.volume
+      if (args.voice !== undefined) request.voice = args.voice
+      if (args.action !== undefined) request.action = args.action
+      if (args.id !== undefined) request.id = args.id
+      if (args.name !== undefined) request.name = args.name
+      if (args.model !== undefined) request.model = args.model
+      if (args.note !== undefined) request.note = args.note
       const answer = await call('speak', request)
+      if (args.op === 'voice') {
+        const where = `file: ${answer.path}`
+        if (args.action === 'add' || args.action === 'remove') {
+          return `${answer.detail}; the library now holds ${answer.count}\n${where}`
+        }
+        if (!answer.count) {
+          return `${answer.detail}\n${where}`
+            + (answer.note ? `\nnote: ${answer.note}` : '')
+        }
+        return [
+          `${answer.count} designed voice(s): ${answer.voices}`,
+          where,
+          answer.note ? `note: ${answer.note}` : null,
+          'op=speak voice=<id or name> uses one for a single line; the settings page lists them under 说话 -> API',
+        ].filter(Boolean).join('\n')
+      }
       if (args.op === 'status') {
         const onDevice = answer.readingWith === 'on-device'
+        const reading = onDevice
+          ? `the on-device voice ${answer.onDeviceModel}`
+          : answer.readingWith === 'edge'
+            ? `the Edge online voice ${answer.edgeVoice}`
+            : answer.readingWith === 'api'
+              ? `the API engine voice ${answer.apiVoice} (model ${answer.apiVoiceModel})`
+              : 'the system engine'
         return [
-          `reading with: ${onDevice
-            ? `the on-device voice ${answer.onDeviceModel}`
-            : 'the system engine'}`,
+          `reading with: ${reading}`,
           `rate: ${answer.rateFollowsSystem ? 'whatever the system says' : `${answer.rate} x`}`
             + `, voice: ${answer.selectedVoice}`,
           answer.volume === undefined
@@ -3905,18 +4078,27 @@ const TOOLS = [
           answer.onDeviceVoices
             ? `on-device voices: ${answer.onDeviceVoices}`
             : `on-device voices: none imported under ${answer.voicesDirectory}`,
+          answer.apiVoices
+            ? `designed voices: ${answer.apiVoices}`
+            : `designed voices: none registered under ${answer.apiVoiceLibrary}`,
+          answer.apiVoiceLibraryNote ? `voice library note: ${answer.apiVoiceLibraryNote}` : null,
           `speaking right now: ${answer.speaking ? 'yes' : 'no'} (${answer.utterances} utterances so far)`,
-        ].join('\n')
+        ].filter(Boolean).join('\n')
       }
       if (args.op === 'speak') {
         if (!answer.spoken) return `the engine did not report finishing: ${answer.detail}`
-        // 自带那条要报出用的是哪个音色目录, 系统那条没有这一项
-        const withVoice = answer.readingWith === 'on-device' ? ` with the on-device voice ${answer.voice}` : ''
+        // 自带那条要报出用的是哪个音色目录; API 那条要报出音色与生效模型; 系统那条没有这一项
+        const withVoice = answer.readingWith === 'on-device'
+          ? ` with the on-device voice ${answer.voice}`
+          : answer.readingWith === 'api'
+            ? ` with voice ${answer.voice} on model ${answer.model}`
+            : ''
         // 点了音量却没落到这条引擎上时要把这句带上: 不然模型以为它调过了, 而人听到的还是原样
         const volumeNote = answer.volumeIgnored && answer.volumeNote ? `; ${answer.volumeNote}` : ''
+        const voiceNote = answer.voiceIgnored && answer.voiceNote ? `; ${answer.voiceNote}` : ''
         return `the engine took ${answer.characters} characters` + withVoice
           + (answer.pieces > 1 ? ` in ${answer.pieces} pieces` : '')
-          + ` and reported it finished${volumeNote}`
+          + ` and reported it finished${volumeNote}${voiceNote}`
       }
       if (args.op === 'stop') {
         return answer.stopped
@@ -4455,8 +4637,9 @@ const TOOLS = [
     + ' and a package whose capabilities the user has not allowed yet can do nothing; op=enable /'
     + ' op=disable turn one on or off (a companion plugin is an installed APK that Luwi'
     + ' binds, and a package that says where its APK lives brings it along as it installs);'
-    + ' op=uninstall asks before it deletes anything (keepData keeps the plugin\'s own'
-    + ' settings directory); op=audit prints the recent capability calls, refused ones included.'
+    + ' op=uninstall deletes the plugin completely - its directory, settings, audit log and'
+    + ' history all go with it, so there is no keep-data option; op=audit prints the recent'
+    + ' capability calls, refused ones included.'
     + ' **A plugin is somebody else\'s code**: tell the user what it wants before enabling it, and'
     + ' never turn on a capability they did not ask for. Capability names look like device.read,'
     + ' notify.post, session.post (that one lets it drive the conversation).',
@@ -4482,11 +4665,6 @@ const TOOLS = [
         type: 'string',
         description: 'For op=install: an https link to a .lwp instead of a local path. Only https,'
           + ' and a redirect to http aborts. Give either url or path, never both',
-      },
-      keepData: {
-        type: 'boolean',
-        description: 'For op=uninstall: keep the plugin\'s own settings directory. Defaults to'
-          + ' false; ask the user which they want',
       },
       lines: {
         type: 'integer',
@@ -4517,6 +4695,22 @@ async function call(method, params = {}) {
   return parsed.result
 }
 
+/**
+ * 一条通道请求最多等多久
+ *
+ * 应用侧一次 `speak` 的预算是 120 s (见 LwSpeak.MAX_WAIT_MS), 这里留一点余量即可。没有这条上限
+ * 时, 应用"连上却不回话也不关连接"会让这条 Promise 永不落地, 于是整轮工具调用卡死, 而日志里一个
+ * 字都没有 (2026-10-25 静态审计: 发现 1 / K4)
+ */
+const REQUEST_TIMEOUT_MS = 150_000
+
+/**
+ * `lw_wait_text` 两次读屏之间歇多久
+ *
+ * 一次读屏本身就要 det 一百多毫秒 + rec 每行十几毫秒, 再快也只是把通道占满而看不到新帧
+ */
+const WAIT_TEXT_POLL_MS = 350
+
 /** Send one line and resolve with the first line that comes back */
 function request(endpoint, line) {
   const split = endpoint.lastIndexOf(':')
@@ -4526,6 +4720,15 @@ function request(endpoint, line) {
     const socket = connect({ host, port })
     let buffer = ''
     let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      reject(new Error(
+        `the app did not answer ${endpoint} within ${REQUEST_TIMEOUT_MS}ms: it is either still`
+        + ' working, or the request never reached a handler',
+      ))
+    }, REQUEST_TIMEOUT_MS)
     socket.setEncoding('utf8')
     socket.on('connect', () => socket.write(`${line}\n`))
     socket.on('data', (chunk) => {
@@ -4533,19 +4736,75 @@ function request(endpoint, line) {
       const end = buffer.indexOf('\n')
       if (end < 0) return
       settled = true
+      clearTimeout(timer)
       socket.end()
       resolve(buffer.slice(0, end))
     })
     socket.on('error', (error) => {
       settled = true
+      clearTimeout(timer)
       reject(new Error(`could not reach the app's privileged channel at ${endpoint}: ${error.message}`))
     })
     socket.on('close', () => {
+      clearTimeout(timer)
       if (settled) return
       settled = true
       reject(new Error(`the app closed the channel at ${endpoint} without answering`))
     })
   })
+}
+
+/**
+ * 调用没有点名屏幕时, 该落在哪一块上
+ *
+ * 顺序就是"手里正拿着的那块": 预览里显示的那块 → 最新建的那块 → 手机自己的屏。**最后那一档是
+ * 退路而不是默认**: 有虚拟屏在手时绝不碰 display 0, 因为那是用户正拿着的手机, 一次误按就是把他
+ * 手上的界面按掉了。同一时刻只允许一块虚拟屏, 所以这里的"最新"实际就是那唯一一块
+ */
+async function defaultDisplayId() {
+  const list = await call('screen')
+  const screens = Array.isArray(list?.screens) ? list.screens : []
+  if (screens.length === 0) return 0
+  const shown = screens.find((screen) => screen.displayId === list?.selected)
+  if (shown) return shown.displayId
+  return screens.reduce(
+    (newest, screen) => (screen.displayId > newest ? screen.displayId : newest),
+    screens[0].displayId,
+  )
+}
+
+/**
+ * 工具定义的一层薄壳: 参数表里有 displayId 而调用时没给, 就自动补上手里那块屏
+ *
+ * **注入点只有这一处**: `registerTool` 是纯注册函数, 换一个同签名的本地函数包住它, 二十多个工具
+ * 就一起有了默认值, 也不会有人漏掉某一个。`simpleTool` 与自定义 execute 用的是同一个出口, 所以
+ * 两条路都覆盖到了
+ *
+ * `lw_events_*` 不补: 它们的 displayId 是"只看这一块", 省略的意思是**全看**, 补进去就等于把
+ * "看全部"静默改成"看这块"
+ */
+function defineTool(definition) {
+  const execute = definition?.execute
+  if (typeof execute !== 'function') return registerTool(definition)
+  if (WATCH_ALL_TOOLS.has(definition.name)) return registerTool(definition)
+  return registerTool({
+    ...definition,
+    async execute(args, context) {
+      return execute(await withDefaultDisplay(args, definition.parameters), context)
+    },
+  })
+}
+
+/**
+ * 给省略了 displayId 的调用补上默认屏
+ *
+ * 只补**参数表里真的有 displayId 的那几个工具**: 别的一律原样放过, 否则 `lw_screen` 这种自己
+ * 不认 displayId 的调用会凭空多出一个参数, 应用那一侧会因为"不认识的字段"拒掉整条请求
+ */
+async function withDefaultDisplay(args, parameters) {
+  if (!parameters || !Object.prototype.hasOwnProperty.call(parameters, 'displayId')) return args
+  if (args?.displayId !== undefined && args?.displayId !== null) return args
+  return { ...args, displayId: await defaultDisplayId() }
 }
 
 /** A tool's arguments as a request body, without the ones the caller left out or that are ours */
@@ -4739,6 +4998,7 @@ function formatScreens(result) {
         + `${screen.width}x${screen.height} at ${screen.dpi}dpi${shown}${paused}`,
       )
     }
+    lines.push('only one virtual screen may exist at a time: creating another closes this one first')
   }
   // 通道不通才说那句话: `lastError` 是**上一次**出错留下的, 通道已经连上时它还在, 念出来就是一句
   // 已经不成立的话 (2026-10-04 在模拟器上就是这么误导的)
@@ -4752,15 +5012,21 @@ function formatScreens(result) {
   return withJson(lines, result)
 }
 
-/** What was just made */
+/** What was just made, including the screen it had to close first */
 function formatCreated(result) {
   if (result.created !== true) {
     return `the device refused to create a screen: ${result.error || 'no reason reported'}`
   }
-  return withJson(
-    [`created "${result.label}" as displayId ${result.displayId}, and the phone is showing it`],
-    result,
-  )
+  const lines = [`created "${result.label}" as displayId ${result.displayId}, and the phone is showing it`]
+  if (typeof result.replaced === 'number' && result.replaced > 0) {
+    const label = result.replacedLabel ? ` ("${result.replacedLabel}")` : ''
+    lines.push(
+      'only one virtual screen may exist at a time, so the screen that was there' + label + ' was'
+      + ` closed first (displayId ${result.replaced}), together with whatever was running on it:`
+      + ' that id is dead now, use the new one',
+    )
+  }
+  return withJson(lines, result)
 }
 
 /** What a screen is now, after being given another shape */
@@ -5087,6 +5353,19 @@ function formatOcr(result) {
     + ' line with lw_tap(x=..., y=...) at its centre.',
   ]
   if (asleep) report.unshift(asleep)
+  const dropped = Number(result.dropped ?? 0)
+  if (dropped > 0) {
+    report.push(`${dropped} more box${dropped === 1 ? '' : 'es'} were dropped as icons: square,`
+      + ' small and low score - that is a picture, not a word')
+  }
+  if (Number(result.segmented ?? 0) > 0) {
+    report.push(`${result.segmented} line(s) were too wide for one recogniser pass and were read`
+      + ' in pieces, then joined - a character at a seam may be off')
+  }
+  if (result.debugImage) {
+    report.push(`debug overlay: ${result.debugImage}`
+      + (result.debugText ? ` (and ${result.debugText})` : ''))
+  }
   for (const line of lines) {
     const box = line.box ?? []
     report.push(`  [${box.join(',')}] ${JSON.stringify(line.text)}`
@@ -7982,7 +8261,12 @@ async function explorePrune(directory, extension, keep) {
   return extra
 }
 
-/** 省电探针: 桥上有 `wakeword op=status` 带 powerSave (见 §2 第 7 条); 探针抛错不算省电 */
+/**
+ * 省电探针: 桥上有 `wakeword op=status` 带 powerSave (见 §2 第 7 条)
+ *
+ * **现在只当读数** (2026-10-26): `startExplore` 读完不拒, `lw_explore op=status` 与设置页拿它说话;
+ * 探针抛错不算省电 (回 `known: false`, 只让调用方记一笔 `powerSaveUnknown`)
+ */
 async function explorePowerSave() {
   try {
     const status = await call('wakeword', { op: 'status' })
@@ -8149,8 +8433,13 @@ async function exploreStub() {
 /**
  * 开一场探索 (op=start 与收件箱那条 `source:"explore"` 都走它)
  *
- * 判据顺序照方案 §5.4(d), 一步都不许换: 已经有活着的 -> 省电 -> 建工作区 -> 定预设 -> 建会话 ->
- * 投开场正文 -> 落 run。**不传 workspaceId 与 cwd 两个** (二选一, 与 [openBallConversation] 同形)
+ * 判据顺序: 已经有活着的 -> 建工作区 -> 定预设 -> 建会话 -> 投开场正文 -> 落 run。
+ *
+ * **省电不再是一道闸** (2026-10-26 主人: "探索功能当前被省电模式阻止启动，看能不能忽略省电"): 探针
+ * 仍然要读 (它是 `lw_explore op=status` 与设置页的读数), 但读到省电也不拒 —— 探索是按主人自己定的时刻
+ * 干活, 省电那两档开关管的是麦克风那一笔账。读不到只记 `powerSaveUnknown`
+ *
+ * **不传 workspaceId 与 cwd 两个** (二选一, 与 [openBallConversation] 同形)
  */
 async function startExplore(ctx, options = {}) {
   const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'tool'
@@ -8166,16 +8455,8 @@ async function startExplore(ctx, options = {}) {
   }
   // 上一场到点了而摘要还没交: 先按桩收掉, 再开这一场 (一场只允许一场)
   if (exploreRun.session !== null && exploreRun.over === true) await exploreStub()
+  // 省电只当读数: 读到什么都不拒, 只把"探针抛错过"记下来
   const power = await explorePowerSave()
-  if (power.known && power.powerSave === true) {
-    exploreState.refusals += 1
-    exploreState.lastRefusal = { at: Date.now(), why: 'powerSave' }
-    return {
-      started: false,
-      refused: 'powerSave',
-      reason: 'the phone is in power save mode right now, so an exploration is not opened',
-    }
-  }
   if (!power.known) exploreState.powerSaveUnknown = true
   const controller = ctx?.get?.('sessionController')
   if (!controller) throw new Error('this profile has no session controller, so an exploration has nowhere to go')

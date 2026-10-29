@@ -29,10 +29,13 @@
 | `check-image-edit.mjs` | p 图那一条的判据表: `lw_image` 的两个 op 与 `.mjs` / 桥两侧对得上 (ref 那条链与 `edit_image` 的 `source_image` 同一份形状) / 生图插件与 `photo-edit` 技能都在随包表里 / 那两处清单与 `PluginOverlay` 那一行三边一致 / 面板要能改的那一行不在覆盖层两张表里, 而且盘上写的是 `file://` 形态 |
 | `check-automations.mjs` | 自动指令那一条的判据表: `lw_automation` 的 op 名单两侧一致 (删除只在桥上有) / 六个 `when.kind` 与两种 `then.kind` 在插件说明里逐个念到 / 冷却与上限那两个默认值两侧一致 / 两个来源记号 (`automation` 与 `automation-setup`) 都在且插件对前一个有那两处特别处理 / 设置页引用的字符串键两份 `strings.xml` 都有而且顺序一致 |
 | `check-wake-words.mjs` | 唤醒词表算法的两份实现不许漂开 (`WakeWordWords.kt` vs 插件里的 `wakeWordLine`) |
+| `check-model-files.mjs` | 两个模型的下载表不许漂开 (2026-10-28): 唤醒词 4 个文件 / 语音 2 个文件 + VAD 的 name·bytes·sha256 与镜像地址逐项对 `host-plugin/index.mjs`; 每次冷启动提醒一次、最多 3 次 (到数后不再检测)、下载编排、`AppNav` 与设置页入口、两份文案都在 |
 | `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话 |
 | `check-shot-params.mjs` | 取景与截图那几个数字的**唯一口径** (`docs/shot-params.md`) 与插件 / Kotlin / 提示词 / 技能 / 预置五处逐项对照 |
 | `check-video-gate.mjs` | 视频模式那两道闸 (屏幕类工具一律拒 / 相机同时只许一场会话用) 的判据表, 临时 `DSH_HOME` 自己搭 |
-| `check-explore.mjs` | 探索那一档的判据表 (2.7.8 批次 7): 预设那一段的 19 行 / persona 那三条红线与五节摘要 / 预算常数与 `exploreBudget` 真值表 / 工作区与预设回退 / 省电闸 / 数步只数不拒 / `lw_explore` 的工具面 / 摘要的文件形状 (抽那几段纯函数真跑) / 候选卡已下线 |
+| `check-single-screen.mjs` | 虚拟屏单槽那条硬限制的判据表 (2026-10-28): 特权侧建屏前先放已有的 / 应用侧先关旧再建 / 桥回被替换的 displayId / 插件把它写进描述与答案 / `displayId` 可省略但事件订阅不补 / 请求有超时 / `lw_wait_text` 在视频模式被拒 |
+| `check-explore.mjs` | 探索那一档的判据表 (2.7.8 批次 7): 预设那一段的 19 行 / persona 那三条红线与五节摘要 / 预算常数与 `exploreBudget` 真值表 / 工作区与预设回退 / 省电只当读数 (2026-10-26 起不再拦) / 数步只数不拒 / `lw_explore` 的工具面 / 摘要的文件形状 (抽那几段纯函数真跑) / 候选卡已下线 |
+| `check-host-persistence.mjs` | dsh 后台持久化那一条的判据表 (2026-10-26; 2026-10-28 扩): renderer 优先级钉在不可见也不降 / renderer 死了自己换一块并有次数上限 / `MainActivity.onResume` 自愈 / 电池白名单只有一份实现且两处入口 / 酒馆缓存带 token 且 token 变了只重载一次 / 酒馆 renderer 也钉住并自己重建 / 浮标输入条收起再展开只重新挂上 / 那份文案两份 strings 都有 |
 | `check-bare-percent.py` | 扫 `strings.xml` 里的裸 `%` (`Resources.getString` 会把它当转换符, 主线程崩) |
 | `check-docx-preview.mjs` | Office 预览那一包 (2.7.9 第 6 条 T8/T9) 的判据表: 包形状 / 装载 id 与包名一字不差 / `extension` 档与那两条**末尾不能带 `$`** 的模式 / 读字节走 `remote.workspaceFiles` / 渲染进 `sandbox` iframe / 10 MB 闸与三种失败 / `lib/client.js` 是打包产物 / 两张覆盖层表各一行且不在 `PluginRows` |
 | `check-tools.mjs` | 扫本目录自己: 命名 / 用法段 / 根目录落位 (就是本文那三条约定) |
@@ -115,9 +118,12 @@ node tools/check-host-plugin.mjs
 node tools/check-voice-commands.mjs
 node tools/check-auto-shot.mjs
 node tools/check-wake-words.mjs
+node tools/check-model-files.mjs
 node tools/check-shot-params.mjs
 node tools/check-video-gate.mjs
 node tools/check-explore.mjs
+node tools/check-host-persistence.mjs
+node tools/check-web-compat.mjs
 python tools/check-bare-percent.py
 node tools/check-tools.mjs
 ```

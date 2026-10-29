@@ -29,14 +29,14 @@ internal object BallMinutes {
     /**
      * 休闲那一档 (半隐) 的不透明度
      *
-     * **就是以前那个数** (0.35): 从前它是"半透明开着 (0.7) 又半藏着 (×0.5)"叠出来的值, 也就是主人
-     * 最常看到的那颗休闲球 —— 2026-10-17 他点名"透明度用之前的"并直接给了这个数。现在半隐独立成
-     * 一档, 那个 0.35 就是它自己的值, 不再靠两个乘数凑
+     * **2026-10-25 主人: "半隐改为一半透明度"** —— 所以它是 0.5 (一半), 不再是那个 0.35。
+     * 0.35 的来由记在这儿: 从前它是"半透明开着 (0.7) 又半藏着 (×0.5)"叠出来的值, 2026-10-17 半隐
+     * 独立成一档时沿用了它; 现在按主人的口径抬到一半
      *
-     * 与半藏那一档**没有关系**: 半藏只挪位置, 不再顺手把球压暗 —— 关掉半隐时, 半藏就是一颗
-     * **全不透明**的球 (同一批主人那句"当半透明关闭时, 半隐藏可以不透明显示")
+     * 与半藏那一档**没有关系**: 半藏只挪位置, 不顺手把球压暗 —— 关掉半隐时, 半藏就是一颗
+     * **全不透明**的球 (2026-10-17 主人: "当半透明关闭时, 半隐藏可以不透明显示")
      */
-    const val TRANSLUCENT_ALPHA = 0.35f
+    const val TRANSLUCENT_ALPHA = 0.5f
 
     /**
      * 球这一刻的不透明度
@@ -440,18 +440,26 @@ internal object BallTouch {
         // 麦克风开着: 点一下收回来 (原来判的是 `phase == VOICE`, 而那个档位现在也会因为"正在想"而成立)
         listening -> BallAct.HUSH
         // 剩下两档都是"点一下开语音": 空闲时那是"点两次才说话"的第一下 (见 [opensVoiceNow]),
-        // 而**正在想时那一下等过双击窗口就当场开** (见 [THINKING_TAP_MS] 与 OverlayService.tapAction)
+        // 而**正在想时那一下等过双击窗口就当场开** (见 [THINKING_TAP_MS] 与 OverlayService.tapAction);
+        // 半隐与半藏都关着时没有"召出"这一步, 第一下就开 (同样在 [opensVoiceNow] 里判)
         else -> BallAct.LISTEN
     }
 
     /**
      * 这一下 [BallAct.LISTEN] 该不该**当场**开语音
      *
-     * 两条: 刚被召出来那一下之后的第一击 (主人点名的"点两次才说话"), 或者**回复框在屏上且有回复**
-     * —— 那时人已经在那块框上说话了, 再要他点两下是多余的 (2026-10-06 那条例外: "有回复窗时也可以
-     * 点击小球进行语音输入")。判据是纯函数 (见 BallTest), 调用方只按它的答案走
+     * 三条:
+     * - **球根本收不着** (半隐与半藏两个开关都关着): 它一直全亮全露, 没有"召出"这一步 —— 主人
+     *   2026-10-25: "当半隐和半藏都关闭时, 则只用点一次即可语音输入, 不用再点一次唤醒"
+     * - 刚被召出来那一下之后的第一击 (主人点名的"点两次才说话")
+     * - **回复框在屏上且有回复** —— 那时人已经在那块框上说话了, 再要他点两下是多余的 (2026-10-06
+     *   那条例外: "有回复窗时也可以点击小球进行语音输入")
+     *
+     * 判据是纯函数 (见 BallTest), 调用方只按它的答案走
+     * @param canRest 球闲下来会不会收着 (半隐 / 半藏任一开着): false = 那一击当场开, 不必先召出
      */
-    fun opensVoiceNow(summonFresh: Boolean, replyBox: Boolean): Boolean = replyBox || summonFresh
+    fun opensVoiceNow(summonFresh: Boolean, replyBox: Boolean, canRest: Boolean = true): Boolean =
+        !canRest || replyBox || summonFresh
 }
 
 /**
@@ -477,8 +485,8 @@ internal object BallCommit {
     /**
      * 这一下要等多久才提交; **0 = 当场做掉**
      *
-     * 三个入参与 [BallTouch.act] 和 [BallTouch.opensVoiceNow] 共用, 只是提前问一次"这一下会是开麦
-     * 吗" —— 答案在窗里不会变 (那一支只看状态词与两笔框账), 所以可以提前取
+     * 几个入参与 [BallTouch.act] 和 [BallTouch.opensVoiceNow] 共用 (含 [canRest]), 只是提前问一次
+     * "这一下会是开麦吗" —— 答案在窗里不会变 (那一支只看状态词、两笔框账与那两个开关), 所以可以提前取
      *
      * 两个等待长度不是随便挑的:
      *
@@ -486,18 +494,21 @@ internal object BallCommit {
      *   原封不动地留用 —— 它比确认窗还晚, 于是"想打断"永远先被认出来
      * - 其余开麦只等 [BallFeel.commitWindowMs]: 过了这一个窗口就不会再有双击/三击了, 再多等只是
      *   白让主人等 (那个数的理由写在 [BallFeel.commitWindowMs] 上)
+     *
+     * @param canRest 球闲下来会不会收着 (半隐 / 半藏任一开着), 原样交给 [BallTouch.opensVoiceNow]
      */
     fun deferMs(
         act: BallAct,
         word: BallWord?,
         summonFresh: Boolean,
         replyBox: Boolean,
+        canRest: Boolean = true,
         feel: BallFeel = BallFeel.GUARD,
     ): Long = when {
         act != BallAct.LISTEN -> 0L
         word == BallWord.THINKING -> feel.thinkingTapMs()
         word == BallWord.FAILED -> feel.commitWindowMs
-        BallTouch.opensVoiceNow(summonFresh, replyBox) -> feel.commitWindowMs
+        BallTouch.opensVoiceNow(summonFresh, replyBox, canRest) -> feel.commitWindowMs
         else -> 0L
     }
 }
@@ -759,7 +770,7 @@ internal object BallRest {
  * [BallRest.wait] 的答案: 要不要半藏、要不要半隐, 以及这一拍为什么这么判
  *
  * 两个状态**各归各的** (2026-10-17 主人: 叫法定成「半隐」= 淡下去、「半藏」= 挪一半到屏幕外):
- * [translucent] 是半隐 (整颗球压到 [OverlayService.TRANSLUCENT_ALPHA]), [peek] 是半藏 (贴边收起
+ * [translucent] 是半隐 (整颗球压到 [BallMinutes.TRANSLUCENT_ALPHA]), [peek] 是半藏 (贴边收起
  * 一半)。它们**同一个 5 秒到点** (见 [BallMinutes.PEEK_IDLE_MS]), 而两个开关在调用处各自 `&&`
  * 进来, 所以这里不需要知道开关 —— 它只回答"这一刻那个状态成不成立"
  */

@@ -187,5 +187,78 @@ class PluginV2Test {
             )
         }
     }
+
+    /**
+     * 一个状态可以给一组动作 (2026-10-25 主人: "一个状态里加入多个动作")
+     *
+     * 老写法 (一个对象) 与新写法 (一组对象) 都要能解, 而且解出来的顺序就是演的顺序 —— 那一个顺序
+     * 只能由清单决定, 所以这里连下标一起钉住
+     */
+    @Test
+    fun ballThemeTakesSeveralActionsPerState() {
+        val single = BallTheme.parse(
+            """{"name":"一支","frames":{"idle":{"dir":"art/idle","count":12,"fps":12}}}""",
+        )
+        // 老形状解出来是"只有一支的一档" —— 不是 `null`, 也不是要改写调用方
+        assertEquals(listOf("art/idle"), single.frames.getValue("idle").map { it.dir })
+        assertEquals(1, single.frames.getValue("idle").size)
+
+        val many = BallTheme.parse(
+            """
+            {"name":"两支",
+             "frames":{"idle":[{"dir":"art/idle/1","count":120,"fps":12},
+                               {"dir":"art/idle/2","count":36,"fps":10}]}}
+            """.trimIndent(),
+        )
+        val actions = many.frames.getValue("idle")
+        assertEquals(listOf("art/idle/1", "art/idle/2"), actions.map { it.dir })
+        assertEquals(listOf(120, 36), actions.map { it.count })
+        assertEquals(listOf(12, 10), actions.map { it.fps })
+        // 同一份清单还要能被"解成文件列表"那一条吃下去 (帧名的拼法没变)
+        assertEquals("frame-119.png", actions[0].frameName(119))
+        assertEquals(120, actions[0].frameNames().size)
+    }
+
+    /** 支数上限与"空数组"这两条: 手滑写坏了要在读的那一刻说清, 不能悄悄少演几支 */
+    @Test
+    fun ballThemeBoundsTheActionsPerState() {
+        val one = """{"dir":"art/x","count":2,"fps":10}"""
+        val tooMany = (0..BallTheme.MAX_ACTIONS_PER_STATE).joinToString(",") { one }
+        assertThrows(IllegalArgumentException::class.java) {
+            BallTheme.parse("""{"name":"太多","frames":{"idle":[$tooMany]}}""")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            BallTheme.parse("""{"name":"空的","frames":{"idle":[]}}""")
+        }
+        // 组里任何一支的张数越界, 整份主题都要拒 (那一支演到一半没帧比"少一支"更难查)
+        assertThrows(IllegalArgumentException::class.java) {
+            BallTheme.parse(
+                """{"name":"坏的一支","frames":{"idle":[{"dir":"art/a","count":2,"fps":10},"""
+                    + """{"dir":"art/b","count":${BallTheme.MAX_FRAMES + 1},"fps":10}]}}""",
+            )
+        }
+    }
+
+    /**
+     * 起头那一支是抽的、之后按顺序轮 —— 两条都是纯算术, 所以能在 JVM 上钉
+     *
+     * 抽签只决定"从哪儿起头": 不抽的话短会话里永远只看得到第一支, 等于白加; 而轮换要是也抽, 同一支
+     * 可能连着演三圈, 主人会觉得"另外两支坏了"
+     */
+    @Test
+    fun ballThemePicksAndRotatesActions() {
+        assertEquals(0, BallTheme.startAction(0))
+        assertEquals(0, BallTheme.startAction(1))
+        val draws = (0..200).map { BallTheme.startAction(3) }
+        assertTrue(draws.all { it in 0..2 })
+        assertEquals(setOf(0, 1, 2), draws.toSet())
+
+        assertEquals(0, BallTheme.nextAction(0, 1))
+        assertEquals(1, BallTheme.nextAction(0, 3))
+        assertEquals(2, BallTheme.nextAction(1, 3))
+        assertEquals(0, BallTheme.nextAction(2, 3))
+        // 越界或负数也不能抛: 那是清单刚被换掉那一拍的正常竞争
+        assertEquals(0, BallTheme.nextAction(7, 3))
+    }
 }
 

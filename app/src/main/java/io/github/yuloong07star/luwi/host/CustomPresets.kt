@@ -2,6 +2,7 @@ package io.github.yuloong07star.luwi.host
 
 import android.content.Context
 import android.util.Log
+import io.github.yuloong07star.luwi.ui.LuwiTavern
 import java.io.File
 import java.nio.file.Files
 import kotlinx.serialization.json.Json
@@ -71,6 +72,10 @@ internal object CustomPresets {
 
     /** 声明各自那个 loader 行 id: 幂等判据就是"patch 里有没有这一行" */
     private const val ROW_EXPLORE = "preset-explore"
+
+    /** 酒馆那一份 (2026-10-27): persona 写酒馆协议, 发言走 `tavern_say` */
+    private const val ROW_TAVERN = "preset-tavern"
+
     private const val ROW_REGISTRY = "agent-preset-registry"
 
     /**
@@ -81,7 +86,7 @@ internal object CustomPresets {
      */
     val PRESET_ROWS: List<Pair<String, String>> = listOf(
         ROW_EXPLORE to "explore",
-    )
+    ) + if (LuwiTavern.enabled) listOf(ROW_TAVERN to "tavern") else emptyList()
 
     /**
      * **已经下线的那两条**: 手机模式 (`preset-mobile-use`) 与视频模式 (`preset-video`)
@@ -91,10 +96,40 @@ internal object CustomPresets {
      * 东西的第二份。**这里要把它们从老机器的 profile patch 里真正删掉** (只停止随包发的话, 已经装过的
      * 机器里那两段声明还在, 选择器里就永远看得见), 见 [withoutRow]
      */
-    val LEGACY_ROWS: List<String> = listOf("preset-mobile-use", "preset-video")
+    val LEGACY_ROWS: List<String> = listOf("preset-mobile-use", "preset-video") +
+        if (LuwiTavern.enabled) emptyList() else listOf(ROW_TAVERN)
 
     /** `link:` 那一条: 相对 profile 目录 (`profiles/web`) 算, 落到的就是耐久副本 [durablePackage] */
     private const val LINK = "link:../../../plugins/$PACKAGE"
+
+    /** 酒馆那个包: 只为了让预设子行 `luwi-tavern/preset/tavern-tools.mjs` 从 profile 解析得到 */
+    private const val TAVERN_PACKAGE = "luwi-tavern"
+
+    /**
+     * 酒馆那个包以 host 树里那一份为准: 它本来就是随树发的 (`pack-host.mjs` 拷进 node_modules),
+     * 不需要另做耐久副本 —— 这里的值只是 profile 的登记表, 设备上不跑 pnpm, 真正起作用的是那条 link
+     */
+    private const val TAVERN_LINK = "link:../../../host/node_modules/$TAVERN_PACKAGE"
+
+    /**
+     * 要挂进 profile 的包: 名字 / 登记表里那一行 / 要不要进 `dsh.profile.bundles`
+     *
+     * **bundle 那一栏只给真 bundle**: `dsh-custom-mode` 自带 `dsh.bundle.patch`, 而 `luwi-tavern` 是
+     * 一条普通插件行 (由 `PluginOverlay` 按绝对路径挂), 写进 bundles 会让 boot 去找它并不存在的
+     * bundle patch
+     *
+     * 为什么要第二条: 预设子行的 `name` 按 **profile 目录** 解析 (`qq-tool-restrict.mjs` 那条实测),
+     * 所以 `luwi-tavern/preset/tavern-tools.mjs` 只有 profile 里能解析到 `luwi-tavern` 才装得上
+     */
+    data class ProfilePackage(val name: String, val spec: String, val bundle: Boolean)
+
+    val PROFILE_PACKAGES: List<ProfilePackage> = listOf(
+        ProfilePackage(PACKAGE, LINK, bundle = true),
+    ) + if (LuwiTavern.enabled) {
+        listOf(ProfilePackage(TAVERN_PACKAGE, TAVERN_LINK, bundle = false))
+    } else {
+        emptyList()
+    }
 
     /**
      * dsh 自己那份 `initProfile` 写下的 profile patch 模板
@@ -176,8 +211,15 @@ internal object CustomPresets {
             .onFailure { Log.w(TAG, "the pnpm workspace file could not be written", it) }
         runCatching { ensurePatch(context, profile) }
             .onFailure { Log.w(TAG, "the preset declarations could not be appended", it) }
-        runCatching { ensureLink(context, source) }
-            .onFailure { Log.w(TAG, "the profile link to $PACKAGE could not be made", it) }
+        for (entry in PROFILE_PACKAGES) {
+            val packageSource = hostPackageOf(context, entry.name)
+            if (!packageSource.isDirectory) {
+                Log.w(TAG, "the host tree carries no ${entry.name}, so its profile link cannot be made")
+                continue
+            }
+            runCatching { ensureLink(context, entry, packageSource) }
+                .onFailure { Log.w(TAG, "the profile link to ${entry.name} could not be made", it) }
+        }
     }
 
     /** 给设置页之外那几处读数用: 一件一行地说"这一份齐了没有" */
@@ -205,6 +247,10 @@ internal object CustomPresets {
     /* ── 落位那几步 ──────────────────────────────────────────────────────── */
 
     private fun hostPackage(context: Context): File = File(File(DshHost.hostRoot(context), "node_modules"), PACKAGE)
+
+    /** host 树里任意一个包的位置 (profile link 的来源) */
+    private fun hostPackageOf(context: Context, name: String): File =
+        File(File(DshHost.hostRoot(context), "node_modules"), name)
 
     private fun durablePackage(context: Context): File = File(File(context.filesDir, "plugins"), PACKAGE)
 
@@ -318,16 +364,19 @@ internal object CustomPresets {
     }
 
     /**
-     * `profiles/node_modules/dsh-custom-mode` → host 树里那一份
+     * `profiles/node_modules/<包名>` → host 树里那一份
      *
      * 手工装那一次记下的一条: **loader 解析 bundle 目录走"安装锚点 + profile 锚点"两条, 而 import
      * 那一行是相对 profile 的** —— 光把包放进 host 树, 设备上的表现就是 `failed to import`。所以这条
      * 链接是必需的; 建不出符号链接的文件系统 (FUSE 之类) 上退回拷一份
+     *
+     * 预设子行那条 (`luwi-tavern/preset/tavern-tools.mjs`) 也是同一个道理: 它的 `name` 按 profile
+     * 目录解析, 所以 `luwi-tavern` 必须能从 profile 解析到
      */
-    private fun ensureLink(context: Context, source: File) {
+    private fun ensureLink(context: Context, entry: ProfilePackage, source: File) {
         val nodes = File(profilesRoot(context), "node_modules")
         nodes.mkdirs()
-        val link = File(nodes, PACKAGE)
+        val link = File(nodes, entry.name)
         if (link.exists() && File(link, "package.json").isFile) return
         // 断链也要能删掉: `File.exists()` 跟着链接走, 所以这里用不跟随的那一个 API
         runCatching { Files.deleteIfExists(link.toPath()) }
@@ -338,7 +387,7 @@ internal object CustomPresets {
             return
         }
         copyTree(source, link)
-        Log.i(TAG, "symlinks are not available here, so $PACKAGE was copied to ${link.absolutePath}")
+        Log.i(TAG, "symlinks are not available here, so ${entry.name} was copied to ${link.absolutePath}")
     }
 
     /* ── 纯函数: 那几段算术都在这儿, 判据在 CustomPresetsTest ───────────── */
@@ -418,10 +467,13 @@ internal object CustomPresets {
      * profile 那份 `package.json` 该长什么样
      *
      * [existing] 为空 (profile 还不存在) 时就按 dsh 的 web 模板起一份 —— 名字、`private`、两个出厂
-     * bundle 都与 `dsh-app-boot` 那一份一致, 只是多了我们的包。已有的话只加两处:
-     * `dependencies.dsh-custom-mode` 与 `dsh.profile.bundles` 里的那一名
+     * bundle 都与 `dsh-app-boot` 那一份一致, 只是多了我们那几个包。已有的话只加两处:
+     * `dependencies` 里那几行与 `dsh.profile.bundles` 里那几个真 bundle
      */
-    fun withProfileManifest(existing: String?): String {
+    fun withProfileManifest(
+        existing: String?,
+        packages: List<ProfilePackage> = PROFILE_PACKAGES,
+    ): String {
         val root = if (existing.isNullOrBlank()) {
             freshProfileTemplate()
         } else {
@@ -430,14 +482,16 @@ internal object CustomPresets {
         // 依赖与 bundle 两张表都按"已有的原样留着, 我们的追加在后面"来合 (键已经在时替换在原来的位置)
         val dependencies = linkedMapOf<String, JsonElement>()
         (root["dependencies"] as? JsonObject)?.forEach { (key, value) -> dependencies[key] = value }
-        dependencies[PACKAGE] = JsonPrimitive(LINK)
+        for (entry in packages) dependencies[entry.name] = JsonPrimitive(entry.spec)
         val dsh = root["dsh"] as? JsonObject
         val profile = dsh?.get("profile") as? JsonObject
         val bundles = (profile?.get("bundles") as? JsonArray)
             ?.mapNotNull { it.jsonPrimitive.contentOrNull }
             ?.toMutableList()
             ?: mutableListOf()
-        if (PACKAGE !in bundles) bundles += PACKAGE
+        for (entry in packages) {
+            if (entry.bundle && entry.name !in bundles) bundles += entry.name
+        }
         val profileNext = linkedMapOf<String, JsonElement>()
         profile?.forEach { (key, value) -> if (key != "bundles") profileNext[key] = value }
         profileNext["bundles"] = JsonArray(bundles.map { JsonPrimitive(it) })

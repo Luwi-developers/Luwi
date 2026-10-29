@@ -22,9 +22,9 @@ import android.view.Surface
  * at all. Detaching is a first-class state, because the surface dies with the app's window while
  * the screen is meant to outlive it
  *
- * More than one screen can exist at a time, so every call names the one it means, and the name a
- * screen is created with has to be unique as well: it is the only thing that ties a screen to the
- * compositor's own id, which is what a screenshot is asked for by
+ * 同一时刻只允许一块 (2026-10-28 的硬限制), 所以调用里那个 displayId 永远只指这一块; 名字仍然必须
+ * 唯一, 因为它是屏与合成器自己的 id 之间唯一的纽带 —— 不过取帧已经不看它了, 帧在 app 进程的
+ * [FrameCache] 里, 这个类只负责把屏建出来、改形状、交还
  */
 internal class LwVirtualDisplay(private val context: Context?) {
 
@@ -36,10 +36,16 @@ internal class LwVirtualDisplay(private val context: Context?) {
     /** Counts up rather than following the map's size, so a name is never handed out twice */
     private var created = 0
 
-    /** Build one more screen over the given surface, and answer with its display id */
+    /** Build the one screen over the given surface, and answer with its display id */
     fun create(width: Int, height: Int, dpi: Int, surface: Surface?): Int {
         val displays = manager()
             ?: throw IllegalStateException("the privileged process has no context to ask for displays")
+        // 同一时刻只允许一块虚拟屏 (2026-10-28 的硬限制): 这里是最后一道闸, 应用那一侧建屏前
+        // 已经先关过一遍, 但任何绕过它的调用方到这里也得先交出旧的
+        if (screens.isNotEmpty()) {
+            Log.i(TAG, "one screen at a time, so the ${screens.size} already hosted is going first")
+            releaseAll()
+        }
         created += 1
         val name = name(created)
         val created = try {
@@ -101,9 +107,6 @@ internal class LwVirtualDisplay(private val context: Context?) {
     fun releaseAll() {
         screens.keys.toList().forEach { release(it) }
     }
-
-    /** What the compositor calls the screen with this id, for a capture that has to find it again */
-    fun nameOf(displayId: Int): String? = screens[displayId]?.name
 
     /**
      * A hardware display, or the system refuses it

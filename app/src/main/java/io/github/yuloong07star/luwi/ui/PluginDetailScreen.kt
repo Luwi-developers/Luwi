@@ -54,7 +54,9 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
  * 插件那一页 (2.7.8 批次 6, 主人 2026-10-17: "点击插件可进入二级界面")
  *
  * 原来点列表里那一条弹出的是一个 `OverlayDialog`, 而现在它是一页 —— 因为要放的东西长过一屏:
- * 状态、**插件自己的设置** (协议 `ui.settings`, 这一批才接通)、能力、审计、停用与两种卸载
+ * 状态、**插件自己的设置** (协议 `ui.settings`, 这一批才接通)、能力、审计、停用与卸载
+ *
+ * **卸载只有一颗键** (2026-10-28 主人): 数据、审计与历史记录一起删, 不再给"留数据"的第二个选择
  *
  * **不在这一页弹 `OverlayDialog`**: 这一层是 `navigator.push` 出来的, 而 Miuix 的 OverlayDialog 在
  * 这一层挂不上窗口 (2026-10-17 在技能那两页上量到的, 现象是"点了什么都没发生")。所以这一页只有
@@ -226,7 +228,7 @@ fun PluginDetailScreen(id: String) {
                 )
             }
 
-            // ⑦ 卸载那两颗: 一颗连数据一起删, 一颗留着数据 (主人点名要"卸载要包括数据")
+            // ⑦ 卸载: 只有一颗键 —— 插件的数据、审计与历史记录一起删, 不再给"留数据"的第二个选择
             item {
                 TextButton(
                     text = stringResource(R.string.settings_plugin_uninstall),
@@ -234,7 +236,7 @@ fun PluginDetailScreen(id: String) {
                         haptic.confirm()
                         scope.launch {
                             val said = withContext(Dispatchers.IO) {
-                                PluginManager.uninstall(context, id, keepData = false)
+                                PluginManager.uninstall(context, id)
                             }
                             message = said
                             revision += 1
@@ -242,22 +244,6 @@ fun PluginDetailScreen(id: String) {
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.textButtonColorsPrimary(),
-                )
-            }
-            item {
-                TextButton(
-                    text = stringResource(R.string.settings_plugin_uninstall_keep),
-                    onClick = {
-                        haptic.confirm()
-                        scope.launch {
-                            val said = withContext(Dispatchers.IO) {
-                                PluginManager.uninstall(context, id, keepData = true)
-                            }
-                            message = said
-                            revision += 1
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }

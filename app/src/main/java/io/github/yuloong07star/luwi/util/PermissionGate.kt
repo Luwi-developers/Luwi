@@ -74,6 +74,11 @@ object PermissionGate {
      * 用户唯一看得见的东西, 所以宁可退到一个一定存在、而且能看权限状态的地方
      */
     fun openSettings(context: Context, capability: Capability): Boolean {
+        // 忽略电池优化 (2026-10-26): 系统有一个**直接弹确认框**的入口, 比名单那一页少点两下 ——
+        // 这条能力的 settings 本来就是名单页, 所以这里只是"先试更好的那一条", 它自己会回退
+        if (capability.settings?.action == Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS) {
+            if (BatteryWhitelist.request(context) != null) return true
+        }
         capability.settings?.let { if (start(context, it)) return true }
         return start(context, appDetails(capability.context))
     }

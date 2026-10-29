@@ -9,10 +9,6 @@ import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.channel.PrivilegedBridge
 import io.github.yuloong07star.luwi.workspace.Workspace
 import java.io.File
-import java.io.IOException
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.util.concurrent.TimeUnit
 
 /**
@@ -54,6 +50,9 @@ object DshHost {
 
     /** Host output lines kept for the status screen */
     private const val LOG_LINES = 300
+
+    /** Where the packed host tree keeps the entry script, relative to [hostRoot] */
+    private const val HOST_ENTRY = "node_modules/@deepseek-ai/dsh/lib/bin.js"
 
     /** The readiness line dsh prints once the tree settled, LAN suffix and all */
     private val READY = Regex("""dsh web: (http://\S+)""")
@@ -100,11 +99,22 @@ object DshHost {
             cancelled = false
         }
         val application = context.applicationContext
-        Thread({ begin(application) }, "dsh-host-start").apply { isDaemon = true }.start()
+        Thread({
+            try {
+                begin(application)
+            } finally {
+                // 这一格盖住**整段**起的过程, 不是只盖到解压完: 从解压到 `process` 落位之间
+                // (探口 / 写覆盖层 / spawn) 还没有人能证明"已经在起了", 第二个 `start` 就会再 spawn
+                // 一个 —— 先起的占住 3080, 后起的死在 EADDRINUSE, 而它退出时那条 watch 把 `process`
+                // 与 status 一起踩掉, 于是**活着的 host 没人认领而界面写着启动失败** (2026-10-27 的
+                // 那两份日志就是这么来的)
+                synchronized(lock) { starting = false }
+            }
+        }, "dsh-host-start").apply { isDaemon = true }.start()
     }
 
     /**
-     * 那个监听口现在有没有人在听
+     * 那个监听口现在有没有人在听 (判据与地址的选择见 [HostPort])
      *
      * **为什么需要这一步** (2026-10-06 真机上抓到的): app 只知道**自己这个进程**spawn 过的那个
      * `Process` 对象, 而 host 是子进程 —— app 被强停/被杀之后子进程可能活着变成孤儿 (Android 不会
@@ -117,17 +127,19 @@ object DshHost {
      *
      * 表现是"球能点、界面打得开, 但**没有一个工具在**、语音发出去也没有回音" —— 因为插件一个都没挂上。
      * 所以起之前先探一次: 有人在听就说明**已经有一个 host 活着** (它只可能是我们自己上一次留下的),
-     * 那就别起第二个 —— 让端口留给它, 而它的插件本来就是好的
+     * 那就别起第二个 —— 让端口留给它, 而它的插件本来就是好的。**收不掉它也没有令牌 URL 可给**:
+     * 那个带令牌的 URL 只打印给启动它的那一份 app 进程, 而 WebView 这边靠的是它上一次换回来的
+     * cookie (`dsh-auth-*`, 30 天), 所以"留着"这条路在 WebView 里是通的
+     *
+     * **2026-10-27 才查出这一问原来问错了地址**: 探针拿 `InetAddress.getLoopbackAddress()` 当地址,
+     * 而这台机器上它指的是 `::1`, host 绑的却是 `127.0.0.1` —— 于是它永远答"空着", 孤儿一次都没被
+     * 认出来, 每开一次应用就多一个死在 EADDRINUSE 的 host, 界面上写着「host 启动失败」而**活着的
+     * 那个 host 一直在 3080 上答话**
      */
-    private fun portIsTaken(): Boolean = try {
-        ServerSocket().use { probe ->
-            probe.reuseAddress = false
-            probe.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), PORT), 1)
-        }
-        false
-    } catch (problem: IOException) {
-        Log.i(TAG, "port $PORT is already taken, so a host is up: ${problem.message}")
-        true
+    private fun portIsTaken(): Boolean {
+        val taken = HostPort.answersOn(PORT)
+        if (taken) Log.i(TAG, "port $PORT answers, so the host left by the last session is kept")
+        return taken
     }
 
     /** Stop the host and wait briefly for the process to go away */
@@ -180,10 +192,7 @@ object DshHost {
         val problem = HostInstaller.ensure(application) { done, total ->
             status = HostStatus.Installing(done, total)
         }
-        val abandoned = synchronized(lock) {
-            starting = false
-            cancelled
-        }
+        val abandoned = synchronized(lock) { cancelled }
         if (abandoned) return
         if (problem != null) return fail(problem)
         val root = Workspace.resolve(application)
@@ -210,7 +219,7 @@ object DshHost {
         // with the app under the same native-library rule; ripgrep is the same story
         val bash = File(libraryDir, "liblwbash.so")
         val ripgrep = File(libraryDir, "liblwrg.so")
-        val entry = File(hostRoot(application), "node_modules/@deepseek-ai/dsh/lib/bin.js")
+        val entry = File(hostRoot(application), HOST_ENTRY)
         val home = File(application.filesDir, HOME_DIR)
         val temp = File(application.cacheDir, "tmp")
         home.mkdirs()

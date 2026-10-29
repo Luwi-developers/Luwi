@@ -108,23 +108,19 @@ object VirtualScreen {
     /**
      * The surface each screen's preview draws into, by display id
      *
-     * One per screen rather than one for the app: a preview that is being replaced reports its
-     * surface going away at some point around the replacement, and with a single slot that report
-     * could land on the screen that just took over
+     * 这只是一路镜像的目标, 不是屏的输出面: 屏一直画在 [frames] 那块 reader 里, 所以预览报"面
+     * 没了"的时候屏不会跟着没了。一块屏一个格子而不是全应用一个: 换屏时旧面被拆、新面挂上,
+     * 那两个报告可能交错到达, 一个格子会把旧报当成新屏的
      */
     private val surfaces = mutableMapOf<Int, Surface?>()
 
     /**
-     * The app-owned surface each screen falls back to when no preview is drawing into it
+     * 每块屏那个人不看也要有的输出面, 以及它最近一帧
      *
-     * See [ScreenKeeper] for why a screen may never be left without one: the preview is a thing a
-     * person looks at, and what the model sees through the tools is not that - hiding the preview,
-     * or the app going to the background, must not take the screen away from the model
+     * 屏从存在的那一刻起就画进这里, 预览只是从同一份缓存镜像出去 —— 有没有人看, 与能不能截图、
+     * 能不能读屏因此是两件事。帧留在本进程里, 所以取图既不用跑 `screencap`, 也不用跨进程传文件
      */
-    private val keepers = mutableMapOf<Int, ScreenKeeper>()
-
-    /** How many screens this app has asked for, which is only used to label the unnamed ones */
-    private var created = 0
+    private val frames = mutableMapOf<Int, FrameCache>()
 
     /**
      * The screens that were closed lately, by display id, so a call on a dead id can say who
@@ -180,14 +176,17 @@ object VirtualScreen {
     }
 
     /**
-     * Ask for one more screen and show it, blocking
+     * Ask for the screen and show it, blocking
+     *
+     * 同一时刻只允许一块: 已经有一块时**先把它关掉再建新的** (2026-10-28 主人定的硬限制), 不是
+     * 拒绝也不是并排 —— 旧屏上的应用随屏一起结束。特权侧也钉了同一条 (`LwVirtualDisplay.create`),
+     * 两层任一层被绕过都到不了"两块屏"
      *
      * Blocking because nobody in the app calls this: a screen is made by whatever is driving the
-     * device - a tool, over the bridge - and that caller wants the screen it just asked for. The
-     * app's own UI only lists them and gives them back
+     * device - a tool, over the bridge - and that caller wants the screen it just asked for. It
+     * runs on the worker so it cannot interleave with a release or a preview attach
      *
-     * @param name what its creator wants it called, numbered if that name is taken, and only
-     *   falling back to a generated one when nothing was said
+     * @param name what its creator wants it called, or a plain one when nothing was said
      * @param width the screen's own size, or 0 to take this device's
      * @param height the screen's own size, or 0 to take this device's
      * @param dpi the screen's density, or 0 to take this device's
@@ -199,19 +198,37 @@ object VirtualScreen {
         val density = if (dpi > 0) dpi else metrics.densityDpi
         Log.i(TAG, "asking for a ${pixelsWide}x$pixelsHigh screen at ${density}dpi named ${name ?: "(none)"}")
         return try {
-            val service = requireService()
-            val id = service.createDisplay(pixelsWide, pixelsHigh, density, null)
-            created += 1
-            val screen = ScreenState(id, pixelsWide, pixelsHigh, density, label(name))
-            screens = screens + screen
-            selected = screen
-            // 建屏时就把面交上去: 预览可能过很久才挂上, 也可能一直不挂, 而屏从存在的那一刻起就该
-            // 有画面 —— 有画面才有窗口, 有窗口工具才找得到它
-            service.setDisplaySurface(id, surfaceFor(screen))
-            lastError = null
-            screen
+            var made: ScreenState? = null
+            worker.submit {
+                val service = requireService()
+                // 单槽: 旧屏先关, 旧屏上的应用也一起走
+                screens.toList().forEach { old ->
+                    closeLocal(old, byUser = false, replaced = true)
+                    try {
+                        service.releaseDisplay(old.displayId)
+                    } catch (problem: Throwable) {
+                        report("release", problem)
+                    }
+                }
+                val frame = FrameCache(pixelsWide, pixelsHigh)
+                try {
+                    // 这个面从建屏那一刻就交上去: 预览可能过很久才挂上, 也可能一直不挂, 而屏从
+                    // 存在的那一刻起就该有画面 —— 有画面才有窗口, 窗口才是工具找得到它的东西
+                    val id = service.createDisplay(pixelsWide, pixelsHigh, density, frame.surface)
+                    val screen = ScreenState(id, pixelsWide, pixelsHigh, density, label(name))
+                    frames[id] = frame
+                    screens = listOf(screen)
+                    selected = screen
+                    lastError = null
+                    made = screen
+                } catch (problem: Throwable) {
+                    frame.close()
+                    throw problem
+                }
+            }.get(CREATE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            made
         } catch (problem: Throwable) {
-            report("create", problem)
+            report("create", problem.cause ?: problem)
             null
         }
     }
@@ -244,18 +261,32 @@ object VirtualScreen {
         requireSize(pixelsWide, "width")
         requireSize(pixelsHigh, "height")
         return try {
-            requireService().resizeDisplay(screen.displayId, pixelsWide, pixelsHigh, density)
-            val resized = screen.copy(width = pixelsWide, height = pixelsHigh, dpi = density)
-            screens = screens.map { if (it.displayId == screen.displayId) resized else it }
-            if (selected?.displayId == screen.displayId) selected = resized
-            // 面是一块按老尺寸做好的 buffer, 换尺寸就得跟着换: 合成器不缩放, 旧面只装得下新屏的
-            // 左上角。预览那块 SurfaceView 会自己 setFixedSize 并重新 attach, 这一句管的是没有
-            // 预览、只剩保活面的那种屏
-            requireService().setDisplaySurface(resized.displayId, surfaceFor(resized))
-            lastError = null
+            var resized: ScreenState? = null
+            worker.submit {
+                val service = requireService()
+                // reader 的 buffer 是按尺寸定死的, 改尺寸只能换一个新的: 合成器不缩放, 旧面只装
+                // 得下新屏的左上角
+                val next = FrameCache(pixelsWide, pixelsHigh)
+                try {
+                    service.resizeDisplay(screen.displayId, pixelsWide, pixelsHigh, density)
+                    service.setDisplaySurface(screen.displayId, next.surface)
+                } catch (problem: Throwable) {
+                    next.close()
+                    throw problem
+                }
+                frames.remove(screen.displayId)?.close()
+                frames[screen.displayId] = next
+                // 预览还是同一块面, 换了帧源要重新挂上去, 否则预览停在上一帧
+                surfaces[screen.displayId]?.let { next.mirror(it) }
+                val updated = screen.copy(width = pixelsWide, height = pixelsHigh, dpi = density)
+                screens = screens.map { if (it.displayId == screen.displayId) updated else it }
+                if (selected?.displayId == screen.displayId) selected = updated
+                lastError = null
+                resized = updated
+            }.get(CREATE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             resized
         } catch (problem: Throwable) {
-            report("resize", problem)
+            report("resize", problem.cause ?: problem)
             null
         }
     }
@@ -269,17 +300,8 @@ object VirtualScreen {
         )
     }
 
-    /** What to call a screen: its given name, made unique, or a generated one if it has none */
-    private fun label(name: String?): String {
-        val wanted = name?.trim().orEmpty().ifEmpty { "虚拟屏 $created" }
-        var candidate = wanted
-        var suffix = 2
-        while (screens.any { it.label == candidate }) {
-            candidate = "$wanted $suffix"
-            suffix += 1
-        }
-        return candidate
-    }
+    /** What to call a screen: the name its creator gave it, or a plain one when it said none */
+    private fun label(name: String?): String = name?.trim().orEmpty().ifEmpty { "虚拟屏" }
 
     /** Show one screen, or stop showing the one that is already showing */
     fun toggle(screen: ScreenState) {
@@ -345,28 +367,10 @@ object VirtualScreen {
         return ScreenState(MAIN_DISPLAY, metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, MAIN_LABEL)
     }
 
-    /** Show a screen, or none, moving the preview's surface with it */
+    /** Show a screen, or none: 预览只是一路镜像, 显不显示都不影响这块屏与它的帧 */
     private fun select(screen: ScreenState?) {
-        val previous = selected
-        if (previous?.displayId == screen?.displayId) return
+        if (selected?.displayId == screen?.displayId) return
         selected = screen
-        // 两边的面都在这条线程上取好: 下面那段跑在 worker 上, 而 surfaces 与 keepers 是主线程也在
-        // 动的两张表 (与上一版把 surface 先取出来是同一个理由)
-        val letting = previous?.let { it to surfaceFor(it) }
-        val taking = screen?.let { it to surfaceFor(it) }
-        worker.execute {
-            try {
-                val service = requireService()
-                // The old one is let go first: two screens drawing into one buffer would leave the
-                // picture on whichever the compositor happened to finish last. It goes back to its
-                // keeper rather than to null, so it stays a screen the tools can still use
-                letting?.let { (old, surface) -> service.setDisplaySurface(old.displayId, surface) }
-                taking?.let { (shown, surface) -> service.setDisplaySurface(shown.displayId, surface) }
-                lastError = null
-            } catch (problem: Throwable) {
-                report("select", problem)
-            }
-        }
     }
 
     /**
@@ -376,11 +380,7 @@ object VirtualScreen {
      *   what lets a later call on this id say who closed it
      */
     fun release(screen: ScreenState, byUser: Boolean = false) {
-        screens = screens.filterNot { it.displayId == screen.displayId }
-        surfaces.remove(screen.displayId)
-        keepers.remove(screen.displayId)?.close()
-        if (selected?.displayId == screen.displayId) selected = null
-        remember(screen, byUser)
+        closeLocal(screen, byUser, replaced = false)
         working = true
         worker.execute {
             try {
@@ -392,6 +392,19 @@ object VirtualScreen {
                 working = false
             }
         }
+    }
+
+    /**
+     * 这一侧先当它已经不在了: 列表、预览、帧源一起收
+     *
+     * 与 [release] 分开是因为建屏那条路也要用它 —— 那里已经在 worker 上, 不能再往 worker 上排一次
+     */
+    private fun closeLocal(screen: ScreenState, byUser: Boolean, replaced: Boolean) {
+        screens = screens.filterNot { it.displayId == screen.displayId }
+        surfaces.remove(screen.displayId)
+        frames.remove(screen.displayId)?.close()
+        if (selected?.displayId == screen.displayId) selected = null
+        remember(screen, byUser, replaced)
     }
 
     /**
@@ -410,73 +423,42 @@ object VirtualScreen {
             gone == null ->
                 "no screen with displayId $displayId, ask screen for the ones that exist"
 
+            // 单槽: 建新屏会把旧屏关掉, 与"用户关的 / 别的会话关的"都不一样
+            gone.replaced ->
+                "displayId $displayId was closed when another screen was built: only one virtual" +
+                    " screen may exist at a time, so a new one replaces the old one and whatever" +
+                    " was running on it - lw_screen lists the screen that is there now"
+
             gone.byUser ->
                 "the user closed the virtual screen \"${gone.label}\" (displayId $displayId) from" +
                     " the phone's menu, so it is gone - stop and ask them what they want before" +
-                    " acting again (lw_screen lists the ones that are left)"
+                    " acting again (lw_screen lists the one that is left)"
 
             else ->
                 "the virtual screen \"${gone.label}\" (displayId $displayId) was closed by an" +
-                    " agent calling lw_screen_release rather than by the user, and screens are" +
-                    " shared, so another session may be the one that closed it - the id is gone" +
-                    " either way, do not make a replacement without asking" +
-                    " (lw_screen lists the ones that are left)"
+                    " agent calling lw_screen_release rather than by the user, so the id is gone -" +
+                    " do not make a replacement without asking, and if one has to be made, that" +
+                    " closes the screen that is there now as well (lw_screen lists it)"
         }
     }
 
     /** Remember one closed screen, keeping only the last few, for the sentence above */
-    private fun remember(screen: ScreenState, byUser: Boolean) {
-        closed[screen.displayId] = ClosedScreen(screen.label, byUser)
+    private fun remember(screen: ScreenState, byUser: Boolean, replaced: Boolean) {
+        closed[screen.displayId] = ClosedScreen(screen.label, byUser, replaced)
         while (closed.size > CLOSED_REMEMBERED) {
             closed.remove(closed.keys.first())
         }
     }
 
     /**
-     * The surface one screen should be drawing into right now
-     *
-     * The preview's own surface when there is a preview, and the screen's keeper otherwise. Never
-     * null: a virtual screen with no output surface is not composed at all, and then it has no
-     * windows for the accessibility tree (`lw_ui`, `lw_tap`, `lw_type` all read that) and no valid
-     * display id for `screencap` (`lw_screenshot` runs it) - the screen is still there in this app's
-     * list and in the system's, but nothing can see or touch it. That is what "hide the preview"
-     * used to do, and it is the same state the app lands in when its window is torn down
-     */
-    private fun surfaceFor(screen: ScreenState): Surface =
-        surfaces[screen.displayId] ?: keeper(screen).surface
-
-    /** The keeper for one screen, made when it is missing and remade when the screen changed size */
-    private fun keeper(screen: ScreenState): ScreenKeeper {
-        val existing = keepers[screen.displayId]
-        if (existing != null && existing.matches(screen)) return existing
-        existing?.close()
-        return ScreenKeeper(screen.width, screen.height).also { keepers[screen.displayId] = it }
-    }
-
-    /**
      * Follow the preview's surface for one screen
      *
-     * A screen with no surface is a normal state rather than a broken one: the app goes to the
-     * background, its window is torn down, and the screen has to keep running without it
+     * 预览只是一路镜像: 面记在这里, 帧还是那块屏自己的 reader 出的。面没了 (收起预览 / app 切后台 /
+     * 窗口被拆) 是正常状态, 屏照旧合成、照旧能拍, 工具照旧看得见它
      */
     fun attach(screen: ScreenState, surface: Surface?) {
         surfaces[screen.displayId] = surface
-        // Only the screen the preview is on is worth telling the device about; the other one is
-        // either on its way out or waiting for its turn, and it gets told when its turn comes
-        if (selected?.displayId != screen.displayId) return
-        // 与 select 同一个理由: 面在主线程取好, 下面那段在 worker 上跑
-        val attached = surfaceFor(screen)
-        worker.execute {
-            try {
-                // A preview that went away hands the screen back to its keeper rather than to
-                // null - the screen keeps being composed, so the tools keep having a screen
-                requireService().setDisplaySurface(screen.displayId, attached)
-                lastError = null
-            } catch (problem: Throwable) {
-                // A screen that was released while its preview was going away is not worth a line
-                Log.w(TAG, "attach to ${screen.displayId} failed", problem)
-            }
-        }
+        frames[screen.displayId]?.mirror(surface)
     }
 
     /** A finger touched the screen, at a point in the screen's own coordinates */
@@ -617,11 +599,13 @@ object VirtualScreen {
     /**
      * Capture one screen and leave the picture where the model and the user can both open it
      *
-     * Blocking, because its callers are the ones that want the bytes: a tool call, or a check. The
-     * privileged side writes into the app's cache, which is a directory both uids can name, and the
-     * app then copies it into the workspace - the host's file tools resolve paths inside the
-     * workspace and nowhere else, so a picture left in the cache would be a path the model could be
-     * told about but never open
+     * Blocking, because its callers are the ones that want the bytes: a tool call, or a check. 我们
+     * 自己的屏直接从缓存那帧写出来, 不经过特权进程, 也不跑 `screencap`; 只有手机自己那块屏才
+     * 交给特权侧, 因为它是唯一需要 shell uid 才拍得到的东西
+     *
+     * The scaling happens here rather than at the far end: once a picture is stored nothing on this
+     * device can re-encode it, so what the model will read has to be the right size by the time it
+     * is handed over
      * @param screen the screen to capture, named rather than taken from the selection.
      * @param maxPixels the pixel budget the picture is scaled to fit.
      * @param maxBytes the byte budget the picture is scaled to fit.
@@ -637,22 +621,31 @@ object VirtualScreen {
         region: Rect? = null,
         suffix: String = "",
     ): Shot? {
-        val staging = pictures ?: run {
-            lastError = "no directory to write a picture into"
-            return null
-        }
+        val picture = File(screens(), "screen-${screen.displayId}$suffix.png")
         return try {
-            val stale = captureSettled(screen, staging)
-            if (stale != null) {
-                lastError = stale
-                return null
+            if (screen.displayId == MAIN_DISPLAY) {
+                val staging = pictures ?: run {
+                    lastError = "no directory to write a picture into"
+                    return null
+                }
+                val stale = captureSettled(screen, staging)
+                if (stale != null) {
+                    lastError = stale
+                    return null
+                }
+                staging.copyTo(picture, overwrite = true)
+            } else {
+                val frame = frames[screen.displayId]?.latest() ?: run {
+                    lastError = NOTHING_DRAWN
+                    return null
+                }
+                try {
+                    picture.outputStream().use { frame.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                } finally {
+                    frame.recycle()
+                }
             }
-            val picture = File(screens(), "screen-${screen.displayId}$suffix.png")
-            staging.copyTo(picture, overwrite = true)
             lastError = null
-            // The scaling happens here rather than at the far end: once a picture is stored nothing
-            // on this device can re-encode it, so what the model will read has to be the right size
-            // by the time it is handed over
             Shot(Picture.fit(picture, maxPixels, maxBytes, region), picture)
         } catch (problem: Throwable) {
             report("screenshot", problem)
@@ -763,6 +756,14 @@ object VirtualScreen {
     }
 
     /**
+     * Where an OCR debug picture goes, when the caller asked for one
+     *
+     * 用应用自己的外部目录而不是工作区: 它只是给人看的一张图, 不进模型的上下文, 也不想被当成
+     * 一次会话的产物混在 `screenshots/` 里
+     */
+    fun ocrDebugDir(): File? = application?.getExternalFilesDir(OCR_DEBUG)
+
+    /**
      * Whether one screen is awake, because two things go wrong when it is not
      *
      * A sleeping display keeps showing the last frame it drew, so `screencap` hands back a picture
@@ -788,21 +789,26 @@ object VirtualScreen {
      * Two differences from [screenshot], both deliberate: this one is **not** scaled to the pixel
      * budget (that budget exists so the model can read a picture at all, and halving a 12sp glyph
      * makes it unreadable), and nothing is left in the workspace - OCR wants pixels, not a file
-     * for the model to open
+     * for the model to open. 我们自己的屏连文件都不经过: 直接拿缓存那一帧的拷贝
      */
     fun capture(screen: ScreenState): Bitmap? {
-        val staging = pictures ?: run {
-            lastError = "no directory to write a picture into"
-            return null
-        }
         return try {
-            val stale = captureSettled(screen, staging)
-            if (stale != null) {
-                lastError = stale
-                return null
+            if (screen.displayId == MAIN_DISPLAY) {
+                val staging = pictures ?: run {
+                    lastError = "no directory to write a picture into"
+                    return null
+                }
+                val stale = captureSettled(screen, staging)
+                if (stale != null) {
+                    lastError = stale
+                    return null
+                }
+                BitmapFactory.decodeFile(staging.absolutePath)
+            } else {
+                frames[screen.displayId]?.latest()
+            }.also { bitmap ->
+                lastError = if (bitmap == null) NOTHING_DRAWN else null
             }
-            lastError = null
-            BitmapFactory.decodeFile(staging.absolutePath)
         } catch (problem: Throwable) {
             report("capture", problem)
             null
@@ -848,6 +854,9 @@ object VirtualScreen {
     /** Where in the workspace pictures are kept, which the model can read and the user can open */
     private const val SCREENSHOTS = "screenshots"
 
+    /** 调试图那个目录的名字, 落在应用自己的外部文件里, 不进工作区 */
+    private const val OCR_DEBUG = "ocr"
+
     /** A gesture is one transaction, so this only has to outlast the longest swipe asked for */
     private const val GESTURE_TIMEOUT_MS = 30_000L
 
@@ -879,7 +888,20 @@ object VirtualScreen {
 
     /** How long to let the screen draw at its new size before looking again */
     private const val CAPTURE_SETTLE_MS = 120L
+
+    /**
+     * 一次建屏最多等多久
+     *
+     * 里面含"先把旧屏关掉"与"起特权进程"两笔, 实测都在一秒上下; 给的预算宽一点, 但必须有一个,
+     * 否则通道卡住时调用方会无限期等下去
+     */
+    private const val CREATE_TIMEOUT_MS = 30_000L
+
+    /** 屏在, 但没有任何东西画上去过: 与"屏没了"必须分得开 */
+    private const val NOTHING_DRAWN =
+        "the screen is there but nothing has drawn on it yet, so launch an app on that screen and" +
+            " take the picture again"
 }
 
-/** A screen that is gone, and whether the person holding the phone closed it */
-private data class ClosedScreen(val label: String, val byUser: Boolean)
+/** A screen that is gone, whether the person holding the phone closed it, and whether a new one took its place */
+private data class ClosedScreen(val label: String, val byUser: Boolean, val replaced: Boolean)

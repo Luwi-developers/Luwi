@@ -364,6 +364,8 @@ fun areaDp(faceDp: Int, bubbleSp: Long, rows: Int): Int = rows * oneLineDp(bubbl
             return
         }
         view.setViewVisibility(R.id.lw_chat_flipper, View.VISIBLE)
+        // 一档好几支动作时 (2026-10-25) 这里只跟**第一支**: 桌面那一格是 `RemoteViews` 的 flipper,
+        // 换动作那套轮转是球那边的事, 组件这一块要的是"人物跟球一致", 不是"连动作都同步"
         val sequence = face.frames
         val frames = sequence?.let { spec ->
             runCatching { BallTheme.framesOf(context, FACE_STATE, spec) }.getOrNull()

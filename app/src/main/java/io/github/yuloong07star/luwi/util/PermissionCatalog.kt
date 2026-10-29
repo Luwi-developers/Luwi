@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import androidx.core.content.ContextCompat
@@ -256,11 +255,8 @@ object PermissionCatalog {
         return mode == AppOpsManager.MODE_ALLOWED
     }
 
-    /** 电池优化名单: 在名单里 = 没有被优化 = 已允许 */
-    private fun batteryOptimizationIgnored(context: Context): Boolean {
-        val manager = context.getSystemService(PowerManager::class.java) ?: return false
-        return manager.isIgnoringBatteryOptimizations(context.packageName)
-    }
+    /** 电池优化名单: 在名单里 = 没有被优化 = 已允许 (判据只有 [BatteryWhitelist.ignored] 这一处) */
+    private fun batteryOptimizationIgnored(context: Context): Boolean = BatteryWhitelist.ignored(context)
 
     /** 精确闹钟 (Android 12 起可以撤回) */
     private fun exactAlarms(context: Context): Boolean {

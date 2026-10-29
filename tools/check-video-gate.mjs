@@ -106,7 +106,7 @@ check('手机模式 + 别场占着相机: 切回手机模式不受影响', ask('
 await scene({ mode: 'video' })
 const screenRefusals = [
   'lw_screenshot', 'lw_screen', 'lw_screen_create', 'lw_screen_resize', 'lw_screen_rotate',
-  'lw_screen_release', 'lw_ui', 'lw_ui_dump', 'lw_ocr', 'lw_events_subscribe', 'lw_events_wait',
+  'lw_screen_release', 'lw_ui', 'lw_ui_dump', 'lw_ocr', 'lw_wait_text', 'lw_events_subscribe', 'lw_events_wait',
   'lw_wait_for', 'lw_tap', 'lw_swipe', 'lw_type', 'lw_key', 'lw_key_combo', 'lw_gesture',
   'lw_pinch', 'lw_scroll', 'lw_launch', 'lw_take_photo',
 ]

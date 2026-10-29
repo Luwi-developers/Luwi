@@ -322,7 +322,11 @@ object PrivilegedBridge {
         }
         // A screen is made here rather than in the app's UI, so a tool says what it wants: a name
         // to be known by, and a size when this device's own is not the right shape
+        //
+        // 同一时刻只允许一块: 建新的会把旧的那块就地关掉 (VirtualScreen.create 里做), 所以答案要
+        // 把"关掉的是哪一块"说出来 —— 调用方手里那个 displayId 从这一刻起就是死的
         "create" -> {
+            val previous = VirtualScreen.screens.firstOrNull()
             val screen = VirtualScreen.create(
                 name = request["name"]?.jsonPrimitive?.contentOrNull,
                 width = request["width"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -333,6 +337,8 @@ object PrivilegedBridge {
                 put("created", screen != null)
                 put("displayId", screen?.displayId ?: -1)
                 put("label", screen?.label ?: "")
+                put("replaced", previous?.displayId ?: -1)
+                put("replacedLabel", previous?.label ?: "")
                 put("error", VirtualScreen.lastError ?: "")
             }
         }
@@ -886,6 +892,15 @@ object PrivilegedBridge {
                     } else {
                         LwOcr.recognize(bitmap, maxLines.coerceAtLeast(1), minScore, captureMs)
                     }
+                    // 调试图只在明确要的时候写: 350ms 一次的读屏轮询里每次都画一张全屏 PNG 太贵
+                    val debug = request["debug"]?.jsonPrimitive?.booleanOrNull == true
+                    val paths = if (debug) {
+                        VirtualScreen.ocrDebugDir()?.let { dir ->
+                            OcrOverlay.write(dir, bitmap, outcome.lines, outcome.dropped)
+                        }
+                    } else {
+                        null
+                    }
                     buildJsonObject {
                         put("displayId", screen.displayId)
                         put("label", screen.label)
@@ -897,6 +912,16 @@ object PrivilegedBridge {
                         put("detMs", outcome.detMs)
                         put("recMs", outcome.recMs)
                         put("boxes", LwOcr.lastBoxes)
+                        put("dropped", outcome.dropped.size)
+                        put("segmented", outcome.segmented)
+                        put("recCalls", outcome.recCalls)
+                        put("recTotalMs", outcome.recTotalMs)
+                        put("detInput", outcome.detInput)
+                        put("recInput", outcome.recInput)
+                        if (paths != null) {
+                            put("debugImage", paths.first.absolutePath)
+                            put("debugText", paths.second.absolutePath)
+                        }
                         put("error", outcome.error ?: "")
                         put("lines", buildJsonArray {
                             for (line in outcome.lines) {
