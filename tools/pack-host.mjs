@@ -300,6 +300,65 @@ function measure(root) {
   return { files, bytes }
 }
 
+/**
+ * 逐文件裁掉"安卓上没人读"的东西 (2026-10-29, 规则取自交付包的 `_slim-host.py`, 那一份在真机上
+ * 跑过完整启动)
+ *
+ * 判据是每个文件在设备上到底有没有人读:
+ *
+ * - `win32-*` / `win10-*` / `darwin-*` 的预编译: node-pty / koffi 的平台二进制, 安卓只加载
+ *   linux-arm64 那一套
+ * - `.pdb` / `.exe`: Windows 调试符号与可执行文件, 安卓根本不能执行
+ * - `.map`: source map, 只影响报错堆栈的行号还原
+ * - `.d.ts`: TypeScript 类型声明, 运行时 Node 不读
+ * - `.md` (路径含 LICENSE 的除外): 文档
+ * - `test` / `tests` / `__tests__` 目录与 `*.test.*` / `*.spec.*`: 测试
+ * - **保留**: `@img/sharp-wasm32` (这台机器没有 sharp 的原生包, 图像处理全靠它)、`linux-*`
+ *   预编译、所有 LICENSE、`.js` / `.mjs` / `.cjs` / `.json` / `.wasm`
+ *
+ * 风险与验证: 交付包作者在真机上跑过完整启动 (127 个出厂行模块注入 / 3080 起 8 个连接), 没有
+ * 逐插件回归; 本仓要在模拟器上装一次冒烟 (host 起来 / GUI 渲染 / 66 工具) 才算过。真出问题就
+ * 摘掉这一整段重打
+ */
+const SLIM_PLATFORM_DROP = ['win32-x64', 'win32-arm64', 'win10-x64', 'win10-arm64', 'darwin-']
+const SLIM_TEST_DIR = /(^|\/)(test|tests|__tests__)(\/|$)/
+const SLIM_TEST_FILE = /\.(test|spec)\.[cm]?[jt]s$/
+
+function slimSkip(name) {
+  if (SLIM_PLATFORM_DROP.some((mark) => name.includes(mark))) return true
+  if (name.endsWith('.pdb') || name.endsWith('.exe')) return true
+  if (name.endsWith('.map')) return true
+  if (name.endsWith('.d.ts')) return true
+  if (name.endsWith('.md') && !name.includes('LICENSE')) return true
+  if (SLIM_TEST_DIR.test(name)) return true
+  if (SLIM_TEST_FILE.test(name)) return true
+  return false
+}
+
+/** Delete what [slimSkip] names, bottom-up, and answer how many files went away */
+function slim(root) {
+  let removed = 0
+  const walk = (directory, prefix) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const name = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) {
+        if (SLIM_TEST_DIR.test(name)) {
+          removed += measure(path).files
+          rmSync(path, { recursive: true, force: true })
+        } else {
+          walk(path, name)
+        }
+      } else if (entry.isFile() && slimSkip(name)) {
+        rmSync(path, { force: true })
+        removed += 1
+      }
+    }
+  }
+  walk(root, '')
+  return removed
+}
+
 const { values } = parseArgs({
   options: {
     dsh: { type: 'string' },
@@ -367,6 +426,13 @@ mkdirSync(out, { recursive: true })
 // 版本从 pack 出来的 manifest 里现取, dsh 以后换版本这里跟着换 (取不到就退回原行为并说一句)
 const zodPin = packs.dsh.pins.get('zod')
 if (zodPin === undefined) console.log('pack-host: no repeated exact zod pin found; leaving it to npm')
+
+// **`@smithy/core` 压到镜像上有的最新小版本** (2026-10-29): 某条子依赖已经要求 `^3.38.0`, 而
+// registry.npmmirror.com 只同步到 `3.37.0` (npmjs 上 3.38.0 是有的) —— 直接装就是 ETARGET, 整棵树
+// 在 install 那一步打红. 这一条只是把 AWS SDK 内部那个工具库压一档, dsh 的 host 根本不走 AWS SDK;
+// 镜像同步上来之后把 `overrides` 整块删掉即可
+const smithyPin = '3.37.0'
+
 writeFileSync(join(out, 'package.json'), `${JSON.stringify({
   name: 'luwi-host',
   version: '0.0.0',
@@ -376,6 +442,7 @@ writeFileSync(join(out, 'package.json'), `${JSON.stringify({
     ...IMAGE_BACKEND,
     ...zodPin === undefined ? {} : { zod: zodPin },
   },
+  overrides: { '@smithy/core': smithyPin },
 }, null, 2)}\n`)
 
 // Optional dependencies stay out for the same reason the release job omits them: the Landlock
@@ -567,7 +634,14 @@ console.log(
 //
 // **它要 `node:sqlite`** (`lib/store.js` 的 `DatabaseSync`): 随包的 node 是 v26, 这一点在真机上量过
 // (2026-10-17, 见 docs/DSH-LW-2.7.8-开发计划.md 第 8 节那一批)
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.9.0' }
+//
+// **2026-10-29 升到 0.9.4** (主人: "还是升级mneme吧，记忆只是没显示，不是没有了"): 数据面在 0.9.4 上
+// 完全正常 (库、蒸馏、注入、`/api/dsh-mneme/list`、状态页), 只有面板「记忆」那个列表在 Luwi 的 dsh 基座
+// (rc.3) 上渲染不出来 —— 筛选栏与状态页都在, 列表区空白. 主人拍板接受这一档显示问题, 换 0.9.1~0.9.4 的
+// 蒸馏修复 (#494 转录围栏 / 解析失败护栏) 与那一批新能力. **升级后必须真机打开面板确认数据面** (列表可能
+// 仍然空白, 那是前端那一层, 不要误判成"库被清空" —— 判据是 `/api/dsh-mneme/list` 与 `memory.db` 的
+// 大小 / mtime). "酒馆不写记忆"那三处补丁在 0.9.4 上照旧打得中
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.9.4' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
@@ -599,6 +673,68 @@ for (const name of readdirSync(join(mnemeRoot, 'lib'))) {
   if (name.endsWith('.map')) rmSync(join(mnemeRoot, 'lib', name), { force: true })
 }
 
+// 2026-10-29: 酒馆的对话不许进记忆库 (主人: "酒馆的对话进入记忆库了, 有办法阻止吗")
+//
+// 上游 0.9.0 没有任何"按 agentPreset 排除"的配置, 而 `autoSummarize` 在**每场会话的 turn/end**
+// 上蒸馏写库 —— 酒馆一场存档就是一场 DSH 会话 (preset 是 `tavern`), 于是凯尔与玛丽安那些台词被写成
+// history / preference / project, 连记忆总览都被改写成酒馆剧情. 这里补三处:
+//
+//   · config 多一档 `excludeAgentPresets` (默认空 = 上游行为一个字节不变)
+//   · 蒸馏入口按 `session.header.agentPreset` 早退
+//   · 注入入口按同一判据早退 (连热记忆与时间前缀一起不给)
+//
+// 三处锚点各要求**恰好命中一次**: 上游换个写法时构建当场失败, 而不是静默漏打. 上游自己实现同名键时
+// 整段跳过 (改用上游那一份), 免得两套语义打架. "用户自己装了一份 mneme" 时 `PluginRows` 会让位,
+// 这一层也就跟着不在 —— 那是"不覆盖主人装的东西"那条纪律的代价, 注释留在这里, 别当成 bug 去修
+//
+// **默认值就是 `['tavern']`**, 不是空数组: 老设备上 profile 里那一行是旧版本写的 (`PluginRows` 的
+// `ensuredRow` 对已存在的行只改 `name:`, 不补 `config:`), 于是"配置里写排除谁"这一半在升级后不会自动
+// 出现 —— 补丁的缺省值兜住它, 配置行只当显式可见的那一份
+const mnemeExclusion = [
+  {
+    file: join(mnemeRoot, 'lib', 'config.js'),
+    anchor: 'autoSummarize: z.boolean().default(true),',
+    insert: "\n  excludeAgentPresets: z.array(z.string()).default(['tavern']),",
+  },
+  {
+    file: join(mnemeRoot, 'lib', 'summarize.js'),
+    anchor: 'async function summarize(session, triggerEvent, opts = {}) {',
+    insert: '\n    const excludedPresets = Array.isArray(config.excludeAgentPresets) ? config.excludeAgentPresets : [];'
+      + '\n    let presetName = null;'
+      + '\n    try { presetName = session?.header?.agentPreset ?? null } catch { presetName = null }'
+      + '\n    if (typeof presetName === "string" && excludedPresets.includes(presetName.trim())) return;',
+  },
+  {
+    file: join(mnemeRoot, 'lib', 'inject.js'),
+    anchor: 'text: (ctx) => {',
+    insert: '\n        let presetName = null;'
+      + '\n        try { presetName = ctx?.agent?.session?.header?.agentPreset ?? null } catch { presetName = null }'
+      + '\n        if (typeof presetName === "string" && Array.isArray(config.excludeAgentPresets)'
+      + '\n          && config.excludeAgentPresets.includes(presetName.trim())) return "";',
+  },
+]
+
+if (readFileSync(mnemeExclusion[0].file, 'utf8').includes('excludeAgentPresets')) {
+  console.log(`pack-host: ${mnemePlugin.name} already carries excludeAgentPresets, so the local patch was skipped`)
+} else {
+  let patched = 0
+  for (const patch of mnemeExclusion) {
+    const source = readFileSync(patch.file, 'utf8')
+    const hits = source.split(patch.anchor).length - 1
+    if (hits !== 1) {
+      throw new Error(
+        `${mnemePlugin.name}: expected exactly 1 occurrence of the exclusion anchor in ${patch.file},`
+          + ` found ${String(hits)}; the upstream layout changed, so the tavern exclusion has to be revisited`,
+      )
+    }
+    writeFileSync(patch.file, source.replace(patch.anchor, patch.anchor + patch.insert))
+    patched += 1
+  }
+  console.log(
+    `pack-host: patched ${String(patched)} of ${mnemePlugin.name}'s files so tavern sessions stay out of memory`,
+  )
+}
+
 const mnemeManifest = JSON.parse(readFileSync(join(mnemeRoot, 'package.json'), 'utf8'))
 const mnemeEntry = typeof mnemeManifest.main === 'string' ? mnemeManifest.main : 'index.js'
 try {
@@ -613,87 +749,16 @@ console.log(
   `pack-host: installed ${mnemePlugin.name}@${mnemePlugin.version} from ${npmRegistry}`,
 )
 
-// 随包发的第三个第三方插件: `dsh-our-free-model` (免费模型通道 + 渠道管理面板)
+// **面板前端也用 0.9.4 自带的** (2026-10-29 主人: "只用0.9.4即可"): 它那份 `lib/client.js` 在 Luwi 的
+// dsh 基座 (rc.3) 上渲染不出记忆列表那一块 —— 面板只剩标题、标签栏与筛选栏, 统计与列表区是空的
+// (真机实测; 数据面与 `/api/dsh-mneme/list` 都正常, 只是前端那一层). 这一档显示问题接受, 等上游下一版;
+// **别为了"面板好看"把 client.js 换成 0.9.0 那份** —— 那样 0.9.4 的新功能 (M.O. 工作流 / 人格 /
+// 画像草稿) 连设置项都看不到, 主人要的是新版能力
+// 随包发的第三个第三方插件 `dsh-our-free-model` (免费模型通道 + 渠道管理面板) 于 2026-10-30 撤下
 //
-// **为什么取 git 而不取 registry**: 它在 npm 上只停到 2.1.0, 而仓库已经走到 2.7.x —— 拿 npm 那一份
-// 会缺掉整条渠道链。于是这一条锁 commit (与 dsh submodule 的 pin 同一条纪律: 只认推上去过的提交)。
-// `npm pack` 对 git spec 也只打**包自己**一个 tarball, 装不进任何依赖, 与上面两条同一个形状
-//
-// **托管安装**: 插件自带"应用内升级 / 公告 feed / 热重载"三件套, 而这三件在手机上必须由 APK 说了算
-// —— 同一份字节被两个写入方改, 结果是目录损坏 (它 README 的原话)。`distribution: 'managed'` 那
-// 一行由 [PluginRows] 写进 profile patch, 这里只管把包放到位
-//
-// **必须整包**: `adapter/` / `src/` / `locale/` / `vendor/channel-pack/` 少一样, 渠道就加载失败
-// (不是"少个功能", 是整块面板起不来), 所以下面那一段会把关键件逐个点一遍
-const freeModelPlugin = {
-  name: 'dsh-our-free-model',
-  version: '2.7.1',
-  commit: 'e164fea59e0293ab6284fd62d25d3ab8a4f459ce',
-}
-
-const freeModelStage = join(out, '.free-model-stage')
-mkdirSync(freeModelStage, { recursive: true })
-run(
-  'npm',
-  [
-    'pack',
-    `github:Ebony-Vinyl/dsh-our-free-model#${freeModelPlugin.commit}`,
-    '--pack-destination', freeModelStage,
-  ],
-  freeModelStage,
-)
-const freeModelTarball = readdirSync(freeModelStage).find(name => name.endsWith('.tgz'))
-if (freeModelTarball === undefined) {
-  throw new Error(
-    `npm pack produced no tarball for ${freeModelPlugin.name}@${freeModelPlugin.version}: it ships`
-      + ' from git, so the build machine needs git and a route to github.com',
-  )
-}
-run('tar', ['-xzf', join(freeModelStage, freeModelTarball), '-C', freeModelStage], freeModelStage)
-const freeModelRoot = join(out, 'node_modules', ...freeModelPlugin.name.split('/'))
-mkdirSync(dirname(freeModelRoot), { recursive: true })
-cpSync(join(freeModelStage, 'package'), freeModelRoot, { recursive: true })
-rmSync(freeModelStage, { recursive: true, force: true })
-
-// 点一遍关键件: 渠道包 / 浏览器半身 / 补丁层各少一样时的表现都不是一句安装错误
-for (const relative of [
-  'index.js',
-  'client.js',
-  'cordis.patch.yml',
-  'adapter/kernel.js',
-  'vendor/channel-pack/pack.js',
-  'vendor/channel-pack/qoder-auth-wasm.wasm',
-]) {
-  if (!existsSync(join(freeModelRoot, relative))) {
-    throw new Error(
-      `${freeModelPlugin.name}: ${relative} is missing from the packed tarball; its "files" list`
-        + ' changed upstream, so the bundle has to be revisited before shipping',
-    )
-  }
-}
-
-/**
- * 裁掉 `vendor/magpie/`: 它整包 65 MB, 而唯一那一份二进制是 `magpie-win32-x64.exe`
- *
- * 那个东西是它"出网代理"那一档的引擎 (`src/magpie-engine.js` 按 `magpie-${platform}-${arch}` 找),
- * 安卓上没有对应平台的二进制 —— 留着不会让代理能跑, 只会让 APK 白胖 65 MB。引擎找不到那一份时
- * 自己降级 (那一档在手机上本来就起不来), 与"根本没拷进来"同一条路
- */
-rmSync(join(freeModelRoot, 'vendor', 'magpie'), { recursive: true, force: true })
-
-const freeModelManifest = JSON.parse(readFileSync(join(freeModelRoot, 'package.json'), 'utf8'))
-const freeModelEntry = typeof freeModelManifest.main === 'string' ? freeModelManifest.main : 'index.js'
-try {
-  await import(pathToFileURL(join(freeModelRoot, freeModelEntry)).href)
-} catch (error) {
-  throw new Error(
-    `${freeModelPlugin.name} cannot be imported after installation (${error?.message ?? error}): it is`
-      + ' missing a dependency it actually imports, or it needs a package this tree does not carry',
-  )
-}
-console.log(
-  `pack-host: installed ${freeModelPlugin.name}@${freeModelManifest.version} (${freeModelPlugin.commit.slice(0, 7)}) from git`,
-)
+// 主人原话: "删除 ourfreemodel 这个随包插件"。原来那一段 (锁 git 的 40 位 commit 取包 / 点一遍
+// adapter 与 channel-pack 的关键件 / 裁 `vendor/magpie` 那 65 MB) 一并删掉, 树里不再有它。要装回来
+// 得把上面那四段接缝重接一遍, 而且 `PluginRows` 那一行 (含 `distribution: 'managed'`) 也要一起补
 
 // Luwi's own host plugin is copied in rather than packed: it is a few hundred lines of
 // plain ESM with no build step, and it has to sit under node_modules so that its import of
@@ -831,6 +896,16 @@ console.log(`pack-host: staged the preset declarations in ${presetSeed}`)
 
 // sharp 随树装进来 (见 IMAGE_BACKEND), 这里不再覆盖任何东西 —— 以前那一步是把一个只认 PNG 的
 // 替身盖在 sharp 上, 代价是相册里的照片一律进不来
+
+// 逐文件裁剪放在**所有拷贝都完成之后**: 它只看后缀与路径, 不看是谁放进来的
+const beforeSlim = measure(out)
+const slimmed = slim(out)
+const afterSlim = measure(out)
+console.log(
+  `pack-host: slimmed ${String(slimmed)} file(s), `
+    + `${((beforeSlim.bytes - afterSlim.bytes) / 1024 / 1024).toFixed(1)} MB off the tree `
+    + `(${String(beforeSlim.files)} -> ${String(afterSlim.files)} files)`,
+)
 
 const { files, bytes } = measure(join(out, 'node_modules'))
 console.log(`pack-host: ${String(packed.size)} tarball(s), ${String(files)} file(s), ${(bytes / 1024 / 1024).toFixed(1)} MB in ${out}`)

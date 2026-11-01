@@ -80,31 +80,39 @@ internal object PluginRows {
             "node_modules/@modusensus/dsh-mneme/lib/index.js",
             config = ::memoryConfig,
         ),
-        Owned(
-            "free-model",
-            "node_modules/dsh-our-free-model/index.js",
-            config = { MANAGED_DISTRIBUTION },
-        ),
     )
 
-    /** 记忆库落在 `$DSH_HOME/memory`, 不落在工作区的 `~/.dsh/memory` (见 [Owned]) */
-    private fun memoryConfig(context: Context): List<String> =
-        listOf("memoryDir: '${File(File(context.filesDir, DshHost.HOME_DIR), "memory").absolutePath}'")
+    /**
+     * 已经撤出随包的那几行 (`id` → 包名, 2026-10-30)
+     *
+     * [OWNED] 只管**还在发**的那几行, 所以撤掉一个插件之后, 盘上那条指向已删文件的行不会被那一圈
+     * 循环碰到 —— 设备上的表现是每启一次 host 写一句
+     * `free-model (file://…/dsh-our-free-model/index.js): failed to import` 加
+     * "1 entry did not activate" (2026-10-30 在 22041216C 上实测), 界面本身照常
+     *
+     * 这里按 id + 包名 + **指回宿主树**三条对一次账: 主人自己在 `plugins-src/` 里装的那一份 (裸包名,
+     * 或者指向树外的路径) 一个字节都不动, 什么时候退役由主人决定
+     */
+    private val RETIRED = listOf("free-model" to "dsh-our-free-model")
 
     /**
-     * 免费模型插件按"整合包安装"这一档跑 (2026-10-25 随包)
+     * 记忆库落在 `$DSH_HOME/memory`, 不落在工作区的 `~/.dsh/memory` (见 [Owned])
      *
-     * 它自带应用内升级 / 公告 feed / 热重载; 这三件在手机上必须由 APK 说了算 —— 同一份字节被两个
-     * 写入方改, 它自己的 README 写的就是"目录损坏"。`managed` 只停这三件, 模型通道照常
+     * 2026-10-29: 再加一条 `excludeAgentPresets: ['tavern']` —— 酒馆一场存档就是一场 DSH 会话
+     * (preset 是 `tavern`), 而记忆插件的自动蒸馏会把那些台词写成 history / preference / project,
+     * 连总览都改写成酒馆剧情. 排除按 preset 判, 不碰别的会话; 那一档的默认值由 `tools/pack-host.mjs`
+     * 补进上游包里 (构建时重打, 锚点对不上就失败), 这里只负责说"排除谁"
      */
-    private val MANAGED_DISTRIBUTION = listOf("distribution: 'managed'")
-
+    private fun memoryConfig(context: Context): List<String> = listOf(
+        "memoryDir: '${File(File(context.filesDir, DshHost.HOME_DIR), "memory").absolutePath}'",
+        "excludeAgentPresets: ['tavern']",
+    )
 
     /**
      * 每次 host 起来之前对一次账 (排在 [PluginOverlay.write] 前面, 与 `CustomPresets` 那两步并排)
      *
      * 四件事都在纯函数里: 文件在而这一行不在就补, 文件在而这一行还是裸路径就改成 [fileUrlOf] 形态,
-     * 文件不在而这一行在就摘, 别的行一个都不碰
+     * 文件不在而这一行在就摘, 别的行一个都不碰; 已经撤出随包的那几行 ([RETIRED]) 顺带摘掉
      */
     fun ensure(context: Context) {
         runCatching { reconcile(context) }
@@ -152,6 +160,13 @@ internal object PluginRows {
                     Log.w(TAG, "the host tree carries no ${row.entry}, so ${row.id} cannot be mounted")
                     patch
                 }
+            }
+        }
+        for ((id, packageName) in RETIRED) {
+            val next = retired(patch, id, packageName, root.absolutePath)
+            if (next != patch) {
+                Log.w(TAG, "the retired $packageName row ($id) pointed into the host tree, so it was removed")
+                patch = next
             }
         }
         if (patch == before) return
@@ -320,16 +335,16 @@ internal object PluginRows {
     /**
      * 盘上是不是**已经有别的行**挂着同一个包 (2026-10-25)
      *
-     * 背景: 主人 2026-10-16 在手机上手工装过一份 `dsh-our-free-model` (源码在 `plugins-src/`,
-     * profile `node_modules` 里一条软链, patch 里一条 `id: our-free-model`), 而 2.7.10 起随包也发一份。
-     * 两行同时在的结果不是"用了新的那一份", 而是启动时一句
-     * `an adapter for provider "our-free-model" is already registered` —— 先挂上的赢, 后挂上的整块塌,
-     * 而谁先全看 patch 里的次序
+     * 缘起是 2026-10-16 主人在手机上手工装过一份第三方插件 (源码在 `plugins-src/`, profile
+     * `node_modules` 里一条软链, patch 里一条裸包名的行), 而随包也发过一份。两行同时在的结果不是
+     * "用了新的那一份", 而是启动时一句 `an adapter for provider ... is already registered` ——
+     * 先挂上的赢, 后挂上的整块塌, 而谁先全看 patch 里的次序 (那一份插件 2026-10-30 已撤出随包,
+     * 这条判据仍要对 mneme 与 imagegen 生效)
      *
-     * 判据是**包名**而不是路径: 旧的写法是裸包名 (`name: 'dsh-our-free-model'`, 靠 profile 的软链解析),
+     * 判据是**包名**而不是路径: 旧的写法是裸包名 (靠 profile 的软链解析),
      * 我们写的是 `file://` 形态的绝对路径, 两种都要认出来
      * @param patch - 整份 patch
-     * @param packageName - 包名 (`dsh-our-free-model` / `@modusensus/dsh-mneme`)
+     * @param packageName - 包名 (`@modusensus/dsh-mneme` / `@dickpy/dsh-imagegen`)
      * @param exceptId - 自己那一行的 id (它不算"别的行")
      * @returns 别人挂着它就是 true
      */
@@ -357,8 +372,8 @@ internal object PluginRows {
     /**
      * 一条挂载 (`name:` 那一行的值) 指的是哪个包
      *
-     * 两种写法都要认: 裸包名 (`dsh-our-free-model`, 靠 profile 的软链解析) 与绝对路径
-     * (`file://…/node_modules/dsh-our-free-model/index.js`)。路径那一档取 `node_modules/` 之后那一段
+     * 两种写法都要认: 裸包名 (靠 profile 的软链解析) 与绝对路径
+     * (`file://…/node_modules/<包名>/index.js`)。路径那一档取 `node_modules/` 之后那一段
      * (带 scope 的两段); 不在 `node_modules` 里的 (旧的手工装法, 源码放 `plugins-src/`) 取入口文件
      * 所在目录名 —— 那种装法的入口都在包根上
      * @param value - `name:` 的值
@@ -377,12 +392,56 @@ internal object PluginRows {
     }
 
     /**
+     * 摘掉一条已经撤出随包的挂载行 ([RETIRED])
+     *
+     * 三条都要对上才摘: id 相同、包名相同、`name:` 是**指回宿主树**的 `file://` 路径. 主人自己装的那份
+     * 要么是裸包名 (靠 profile 的 `node_modules` 软链解析)、要么指到 `plugins-src/` 里, 两种都不动 ——
+     * 与"先看本体, 有就不装"同一条纪律
+     * @param patch - 整份 patch
+     * @param rowId - 当初我们写进去的那个 id (`free-model`)
+     * @param packageName - 那个包 (`dsh-our-free-model`)
+     * @param hostRoot - 宿主树根 (`files/host` 的绝对路径; 传字符串而不是 [File], 判的只是前缀)
+     * @returns 摘过之后那份 patch (不该摘时原样返回)
+     */
+    fun retired(patch: String, rowId: String, packageName: String, hostRoot: String): String {
+        val name = nameOfRow(patch, rowId) ?: return patch
+        if (packageOf(name) != packageName) return patch
+        if (!name.startsWith("file://")) return patch
+        val root = hostRoot.trimEnd('/', '\\')
+        val path = name.removePrefix("file://")
+        if (!path.startsWith("$root/") && !path.startsWith("$root\\")) return patch
+        return withoutRow(patch, rowId)
+    }
+
+    /**
+     * 一行挂载的 `name:` 值 (没有这一行就是 null), 判据在 [PluginRowsTest]
+     * @param patch - 整份 patch
+     * @param rowId - 那一行的 id
+     * @returns `name:` 去掉引号之后的原文; 这一行不在、或者它没有 `name:` 时 null
+     */
+    fun nameOfRow(patch: String, rowId: String): String? {
+        val lines = patch.lines()
+        for (index in lines.indices) {
+            if (indentOf(lines[index]) <= 0) continue
+            if (lines[index].trimStart() != "- id: $rowId") continue
+            val indent = indentOf(lines[index])
+            for (scan in index + 1 until lines.size) {
+                if (lines[scan].isNotBlank() && indentOf(lines[scan]) <= indent) break
+                val entry = lines[scan].trimStart()
+                if (!entry.startsWith("name:")) continue
+                return entry.removePrefix("name:").trim().trim('"', '\'')
+            }
+        }
+        return null
+    }
+
+    /**
      * profile 的 `node_modules` 里, 这个包是不是**宿主树之外**的一份 (主人自己装的)
      *
      * 看的是解析之后的真实路径: 指向 `files/host/...` 的那种链接是随包这棵树的别名, 不算主人的 ——
      * 把它算进来, 随包那份就永远挂不上, 而它本来就是树里的那一份
      * @param context - 应用
-     * @param packageName - 包名 (`dsh-our-free-model` / `@modusensus/dsh-mneme`)
+     * @param packageName - 包名 (`@modusensus/dsh-mneme` / `@dickpy/dsh-imagegen`)
      * @param hostRoot - 宿主树根 (`files/host`)
      * @returns 那一份的真实路径; 没有、或者是树里那份时 null
      */

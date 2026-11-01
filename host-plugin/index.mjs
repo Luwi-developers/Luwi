@@ -5340,8 +5340,12 @@ function formatOcr(result) {
   const where = `displayId ${result.displayId}`
   if (result.error) return `could not read ${where}: ${result.error}`
   const lines = result.lines ?? []
+  // recMs 是识别总时间, 不是每行平均值: 以前按每行报, 33 行的 330ms 会被说成 10ms
+  const calls = Number(result.recCalls ?? 0)
   const cost = `${result.captureMs ?? 0}ms to capture, ${result.detMs ?? 0}ms to find the text, `
-    + `${result.recMs ?? 0}ms per line, on ${result.backend}`
+    + `${result.recMs ?? 0}ms to read it`
+    + (calls > 0 ? ` in ${calls} pass${calls === 1 ? '' : 'es'}` : '')
+    + `, on ${result.backend}`
   const asleep = asleepLine(result)
   if (lines.length === 0) {
     return `no text was found on ${where} (${cost}). The screen may be blank or hold only`
@@ -7590,6 +7594,10 @@ function startReadAloud(ctx) {
     // 只见过"本机跑出来的一轮"。真机上是这么炸的: 投影带上回答之后, 对端那句长回答被推去念 →
     // 也画进球的回复框 → 超过 5000 字时 BoxView.render 的光标越界 → 应用每 100 秒崩一次
     if (isPeerProjection(session)) return
+    // **酒馆会话不念、也不推进回复框** (2026-10-29): 那一桌的台词由酒馆宿主按角色音色直接调
+    // `speak`, 而模型正文只是思考 (预设要求 text 为空) —— 万一它还是写了收尾总结, 也不能被当成
+    // "球的回答"念出来/画进框里
+    if (session.agentPreset === 'tavern') return
     if (event.type === 'assistant/message') {
       // 被打断的那条不作数: 它后面还可能跟着真正的回答
       if (event.data.interrupted === true) {
@@ -8315,7 +8323,7 @@ async function exploreSay(ctx, text, options = {}) {
  */
 async function exploreStepNote(ctx) {
   if (ctx === null) return
-  const text = `预算用完了 (${exploreRun.steps} 步), 该收尾了: 立刻 lw_explore `
+  const text = `预算用完了 (${exploreRun.steps} 步), 该收尾了: 立刻 lw_screen_release 关闭虚拟屏, 再 lw_explore `
     + '{op:"finish", summary:"..."}, 不要再开新的事'
   try {
     const sent = await exploreSay(ctx, text, { steer: true })

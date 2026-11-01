@@ -11,11 +11,13 @@
 # pin them (640x640 for det, 48x320 for rec). Everything else is left alone on purpose —
 # see docs/step8-record.md for the two routes that were tried and what each cost.
 #
-# Two knobs, both off by default (the shipped shape is still 640 / batch 1):
-#   -DetSize 960   square detector input side
-#   -RecBatch 4    recogniser batch; QNN HTP accepts it, but the 2026-10-28 measurement found the
-#                  per-sample cost linear, so batching buys nothing on this device
-# They exist for the A/B only; see docs/step8-record.md for the numbers and the decision.
+# Two knobs:
+#   -DetSize 960   square detector input side (off by default, the shipped shape is still 640)
+#   -RecBatch 8    recogniser batch; **8 is the shipped default since 2026-10-29**: the delivery
+#                  package measured 330ms -> 53ms on an 8 Gen 2 with `[8,3,48,320]`, while the
+#                  2026-10-28 run on another device found the per-sample cost linear and batch 4
+#                  bought nothing. Code reads `recShape[0]` either way, so going back is just
+#                  `-RecBatch 1` plus a repack. See docs/step8-record.md for both readings.
 #
 # The mirror is not a preference. huggingface.co itself does not answer from this network (curl
 # exits 28 after the whole timeout, on every one of the three files), while hf-mirror.com serves
@@ -37,8 +39,8 @@ param(
     # 方形 detector 的边长 (0 = 640 缺省). 2026-10-28 的 A/B 用 `-DetSize 960` 出一份候选,
     # 再拿同一个页面比小字与 detMs; 采用与否由判据决定, 不是这里
     [int]$DetSize = 0,
-    # recogniser 的 batch (0 = 1 缺省). QNN HTP 认不认 batch>1 只有真机试了才知道
-    [int]$RecBatch = 0,
+    # recogniser 的 batch (缺省 8, 见文件头). QNN HTP 认不认 batch>1 只有真机试了才知道
+    [int]$RecBatch = 8,
     # detector 的来源仓库: 换更强的 det 只改这一个 (tiny / small / medium 都在同一套导出里)
     [string]$DetRepo = 'PaddlePaddle/PP-OCRv6_tiny_det_onnx'
 )

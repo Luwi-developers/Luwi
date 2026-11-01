@@ -67,6 +67,25 @@ object LwOcr {
     /** 屏上小于这个边长的框不要 */
     private const val MIN_SCREEN_SIDE = 8
 
+    /** 有 Hexagon 的机器才有的设备节点: 建 QNN device 真正要打开的就是它 */
+    private const val FASTRPC = "/dev/adsprpc-smd"
+
+    /**
+     * 性能票阶梯: burst 最激进, 被拒就往下退一档
+     *
+     * 不下发时 DSP 跑在 DCVS 默认 (低频) 档上, burst 是投给它的最高电压角
+     */
+    private val PERF_LADDER = listOf("burst", "high_performance", "default")
+
+    /**
+     * strict 两轮: 先要求每个算子都必须落在 HTP 上, 被拒再接受混跑
+     *
+     * `disable_cpu_ep_fallback` 只在建 session 时生效, 而它以前挂在 `!jit` 那一支下 —— 两条路都是
+     * `jit = true` 建的, 那个保险丝从来没合上过, 于是 `backend = NPU` 只说明 QNN EP 被收下, 不说明
+     * 任何算子在 DSP 上跑 (天玑机上界面显示 NPU, 实际全在 CPU)
+     */
+    private val STRICT_TRIES = listOf(true, false)
+
     /** 单个字至少要这么确定才留 (低于它的单字基本都是图标) */
     private const val SINGLE_CHARACTER_SCORE = 0.75f
 
@@ -122,6 +141,9 @@ object LwOcr {
 
     /** 当前这次加载用的是哪一档性能票, 换档要重建 session */
     private var perfMode = "burst"
+
+    /** 这一次建 session 是不是**每个算子**都落在 HTP 上了, 只有 strict 建成功才为真 */
+    private var npuStrict = false
 
     private var env: OrtEnvironment? = null
     private var detSession: OrtSession? = null
@@ -184,11 +206,18 @@ object LwOcr {
     /**
      * 打开一份模型
      *
-     * [qnn] 为真时挂 QNN EP, 并把 `session.disable_cpu_ep_fallback` 打开 —— 这个开关的语义
-     * 正是"有一个算子落不到 QNN EP 上就让建 session 失败", 所以建得起来就等于整张图真在 NPU 上,
-     * 不需要另找证据
+     * [qnn] 为真时挂 QNN EP; [strict] 再要求 `session.disable_cpu_ep_fallback` —— 这个开关的语义
+     * 正是"有一个算子落不到 QNN EP 上就让建 session 失败", 所以 strict 建得起来就等于整张图真在
+     * NPU 上, 不需要另找证据。被拒时由 [load] 退到混跑, 混跑再不行才退 CPU
      */
-    private fun open(context: Context, file: File, qnn: Boolean, jit: Boolean = false, perf: String): OrtSession {
+    private fun open(
+        context: Context,
+        file: File,
+        qnn: Boolean,
+        jit: Boolean = false,
+        perf: String,
+        strict: Boolean = false,
+    ): OrtSession {
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
         if (qnn) {
             // fastrpc 按路径找 skel, 所以要在建 session 之前把目录指好
@@ -215,7 +244,9 @@ object LwOcr {
                 qnnOptions["enable_htp_fp16_precision"] = "1"
             }
             options.addQnn(qnnOptions)
-            if (!jit) {
+            // strict 那一轮要求每个算子都落 HTP; 混跑那一轮把保险丝松开, 代价是个别算子会在
+            // CPU 与 DSP 之间搬张量, 实测 (天玑 1200) 混跑比纯 CPU 还慢 2ms
+            if (!jit || strict) {
                 options.addConfigEntry("session.disable_cpu_ep_fallback", "1")
             }
         }
@@ -225,18 +256,27 @@ object LwOcr {
     /**
      * 把两份模型都加载起来, 顺带定下计算单元
      *
-     * 先试 NPU: 建 session 抛异常 (skel 对不上、HTP 上跑不了、被别的进程占满) 就退到 CPU,
-     * 而退到 CPU 之后**不会**再回头试 NPU —— 这一层没有重试的意义, 设备状态没变结果就不变
+     * 顺序是「有没有 Hexagon」→「性能票阶梯 × strict 两轮」→ CPU:
+     *
+     * 1. `/dev/adsprpc-smd` 不在的机器 (联发科这类没有 Hexagon 的) 直接判 CPU, 省掉几次必然失败的
+     *    建 device —— 以前那里会白试一轮, 然后界面报一个假的 NPU
+     * 2. 在的机器先按 [PERF_LADDER] 从 burst 往下试, 每档里先 strict (每个算子都要上 HTP) 再混跑;
+     *    建 session 抛异常就换下一轮, 全试完才退 CPU
+     * 3. 退到 CPU 之后**不会**再回头试 NPU —— 设备状态没变结果就不变
+     *
+     * [perf] 为 null 表示"沿用当前那一档": 认字那条路这么调, 免得每次识别都把上一轮降下来的性能票
+     * 又拽回 burst 重建一遍 session
      */
-    fun load(force: String? = null, perf: String = "burst"): Backend = synchronized(lock) {
-        if ((force != null && force != mode) || perf != perfMode) {
+    fun load(force: String? = null, perf: String? = null): Backend = synchronized(lock) {
+        if ((force != null && force != mode) || (perf != null && perf != perfMode)) {
             detSession?.let { runCatching { it.close() } }
             recSession?.let { runCatching { it.close() } }
             detSession = null
             recSession = null
             backend = Backend.UNLOADED
+            npuStrict = false
             mode = force ?: mode
-            perfMode = perf
+            perfMode = perf ?: perfMode
         }
         if (backend == Backend.NPU || backend == Backend.CPU) return backend
         val context = app()
@@ -245,17 +285,40 @@ object LwOcr {
         val detFile = File(dir, "det.onnx")
         val recFile = File(dir, "rec.onnx")
 
-        try {
-            // 只用 CPU 是从这里跳出去, NPU 那条路就是把同一份 onnx 交给 QNN 在设备上编译
-            if (mode == "cpu") throw IllegalStateException("forced CPU")
-            detSession = open(context, detFile, qnn = true, jit = true, perf = perfMode)
-            recSession = open(context, recFile, qnn = true, jit = true, perf = perfMode)
-            backend = Backend.NPU
-        } catch (e: Throwable) {
-            Log.w(TAG, "QNN session ($mode) failed, falling back to CPU: ${e.message}")
-            detSession?.let { runCatching { it.close() } }
-            detSession = null
-            recSession = null
+        val hexagon = hasFastRpc()
+        if (mode != "cpu" && hexagon) {
+            for (level in ladderFrom(perfMode)) {
+                for (strict in STRICT_TRIES) {
+                    try {
+                        detSession = open(context, detFile, qnn = true, jit = true, perf = level, strict = strict)
+                        recSession = open(context, recFile, qnn = true, jit = true, perf = level, strict = strict)
+                        backend = Backend.NPU
+                        npuStrict = strict
+                        perfMode = level
+                        Log.i(
+                            TAG,
+                            "NPU session up at perf=$level, " +
+                                if (strict) "strict: every op is on the HTP" else "mixed: some ops fell back to the CPU",
+                        )
+                        break
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "QNN session at perf=$level strict=$strict was refused: ${e.message}")
+                        detSession?.let { runCatching { it.close() } }
+                        detSession = null
+                        recSession = null
+                        npuStrict = false
+                    }
+                }
+                if (backend == Backend.NPU) break
+            }
+            if (backend != Backend.NPU) {
+                Log.w(TAG, "QNN refused every perf/strict combination, falling back to CPU")
+            }
+        } else if (mode != "cpu") {
+            Log.i(TAG, "no Hexagon at $FASTRPC, so QNN cannot build a session on this device")
+        }
+
+        if (backend != Backend.NPU) {
             detSession = open(context, detFile, qnn = false, perf = perfMode)
             recSession = open(context, recFile, qnn = false, perf = perfMode)
             backend = Backend.CPU
@@ -266,10 +329,27 @@ object LwOcr {
         detShape = (detSession!!.inputInfo[detInput]!!.info as TensorInfo).shape
         detOutput = detSession!!.outputNames.first()
         val cost = System.currentTimeMillis() - started
-        note = "建 session ${cost}ms"
-        Log.i(TAG, "backend=${backend.label} input=$detInput ${detShape.toList()} load=${cost}ms")
+        note = "建 session ${cost}ms, perf=$perfMode" +
+            when {
+                backend != Backend.NPU -> ""
+                npuStrict -> ", 全算子在 HTP 上"
+                else -> ", 混跑"
+            }
+        Log.i(TAG, "backend=${backend.label} perf=$perfMode strict=$npuStrict input=$detInput ${detShape.toList()} load=${cost}ms")
         backend
     }
+
+    /** 这台机器有没有能跑 QNN 的 Hexagon, 判据是 fastrpc 真正要打开的那个设备节点 */
+    private fun hasFastRpc(): Boolean = File(FASTRPC).exists()
+
+    /** 从 [perf] 那一档开始往下退, 请求的档不在阶梯里就只试它自己 */
+    private fun ladderFrom(perf: String): List<String> {
+        val at = PERF_LADDER.indexOf(perf)
+        return if (at < 0) listOf(perf) else PERF_LADDER.drop(at)
+    }
+
+    /** 这一次会话是不是**每个算子**都在 HTP 上, 设置页拿它决定要不要标「混跑」 */
+    fun isStrictNpu(): Boolean = npuStrict
 
     /**
      * 让两个模型各跑一遍, 回一份能看的数字
@@ -352,6 +432,10 @@ object LwOcr {
             put("recPackMs", recPack)
             put("rounds", rounds)
             put("perf", perfMode)
+            // 这三样放在一起才说得清"NPU 到底真不真": 有 Hexagon 且 strict 建成功才是纯 NPU,
+            // 有 Hexagon 但只能混跑就是混跑, 没有 Hexagon 则 backend 必然是 CPU
+            put("strict", npuStrict)
+            put("fastrpc", hasFastRpc())
             put("detShape", buildJsonArray { detShape.forEach { add(it) } })
             put("recShape", buildJsonArray { recShape.forEach { add(it) } })
             put("soc", Build.SOC_MODEL ?: "")
@@ -416,6 +500,7 @@ object LwOcr {
         val backend: String,
         val captureMs: Long,
         val detMs: Long,
+        /** 识别总耗时; 与 [recTotalMs] 同义 (以前这里放的是"每次调用平均", 容易误读) */
         val recMs: Long,
         val error: String? = null,
         /** 被当成图标丢掉的框, 给调试图与"丢了几条"的答案用 */
@@ -462,8 +547,10 @@ object LwOcr {
             val probability = run(det, detInput, detShape, detType, planes)
             val detMs = (System.nanoTime() - detStarted) / 1_000_000
 
-            val boxes = OcrDetect.lines(probability, detWidth, detHeight)
+            // 同一行被检出两遍的框先收掉: 检测器的缩放与滑窗会给出重叠框, 而 merge 只合相邻块
+            val (boxes, deduped) = OcrBoxes.dedupe(OcrDetect.lines(probability, detWidth, detHeight))
             lastBoxes = boxes.size
+            val screenLong = maxOf(bitmap.width, bitmap.height)
             val rec = recSession!!
             val recInput = rec.inputNames.first()
             val recShape = (rec.inputInfo[recInput]!!.info as TensorInfo).shape
@@ -559,7 +646,7 @@ object LwOcr {
                 // 头像 / 表情 / 喇叭 / 底部导航都是近正方形、小、分数低的框; 抬分数线会先误杀夜里的灰字
                 // 设置页右侧那种单独的 ">" 箭头形状不方、分数又高, 由"只有符号"那一条收掉
                 if (
-                    OcrBoxes.isIconLike(rect.width(), rect.height(), score) ||
+                    OcrBoxes.isIconLike(rect.width(), rect.height(), score, screenLong) ||
                     OcrBoxes.isSymbolOnly(text)
                 ) {
                     dropped.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
@@ -572,16 +659,19 @@ object LwOcr {
                 lines.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
             }
             val recTotalMs = (System.nanoTime() - recStarted) / 1_000_000
-            val recMs = if (calls == 0) 0L else recTotalMs / calls
-            note = "det ${detMs}ms / rec ${recMs}ms × ${lines.size}, dropped ${dropped.size}" +
-                (if (segmented > 0) ", split $segmented" else "") +
+            // recMs 现在是**总时间**: 以前算的是"每次调用平均", 33 框 x 10ms 会被误读成 10ms,
+            // 而它其实是 330ms 那一整块
+            note = "det ${detMs}ms / rec ${recTotalMs}ms / ${boxes.size} 框 → ${lines.size} 行" +
+                (if (dropped.size > 0) ", 丢 ${dropped.size}" else "") +
+                (if (deduped > 0) ", 并 $deduped" else "") +
+                (if (segmented > 0) ", 切 $segmented" else "") +
                 (if (batch > 1) ", batch $batch" else "")
             Outcome(
                 lines,
                 unit.label,
                 captureMs,
                 detMs,
-                recMs,
+                recTotalMs,
                 dropped = dropped,
                 segmented = segmented,
                 recCalls = calls,

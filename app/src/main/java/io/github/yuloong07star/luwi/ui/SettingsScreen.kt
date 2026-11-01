@@ -6131,7 +6131,10 @@ private fun OcrRows() {
     // label 与 note 来自模型那一侧 (桥也把它们交给工具), 所以它们不是这一页的字符串, 只有那一圈
     // 说明文字跟着资源走
     val unit = if (backend == LwOcr.Backend.NPU) {
-        "${backend.label} (${Build.SOC_MODEL})"
+        // strict 建成功才是"每个算子都在 HTP 上"; 只能混跑时必须说出来, 否则又是一个"标着 NPU
+        // 其实一半在 CPU"的假标签
+        "${backend.label} (${Build.SOC_MODEL})" +
+            if (LwOcr.isStrictNpu()) "" else " " + stringResource(R.string.settings_ocr_mixed)
     } else {
         backend.label
     }

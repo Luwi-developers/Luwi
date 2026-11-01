@@ -20,10 +20,10 @@
 
 ## 当前版本
 
-**2.7.10 (进行中, 未发布)**: `versionCode 18 / versionName "2.7.10"` —— 酒馆 (角色卡/故事书/存档/主题/主动说话, 最多十人一桌) / 账号与签到 (官网设备码登录, 签到只在官网, 应用里没有写操作) / 开屏 (图标 + 转圈 + 加载日志, `splash.json` 可配) / 老 WebView 兼容层 (polyfill + 四步更新指引) / 切后台回来不重载 (renderer 钉住 + 回前台 host 自愈 + 后台保活白名单) / 探索不看省电 / 一状态多支动作 / 立绘按高贴满 / 半隐改一半透明度 / 鲸鱼娘外观随包发 / API 音色库与接口文档
+**2.7.10 (发布候选已冻结, 2026-11-01 周日发布)**: `versionCode 18 / versionName "2.7.10"` —— 酒馆 (角色卡/故事书/存档/主题/主动说话, 最多十人一桌) / 账号与签到 (官网设备码登录, 签到只在官网, 应用里没有写操作) / 开屏 (图标 + 转圈 + 加载日志, `splash.json` 可配) / 老 WebView 兼容层 (polyfill + 四步更新指引) / 切后台回来不重载 (renderer 钉住 + 回前台 host 自愈 + 后台保活白名单) / 探索不看省电 / 一状态多支动作 / 立绘按高贴满 / 半隐改一半透明度 / 鲸鱼娘外观随包发 / API 音色库与接口文档
 
 - **外观包的 minLw 跟着这一版走**: `whalegirl-balltheme-1.1.3.lwp` 已用 `backups\lw-publisher-key.pem` 签到 `minLw 2.7.10` (包内 `version` 也抬到 1.1.3 —— 不改号的话设备上装着的旧副本永远比不过), 插件索引随之换 sha256 与内容 tag; 改号时忘了重签 = 这份外观在设备上永远装不上 (`check-bundled-ball-theme.mjs` 会红)
-- **发布材料**: `docs\DSH-LW-2.7.10-release-notes.md` (对外正文, 体积 / sha256 已按干净构建补齐); 干净构建 269,510,597 字节 (257.0 MiB), sha256 `EC8DFB9E…60EA6FC2`, 存档 `D:\apk\archive\releases\Luwi-2.7.10-release.apk`; **2026-10-29 00:22 出包, 发布等周日** (提交 / 推送 / Release 都还没动)
+- **发布材料**: `docs\DSH-LW-2.7.10-release-notes.md` (对外正文); **发布候选已冻结 (2026-10-30 12:44, r2)**: `D:\apk\archive\releases\Luwi-2.7.10-frozen-20261030-r2.apk`, 250,390,159 字节 (238.8 MiB), sha256 `F89348B9…F19296`, 无归属区间 4,140 字节, `lw-release-check` PASS (含首启告示与 dsh 0.2.1-rc.5; 同日更早冻的 r1 已按主人指示删除, 2.7.10 只剩这一只); 重建所需的一切在 `archive\frozen\2.7.10-20261030\FREEZE.md` (两个仓的 patch + 未跟踪文件 + HEAD 指针)。**2026-11-01 (周日) 发布**; 做下一版功能不许改这份包的任何一个字节, `app/build/outputs/apk/debug/app-debug.apk` 下一次构建就被重写 (公开推送的父提交必须是 `2c61255`, 见下面「酒馆的源在仓库外」)
 
 **2.7.9 (2026-10-25 发布, 产物 10-24 已备好)**: `versionCode 17 / versionName "2.7.9"`, 干净构建 244,866,859 字节 (233.5 MiB), sha256 `F5358ADB…D0FC7`, host 树 353 tarball / 35,814 文件 / 341.4 MB, `host.zip` 98.9 MB, 最大无归属区间 3 字节
 
@@ -38,7 +38,7 @@
 - dsh 是可写 fork: submodule 的 `origin` = `yuloong07-star/deepseek-harness`, 上游 `Miuzarte/deepseek-harness` 配成 `upstream` (只读, 别把 origin 改回去)
 - **dsh 构建产物不进 git**: `pnpm install` + `build:official` 在构建 APK 时由 Gradle task 跑
 - **pin 必须是 fork 上推过的提交** —— 只活在 submodule 工作区的改动, 克隆方看不见
-- **当前基座 rc.3**: 分支 `lw-sync-rc2`, pin `c1e94a3f94267f5fa8a1400eeddfc4034a5f5177`; 升法 = 浅 fetch 上游 tag 的树 → `git commit-tree` 接旧基座 → `git rebase --onto`
+- **当前基座 rc.5** (2026-10-30 升, 官方 tag `dsh-v0.2.1-rc.5` / `b830ec950`): 分支 `lw-sync-rc2`, pin `f202323a90` (19 个本地补丁 rebase 过来, 零冲突); 升法 = 浅取上游 tag 的树 (本机 github.com:443 被挡, 用 `codeload.github.com` 下载 tar.gz, 再按临时 index 导成合成提交) → `git commit-tree <tree> -p <旧基座>` → `git rebase --onto <新基座> <旧基座> lw-sync-rc2`; **导入时三个坑**: Windows 建不了符号链接 (14 条 120000 要按旧树名单补)、中文文件名会按本机代码页写歪 (`说明.txt` → `璇存槑.txt`)、4 个上游 force-track 的夹具被 .gitignore 挡住 (要 `add -f`); 公开前 fork 那个 pin 必须先用 `lw-api-push.ps1` 推上去
 - rc.2 删了 `{{cwd}}` 提示词变量, 由 `host-plugin` 的 `systemPrompt.variable('cwd', …)` 按原名补回, 老模板一个字不改
 
 ## 酒馆的源在仓库外 (2026-10-29, 闭源 C 方案)
@@ -53,7 +53,7 @@
   `presets/tavern`, 没有这个参数就两样都不进树 (Gradle 在有目录时自动传)
 - 共享文件 (AppNav / SettingsScreen / HostScreen / MainActivity / CustomPresets / PluginOverlay)
   **只准调 `LuwiTavern`** 的八个入口, 不准 import `luwi.tavern.*` —— 这就是公开侧干净的唯一判据
-- 判据: `node D:\apk\Luwi-private\tavern\tools\check-tavern.mjs` (65 条) 与
+- 判据: `node D:\apk\Luwi-private\tavern\tools\check-tavern.mjs` (70 条) 与
   `check-tavern-account.mjs` (18 条); 它们默认按兄弟目录找 `D:\apk\Luwi`, `--repo` 可改
 - **公开推送的父提交必须是 `2c61255`** (v2.7.9): `c6aa501` 里就有酒馆 85 个文件, 直接推等于连历史
   一起公开 —— 导出无酒馆树后以 `2c61255` 为父做一次提交, 细则见 `docs/Luwi-酒馆-C-拆分方案-20261029.md`
@@ -98,7 +98,7 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 - **`has-bg` 必须由 JS 加, 不能静态写在 index.html 上** (2026-10-27 踩到): 页面若是从第一帧就全透明, 这台 vivo 上那块 WebView **只画第一下, 之后 DOM 变了也不再重画** —— 内容在 DOM 里 (`Runtime.evaluate` 量到 3 条消息、composer 都在), 屏幕上看不见一片; 改成先把底色画实、等 `/status` 回来再由 `updateBackdrop()` 加 `has-bg` 就正常 (主题此时两侧同色, 这次"由实到透"看不出来)。判据 `check-tavern` 钉住这两条
 - 系统栏图标深浅由 `theme/SystemBars.kt` 按实际渲染配色定; 顶栏没有模糊
 - **三处图标同一份标记**, 由 `tools/brand/luwi-mark.png` 出 (`vector-trace.py` + `vector-ink.py --ink-width 0.46`, 位图 `make-icons.py`); **0.46 是唯一个数别改**, 球那处 `GLYPH_INK_RATIO` **0.65**
-- **设置页右上 ⋮** 五条: 反馈 / 检测更新 / 账号 / 关于 / 重启 host, 同一刻只开一个; 反馈缺省投 `https://luwi.dpdns.org/feedback`, 有 `$DSH_HOME/lw/feedback-channel.json` 时它优先; 「账号」那一条只跳官网 `/login` (签到在官网, 2026-10-26 恢复); **material3 不是本项目依赖**
+- **设置页右上 ⋮** 五条: Luwi反馈 / 检测更新 / 账号 / 关于 / 重启 host, 同一刻只开一个; 反馈缺省投 `https://luwi.dpdns.org/feedback`, 有 `$DSH_HOME/lw/feedback-channel.json` 时它优先; 「账号」那一条只跳官网 `/login` (签到在官网, 2026-10-26 恢复); **material3 不是本项目依赖**; 会话界面浮标菜单里另有「Luwi反馈」(2026-10-29, 同一个窗)
 - **设置页两层分组 + 逐段折叠**: 一级 `GroupTitle`, 二级 `SectionTitle`; 缺省只展开省电与常用六段 (`SettingsSectionsAlwaysOpenKeys`), **新加一段天然收起**; 判据 `SettingsSectionsTest` + `tools/check-settings-sections.mjs` (对齐 20 个 section, 顺序也管)
 - **同步段**写 `$DSH_HOME/lw/session-sync.json` (`SyncSetting.kt`, 保留未知键, 令牌只出打码); **关同步三件事一起做** (remote 挪 `lw.savedRemote` + 三个节奏键归零), 缺一件照旧白烧电; 2026-10-20 起扫码配对 (`PairPayload.kt` + `QrScanner`); **生成配对码不要求登录** (2026-10-25 主人: `buildPairing()` 里那道登录闸与面板的「生成配对码前要先登录」都删了, 只要求保存过仓库地址; 账号只剩给 P2P 收费闸提供到期读数); 对端通道与同步无关
 - **视频模式段**: 最上面是用哪个模型 (`mode-model.json`), 判定纯函数 `resolveModeModel`; **每次切换后必须 `saveSelection` 把部署默认还回去**; 还原按 `agentAvailable === true` 判 (**不是 `running`**); **工具 `execute` 里没有 `ctx`, 用模块级 `hostCtx`**; 「添加模型」写 `endpoint` (url + model 都非空), 宿主 `ensureVideoRoute()` 挂成路由 `luwi-video` (**key 只进 `ctx.credentials`**)
@@ -177,9 +177,12 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 - **酒馆聊天页不钉软件层**: 背景图由 Compose 画、WebView 透明走默认硬件渲染; 钉软件层再让 `body` 铺整屏图, 滚动实测 48.7% 掉帧 (p90 165 ms → 现在 12 ms, 2026-10-25)
 - **酒馆主题画与纹理** (2026-10-26, 本地 AI 出图): 六套主题各带一张 864x1536 背景画 (`web/backdrops/<id>.webp`) 与一张带 alpha 的灰阶纹理 (`web/textures/<id>.webp`); **画由 Compose 画** (与导入背景同一条, `TavernChatScreen` 按 `导入 > 主题画 > 纯色` 选), 页面只留 `has-bg` 透明; 纹理走 `body::before` 固定层 (`--tw-texture` / `--tw-texture-strength`), 明暗底都看得见, 不用 `mix-blend-mode`; **有画时必须 `html.has-bg { color-scheme: normal !important }`** —— 暗色主题的 `color-scheme: dark` 会让 WebView 把 iframe 底衬按黑画, 把底下 Compose 的画整块盖掉 (2026-10-26 在 headless Edge 上量到); 主题元数据 `textureUrl` / `backdropUrl` / `scrim` 与 Kotlin `TavernTheme` 同步, `TavernStore.PALETTE` 必须与 `lib/themes.mjs` 颜色一致 (判据 `check-tavern`); 静态白名单只放行 `textures|backdrops/<主题 id>.webp`, 出图脚本在 `tools/tavern-art/`
 - **酒馆角色复选**: 勾几个就按勾选顺序依次回几条 (`turn` 回 `replies` 数组), 每位单独拼提示词、后面的看得见前面的; 选中挂小勾、亮框只给 `is-speaking`; 不勾选仍是一轮一人加权
-- **酒馆两条引擎 (2026-10-27)**: 存档 `meta.engine` 选 `direct` (老路, 一发一收) 或 `bridge` (一场存档 = 一场 DSH 会话, `preset: tavern`), 新存档跟 `config.defaultEngine`。桥接那一轮: `ensureSession` (`presets.resolve('tavern')` + `sessionController.create({workspaceId, agentPreset})`, 工作区 `dsh-tavern`) → `applyModel` (配置的模型 `selectModel` 到这一场, **随后 `agentDefaultModel.saveSelection(旧值)` 还回去** —— 不还就把部署默认换了) → 投一段场景消息 (`agent.followup` + `ctx.sessions.flush`) → 等 `turn/end` (`reason.kind === 'completed'`; 180 s 超时但**不取消那一轮**)。气泡由预设作用域里的 `tavern_say` **直接落盘**, 宿主经 `ctx.provide('luwiTavernBridge')` 收结果; 一条工具调用都没有就按正文兜底解析 (`【名字】…` / `名字：…`), 仍过 `guardReply`; 桥接任一步失败就退直连并在响应里带 `engineFallback` (前端小字提示, 不当成整轮失败)
-- **酒馆预设 `presets/tavern/cordis.patch.yml`** (`- insert:` 进 profile patch, `CustomPresets.PRESET_ROWS` 加 `preset-tavern`, `pack-host.mjs` 把声明拷进 `lw-presets/`): persona 写酒馆协议 (文本只是思考, 发言只能走 `tavern_say`), `tavern-tools` 行在作用域内注册那一个工具并挂运行期白名单, 另有 qq-chat-v2 那组 compaction。**预设子行的 `name` 按 profile 目录解析** (qq-tool-restrict 的坑), 所以 `CustomPresets` 的 `PROFILE_PACKAGES` 还要给 `luwi-tavern` 建 `profiles/node_modules` link + 依赖 (**不进 `dsh.profile.bundles`**: 它不是 bundle)
-- **酒馆的模型只有一处** (2026-10-27 主人: "角色设置里的模型删掉, 在酒馆配置里加上模型选择, dsh 里用此模型跑"): `config.model` (`{provider, model}` 或 null = 跟随当前), 配置页那一行选; 直连与桥接都用它, 直连失败退回当前模型标 `modelFallback`。角色卡上的 `model` **不再读也不再写** (`readCardFile` / `cardSummary` / `PUT /cards/:id/settings` 都不碰; 旧键原样留着), 类型并进 `TavernModel`, 选择框搬到 `ui/TavernModelDialog.kt`
+- **酒馆只有一条引擎 (2026-10-29 主人: "不再直连, 必须走dsh")**: 一场存档 = 一场 DSH 会话 (`preset: tavern`), 存档里没有 `engine` 这一档, `config.defaultEngine` 也删了; 旧存档/旧配置里的键读进来忽略、下次写盘消失。每一轮: `ensureSession` (`presets.resolve('tavern')` + `sessionController.create({workspaceId, agentPreset})`, 工作区 `dsh-tavern`) → `applyModel` (配置的模型 `selectModel` 到这一场, **随后 `agentDefaultModel.saveSelection(旧值)` 还回去** —— 不还就把部署默认换了) → 投一段场景消息 (`agent.followup` + `ctx.sessions.flush`) → 等 `turn/end` (`reason.kind === 'completed'`; 180 s 超时但**不取消那一轮**)。气泡由预设作用域里的 `tavern_say` **直接落盘**, 宿主经 `ctx.provide('luwiTavernBridge')` 收结果; 一条工具调用都没有就按正文兜底解析 (`【名字】…` / `名字：…`), 仍过 `guardReply`。失败按 409 busy / 413 budget_exceeded / 503 bridge-failed 回, **没有直连可退**; 插件不再 inject `llm`
+- **故事书: 内联只是索引, 整本走 `tavern_worldbook` (2026-10-29 主人: "第一轮把故事书的文件发给 agent, 这样就没有 1200 token 的限制")**: 开场 / 会话重建 / `bridge.worldVersion < 1` 的那一轮仍把这一场挑中的书按 priority 塞进 `worldText` 的 1200 token 预算, 但那一节只是快速索引; 场景消息另带 `【故事书】` 段 (每本的 id + 条目数) 并点名"第一轮先用 tavern_worldbook 读完整本 (op=list, op=read 按 `nextOffset` 翻页), 再开口"。工具只读这一场 `worldbookIds` 里的书, 每页最多 20 条, 整本不再受 1200 截断; 之后各轮仍只带关键词命中的条目。`worldVersion` 只在成功那一轮写 1, 失败下轮再补
+- **酒馆预设 `presets/tavern/cordis.patch.yml`** (`- insert:` 进 profile patch, `CustomPresets.PRESET_ROWS` 加 `preset-tavern`, `pack-host.mjs` 把声明拷进 `lw-presets/`): persona 写酒馆协议 (文本只是思考, 发言只能走 `tavern_say`; 另有只读故事书的 `tavern_worldbook`), `tavern-tools` 行在作用域内注册这两个工具并挂运行期白名单, 另有 qq-chat-v2 那组 compaction。**预设子行的 `name` 按 profile 目录解析** (qq-tool-restrict 的坑), 所以 `CustomPresets` 的 `PROFILE_PACKAGES` 还要给 `luwi-tavern` 建 `profiles/node_modules` link + 依赖 (**不进 `dsh.profile.bundles`**: 它不是 bundle)
+- **音色: 每个角色一份, 四类引擎都可选, 回复时由宿主直接调说话工具 (2026-10-29 主人: "在角色设置里加上音色选择, 回答时直接调用说话工具即可" / "把 luwi 设置里音色板块都复制到角色设置里")**: 卡上 `voice` 带引擎前缀 —— `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id` (老写法没前缀 = 引擎跟设置页, 仍然有效; `api:` 空 = 用设置页那个默认 API 音色); 场景的 `【同席的人】` / `【你扮演的角色】` 带「音色：…」; `recordSay` 落完气泡后把台词**去掉括号动作** (`spokenText`), 经 `LW_CHANNEL_ENDPOINT` / `LW_CHANNEL_TOKEN` 直接调应用的 `speak` (与 `lw_speak` 同一条通道, `interrupt:false` 排队), 旁白不念。模型不用第三个工具, DSH 正文仍只是思考, 不落明文
+- **酒馆会话的正文在 LLM 流上就丢掉 (2026-10-29 主人: "dsh 里不要有明文输出")**: 提示词说"text 必须为空"仍会被 deepseek-flash 补一句收尾, 所以宿主在 `ctx.on('llm/stream')` 上把 `text` 块 (`block-start` / `text-delta` / `block-end`) 整个滤掉, reasoning 与 tool-call 原样过; **只滤 `env.tavernSessions` 里出现过的 DSH 会话**, 别的会话不动。公开插件那边 `startReadAloud` 也跳过 `session.agentPreset === 'tavern'`, 双保险不让浮标拿到它。判据 `check-tavern` 钉住 `tavernSessions` 与 `withoutText`; 真机新会话 5 条 assistant 的 text 长度全是 0
+- **酒馆的模型只有一处** (2026-10-27 主人: "角色设置里的模型删掉, 在酒馆配置里加上模型选择, dsh 里用此模型跑"): `config.model` (`{provider, model}` 或 null = 跟随当前), 配置页那一行选; 只有 DSH 会话一条路, 经 `selectModel` 落到这一场。角色卡上的 `model` **不再读也不再写** (`readCardFile` / `cardSummary` / `PUT /cards/:id/settings` 都不碰; 旧键原样留着), 类型并进 `TavernModel`, 选择框搬到 `ui/TavernModelDialog.kt`
 - **酒馆预设正文不写「旅人」** (2026-10-27 主人: "预设里旅人的字眼应改为用户（主角），有可能用户会改名"): 协议只说「用户（主角）」, 真实名字由场景消息的 `【主角】` 行给 (存档 `playerName` 优先, 没填才用资料页那一份)。判据 `check-tavern.mjs` 只看 persona 那一块正文里有没有「旅人」
 - **酒馆预装一套西幻开局** (2026-10-25 主人: "酒馆预装一款经典的故事书和人物等"): 正文在 `host-plugins/luwi-tavern/seed/preset.mjs` (一本故事书 `灰港与雾林` + 三张卡 + 一场已开场一轮的存档), 落盘由 `lib/seed.mjs` 在 **请求路上**补一次 (`index.mjs` 的 `seedOnce`), 记号 `workspaces/<id>/seed.json`; **缺什么补什么** (主人改过或删掉的不会被塞回来), **一次一个版本** (`PRESET_VERSION`), 种不进去只记 warn 不拦路; **存档单独一档 `SESSION_VERSION`** (2026-10-28): 老工作区 `presetVersion` 已是 1 但当时没这场存档时补一次, `seed.json` 记 `sessionSeeded`, 补过再删不再塞回来; id 写死 (`c_marian` / `c_kael` / `c_severin` / `w_greyharbor` / `s_silverstag`), 因为宿主按 `[a-z]_[a-z0-9]{4,40}` 认 id; 判据 `test/seed.test.mjs` + `tools/check-tavern.mjs` 第八段; **头像单独一档** (`AVATAR_VERSION`, 2026-10-26): 三张卡 + 主角「旅人」共四张本地 AI 头像在 `seed/assets/*.png`, 卡只给"卡还在、来源是 preset、头像文件不在"的补, 主角只在**资料还没改过** (名字仍是缺省「旅人」、`avatar` 为空、`profile/avatar.png` 不在) 时补, **不抬 `PRESET_VERSION`** —— 抬正文版本会让"缺什么补什么"把主人删掉的卡再塞回来
 - **酒馆卡片底必须不透明**: Miuix 的 `Card` 缺省取 `surfaceContainer`, 而 `tavernColors` 那一份给的是**调和过的实色** (`lerp(background, foreground, 0.10f)`), 别换回带 alpha 的 `variant` —— 换回去角色详情 / 删除确认那两个弹层会整块透底, 弹层字与背后的列表字叠在一起 (2026-10-25 修过一次)
@@ -212,7 +215,8 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 ## 虚拟屏
 
 - **同一时刻只允许一块** (2026-10-28): 建新屏会把旧屏**就地关掉再建** (旧屏上的应用一起结束), 不是拒绝也不是并排; 两层同时钉, 应用 `VirtualScreen.create()` 先 `closeLocal` 再建, 特权 `LwVirtualDisplay.create()` 建前 `releaseAll()`; 桥的答案带 `replaced` / `replacedLabel`, 插件在 `lw_screen_create` 的描述与答案里写清
-- **取帧在 app 进程的 ImageReader 里** (`FrameCache`): 屏从建出来那一刻就画进这块面, 缓存最新一帧 (有预览 66 ms, 没有 250 ms), 截图与 OCR 直接读缓存; **虚拟屏不再跑 `screencap`** (K40 上它恒 0 字节), 也不依赖特权通道
+- **取帧在 app 进程的 ImageReader 里** (`FrameCache`): 屏从建出来那一刻就画进这块面, 缓存最新一帧 (没有预览 250 ms; **有预览按每帧字节数自适应**, `PREVIEW_BYTES_PER_SECOND = 150 MB/s`, 夹 33~200 ms —— 1080p 约 66 ms、2K 约 122 ms、720p 顶到 33 ms, 写死 66 等于给 1080p 调好之后让 2K 每秒白搬 1.1 GB), 截图与 OCR 直接读缓存; **虚拟屏不再跑 `screencap`** (K40 上它恒 0 字节), 也不依赖特权通道。判据 `FrameCacheTest`
+- **取图只有主屏走 uid** (2026-10-29 核实): 虚拟屏的截图 / OCR 取帧是 `frames[displayId].latest()` 的 app 进程内存拷贝, 建屏那一步才过 shell uid; 唯一走 `screencap` 的是 display 0 (`LwCapture.capturePrimary`), 交付包里也没有它的非 uid 方案 —— **别把取帧搬回特权进程**
 - **预览是镜像不是输出面**: `SurfaceView` 的 surface 由 app 从缓存画 (`lockCanvas` + `drawBitmap`, 有新帧才画); 面没了 (切后台 / 收起预览) 屏照旧合成, 照旧能拍
 - **buffer 必须等于屏尺寸**: reader 的 buffer 就是屏自己的尺寸, 预览那块 `setFixedSize` 同理; 改尺寸只能换一个新 reader (先 `resizeDisplay`, 再 `setDisplaySurface`, 最后关旧的)
 - **换屏要换 SurfaceView** (`key(displayId)`), 否则留着上一块屏的最后一帧
@@ -301,12 +305,15 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 
 - **fp16 是前提**: `--float_bitwidth 16` 之后模型原样过; `rewrite_onnx.py` 只钉 shape
 - NPU 走 ORT QNN EP **设备上 JIT 编译**; 预编译 context binary 输出常数图, 别走; `libQnnHtpPrepare.so` (70 MB) 必须随包
-- `htp_performance_mode="burst"` 与不投票差 **2.5 倍**, 跟着 session 走
-- **rec 批量没有收益, 保持 batch 1** (2026-10-28 实测 22041216C): 每段识别 12~14 ms 且随段数线性, batch 4 在 HTP 上能跑 (`backend=NPU`, `recInput=4x48x320`) 但 7 次调用的总时长与 26 次单行几乎一样 —— "每次调用固定开销" 在这台 NPU 上不存在; 代码仍按 `recShape[0]` 读 batch, 将来换模型不用改
+- **NPU 标签要说真话** (2026-10-29): `backend = NPU` 只说明 QNN EP 被收下, 不说明算子在 DSP 上。判据三件 —— `strict` (建 session 时 `disable_cpu_ep_fallback = 1`, 建成功 = 每个算子都在 HTP), `fastrpc` (`/dev/adsprpc-smd` 在不在; 不在的机器直接判 CPU, 省掉必然失败的建 device), 以及 `probe` 把两个字段一起报出来; 设置页显示 `NPU (SOC)` / `NPU (SOC) 混跑` / `CPU` 三种。实现是 `PERF_LADDER` (burst → high_performance → default) 里套 `STRICT_TRIES` (true → false), 全被拒才落 CPU。**旧的 `if (!jit)` 从来没合上过**, 别写回去。判据 `tools/check-ocr-npu.mjs`
+- **rec 换 batch 8 (2026-10-29 主人拍板, 覆盖 10-28 的 batch 1 结论)**: 交付包在 8 Gen 2 上实测 330ms -> 53ms; 而 10-28 在 22041216C 上实测"batch 无收益" —— 两份实测相反, 现在按交付包那份出包 (`build-models.ps1` 缺省 `-RecBatch 8`), 代码照旧按 `recShape[0]` 读 batch。**换回 batch 1 = `build-models.ps1 -RecBatch 1` 重打**, 无代码改动。模型输出 batch 维必须与输入一起钉死, 只钉输入会留一个动态维 (`rewrite_onnx.py` 已补, 那条是 QNN 拒绝建 session 的原因)
+- `htp_performance_mode` 跟着 session 走; burst 是最激进那一档, 被拒时按上面的阶梯退, 不要一档写死
 - **det 640→960 也没采用**: 设置首页与"我的设备"两页一条字都没多, det 慢 1.8~2.6 倍; 候选留在 `build/ocr-work/models-960/` (gitignored), 换法 `build-models.ps1 -DetSize 960`
 - **换更大的 det 也没用** (2026-10-28 晚): small (9.9 MB) 与 medium (62 MB) 都在 NPU 上跑通, 但两页字数不变, det 分别慢 1.7~2.2 倍与 8~10 倍 —— 连 960 一起看, 瓶颈在输入尺度与汉字识别, 不在检测容量; 换模型只解决"漏检", 而这几页是"认错"
 - `lw_tap(text)` 的 auto 先问无障碍树, `ambiguous` 时不退; 读屏落点取框中间 60% 随机
-- **图标按形状丢, 不抬分数线**: 近方形 (两条边差 < 长边的 0.35) + 边长 < 96 + 分数 < 0.85 的框当图标 (`OcrBoxes.isIconLike`); 夜间灰字分数天然低, 抬 `MIN_TEXT_SCORE` 会先误杀真字
+- **图标按形状丢, 不抬分数线**: 近方形 (两条边差 < 长边的 0.35) + 长边 < **屏长边的 9%** + 分数 < 0.85 的框当图标 (`OcrBoxes.isIconLike`, 尺寸判据按比例不按绝对像素: 旧写死 96px 在 720p 上形同虚设、在 2K 上会误杀真字); 夜间灰字分数天然低, 抬 `MIN_TEXT_SCORE` 会先误杀真字
+- **同一行被检出两遍要收掉**: 检测器的缩放与滑窗会给重叠框, 按分数从高到低扫一遍, 与已保留框的交集 / 较小框面积 ≥ `BOX_OVERLAP = 0.6` 的丢掉 (`OcrBoxes.dedupe`, 保留阅读顺序), 表现是"微信(4)"那种同一行报两条
+- **`recMs` 是识别总时间, 不是每行平均**: `Outcome.recMs` 与 `recTotalMs` 同义, note 写成 `det Xms / rec Yms / N 框 → M 行`; 插件那句也按总时间 + 调用次数说 —— 33 框 x 10ms 的 330ms 曾被当成 10ms 看过
 - **只有符号的框也丢**: 一个框里连一个字母 / 数字 / 汉字都没有 (`OcrBoxes.isSymbolOnly`), 专收设置页右侧那种单独的 `>`
 - **长行只在挤压到 1.5 倍以上才切**: 识别输入 48x320, `resized()` 对超宽行是**横向挤压**而不是裁掉; 长宽比 6.67~10 之间不切 (切了接缝会多认一个标点), 超过 10 才 `OcrBoxes.segments` 切段 (重叠 12 px) + `joinOverlap` 拼回 (去重最多 4 字)
 - **调试图只点名时才写**: `lw_ocr debug=true` 才落 `getExternalFilesDir("ocr")` 的 `overlay.png` / `overlay.txt` (绿框保留 / 红框 + × 丢弃); 350 ms 一次的 `lw_wait_text` 轮询里一次都不写, 也不进相册
@@ -362,7 +369,7 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 - `PluginRows` 那一行才挂进 profile patch, 且 **`name:` 必须写成 `file://` 形态** (面板写不进去的两条根因: 层序 + anchoring)
 - 补上游三处写死 `~/.dsh/dsh-imagegen` 的路径, **数替换处数, 不是 3 处就让构建失败**
 - 第二个随包插件是 `@modusensus/dsh-mneme` (记忆), 数据落点 `memoryDir` = `$DSH_HOME/memory`; 随包 node 必须带 `node:sqlite`
-- 第三个随包插件是 `dsh-our-free-model` (免费模型 + 渠道面板, 2026-10-25): **npm 上那份停在 2.1.0**, 所以取 git 并锁 40 位 commit; 它自带应用内升级 / 公告 feed / 热重载, 手机上一律由 APK 说了算, 那一行 config 写 `distribution: 'managed'`; `vendor/magpie/` 整包 65 MB 且只有 `magpie-win32-x64.exe`, 打包时裁掉 (引擎找不到时自己降级, 手机上那档本来也起不来); 判据 `tools/check-bundled-plugins.mjs`
+- **第三个随包插件 `dsh-our-free-model` 已于 2026-10-30 撤下** (主人: "删除 ourfreemodel 这个随包插件"): `pack-host.mjs` 取包那一段、`PluginRows` 那一行与它那句 `distribution: 'managed'` 一起删了; 老设备上那条挂载行由 `PluginRows` 的 `RETIRED` 表摘掉 (**只摘指回宿主树的那一条**, 主人自己装在 `plugins-src/` 的那份不动) —— 真机上不摘的表现是每次起 host 一句 `free-model (file://…/dsh-our-free-model/index.js): failed to import` 加 "1 entry did not activate", 2026-10-30 在 22041216C 上实测过; 判据 `tools/check-bundled-plugins.mjs` 现在钉住"它不在"与"旧行会被摘"这五条。原来那套 (npm 只停 2.1.0 所以锁 git 40 位 commit / 装完点 `vendor/channel-pack` 关键件 / 裁 `vendor/magpie` 那 65 MB) 要接回来得从头重接一遍
 - **随包插件一律"先看本体, 有就不装"** (2026-10-25 主人: "对于预装的插件要先检查本体有没有才安装, 不覆盖安装"): `PluginRows` 命中任一条就让位 —— patch 里已有**别人**的挂载行 (`mountsPackage`), 或 profile 的 `node_modules` 里这个包解析到**宿主树之外** (`userInstallOf` + `isUserCopy`, 例如软链到 `plugins-src/` 主人自己那份)。让位 = 摘掉自己那行 + 记一条带路径的日志, **不删别人的行、不往别人的目录写字节**; 一条可用本体都没有时才装树里这份 (`taken` 那一段, 判据 `PluginRowsTest` 14 条)
 - 右栏浏览器格在上游是 desktop 专属, `PluginOverlay.write` 每启一次写 `disabled: false` 覆盖
 - **Luwi 的 CSS 覆盖层**是 `presets/ui-fix`: 只写选择器与样式, **不复制组件不 monkey-patch**; 每条 `!important`; `tools/check-ui-fix.mjs` 把每个 selector 去产物里 grep
@@ -427,6 +434,8 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 - 迭代: 改 dsh → `build\lw-dsh-patches.diff` 应用到 submodule → `node tools\pack-host.mjs --dsh third_party\deepseek-harness --out build\host-tree` → `node tools\push-host.mjs build\host-tree` → 重启 app; 改 Kotlin → `assembleDebug` + `adb install -r`
 - 判据: `DshHost: dsh web: http://…` = 树起来了; `DshWebView: shell {...}` 里 `rootChildren` 非 0 = GUI 渲染 (那一行还带 `vh`, 界面塌了先看它); 回前台那一趟 `LwMain: resumed with host Running` 且没有第二条 `DshWebView: finished` = 没重载
 - 静态判据: `node tools/check-host-persistence.mjs` (renderer 优先级 / 重建上限 / 回前台自愈 / 白名单只有一份实现) 与 `node tools/check-web-compat.mjs` (兼容层 + 更新指引)
+- **host 树逐文件裁剪在 `pack-host.mjs` 末尾** (2026-10-29): 剔 win32/darwin 预编译、`.pdb`/`.exe`、`.map`、`.d.ts`、README 那类 `.md`、测试目录与测试文件, 保留 wasm / LICENSE / linux prebuild; 实测 36,030 → 17,526 文件、`host.zip` 64.8 MB (原 ~98.9)。判据 `node tools/check-host-slim.mjs` (源码形状 + 真树零残留), **别用事后重打 zip 的脚本** —— 那样 `host-version.txt` 的 `entries` 与树对不上
+- **`packageDebug` 会在旧 APK 上原地改写**: 条目内容变了会留空洞 (实测 17 MB, 条目 sum 只 251 MB 而文件 268 MB), `apk-bytes.py` 会报几 MB 的"无归属区间"。**出包前先删 `app/build/outputs/apk/debug/app-debug.apk`**
 
 ## 推送与发布 (github.com:443 被挡)
 
@@ -437,4 +446,5 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 ## 还能做
 
 - OCR: 换更强的 **rec** (det 的天花板已量过: tiny/small/medium 与 960 都试了, 字数不变) / 试 ORT 自己导出 ctx (可去掉 70 MB) / 若遇到真正的小字页面再拿 `models-960` 复测
+- **主屏取图去 uid** (2026-10-29 讨论过, 没做): display 0 目前只有特权 `screencap -p`。无障碍 `AccessibilityService.takeScreenshot()` 不需要 uid (服务本来就开着), 换来的是系统节流 (约 1 秒一次)、只能拍默认屏、要重接状态栏裁剪与坐标口径; 主屏 OCR 属兜底场景, 先留着
 - jniLibs 挂 Release 由 Gradle 下载; `node-pty` 可以删

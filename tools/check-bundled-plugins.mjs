@@ -50,14 +50,23 @@ function check(name, got, want) {
 
 const image = /const imagePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
 const mneme = /const mnemePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
-const freeModel = /const freeModelPlugin = \{\s*name: '([^']+)',\s*version: '([^']+)',\s*commit: '([0-9a-f]+)',\s*\}/.exec(packer)
 
 check('生图插件仍按自己那份声明取进树', [image?.[1], image?.[2]], ['@dickpy/dsh-imagegen', '1.6.7'])
-check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.9.0'])
+check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.9.4'])
+
+// 2026-10-30 主人: "删除 ourfreemodel 这个随包插件" —— 三处接缝 (取包 / 挂行 / 贴 config) 一起撤,
+// 钉一条"它不在"的判据, 免得将来谁又把它按老文档加回去. 撤下的那一行还得从老设备上摘掉: OWNED 只管
+// 还在发的几行, 所以另有一张 RETIRED 表 (真机上不摘的表现是每次起 host 一句 "1 entry did not activate")
 check(
-  '免费模型插件按 git 的 40 位 commit 取 (npm 上那份停在 2.1.0, 取不得)',
-  [freeModel?.[1], freeModel?.[2], freeModel?.[3]?.length],
-  ['dsh-our-free-model', '2.7.1', 40],
+  '免费模型插件已经撤出随包 (取包那一段 / OWNED 那一行 / managed config 都不在), 且老设备上的行会被摘',
+  [
+    packer.includes('freeModelPlugin'),
+    /Owned\(\s*"free-model"/u.test(rows),
+    rows.includes('MANAGED_DISTRIBUTION'),
+    rows.includes('private val RETIRED = listOf("free-model" to "dsh-our-free-model")'),
+    rows.includes('val next = retired(patch, id, packageName, root)'),
+  ],
+  [false, false, false, true, true],
 )
 
 check(
@@ -79,28 +88,6 @@ check(
     packer.includes("if (name.endsWith('.map')) rmSync(join(mnemeRoot, 'lib', name)"),
   ],
   [true, true, true],
-)
-
-// 免费模型插件: 关键件少一样时渠道整块起不来, 而 65 MB 的 Windows 代理引擎带上就是白胖
-check(
-  '免费模型插件装完点一遍关键件, 并裁掉只有 Windows 才有的 vendor/magpie',
-  [
-    packer.includes("'vendor/channel-pack/pack.js'"),
-    packer.includes("'vendor/channel-pack/qoder-auth-wasm.wasm'"),
-    packer.includes("'adapter/kernel.js'"),
-    packer.includes("rmSync(join(freeModelRoot, 'vendor', 'magpie'), { recursive: true, force: true })"),
-    packer.includes('await import(pathToFileURL(join(freeModelRoot, freeModelEntry)).href)'),
-  ],
-  [true, true, true, true, true],
-)
-
-check(
-  '免费模型插件按"整合包安装"跑 (distribution: managed, 停在应用内升级/公告/热重载三件)',
-  [
-    rows.includes("config = { MANAGED_DISTRIBUTION }"),
-    rows.includes('distribution: \'managed\''),
-  ],
-  [true, true],
 )
 
 // 2026-10-16 主人在手机上手工装过一份 (plugins-src + 裸包名那一行): 两行同时挂在启动时会报
@@ -136,12 +123,11 @@ check(
 const owned = [...rows.matchAll(/Owned\(\s*"([^"]+)",\s*"([^"]+)"/g)].map((one) => [one[1], one[2]])
 
 check(
-  'profile patch 里那三行指的都是树里的入口文件',
+  'profile patch 里那两行指的都是树里的入口文件',
   owned,
   [
     ['imagegen', 'node_modules/@dickpy/dsh-imagegen/lib/index.js'],
     ['mneme', 'node_modules/@modusensus/dsh-mneme/lib/index.js'],
-    ['free-model', 'node_modules/dsh-our-free-model/index.js'],
   ],
 )
 
@@ -180,6 +166,59 @@ check(
   ],
   [true],
 )
+
+/* ── 三之二、酒馆会话不进记忆库 (2026-10-29) ─────────────────────────────── */
+
+// 酒馆一场存档就是一场 DSH 会话 (preset 是 `tavern`), 而 mneme 的 autoSummarize 在每场会话的
+// turn/end 上蒸馏写库 —— 主人报的"酒馆的对话进入记忆库了"就是这一条. 上游 0.9.0 没有"按 preset
+// 排除"的配置, 所以由 pack-host 打三处补丁 (config / 蒸馏 / 注入), 配置那一半由 PluginRows 写
+check(
+  'mneme 补丁: 三处锚点都在, 缺省排除 tavern, 且上游自己实现了就跳过 (不硬打第二套语义)',
+  [
+    [
+      'autoSummarize: z.boolean().default(true),',
+      'async function summarize(session, triggerEvent, opts = {}) {',
+      'text: (ctx) => {',
+    ].filter((anchor) => !packer.includes(anchor)),
+    packer.includes("excludeAgentPresets: z.array(z.string()).default(['tavern'])"),
+    packer.includes('already carries excludeAgentPresets'),
+    packer.includes('so tavern sessions stay out of memory'),
+  ],
+  [[], true, true, true],
+)
+
+check(
+  'profile 里那一行把 tavern 排除掉 (排除按 preset 判, 不碰别的会话)',
+  rows.includes("excludeAgentPresets: ['tavern']"),
+  true,
+)
+
+// 面板前端就用 0.9.4 自带那一份 (2026-10-29 主人: "只用0.9.4即可"); 它在 rc.3 基座上渲染不出记忆
+// 列表那一块, 这一档显示问题接受, 但**不许**为了面板好看把 client.js 换回 0.9.0 (那会把 0.9.4 的
+// 新功能连设置项一起藏掉). 这条判据钉的是"没有那层替换"
+check(
+  '面板前端就是 0.9.4 自带那一份 (没有换回 0.9.0 的替换层)',
+  [
+    packer.includes('mnemeClientPlugin'),
+    packer.includes("join(mnemeRoot, 'lib', 'client.js')"),
+  ],
+  [false, false],
+)
+
+// 产物级: 树在、且树里那份已经是声明的版本时才查 (旧树是升级前的, 查它只会红给"还没重新构建")
+const treeMneme = 'app/build/host-tree/node_modules/@modusensus/dsh-mneme'
+const patchedMneme = await read(`${treeMneme}/lib/config.js`).catch(() => null)
+const treeManifest = await read(`${treeMneme}/package.json`).catch(() => null)
+if (patchedMneme === null || treeManifest === null) {
+  console.log('skip  树里还没有 mneme (先跑一次构建), 产物级补丁判据跳过')
+} else if (JSON.parse(treeManifest).version !== mneme?.[2]) {
+  console.log(
+    `skip  树里那份 mneme 是 ${JSON.parse(treeManifest).version}, 还不是声明的 ${mneme?.[2]};`
+      + ' 重新构建一次再查产物级补丁',
+  )
+} else {
+  check('树里那份 mneme 真的带着 excludeAgentPresets', patchedMneme.includes('excludeAgentPresets'), true)
+}
 
 /* ── 四、别人那几行别被顺手改了 ─────────────────────────────────────────── */
 

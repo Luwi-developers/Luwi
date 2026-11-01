@@ -39,16 +39,21 @@ internal object LwEdgeTts {
      *
      * [context] 只用来找放临时文件的 cache 目录
      */
-    fun speak(context: Context, text: String, speed: Float): String {
+    fun speak(
+        context: Context,
+        text: String,
+        speed: Float,
+        voice: String = SpeakSettings.edgeVoice,
+    ): String {
         val pieces = LwSpeak.chunk(text, LwEdgeSpeech.CHUNK_CHARS)
         if (pieces.isEmpty()) return "there is nothing to say"
-        val voice = SpeakSettings.edgeVoice.ifBlank { LwEdgeSpeech.DEFAULT_VOICE }
+        val chosenVoice = voice.ifBlank { SpeakSettings.edgeVoice }.ifBlank { LwEdgeSpeech.DEFAULT_VOICE }
         val started = System.currentTimeMillis()
         stopped = false
         return try {
             pieces.forEach { piece ->
                 if (stopped) return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
-                val audio = synthesize(voice, piece, speed)
+                val audio = synthesize(chosenVoice, piece, speed)
                     ?: return "stopped on request while saying \"${piece.take(SCRIBBLE)}\""
                 if (!LwVoiceClip.play(context, audio, "mp3")) {
                     return if (stopped) {
@@ -58,7 +63,7 @@ internal object LwEdgeTts {
                     }
                 }
             }
-            "said ${text.length} characters in ${pieces.size} piece(s) with Edge $voice" +
+            "said ${text.length} characters in ${pieces.size} piece(s) with Edge $chosenVoice" +
                 " in ${System.currentTimeMillis() - started} ms"
         } catch (error: Throwable) {
             Log.w(TAG, "the Edge call failed", error)

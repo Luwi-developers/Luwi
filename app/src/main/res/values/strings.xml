@@ -40,7 +40,7 @@
     <string name="settings_restart_host">Restart DSH host</string>
     <string name="settings_restart_host_summary">For when what the host reads once (where the workspace lands, the LAN switch) changed</string>
 
-    <string name="settings_menu_feedback">Feedback</string>
+    <string name="settings_menu_feedback">Luwi feedback</string>
     <string name="settings_menu_feedback_summary">Report a problem, or say something privately</string>
     <string name="settings_menu_update">Check for updates</string>
     <string name="settings_menu_account">Account</string>
@@ -64,7 +64,7 @@
     <string name="settings_about_source">Update source</string>
     <string name="settings_about_source_default">The built-in one</string>
 
-    <string name="settings_feedback_title">Feedback</string>
+    <string name="settings_feedback_title">Luwi feedback</string>
     <string name="settings_feedback_kind_issue">Public issue</string>
     <string name="settings_feedback_kind_email">Private mail</string>
     <string name="settings_feedback_kind_issue_summary">Goes to the public issue tracker, where anyone can read it</string>
@@ -204,6 +204,7 @@
     <string name="settings_voice_silence_dialog">In seconds, from %1$s to %2$s</string>
 
     <string name="settings_ocr_backend">Runs on: %1$s</string>
+    <string name="settings_ocr_mixed">mixed</string>
     <string name="settings_ocr_probe">Self check</string>
     <string name="settings_ocr_probe_busy">Checking...</string>
 
@@ -229,6 +230,9 @@
     <string name="settings_wake_speech_missing">Not downloaded yet, about %1$s in all; tap to fetch it (Wi-Fi recommended)</string>
     <string name="settings_wake_speech_partial">%1$d of %2$d files are in place; tap to fetch the rest</string>
     <string name="model_setup_title">Two models are still missing</string>
+    <string name="bundled_notice_title">Do not update the bundled plugins yourself</string>
+    <string name="bundled_notice_body">These are built into the host and shipped with each Luwi release: DeepSeek Harness, mneme, dsh-imagegen, and the Custom mode. Every Luwi update already brings them to the latest version that fits this build. Updating them on your own can lose data, and the risk is yours to bear.</string>
+    <string name="bundled_notice_ok">I understand</string>
     <string name="model_setup_summary">Being called by name and speaking to it both need the two models below. Every launch checks for them; if they are missing it asks up to 3 times and then stops, and the Wake section in Settings can still fetch them.</string>
     <string name="model_setup_attempt">Reminder %1$d of %2$d; after %2$d it stops checking and stops asking</string>
     <string name="model_setup_wake">Wake word model</string>
@@ -708,7 +712,7 @@
     <string name="settings_tavern_summary_mismatch">This workspace is not the bound tavern workspace</string>
     <string name="settings_tavern_summary_off">Tavern is off</string>
     <string name="settings_tavern_enable">Tavern</string>
-    <string name="settings_tavern_enable_summary">A table of up to ten characters, one speaks per turn. It never creates a DSH session and never touches memory</string>
+    <string name="settings_tavern_enable_summary">A table of up to ten characters, one speaks per turn; dialogue runs in DSH sessions and never touches memory</string>
     <string name="settings_tavern_bind">Bind this workspace</string>
     <string name="settings_tavern_bind_summary">The tavern only works inside the bound workspace; changing the workspace locks it</string>
     <string name="settings_tavern_manage">Cards, story books and saves</string>
@@ -802,6 +806,14 @@
     <string name="settings_tavern_card_collapse">Collapse</string>
     <string name="settings_tavern_card_settings_bad">Check the numbers: interval 1-1000, quiet 0-1000, chance 0-1</string>
     <string name="settings_tavern_card_settings_saved">Saved</string>
+    <string name="settings_tavern_card_voice">Voice</string>
+    <string name="settings_tavern_card_voice_summary">The TTS voice this character speaks with</string>
+    <string name="settings_tavern_card_voice_default">Follow default</string>
+    <string name="settings_tavern_card_voice_none">The engine reported no voices; type one below</string>
+    <string name="settings_tavern_card_voice_manual">Voice id, or name@locale</string>
+    <string name="settings_tavern_card_voice_unusable">unusable</string>
+    <string name="settings_tavern_card_voice_api_follow">API · Follow settings</string>
+    <string name="settings_tavern_card_voice_api_empty">No API voices registered; type api:&lt;id&gt; or register one with lw_speak</string>
     <string name="settings_tavern_card_proactive">Speak up on its own</string>
     <string name="settings_tavern_card_proactive_hint">One round = you speak once + each picked character replies once. A character who has been quiet long enough may add a line; it can stay silent.</string>
     <string name="settings_tavern_card_proactive_enabled">Allow this character to speak up</string>
@@ -811,19 +823,13 @@
     <string name="settings_tavern_card_probability">Chance</string>
     <string name="settings_tavern_model">Model</string>
     <string name="settings_tavern_model_follow">Follow the current model</string>
-    <string name="settings_tavern_model_summary">The model this tavern uses: both the direct and the DSH-session engine run on it</string>
+    <string name="settings_tavern_model_summary">The model the tavern\'s DSH sessions use</string>
     <string name="settings_tavern_model_provider">Provider</string>
     <string name="settings_tavern_model_name">Model name</string>
     <string name="settings_tavern_model_current">In use</string>
     <string name="settings_tavern_model_saved">Model saved</string>
-    <string name="settings_tavern_engine">Engine for new saves</string>
-    <string name="settings_tavern_engine_summary">Direct = one request per reply; DSH session = one session per save, slower but the cast keeps context and tools</string>
-    <string name="settings_tavern_engine_direct">Direct</string>
-    <string name="settings_tavern_engine_bridge">DSH session</string>
-    <string name="settings_tavern_engine_switch">Switch engine</string>
-    <string name="settings_tavern_engine_unavailable">The tavern preset is not installed: %1$s</string>
-    <string name="settings_tavern_engine_fallback">This round fell back to direct: %1$s</string>
-    <string name="settings_tavern_engine_pending">Still writing, refreshing shortly</string>
+    <string name="settings_tavern_voice">Tavern voice</string>
+    <string name="settings_tavern_voice_summary">Only turns the tavern characters\' speech on or off</string>
     <string name="settings_tavern_card_save">Save settings</string>
     <string name="settings_tavern_card_detail">Character details</string>
     <string name="settings_tavern_account">Account</string>

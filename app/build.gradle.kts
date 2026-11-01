@@ -349,15 +349,11 @@ android {
             // libQnnHtpV73Skel.so by path, and ADSP_LIBRARY_PATH points at
             // nativeLibraryDir, so it has to be a real file
             useLegacyPackaging = true
-            // qnn-runtime ships skels and stubs for six Hexagon generations; this device is v73, so
-            // the other five are dead weight. libQnnHtpPrepare.so is the graph compiler and has to
-            // stay for now because the `jit` path compiles the graph on the device
+            // 六代 Hexagon 骨架全带 (2026-10-29): 以前只留 V73, 注释写 "this device is v73", 代价是
+            // 8 Elite (V79) 的用户装上直接 QNN_DEVICE_ERROR_INVALID_CONFIG —— 那一档的 NPU 永远建不
+            // 起来, 而界面只会显示一个回落后的 CPU。deflate 后六代合计约 25.7 MB, 换来 888 到
+            // 8 Elite Gen 2 都不用挑版本。libQnnHtpPrepare.so 是图编译器, jit 那条路要它
             excludes += listOf(
-                "**/libQnnHtpV68*.so",
-                "**/libQnnHtpV69*.so",
-                "**/libQnnHtpV75*.so",
-                "**/libQnnHtpV79*.so",
-                "**/libQnnHtpV81*.so",
                 // GPU / classic-DSP backends are another 11 MB and OCR only ever asks for HTP
                 "**/libQnnGpu*.so",
                 "**/libQnnDsp*.so",

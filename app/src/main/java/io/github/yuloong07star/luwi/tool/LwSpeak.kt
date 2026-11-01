@@ -435,11 +435,39 @@ internal object LwSpeak {
         else -> "system"
     }
 
+    /**
+     * 一次点名里的引擎与音色 (2026-10-29)
+     *
+     * 卡上那一位可以写成 `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id`;
+     * 没有前缀就是老写法 (引擎跟设置页, 音色原样交给系统 / API 那条)
+     */
+    internal data class VoiceRef(val engine: SpeakSettings.Engine?, val voice: String)
+
+    internal fun parseVoiceRef(raw: String?): VoiceRef {
+        val text = raw?.trim().orEmpty()
+        val at = text.indexOf(':')
+        if (at <= 0) return VoiceRef(null, text)
+        val engine = when (text.substring(0, at).lowercase()) {
+            "sys", "system" -> SpeakSettings.Engine.SYSTEM
+            "dev", "device", "on-device" -> SpeakSettings.Engine.ON_DEVICE
+            "edge" -> SpeakSettings.Engine.EDGE
+            "api" -> SpeakSettings.Engine.API
+            else -> null
+        }
+        return if (engine == null) VoiceRef(null, text) else VoiceRef(engine, text.substring(at + 1).trim())
+    }
+
     /** [speak] 的真身: 三条引擎各自怎么念 (闸在上面那一层合, 这里只管念) */
     private fun speakWith(context: Context, request: JsonObject, text: String, run: Int): JsonObject {
+        val ref = parseVoiceRef(request.stringOrNull("voice"))
+        val engine = ref.engine ?: SpeakSettings.engine
+        val onDevice = engine == SpeakSettings.Engine.ON_DEVICE
+        val edge = engine == SpeakSettings.Engine.EDGE
+        val api = engine == SpeakSettings.Engine.API
+        val askedVoice = ref.voice
         // 自带那条先问: 设置页选了它、而且真的挑了一个音色目录, 就整段交给它 (它自己按句切)
-        if (SpeakSettings.usesOnDevice()) {
-            val wanted = SpeakSettings.model
+        if (onDevice) {
+            val wanted = askedVoice.ifBlank { SpeakSettings.model }
             val voice = LwTts.list(context).firstOrNull { it.name == wanted }
             if (voice == null) {
                 unavailable(
@@ -474,14 +502,11 @@ internal object LwSpeak {
         }
         // 在线那两条: 语音在服务那一侧, 所以**音量那一条对它们不成立** (拿回来的是编码过的音频) ——
         // 点名要了音量就必须如实说没生效, 而不是静默丢掉
-        if (SpeakSettings.usesEdge() || SpeakSettings.engine == SpeakSettings.Engine.API) {
+        if (edge || api) {
             val asked = request.numberOrNull("rate")?.toFloat()
             val speed = (asked ?: SpeakSettings.rate).coerceIn(0.5f, 2.0f)
-            val edge = SpeakSettings.usesEdge()
-            // 本次点名的音色 (id 或音色库里那个名字): 只对 API 那条有意义, 优先于设置页
-            val askedVoice = request.stringOrNull("voice")
             val answer = if (edge) {
-                LwEdgeTts.speak(context, text, speed)
+                LwEdgeTts.speak(context, text, speed, askedVoice)
             } else {
                 // 没填地址时这一句会直说缺什么 (见 LwApiTts.speak), 所以这里不另设闸
                 LwApiTts.speak(context, text, speed, askedVoice)
@@ -494,7 +519,7 @@ internal object LwSpeak {
             if (edge && failed) {
                 Log.w(TAG, "the Edge call failed ($answer); falling back to the system engine")
                 val fallback = try {
-                    systemSpeak(context, request, text, run)
+                    systemSpeak(context, request, text, run, askedVoice)
                 } catch (error: Throwable) {
                     unavailable(
                         "speaking",
@@ -536,7 +561,7 @@ internal object LwSpeak {
                 put("detail", answer)
             }
         }
-        return systemSpeak(context, request, text, run)
+        return systemSpeak(context, request, text, run, askedVoice)
     }
 
     /**
@@ -545,7 +570,13 @@ internal object LwSpeak {
      * 从 [speakWith] 里抽出来, 为了让 Edge 那一档在彻底失败时**还能落到这里** —— "自动换系统朗读"
      * 那一条 (2026-10-20) 不能靠改 [SpeakSettings] 的全局设置, 那会把主人选的那条引擎改掉
      */
-    private fun systemSpeak(context: Context, request: JsonObject, text: String, run: Int): JsonObject {
+    private fun systemSpeak(
+        context: Context,
+        request: JsonObject,
+        text: String,
+        run: Int,
+        voiceOverride: String? = null,
+    ): JsonObject {
         val tts = engine(context)
         val chinese = tts.setLanguage(Locale.CHINESE)
         if (chinese == TextToSpeech.LANG_MISSING_DATA || chinese == TextToSpeech.LANG_NOT_SUPPORTED) {
@@ -562,8 +593,11 @@ internal object LwSpeak {
         val asked = request.numberOrNull("rate")?.toFloat()
         val chosen = asked?.coerceIn(0.5f, 2.0f) ?: SpeakSettings.effectiveRate()
         if (chosen != null) runCatching { tts.setSpeechRate(chosen) }
-        // 音色同理由设置页定; 存的是"名字@地区" (名字单独用会撞车), 找不到就退回引擎默认
-        SpeakSettings.voice?.let { stored ->
+        // 音色优先级: 这次调用点名的 > 设置页的; 存的是"名字@地区" (名字单独用会撞车), 找不到就退回引擎默认
+        // 2026-10-29: 点名的这一档是给酒馆"每个角色一个音色"用的
+        val askedVoice = (voiceOverride ?: request.stringOrNull("voice"))?.trim().orEmpty()
+        val storedVoice = askedVoice.ifBlank { SpeakSettings.voice }
+        storedVoice?.let { stored ->
             val wanted = runCatching { tts.voices }.getOrNull()?.firstOrNull { voiceKey(it) == stored }
             if (wanted != null) {
                 runCatching { tts.voice = wanted }

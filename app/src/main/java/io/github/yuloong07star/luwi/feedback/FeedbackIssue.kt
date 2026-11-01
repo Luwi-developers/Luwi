@@ -18,11 +18,11 @@ internal object FeedbackIssue {
 
     private const val TIMEOUT_MS = 20_000
 
-    /** 标题: 正文第一行, 最多 60 字; 正文是空的时候退回"反馈 <版本>" */
+    /** 标题: 正文第一行, 最多 60 字; 正文是空的时候退回"Luwi反馈 <版本>" */
     fun titleOf(body: String, app: String): String {
         val first = body.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
         val cut = if (first.length <= 60) first else first.substring(0, 60)
-        return cut.ifBlank { "反馈 $app" }
+        return cut.ifBlank { "Luwi反馈 $app" }
     }
 
     /** 开一条 issue: 成功回 `null`, 失败回一句人话 (HTTP 码 + 服务器那句) */

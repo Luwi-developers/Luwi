@@ -265,10 +265,12 @@ check('到点那一下先取消再 followup (与双击打断同一条语义)', [
   /if \(options\.cancel === true\) \{\n {6}agent\.cancel\(\{ kind: 'user' \}, \{ keepInbox: true \}\)/u.test(section),
   /agent\.followup\(message\)/u.test(section),
 ], [true, true])
-check('步数用尽的正文点名 op=finish 并说"不要再开新的事"', [
+check('步数用尽的正文先关虚拟屏, 再点名 op=finish 并说"不要再开新的事"', [
   /该收尾了/u.test(section),
+  /lw_screen_release/u.test(section),
+  /关闭虚拟屏/u.test(section),
   /不要再开新的事/u.test(section),
-], [true, true])
+], [true, true, true, true])
 
 /* ── 七、工具面 ───────────────────────────────────────────────────────── */
 
@@ -287,7 +289,7 @@ check('工具说明里写清"宿主自己按排期开, 这条工具不开"', [
   toolFace.includes('never starts one') || toolFace.includes('never starts'),
   toolFace.includes('daily start time'),
 ], [true, true])
-check('工具数的下限抬到 65', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 65)
+check('工具数的下限抬到 66', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 66)
 
 /* ── 八、文件与键名 ───────────────────────────────────────────────────── */
 
@@ -333,7 +335,7 @@ check(
 const pack = await read('tools/pack-host.mjs')
 const custom = await read('app/src/main/java/io/github/yuloong07star/luwi/host/CustomPresets.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
-check('pack-host 摆的就是探索那一份 (手机/视频两条 2026-10-18 下线)', /for \(const name of \['explore'\]\)/u.test(pack), true)
+check('pack-host 摆的就是探索那一份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore'\]/u.test(pack), true)
 check('Kotlin 那张 PRESET_ROWS 是三对', /ROW_EXPLORE to "explore",/u.test(custom), true)
 const exploreBranch = host.slice(
   host.indexOf("if (line.source === 'explore')"),

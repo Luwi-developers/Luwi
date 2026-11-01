@@ -15,24 +15,79 @@ class OcrBoxesTest {
 
     @Test
     fun `方形小低分是图标`() {
-        assertTrue(OcrBoxes.isIconLike(40, 40, 0.6f))
-        assertTrue(OcrBoxes.isIconLike(44, 38, 0.5f))
+        assertTrue(OcrBoxes.isIconLike(40, 40, 0.6f, 1080))
+        assertTrue(OcrBoxes.isIconLike(44, 38, 0.5f, 1080))
     }
 
     @Test
     fun `分数高的方形不是图标`() {
-        assertFalse(OcrBoxes.isIconLike(40, 40, 0.9f))
+        assertFalse(OcrBoxes.isIconLike(40, 40, 0.9f, 1080))
     }
 
     @Test
     fun `宽扁的行不是图标`() {
-        assertFalse(OcrBoxes.isIconLike(200, 30, 0.5f))
+        assertFalse(OcrBoxes.isIconLike(200, 30, 0.5f, 1080))
+    }
+
+    @Test
+    fun `尺寸判据按屏长边的比例走`() {
+        // 2K 屏长边 3200, 9% 是 288px: 120px 的方形仍然是头像, 而旧的 96px 绝对判据会漏掉它
+        assertTrue(OcrBoxes.isIconLike(120, 120, 0.5f, 3200))
+        // 1080 屏的 9% 是 97px, 同一个 120px 框已经比阈值大, 不算小图标
+        assertFalse(OcrBoxes.isIconLike(120, 120, 0.5f, 1080))
+        // 屏尺寸非法时不做形状判断, 交给后面的分数线
+        assertFalse(OcrBoxes.isIconLike(40, 40, 0.5f, 0))
     }
 
     @Test
     fun `大方形不是图标`() {
-        // 边长到了 ICON_MAX_SIDE 就不是小图标了, 不按形状判
-        assertFalse(OcrBoxes.isIconLike(OcrBoxes.ICON_MAX_SIDE, OcrBoxes.ICON_MAX_SIDE, 0.5f))
+        // 长边过了屏长边的 9% 就不是"小图标"了, 不按形状判
+        assertFalse(OcrBoxes.isIconLike(150, 150, 0.5f, 1080))
+    }
+
+    @Test
+    fun `重叠的两条只留分数高的`() {
+        // 检测器对同一行给两个重叠框: 一个是 0.986, 一个是 0.75 (小米13 上"微信(4)"那条)
+        val high = OcrBox(100f, 100f, 400f, 140f, 0.986f)
+        val low = OcrBox(110f, 104f, 396f, 136f, 0.75f)
+        val (kept, dropped) = OcrBoxes.dedupe(listOf(high, low))
+        assertEquals(1, kept.size)
+        assertEquals(1, dropped)
+        assertEquals(0.986f, kept[0].score, 0.0001f)
+    }
+
+    @Test
+    fun `不相邻的两条都保留`() {
+        val first = OcrBox(0f, 0f, 300f, 40f, 0.9f)
+        val second = OcrBox(0f, 60f, 300f, 100f, 0.9f)
+        val (kept, dropped) = OcrBoxes.dedupe(listOf(first, second))
+        assertEquals(2, kept.size)
+        assertEquals(0, dropped)
+    }
+
+    @Test
+    fun `被包住的小框也丢掉`() {
+        val big = OcrBox(0f, 0f, 500f, 60f, 0.95f)
+        val inner = OcrBox(100f, 10f, 200f, 50f, 0.80f)
+        val (kept, dropped) = OcrBoxes.dedupe(listOf(big, inner))
+        assertEquals(1, kept.size)
+        assertEquals(1, dropped)
+        assertEquals(0.95f, kept[0].score, 0.0001f)
+    }
+
+    @Test
+    fun `去重不改检测器给的顺序`() {
+        val upper = OcrBox(0f, 10f, 300f, 40f, 0.9f)
+        val lower = OcrBox(0f, 100f, 300f, 130f, 0.9f)
+        val (kept, _) = OcrBoxes.dedupe(listOf(upper, lower))
+        assertEquals(listOf(upper, lower), kept)
+    }
+
+    @Test
+    fun `完全不相交的两条重叠为 0`() {
+        val a = OcrBox(0f, 0f, 100f, 40f, 0.9f)
+        val b = OcrBox(200f, 0f, 300f, 40f, 0.9f)
+        assertEquals(0f, OcrBoxes.overlap(a, b), 0.0001f)
     }
 
     @Test

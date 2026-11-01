@@ -76,6 +76,13 @@ def const_value(inits, name):
     return value if value.size == 1 else None
 
 
+def pin_dim(dim, value):
+    """Force one declared dimension to a number, whether it was dynamic or symbolic"""
+    if dim.HasField("dim_param"):
+        dim.ClearField("dim_param")
+    dim.dim_value = value
+
+
 def pin_input_shape(model, shape, kind):
     graph = model.graph
     if len(graph.input) != 1:
@@ -89,12 +96,23 @@ def pin_input_shape(model, shape, kind):
     # the recognizer declares its time axis as `floor(floor(floor(W/2 - 1/2)/2)/2 - 1/2) + 1`,
     # which the shape inferencer cannot evaluate, so it is filled in from the pinned width here
     # (320 -> 159 -> 79 -> 39, +1)
+    #
+    # **the batch axis has to be pinned as well** (2026-10-29): the export leaves the output's
+    # first dim dynamic, and a `-RecBatch 8` run that only changed the input left
+    # `fetch_name_0` dynamic — QNN refuses a graph with any dynamic dimension, so the delivered
+    # batch-8 model would have failed to build even though the input looked right
     if kind == "rec":
         out = model.graph.output[0]
         dims = out.type.tensor_type.shape.dim
-        if not dims[1].HasField("dim_value"):
-            del dims[1].dim_value
-            dims[1].dim_value = shape[3] // 2 // 2 // 2 + 1
+        if len(dims) == 3:
+            pin_dim(dims[0], shape[0])
+            pin_dim(dims[1], shape[3] // 2 // 2 // 2 + 1)
+        # the export also leaves a `value_info` entry with the same name and the symbolic dims;
+        # the graph output already carries the type, so that duplicate is dropped rather than
+        # pinned twice — a leftover dynamic dimension is exactly what QNN refuses
+        keep = [vi for vi in model.graph.value_info if vi.name != out.name]
+        del model.graph.value_info[:]
+        model.graph.value_info.extend(keep)
     dynamic = []
     for vi in list(model.graph.value_info) + list(model.graph.output):
         for d in vi.type.tensor_type.shape.dim:

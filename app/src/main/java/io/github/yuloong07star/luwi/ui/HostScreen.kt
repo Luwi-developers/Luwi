@@ -163,6 +163,8 @@ fun HostScreen(modifier: Modifier = Modifier) {
 
     // 减号把整扇窗收掉, 收起来之后界面上一点痕迹都不留; 要它回来走 ⋮ 菜单里那一项
     var windowHidden by remember { mutableStateOf(false) }
+    // 浮标菜单里的「Luwi反馈」: 与设置页 ⋮ 第一条同一个窗 (2026-10-29)
+    var feedbackOpen by remember { mutableStateOf(false) }
 
     // **这一页没有顶栏**: 原来那条写着应用名的 `SmallTopAppBar` 去掉了, 顶上那点位置让给会话。
     // 唯一的菜单入口是浮标 (见 FloatingBall)。`innerPadding` 仍然带着状态栏那条 inset, 所以内容
@@ -231,10 +233,14 @@ fun HostScreen(modifier: Modifier = Modifier) {
                 selected = selected,
                 onSettings = { navigator.push(Screen.Settings) },
                 onTavern = { navigator.push(Screen.TavernHome) },
+                onFeedback = { feedbackOpen = true },
                 windowHidden = windowHidden,
                 onToggleWindow = { windowHidden = !windowHidden },
                 modifier = Modifier.padding(innerPadding),
             )
+            if (feedbackOpen) {
+                FeedbackDialog(onDismissRequest = { feedbackOpen = false })
+            }
             // 「再按一次退出」走这里。挂在主页而不是脚手架上, 是因为提示只有主页会用到:
             // 按返回从设置页回来的时候不该弹它, 弹的是这一页的返回
             SnackbarHost(
@@ -256,6 +262,7 @@ private fun MenuButton(
     selected: ScreenState?,
     onSettings: () -> Unit,
     onTavern: () -> Unit,
+    onFeedback: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -267,6 +274,7 @@ private fun MenuButton(
             selected = selected,
             onSettings = onSettings,
             onTavern = onTavern,
+            onFeedback = onFeedback,
             windowHidden = windowHidden,
             onToggleWindow = onToggleWindow,
         ),
@@ -446,6 +454,7 @@ private fun FloatingBall(
     selected: ScreenState?,
     onSettings: () -> Unit,
     onTavern: () -> Unit,
+    onFeedback: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -563,6 +572,7 @@ private fun FloatingBall(
                 selected = selected,
                 onSettings = onSettings,
                 onTavern = onTavern,
+                onFeedback = onFeedback,
                 windowHidden = windowHidden,
                 onToggleWindow = onToggleWindow,
                 // 球的底由外面这层给, 菜单按钮自己就不用再画一层
@@ -588,6 +598,7 @@ private fun mainMenu(
     selected: ScreenState?,
     onSettings: () -> Unit,
     onTavern: () -> Unit,
+    onFeedback: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
 ): List<DropdownEntry> {
@@ -606,6 +617,8 @@ private fun mainMenu(
     val windowToggle = stringResource(
         if (windowHidden) R.string.screen_window_show else R.string.screen_window_hide,
     )
+    // 「Luwi反馈」: 与设置页 ⋮ 里那一条是同一个窗, 只是把入口也摆到球菜单 (2026-10-29 主人)
+    val feedbackLabel = stringResource(R.string.settings_menu_feedback)
     return listOf(
         DropdownEntry(
             items = listOfNotNull(
@@ -706,6 +719,11 @@ private fun mainMenu(
                 } else {
                     null
                 },
+                // 反馈: 与设置页 ⋮ 第一条同一个对话框 (2026-10-29)
+                DropdownItem(
+                    text = feedbackLabel,
+                    onClick = onFeedback,
+                ),
                 DropdownItem(
                     text = "设置",
                     onClick = onSettings,

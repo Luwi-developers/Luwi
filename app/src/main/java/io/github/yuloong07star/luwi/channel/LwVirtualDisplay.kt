@@ -48,10 +48,17 @@ internal class LwVirtualDisplay(private val context: Context?) {
         }
         created += 1
         val name = name(created)
+        // 建屏失败时把系统版本与实际的 flags 一起报出来: 这两样决定 @hide 位在这台机器上认不认,
+        // 而异地排障时只有一句 "no display" 什么都说明不了
+        val flags = flags()
         val created = try {
-            displays.createVirtualDisplay(name, width, height, dpi, surface, flags())
+            displays.createVirtualDisplay(name, width, height, dpi, surface, flags)
         } catch (error: Throwable) {
-            throw IllegalStateException("no ${width}x$height display at ${dpi}dpi: ${error.message}", error)
+            throw IllegalStateException(
+                "no ${width}x$height display at ${dpi}dpi on sdk ${Build.VERSION.SDK_INT}" +
+                    " (flags=0x${Integer.toHexString(flags)}): ${error.message}",
+                error,
+            )
         }
         val id = created.display.displayId
         screens[id] = Screen(name, created)

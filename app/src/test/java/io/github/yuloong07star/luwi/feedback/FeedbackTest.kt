@@ -185,11 +185,11 @@ class FeedbackTest {
 
     /* ── issue 标题 ─────────────────────────────────────────────────────── */
 
-    /** 标题取正文第一行, 太长截到 60; 空的退回"反馈 <版本>" */
+    /** 标题取正文第一行, 太长截到 60; 空的退回"Luwi反馈 <版本>" */
     @Test
     fun `issue 标题取第一行`() {
         assertEquals("打不开视频模式", FeedbackIssue.titleOf("\n  打不开视频模式 \n后面还有", "2.7.9 (16)"))
-        assertEquals("反馈 2.7.9 (16)", FeedbackIssue.titleOf("   \n ", "2.7.9 (16)"))
+        assertEquals("Luwi反馈 2.7.9 (16)", FeedbackIssue.titleOf("   \n ", "2.7.9 (16)"))
         assertEquals(60, FeedbackIssue.titleOf("字".repeat(200), "2.7.9 (16)").length)
     }
 

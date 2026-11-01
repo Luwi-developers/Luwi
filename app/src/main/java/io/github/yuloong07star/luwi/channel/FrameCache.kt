@@ -16,6 +16,34 @@ import android.view.Surface
 import kotlin.math.min
 
 /**
+ * 预览每秒最多搬这么多字节, 帧率由它按分辨率反推
+ *
+ * 写死一个帧率等于"给某一种分辨率调好的值": 1080p 每帧 10 MB、66ms 是 150 MB/s, 同一档放到
+ * 2K 上就是每秒 1.1 GB 的白搬; 而 720p 又白等。同一个字节预算下 1080p 约 15fps、2K 约 8fps、
+ * 720p 顶到 30fps
+ */
+internal const val PREVIEW_BYTES_PER_SECOND = 150_000_000L
+
+/** 没有预览时缓存最新一帧的间隔 */
+private const val FRAME_KEEP_MS = 250L
+
+/** 预览间隔的下限与上限 (30fps / 5fps) */
+private const val PREVIEW_GAP_MIN_MS = 33L
+private const val PREVIEW_GAP_MAX_MS = 200L
+
+/**
+ * 这块屏的预览间隔: 每帧字节数 / 字节预算, 夹在 33~200ms
+ *
+ * 纯函数, 不碰 reader 也不碰 surface, 所以单测能直接量 (见 `FrameCacheTest`)
+ */
+internal fun previewGapFor(width: Int, height: Int): Long {
+    if (width <= 0 || height <= 0) return FRAME_KEEP_MS
+    val bytes = width.toLong() * height * 4L
+    return (bytes * 1000L / PREVIEW_BYTES_PER_SECOND)
+        .coerceIn(PREVIEW_GAP_MIN_MS, PREVIEW_GAP_MAX_MS)
+}
+
+/**
  * 一块屏从存在到消失都挂着的输出面, 以及它最近一帧
  *
  * 屏是给模型用的, 人看不看它都在跑, 而"人没在看"在系统侧不该有任何后果。让它是有的后果就是没有
@@ -66,6 +94,14 @@ internal class FrameCache(val width: Int, val height: Int) {
     private var closed = false
 
     private val paint = Paint().apply { isFilterBitmap = true }
+
+    /**
+     * 预览两帧之间至少隔多久
+     *
+     * 按这块屏每帧的字节数算, 不再是写死的 66ms: 1080p 约 66ms、2K 约 123ms、720p 顶到 33ms,
+     * 同一常数在所有分辨率上都落在 33~200ms 里
+     */
+    private val previewGap: Long = previewGapFor(width, height)
 
     init {
         // usage 位不是可有可无: 交给 VirtualDisplay 的面必须能被合成器当渲染目标用, 而 4 参数的
@@ -157,8 +193,8 @@ internal class FrameCache(val width: Int, val height: Int) {
     /**
      * 一帧到了: 该缓存就缓存, 该画预览就画一遍
      *
-     * 预览挂上时缓存换得勤 (15fps), 没挂时换得慢 (4fps): 只有人在看的时候那个刷新率才有意义,
-     * 而每次换缓存都要把一整帧从 GPU 缓冲区拷出来, 那是这块屏平时最大的一笔固定开销
+     * 预览挂上时缓存换得勤 (按 [previewGap]), 没挂时换得慢 (4fps): 只有人在看的时候那个刷新率才有
+     * 意义, 而每次换缓存都要把一整帧从 GPU 缓冲区拷出来, 那是这块屏平时最大的一笔固定开销
      */
     private fun onFrame(source: ImageReader) {
         val image = try {
@@ -171,7 +207,7 @@ internal class FrameCache(val width: Int, val height: Int) {
             if (closed) return
             val now = SystemClock.uptimeMillis()
             val target = mirror
-            val interval = if (target != null) PREVIEW_GAP_MS else FRAME_KEEP_MS
+            val interval = if (target != null) previewGap else FRAME_KEEP_MS
             synchronized(lock) {
                 if (closed) return
                 if (cached == null || now - cachedAt >= interval) {
@@ -183,9 +219,9 @@ internal class FrameCache(val width: Int, val height: Int) {
                         made += 1
                     }
                 }
-                // 预览只画新帧, 而且两帧之间至少隔 PREVIEW_GAP_MS: 静态屏不空转, 动起来的屏也不
-                // 会因为同一帧被画了十几遍而白烧内存带宽
-                if (target != null && made != drawn && now - mirroredAt >= PREVIEW_GAP_MS) {
+                // 预览只画新帧, 而且两帧之间至少隔 previewGap: 静态屏不空转, 动起来的屏也不会
+                // 因为同一帧被画了十几遍而白烧内存带宽
+                if (target != null && made != drawn && now - mirroredAt >= previewGap) {
                     mirroredAt = now
                     drawn = made
                     drawLocked(target)
@@ -294,12 +330,6 @@ internal class FrameCache(val width: Int, val height: Int) {
          * 一帧是 w×h×4 字节 (1080×2316 约 10 MB), 所以这是这块屏的一点固定开销
          */
         const val MAX_IMAGES = 3
-
-        /** 没有预览时缓存最新一帧的间隔 */
-        const val FRAME_KEEP_MS = 250L
-
-        /** 有预览时两帧之间至少隔这么久, 约 15fps */
-        const val PREVIEW_GAP_MS = 66L
 
         /** 屏刚建出来或刚改过尺寸时, 等第一帧的预算 */
         const val FRAME_TIMEOUT_MS = 1200L

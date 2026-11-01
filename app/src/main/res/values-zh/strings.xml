@@ -40,7 +40,7 @@
     <string name="settings_restart_host">重启 DSH host</string>
     <string name="settings_restart_host_summary">改了 host 读一次的东西 (工作区落在哪、局域网开关) 之后点它</string>
 
-    <string name="settings_menu_feedback">反馈</string>
+    <string name="settings_menu_feedback">Luwi反馈</string>
     <string name="settings_menu_feedback_summary">报一个问题, 或者私密说一句</string>
     <string name="settings_menu_update">检测更新</string>
     <string name="settings_menu_account">账号</string>
@@ -64,7 +64,7 @@
     <string name="settings_about_source">更新源</string>
     <string name="settings_about_source_default">用缺省那一条</string>
 
-    <string name="settings_feedback_title">反馈</string>
+    <string name="settings_feedback_title">Luwi反馈</string>
     <string name="settings_feedback_kind_issue">公开 issue</string>
     <string name="settings_feedback_kind_email">私密邮件</string>
     <string name="settings_feedback_kind_issue_summary">发到公开的 issue 页, 别人也看得到</string>
@@ -203,6 +203,7 @@
     <string name="settings_voice_silence_dialog">单位是秒, %1$s 到 %2$s</string>
 
     <string name="settings_ocr_backend">计算单元: %1$s</string>
+    <string name="settings_ocr_mixed">混跑</string>
     <string name="settings_ocr_probe">自检</string>
     <string name="settings_ocr_probe_busy">自检...</string>
 
@@ -228,6 +229,9 @@
     <string name="settings_wake_speech_missing">还没下载, 一共约 %1$s; 点一下补上 (建议 Wi-Fi)</string>
     <string name="settings_wake_speech_partial">对了 %1$d/%2$d 个文件, 按一下补齐</string>
     <string name="model_setup_title">还差两个模型</string>
+    <string name="bundled_notice_title">不建议自行更新随包插件</string>
+    <string name="bundled_notice_body">下面这几样是嵌在 host 里的, 随 Luwi 每一次更新一起换到最新且适配本版本的那一份: DeepSeek Harness / mneme / dsh-imagegen / 自定义模式。自行更新可能丢失数据 (记忆库这类带数据的最容易), 相关风险需自行承担。</string>
+    <string name="bundled_notice_ok">我知道了</string>
     <string name="model_setup_summary">要能喊醒我, 也要能用语音输入, 需要先装好下面这两个模型。每次打开应用都会检查; 缺模型最多提醒 3 次, 之后不再弹, 也可以在设置 → 唤醒里补下。</string>
     <string name="model_setup_attempt">第 %1$d / %2$d 次提醒; 到 %2$d 次之后不再检测, 也不再弹出</string>
     <string name="model_setup_wake">唤醒词模型</string>
@@ -707,7 +711,7 @@
     <string name="settings_tavern_summary_mismatch">当前工作区不是绑定的酒馆工作区</string>
     <string name="settings_tavern_summary_off">酒馆已关闭</string>
     <string name="settings_tavern_enable">酒馆</string>
-    <string name="settings_tavern_enable_summary">一张最多十个人的桌子, 一轮一个人说话。不创建 DSH 会话, 也不碰记忆</string>
+    <string name="settings_tavern_enable_summary">一张最多十个人的桌子, 一轮一个人说话; 对话走 DSH 会话, 不碰记忆</string>
     <string name="settings_tavern_bind">绑定当前工作区</string>
     <string name="settings_tavern_bind_summary">酒馆只在绑定的工作区里可用; 换了工作区就锁上</string>
     <string name="settings_tavern_manage">角色卡、故事书与存档</string>
@@ -801,6 +805,14 @@
     <string name="settings_tavern_card_collapse">收起</string>
     <string name="settings_tavern_card_settings_bad">数字不对: 间隔 1~1000, 安静阈值 0~1000, 概率 0~1</string>
     <string name="settings_tavern_card_settings_saved">已保存</string>
+    <string name="settings_tavern_card_voice">音色</string>
+    <string name="settings_tavern_card_voice_summary">这个角色说话用的音色</string>
+    <string name="settings_tavern_card_voice_default">跟随默认</string>
+    <string name="settings_tavern_card_voice_none">引擎没报上音色, 可以手填</string>
+    <string name="settings_tavern_card_voice_manual">音色 id, 或 名字@地区</string>
+    <string name="settings_tavern_card_voice_unusable">不可用</string>
+    <string name="settings_tavern_card_voice_api_follow">API · 跟随设置</string>
+    <string name="settings_tavern_card_voice_api_empty">API 还没登记音色; 可以手填 api:&lt;id&gt;, 或先用 lw_speak 登记</string>
     <string name="settings_tavern_card_proactive">主动说话</string>
     <string name="settings_tavern_card_proactive_hint">一轮 = 你说一句 + 勾选的每位角色各回一句; 角色安静够久才会自己接一句, 不想说就保持沉默</string>
     <string name="settings_tavern_card_proactive_enabled">允许这个角色主动说话</string>
@@ -810,19 +822,13 @@
     <string name="settings_tavern_card_probability">触发概率</string>
     <string name="settings_tavern_model">模型</string>
     <string name="settings_tavern_model_follow">跟随当前模型</string>
-    <string name="settings_tavern_model_summary">酒馆这一档用的模型: 直连与 DSH 会话都按它跑</string>
+    <string name="settings_tavern_model_summary">酒馆这一档用的模型: DSH 会话按它跑</string>
     <string name="settings_tavern_model_provider">提供方</string>
     <string name="settings_tavern_model_name">模型名</string>
     <string name="settings_tavern_model_current">现在用它</string>
     <string name="settings_tavern_model_saved">模型已保存</string>
-    <string name="settings_tavern_engine">新存档引擎</string>
-    <string name="settings_tavern_engine_summary">直连 = 一发一收; DSH 会话 = 一场存档一场会话, 更慢但角色有上下文与工具</string>
-    <string name="settings_tavern_engine_direct">直连</string>
-    <string name="settings_tavern_engine_bridge">DSH 会话</string>
-    <string name="settings_tavern_engine_switch">切换引擎</string>
-    <string name="settings_tavern_engine_unavailable">酒馆预设没装上: %1$s</string>
-    <string name="settings_tavern_engine_fallback">这一轮退回直连: %1$s</string>
-    <string name="settings_tavern_engine_pending">还在写, 稍后自动刷新</string>
+    <string name="settings_tavern_voice">酒馆语音</string>
+    <string name="settings_tavern_voice_summary">仅开关酒馆的角色说话</string>
     <string name="settings_tavern_card_save">保存设置</string>
     <string name="settings_tavern_card_detail">角色详情</string>
     <string name="settings_tavern_account">账号</string>
