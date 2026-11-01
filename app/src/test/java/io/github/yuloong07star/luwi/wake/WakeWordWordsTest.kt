@@ -25,7 +25,7 @@ class WakeWordWordsTest {
     /**
      * 判据表: `词=拼音` -> 该吐出来的那一行
      *
-     * 期望值不是猜的: 前三条拿模型的例子逐字节对上过 (见 `docs/wake-word.md` 第三节), 其余的按同一套
+     * 期望值不是猜的: 前三条拿模型的例子逐字节对上过 (见已归档的 `docs/wake-word.md` 第三节, git 历史可查), 其余的按同一套
      * 规则 (声母长的先匹配, 调号 a/o/e 优先、iu 落 u、ui 落 i、其余落最后一个元音, 轻声不带调号) 写出来
      */
     private val cases = linkedMapOf(

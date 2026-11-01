@@ -2,7 +2,7 @@
 """Rewrite the DT_NEEDED / DT_SONAME / DT_RUNPATH strings of an ELF64 object in place
 
 为什么要有这一步: AGP 会静默丢掉带点的 native lib 名 (`libtalloc.so.2` 那种进不了 APK), 所以随包的
-proot 那一套必须先归一命名 (照 `docs/host-build.md` 里 node / bash / rg 那三件的老办法)。归一落在
+proot 那一套必须先归一命名 (照 git 历史里 `docs/host-build.md` 的 node / bash / rg 那三件老办法)。归一落在
 两处, 缺一不可:
 
 1. **文件名**改成 `liblw*.so` (规则在打包那一侧)

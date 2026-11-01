@@ -4,15 +4,16 @@
 
 仓库 `Miuzarte/LittleWhale`, 开发分支 `release/2.0.0`, dsh 以 submodule 挂在 `third_party/deepseek-harness/`
 
-**本文只留现状 / 决策 / 约束 / 操作**, 过程、实测数字与踩坑在 `docs/step2-record.md` … `step8-record.md` 与 `docs/ui-record.md`, 构建旧账在 `docs/host-build.md`, fork 相对上游的改动唯一权威是 submodule 里 `patch.md` —— 细节去那几处翻, 别再往本文加过程
+**本文只留现状 / 决策 / 约束 / 操作**, 过程、实测数字与踩坑去 git 历史（原 `docs/` 下的 step2~step8 记录、`ui-record.md`、`host-build.md` 已于 2026-11-01 从公开树清理）, fork 相对上游的改动唯一权威是 submodule 里 `patch.md` —— 细节去那几处翻, 别再往本文加过程
 
 ## 文档地图
 
 | 文档 | 放什么 |
 | :-- | :-- |
 | `README.md` | 对外门面: 能力 / 已知问题 / 构建 / Credits |
-| `docs/step2…step8-record.md` / `docs/ui-record.md` | 每一步的清单、实测数字、踩坑、界面那一轮 |
-| `docs/host-build.md` | 构建事实与依赖缺口 (**平时不读**) |
+| `docs/step4-record.md` / `docs/step8-record.md` | 虚拟屏 / 端侧 OCR 那两步的清单、实测数字、踩坑 |
+| `docs/shot-params.md` | 取景与截图的数字唯一口径 (`tools/check-shot-params.mjs` 逐处核) |
+| `docs/floating-input.md` | 浮窗输入 (面板 A) 的设计与实测 |
 | `third_party/deepseek-harness/patch.md` | fork 相对上游的全部改动 |
 | `docs/subsystems/web-client.md` | 会话界面为什么不重写 |
 
@@ -56,7 +57,7 @@
 - 判据: `node D:\apk\Luwi-private\tavern\tools\check-tavern.mjs` (70 条) 与
   `check-tavern-account.mjs` (18 条); 它们默认按兄弟目录找 `D:\apk\Luwi`, `--repo` 可改
 - **公开推送的父提交必须是 `2c61255`** (v2.7.9): `c6aa501` 里就有酒馆 85 个文件, 直接推等于连历史
-  一起公开 —— 导出无酒馆树后以 `2c61255` 为父做一次提交, 细则见 `docs/Luwi-酒馆-C-拆分方案-20261029.md`
+  一起公开 —— 导出无酒馆树后以 `2c61255` 为父做一次提交, 细则见 git 历史（该施工单 2026-11-01 已从公开树删除）
 
 ## 架构
 

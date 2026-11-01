@@ -4415,7 +4415,7 @@ const TOOLS = [
       + 'tolerance spellings); '
       + 'op=keywords replaces the word table (each word is given as 词=拼音, for example '
       + '肥鱼肥鱼=fei2 yu2 fei2 yu2 - the pinyin is what the model needs, see '
-      + 'docs/wake-word.md); op=start '
+      + 'docs/wake-word.md in git history); op=start '
       + 'starts the foreground listener, which keeps a notification with a 停止 button; op=stop '
       + 'ends it. What happens on a hit is onWake: overlay (the default) brings up **the floating '
       + 'ball**, whose face then says it is listening - the one-sentence window a hit already '

@@ -86,7 +86,7 @@ B 不换地基：还是这个窗、这个服务，只是**加载带参数的地�
   - **召出之后再点一下 = 进语音输入**：走应用侧那条识别链（`LwWakeWord.speakNow` →
     `ACTION_LISTEN_NOW`），**不用页面自己的麦克风** —— 球、输入通道与主页共用同一个识别器。它与
     唤醒词命中同一档：开一次"讲一句话"的窗口，闲置 10 s 收回去（**视频模式下那一档是常驻的**：那
-    个模式要求这一路留着，见 `docs/wake-word.md` 第五节）
+    个模式要求这一路留着，见 git 历史 `docs/wake-word.md` 第五节）
     - **例外：半隐与半藏两个开关都关着时没有"召出"这一步**（主人 2026-10-25："当半隐和半藏都关闭时，
       则只用点一次即可语音输入，不用再点一次唤醒"）：球一直全亮全露，先记一个召出时刻只是白让人多点
       一下 —— 那一击当场开口（`BallTouch.opensVoiceNow` 的 `canRest = false`）。两个开关里**任一开
@@ -113,7 +113,7 @@ B 不换地基：还是这个窗、这个服务，只是**加载带参数的地�
   （`BallMinutes.DOUBLE_TAP_MS`）＝ 打断状态与那一轮 —— 球那一侧写一句命令句
   （`VoiceCommands.INTERRUPT` = `打断当前回答`）进收件箱，宿主插件认出它就把浮标那一场正在跑的轮
   `agent.cancel({kind:'user'}, {keepInbox:true})` 掉，并顺手把 `phase` 推回 `idle`（见
-  `docs/wake-word.md` 那张命令表与 `host-plugin` 的 `runVoiceInterrupt`）。
+  git 历史 `docs/wake-word.md` 那张命令表与 `host-plugin` 的 `runVoiceInterrupt`）。
   **它只在"正在想"那一档**：正在念时点一下是掐断播报、正在听时点一下是收回来，那两下本身就是主人
   要的，不该改成两下的。**"正在想"里的单点被推迟 `BallFeel.thinkingTapMs()`**（防误触档 530 ms，见
   `OverlayService.pendingTap`）：不等过双击窗口的话，双击的第一下会先走那一档的单点动作（收/开语音
@@ -415,7 +415,7 @@ else { if (prevWord != null) reset("voice off") }
    "点了说话再点一次之后球再也不收边"。现在 `unpeek()` 判的是窗**现在**在不在停靠位，并且每 400 ms
    有一次 `settleBall()` 对账（没有动画在跑时不一致就摆回去，并记一行）
 4. **语音链不再把进程带走**（那条是主人看到的"整个应用重启"）。见
-   `docs/wake-voice-states.md` 那一节：采集那个消费者现在是常驻的，而"这一句话的窗口"由 `vad` 那一个
+   git 历史 `docs/wake-voice-states.md` 那一节：采集那个消费者现在是常驻的，而"这一句话的窗口"由 `vad` 那一个
    引用说 —— 关窗口时**先摘引用、再 flush 与 release**，`SpeechSegmenter.close()` 也做成幂等
 
 ### 失败面

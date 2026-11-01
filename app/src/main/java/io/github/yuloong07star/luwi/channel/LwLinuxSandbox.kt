@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * 跑的是随包发的 Alpine minirootfs + Termux 编的 proot, 而 proot 从 [Context] 里那个
  * `nativeLibraryDir` 里 exec —— app 的 data 目录在 targetSdk 37 上是 exec 不了的, 随包的二进制
- * 一律当 native lib 发, 就是这一条 (见 `docs/host-build.md`)
+ * 一律当 native lib 发, 就是这一条 (原 `docs/host-build.md` 已归档, git 历史可查)
  *
  * **命令形状写死在这里, 一个字节都不由调用方拼**: proot 路径、loader 路径、binds、`-r` 的根、甚至
  * 环境 (env -i 之后只剩几个写死的变量) 都在这个文件里定; 送过来的只有一段交给 `/bin/sh -lc` 的命令

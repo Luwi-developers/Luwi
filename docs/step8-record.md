@@ -1,6 +1,6 @@
 # 第 8 步记录: 端侧 OCR
 
-> 2026-09-22 起。方案在 `docs/step8-plan.md`, 本文记**实际做出来的东西、实测数字、踩的坑**
+> 2026-09-22 起。方案在 git 历史 `docs/step8-plan.md`, 本文记**实际做出来的东西、实测数字、踩的坑**
 >
 > 进度: **做完了** —— 模型在 NPU 上, 认字 (前后处理) / `lw_ocr` 工具 / `lw_tap(text=…)` 的
 > OCR 分支 / 设置页那段都在真机上验过了
@@ -217,7 +217,7 @@ pwsh -File tools/lw-device-turn.ps1 -Task "Call lw_ocr on displayId 0, then pres
 python build/ocr-spike/pipeline.py --image build/ocr-spike/shot.png
 ```
 
-第 3 节那条 ctx 路的原始命令留在 `docs/step8-plan.md` 与 `build/ocr-spike/` (gitignored) 里,
+第 3 节那条 ctx 路的原始命令留在 git 历史 `docs/step8-plan.md` 与 `build/ocr-spike/` (gitignored) 里,
 QAIRT 2.46 整个包也解在那里 (约 1.1 GB, 免得重下重解)。
 
 ## 图标过滤与长行切段 (2026-10-28)
