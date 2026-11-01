@@ -22,7 +22,7 @@ internal object Feedback {
     const val LIMIT = 500
 
     /** 反馈去的那个仓库: 与更新源 (`AboutSettings.DEFAULT_SOURCE`) 同一个 */
-    const val REPO = "yuloong07-star/Luwi"
+    const val REPO = "Luwi-developers/Luwi"
 
     /** 兜底时打开的 New Issue 页 */
     const val ISSUE_PAGE = "https://github.com/$REPO/issues/new"

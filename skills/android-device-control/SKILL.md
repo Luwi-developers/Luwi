@@ -58,7 +58,7 @@ description: 本机（Luwi 构建）Android 设备操作的唯一规范：虚拟
 | 滑动 / 多指手势（纯 MOVE） | **本机无效**：`lw_swipe` 与 `lw_gesture` 都返回成功，界面却一动不动——时钟闹钟列表、日历日程列表、日历新建表单、日历与时钟的滚轮全部试过 |
 | 系统键与菜单 | BACK 可用；弹出菜单里 **`DPAD_DOWN` + `ENTER` 能激活菜单项**（时钟「更多 → 编辑」就是这么进的） |
 
-**为什么不缺工具**（已核到本机 APK 源码仓库 `yuloong07-star/Luwi`）：`lw_swipe` 由插件 `luwi-channel/index.mjs` 转发到原生方法 `swipe`，参数名 `fromX/fromY/toX/toY` 与 `PrivilegedBridge.kt:636-643` 完全对得上；实现（`LwInput.swipe`）是 DOWN + 12 步分帧 MOVE（每步 `SystemClock.sleep`）+ UP，注释里写明「同一毫秒的一串 MOVE 会被平台合并成一次跳」这个坑也已修。真正缺的是**另外两条机制**：本机无障碍层 `LwAccessibility.kt` 只做 `ACTION_CLICK / ACTION_LONG_CLICK / ACTION_SET_TEXT / ACTION_SET_SELECTION`，**既没有 `ACTION_SCROLL_FORWARD/BACKWARD`，也没有 `dispatchGesture`**——节点树里 `scrollable` 标了，却只被 `lw_ui` 显示出来。旧机 DSHA 的 `/app/ui/*` 正是走无障碍作用于前台窗口，所以那时能滚。
+**为什么不缺工具**（已核到本机 APK 源码仓库 `Luwi-developers/Luwi`）：`lw_swipe` 由插件 `luwi-channel/index.mjs` 转发到原生方法 `swipe`，参数名 `fromX/fromY/toX/toY` 与 `PrivilegedBridge.kt:636-643` 完全对得上；实现（`LwInput.swipe`）是 DOWN + 12 步分帧 MOVE（每步 `SystemClock.sleep`）+ UP，注释里写明「同一毫秒的一串 MOVE 会被平台合并成一次跳」这个坑也已修。真正缺的是**另外两条机制**：本机无障碍层 `LwAccessibility.kt` 只做 `ACTION_CLICK / ACTION_LONG_CLICK / ACTION_SET_TEXT / ACTION_SET_SELECTION`，**既没有 `ACTION_SCROLL_FORWARD/BACKWARD`，也没有 `dispatchGesture`**——节点树里 `scrollable` 标了，却只被 `lw_ui` 显示出来。旧机 DSHA 的 `/app/ui/*` 正是走无障碍作用于前台窗口，所以那时能滚。
 
 **绕行（按可靠度排序）**：
 1. 用应用内的**搜索 / 直达入口**代替滚动：日历用「搜索日程」把条目搜出来、地点用搜索框选 POI；有搜索框就优先搜索。

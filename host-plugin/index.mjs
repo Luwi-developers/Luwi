@@ -5888,7 +5888,7 @@ async function speechKeep(directory, wav, answer, engine) {
  * 清单、下载与运行时就对同一份文件说话, 不留下"文件表说的不是盘上那份"这种说不清的状态
  */
 const WAKEWORD_RELEASE =
-  'https://github.com/yuloong07-star/Luwi/releases/download/models-kws-2024-01-01'
+  'https://github.com/Luwi-developers/Luwi/releases/download/models-kws-2024-01-01'
 
 /**
  * 镜像优先: 这台设备上 github.com 直连只回 302, 真正的字节在 objects.githubusercontent.com 那

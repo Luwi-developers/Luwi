@@ -30,7 +30,7 @@ int8 那一套** (4 个文件, 5 519 884 B, 约 5.3 MB):
 | `joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx` | 65242 | `f79760052b87239e325f0567c752ad3130b30d92effb847d4307743c20c59a24` |
 | `tokens.txt` | 1627 | `72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e` |
 
-- 来源是**我们自己的 Release**: `yuloong07-star/Luwi` 的标签 `models-kws-2024-01-01`, 四个文件都
+- 来源是**我们自己的 Release**: `Luwi-developers/Luwi` 的标签 `models-kws-2024-01-01`, 四个文件都
   在那一版里。字节数与 sha256 都是 GitHub 自己算的那份 (`assets[].digest`), 与本地文件逐个核过。
 - **镜像优先**: `https://ghfast.top/https://github.com/...`。这台手机上 `github.com` 直连只回 302, 真正
   的字节在 `objects.githubusercontent.com` 那一跳上, 出不去, 而镜像那一层实测 200 且逐字节一致。

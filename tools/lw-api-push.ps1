@@ -12,7 +12,7 @@ param(
     [int]$Limit = 0,
     [switch]$Apply,
     [string]$RepoRoot = 'D:\apk\Luwi',
-    [string]$Repo = 'yuloong07-star/Luwi',
+    [string]$Repo = 'Luwi-developers/Luwi',
     [string]$Gh = 'D:\Codex\gh-cli\gh.exe',
     [string]$RemoteRef = 'luwi/main',
     [string]$Tag = 'v1.0.3'

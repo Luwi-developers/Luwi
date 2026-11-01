@@ -290,7 +290,7 @@ $ node tools/check-host-plugin.mjs
 
 | 来源 | 是什么 |
 | :-- | :-- |
-| GitHub 草稿 | repo `yuloong07-star/Luwi` 的 draft release (id `402942831`, 标题 `Luwi 1.1.0 (开发中)`, 未打 tag)。内容 = 真机上用下来踩的 17 条坎 + 8 条建议 + 已经写好的补丁 + 还没验的 |
+| GitHub 草稿 | repo `Luwi-developers/Luwi` 的 draft release (id `402942831`, 标题 `Luwi 1.1.0 (开发中)`, 未打 tag)。内容 = 真机上用下来踩的 17 条坎 + 8 条建议 + 已经写好的补丁 + 还没验的 |
 | 1.0.2 的承诺 | `D:\apk\DSH-LW-1.0.2-版本目标.txt` 第四节「不做的事 (1.0.3)」, 这是上一版对着用户写的欠条 |
 | 代码现状 | 本仓库实测 (见第 1 节), 用来判断哪些要新写、哪些已经有补丁可以落地 |
 
