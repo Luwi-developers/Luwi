@@ -342,7 +342,7 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 
 - 技能 `$DSH_HOME/skills/<name>/SKILL.md` (源 `skills/`), 快捷指令 `$DSH_HOME/quick-commands/<名字>.md` (源 `quick-commands/`)
 - 随包靠 `copySeedAssets` + `host/LwSeed.kt`, **显式列名字而不是整目录拷**; 技能缺什么补什么, 样例只发一次 (`.lw-seed`)
-- 技能从 `yuloong07-star/app-skills` 检测 (contents API + 本地索引缓存); 删走 `AppSkills.remove`, **不可逆**
+- 技能从 `Luwi-developers/app-skills` 检测 (contents API + 本地索引缓存); 删走 `AppSkills.remove`, **不可逆**
 - `lw_quick` 的 op 两份实现, `tools/check-quick-commands.mjs` 拦; **删除只在桥上**; 点一下 = 投一句话 (`source: quick`)
 
 ## 自动指令与探索
@@ -392,8 +392,8 @@ Luwi = 远程 dsh 服务器 + 安卓控制端, 一个进程:
 - 宿主槽 (`plugin/widget/`) 由主 APK 声明, **同槽互斥** (`plugins/.widgets.json`), 帧走 `content://` 且每趟组装前重放读权限
 - `companion` 收窄: **不许 MAIN + LAUNCHER**; `inline` 只对白名单作者; 零能力的包装完**自动启用**
 - 插件详情对话框自己封高度 + `verticalScroll` (Miuix `OverlayDialog` 不滚也没有 `maxHeight`)
-- **签好的包只在 `yuloong07-star/luwi-plugins` 的 `packages/`**, Luwi 仓库 `plugins/` 只留一页指路
-- **插件仓库的推法是 `lw-api-push.ps1` 加三个参数**: `-RepoRoot D:\apk\luwi-plugins -Repo yuloong07-star/luwi-plugins -RemoteRef origin/main`, 先 dry run 再 `-Apply -Tag <内容 tag>`; 2026-10-25 用 `plugins-2.8.0` 推出了 1.1.2 (索引 tag `index-9`), 同一天把 1.1.2 重签到 `minLw 2.7.10` 之后, 包与索引一起落在 `plugins-2.7.10` / `index-10` (**注解 tag 要本地先 `git tag -a` 打好再 `-Apply`**, 那个脚本是从本地 tag 对象逐字节重放的; 轻量 tag 仍然手动 `gh api ... git/refs` 打)
+- **签好的包只在 `Luwi-developers/luwi-plugins` 的 `packages/`**, Luwi 仓库 `plugins/` 只留一页指路
+- **插件仓库的推法是 `lw-api-push.ps1` 加三个参数**: `-RepoRoot D:\apk\luwi-plugins -Repo Luwi-developers/luwi-plugins -RemoteRef origin/main`, 先 dry run 再 `-Apply -Tag <内容 tag>`; 2026-10-25 用 `plugins-2.8.0` 推出了 1.1.2 (索引 tag `index-9`), 同一天把 1.1.2 重签到 `minLw 2.7.10` 之后, 包与索引一起落在 `plugins-2.7.10` / `index-10` (**注解 tag 要本地先 `git tag -a` 打好再 `-Apply`**, 那个脚本是从本地 tag 对象逐字节重放的; 轻量 tag 仍然手动 `gh api ... git/refs` 打)
 - **索引 tag 一变, 应用侧那条常量得跟着抬**: `PluginIndex.REF_CURRENT` / `REF_PREVIOUS` 钉的是索引 tag (不是 `main`) —— 只推索引不重出包, 插件页永远看旧的 (2026-10-25: 推完 1.1.2 忘了抬 ref, 页里还是 1.0.3)
 - **鲸鱼娘浮标外观随包发** (2.7.10 起): `copySeedAssets` 从 `../luwi-plugins/packages/whalegirl-balltheme-1.1.3.lwp` 拷进 assets (源不在就构建失败; **换版本号时它先清掉 `seed-assets/lw-plugins/` 那一层**, Copy 自己不删旧文件, 不清会同时打进两版 17 MB 的素材), `host/LwPluginSeed.kt` 在 `restorePlugins` 那条线程里、`PluginManager.restore` 之前装它 —— 走的是与"从链接装入"**同一条链** (验签 + 逐文件哈希); `$DSH_HOME/lw/plugin-seed.txt` 一行一个版本号, **只补这一版一次** (主人删掉就一直删着), 只在装着的比它旧时才装; 首启没有 `.theme.json` 时替主人挑上它 (挑过内置也是选择, 不动)
 - **1.1.3 换掉了东张西望 (peeked), 整段放慢一半但帧率不降** (2026-10-28 主人: "替换成这张图" -> "不来回放了, 放慢一半的速度" -> "保持上调帧率"): 素材是主人重抠的 `ball-art/动作可用/东张西望.gif` (241 帧 / 24fps / 360x360, 自带 alpha), **一帧不抽**截到 240 帧, 按 **12fps** 播 = 20 s 一圈、动作是原速的一半, 而运动采样仍是 24fps (每个姿势 83 ms, 不是 6fps 那种 167 ms 的定格感), 成品 **240 帧 / 197x224**

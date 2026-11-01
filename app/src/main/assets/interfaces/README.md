@@ -98,7 +98,7 @@ agent 只读：手写它会让球显示一个不存在的「正在想」。
 
 `$DSH_HOME/plugins/.theme.json`：`{"id":"<插件 id>"}`，空 id = 内置画法。
 它由设置页「浮标外观」那一行写，换了之后球在下一次重画时生效。外观插件本身是 LW 插件
-（`kind: art`，带 `theme/ball.json`），仓库在 `yuloong07-star/luwi-plugins`。
+（`kind: art`，带 `theme/ball.json`），仓库在 `Luwi-developers/luwi-plugins`。
 
 ## 4. 语音状态（应用写，只读）
 

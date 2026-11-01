@@ -10,11 +10,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yuloong07-star/luwi-dsh-sync.git"
+    "url": "git+https://github.com/Luwi-developers/luwi-dsh-sync.git"
   },
-  "homepage": "https://github.com/yuloong07-star/luwi-dsh-sync#readme",
+  "homepage": "https://github.com/Luwi-developers/luwi-dsh-sync#readme",
   "bugs": {
-    "url": "https://github.com/yuloong07-star/luwi-dsh-sync/issues"
+    "url": "https://github.com/Luwi-developers/luwi-dsh-sync/issues"
   },
   "author": "yuloong07-star (Luwi)",
   "type": "module",

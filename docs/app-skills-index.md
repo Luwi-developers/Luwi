@@ -1,7 +1,7 @@
 # 技能仓库的索引格式 (app-skills 那一侧)
 
 2026-10-17, 2.7.8 批次 5 定下来的形状。写在 Luwi 仓库里是因为**改的是另一个仓库**
-(`yuloong07-star/app-skills` 的根下 `index.json`)。
+(`Luwi-developers/app-skills` 的根下 `index.json`)。
 
 ## 先说结论: 现在**不改也能用**
 

@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin)
 [![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)](https://github.com/yuloong07-star/luwi-dsh-sync/releases)
+[![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)](https://github.com/Luwi-developers/luwi-dsh-sync/releases)
 
 [English](README.md) · [简体中文](README-zh.md)
 
@@ -39,7 +39,7 @@ dsh plugin --profile <你的 profile> add luwi-dsh-sync
 **从源码装** (仓库里没有构建步骤, 直接就是运行时文件):
 
 ```bash
-git clone https://github.com/yuloong07-star/luwi-dsh-sync.git
+git clone https://github.com/Luwi-developers/luwi-dsh-sync.git
 cd luwi-dsh-sync
 npm install            # 只有测试与类型检查要它; 运行时只有 zod 一个依赖
 node --test "test/*.test.mjs"

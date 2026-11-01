@@ -13,7 +13,7 @@ import org.junit.Test
 class AppSkillsTest {
 
     /**
-     * 远端那份 `index.json` (`yuloong07-star/app-skills`) → 目录条目: 字段对应与容错
+     * 远端那份 `index.json` (`Luwi-developers/app-skills`) → 目录条目: 字段对应与容错
      *
      * 那一份的形状与本机随包的 `catalog.json` **不是同一个** (它是 `apps: [{id,name,package,path,…}]`),
      * 所以这一个映射写错了就是"设置页那段什么都列不出来" —— 没有设备也能量

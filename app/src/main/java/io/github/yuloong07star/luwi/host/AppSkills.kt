@@ -38,11 +38,11 @@ internal object AppSkills {
     private const val TAG = "AppSkills"
 
     /**
-     * **技能的来源仓库** (主人 2026-10-10: "skill 应该检测 https://github.com/yuloong07-star/app-skills 这个")
+     * **技能的来源仓库** (主人 2026-10-10: "skill 应该检测 https://github.com/Luwi-developers/app-skills 这个")
      *
      * 它有两件事: 那份"应用 → 技能"的目录在根下 `index.json`, 正文在 `skills/<id>/SKILL.md`
      */
-    const val REPO = "yuloong07-star/app-skills"
+    const val REPO = "Luwi-developers/app-skills"
 
     /** 取远端文件走 GitHub 的 contents API: 这台机器上 `api.github.com` 通而 `raw.githubusercontent.com` 不通 */
     private const val CONTENTS = "https://api.github.com/repos/$REPO/contents/"
@@ -56,7 +56,7 @@ internal object AppSkills {
      * **主址用 `fastly` 而不是 `cdn`**: `cdn.jsdelivr.net` 在本机网络上 SSL 直接失败 (插件索引那边
      * 2026-10-13 就量到过, 所以它那张表也是多镜像的); `fastly` / `gcore` 两条实测都是 200
      */
-    private const val DEFAULT_INDEX = "https://fastly.jsdelivr.net/gh/yuloong07-star/app-skills@index-1/index.json"
+    private const val DEFAULT_INDEX = "https://fastly.jsdelivr.net/gh/Luwi-developers/app-skills@index-1/index.json"
 
     /** 一次取文件的超时: 设置页那颗按钮不能把人晾在那儿 */
     private const val TIMEOUT_MS = 8_000
@@ -137,7 +137,7 @@ internal object AppSkills {
             ?.let { runCatching { it.readText() }.getOrNull() }
         val addresses = buildList {
             add(DEFAULT_INDEX)
-            add("https://cdn.jsdelivr.net/gh/yuloong07-star/app-skills@index-1/index.json")
+            add("https://cdn.jsdelivr.net/gh/Luwi-developers/app-skills@index-1/index.json")
             cached?.let { text ->
                 val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
                 if (root != null) {
