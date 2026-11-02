@@ -211,7 +211,7 @@ check('摘要与大小两道闸都在 (单文件时才核大小)', [
 ], [true, true])
 
 check('刷新先试索引自己写的 index_url / index_mirrors, 再落到 API', [
-  skills.includes('private const val DEFAULT_INDEX = "https://fastly.jsdelivr.net/gh/Luwi-developers/app-skills@index-1/index.json"'),
+  skills.includes('private const val DEFAULT_INDEX = "https://fastly.jsdelivr.net/gh/yuloong07-star/app-skills@index-1/index.json"'),
   skills.includes('root["index_url"]'),
   skills.includes('addAll(jsonStrings(root["index_mirrors"]))'),
 ], [true, true, true])

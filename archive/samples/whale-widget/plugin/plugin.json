@@ -10,7 +10,7 @@
   "entry": {
     "package": "io.github.yuloong07star.luwi.sample.whalewidget",
     "service": "io.github.yuloong07star.luwi.sample.whalewidget.WhalePluginService",
-    "apk": "https://cdn.jsdelivr.net/gh/Luwi-developers/luwi-plugins@whale-widget-1.1.4/packages/whale-widget-1.1.4-companion.zip"
+    "apk": "https://cdn.jsdelivr.net/gh/yuloong07-star/luwi-plugins@whale-widget-1.1.4/packages/whale-widget-1.1.4-companion.zip"
   },
   "capabilities": {
     "requested": [],

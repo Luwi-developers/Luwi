@@ -17,7 +17,7 @@
 
 import { connect } from 'node:net'
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, watch } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -2107,8 +2107,15 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const created = await call('create', drop(args, 'launch'))
+      // 探索场成功建屏时把 displayId 记进 `explore.json` 的屏账 (2.8.0 B2-a): 收尾 / 重启那条路
+      // 只归还这本账上、且 sessionId 与这一场相同的屏。记账失败不影响建屏本身
+      try {
+        await exploreNoteCreatedScreen(created, sessionIdOf(exec))
+      } catch (error) {
+        console.warn(`luwi-channel: the explore screen ledger was not written: ${error?.message ?? error}`)
+      }
       const app = (args?.launch ?? '').trim()
       if (app === '') {
         // 建了屏而上面什么都没有: 这句话必须说出来, 否则下一次截图是一张全黑的图, 而那看起来
@@ -4415,7 +4422,7 @@ const TOOLS = [
       + 'tolerance spellings); '
       + 'op=keywords replaces the word table (each word is given as 词=拼音, for example '
       + '肥鱼肥鱼=fei2 yu2 fei2 yu2 - the pinyin is what the model needs, see '
-      + 'docs/wake-word.md in git history); op=start '
+      + 'docs/wake-word.md); op=start '
       + 'starts the foreground listener, which keeps a notification with a 停止 button; op=stop '
       + 'ends it. What happens on a hit is onWake: overlay (the default) brings up **the floating '
       + 'ball**, whose face then says it is listening - the one-sentence window a hit already '
@@ -5888,7 +5895,7 @@ async function speechKeep(directory, wav, answer, engine) {
  * 清单、下载与运行时就对同一份文件说话, 不留下"文件表说的不是盘上那份"这种说不清的状态
  */
 const WAKEWORD_RELEASE =
-  'https://github.com/Luwi-developers/Luwi/releases/download/models-kws-2024-01-01'
+  'https://github.com/yuloong07-star/Luwi/releases/download/models-kws-2024-01-01'
 
 /**
  * 镜像优先: 这台设备上 github.com 直连只回 302, 真正的字节在 objects.githubusercontent.com 那
@@ -8069,6 +8076,198 @@ const exploreRun = {
   over: false,
 }
 
+/**
+ * 探索自己建过的那几块屏 (2.8.0 B2-a): `$DSH_HOME/lw/explore.json` 的 `screens`
+ *
+ * 一块一行 `{ displayId, sessionId, createdAt, released }`; 释放成功 / 用户已经不在了的再补
+ * `releasedAt` / `missing` / `reason`。**只释放 sessionId 与这一场相同的那些** —— 屏是全宿主机共用的,
+ * 别的会话正在用的那块不归探索关 (2026-10-28 的单槽规则只说明同一时刻一块, 不说明谁都能关)
+ *
+ * 这本账与 [exploreRun] 一样落进同一个文件, 宿主重启之后先回来, 再等收尾那条路按场次归还 —— 少了
+ * 它, "重启之后把上一场留下的屏关掉"就只剩下猜
+ */
+const EXPLORE_SCREENS_KEPT = 40
+
+/** 内存里这一份是活的那一份; `explore.json` 那份是镜子 */
+let exploreScreens = []
+
+/** 这次进程里是否已经从文件读过 (没读过时写盘保留文件里那一份, 不拿空数组盖掉) */
+let exploreScreensLoaded = false
+
+/** 一块屏的一行账 (纯函数) */
+function exploreScreenEntry(displayId, sessionId, at, boot = '') {
+  return {
+    displayId: Math.round(Number(displayId)),
+    sessionId: String(sessionId ?? '').trim(),
+    createdAt: Number(at) || Date.now(),
+    released: false,
+    // 这一行是在哪一次开机里写的: 重启过之后同一串 displayId 可能已经是另一场的新屏
+    boot: String(boot ?? ''),
+  }
+}
+
+/**
+ * 这一行还可能是同一块屏吗 (纯函数)
+ *
+ * displayId 在**一次开机里**只增不减, 但 `explore.json` 跨重启还在: 开机之后号又从头来, 于是一条
+ * 没释放的旧账可能与别的会话新开的屏撞号。两边的开机记号都在而且不同, 就当它已经随重启没了 ——
+ * 宁可在账上记 missing, 也不去关一块不是这一场的屏 (11-1 不误关非探索屏)
+ */
+function exploreScreenSurvives(entry, boot) {
+  if (typeof boot !== 'string' || boot === '') return true
+  if (typeof entry?.boot !== 'string' || entry.boot === '') return true
+  return entry.boot === boot
+}
+
+/**
+ * 这一次开机是谁 (`/proc/sys/kernel/random/boot_id`)
+ *
+ * 读不到就是空串 (开发机 / 别的平台), 那时 [exploreScreenSurvives] 一律放行
+ */
+let exploreBoot = null
+
+async function exploreBootId() {
+  if (exploreBoot !== null) return exploreBoot
+  exploreBoot = await readFile('/proc/sys/kernel/random/boot_id', 'utf8')
+    .then((text) => String(text).trim())
+    .catch(() => '')
+  return exploreBoot
+}
+
+/** 记一块新屏: 同一个 displayId 只留最后一行, 多了从最旧的删 (纯函数) */
+function exploreScreenRecord(screens, displayId, sessionId, at = Date.now(), boot = '') {
+  const id = Number(displayId)
+  if (!Number.isInteger(id) || id <= 0) return screens
+  const session = String(sessionId ?? '').trim()
+  if (session === '') return screens
+  const next = (Array.isArray(screens) ? screens : []).filter((one) => one?.displayId !== id)
+  next.push(exploreScreenEntry(id, session, at, boot))
+  return next.slice(-EXPLORE_SCREENS_KEPT)
+}
+
+/** 这一场还欠着的屏 (纯函数): 只认 sessionId 相同且没释放过的行 */
+function exploreScreensOfSession(screens, sessionId) {
+  const wanted = String(sessionId ?? '').trim()
+  if (wanted === '') return []
+  return (Array.isArray(screens) ? screens : []).filter((one) =>
+    one?.released !== true
+    && one?.sessionId === wanted
+    && Number.isInteger(one?.displayId)
+    && one.displayId > 0)
+}
+
+/** 改一块屏那一行 (纯函数) */
+function exploreScreenMarked(screens, displayId, patch) {
+  return (Array.isArray(screens) ? screens : []).map((one) =>
+    (one?.displayId === displayId ? { ...one, ...patch } : one))
+}
+
+/**
+ * `explore.json` 里读回来的那本账 (纯函数)
+ *
+ * 只收 displayId 是正整数、sessionId 非空的行: 写歪的 / 手工改过的行不该让重启后的释放拿到一个假的 id
+ */
+function exploreScreensFromRecord(record) {
+  const rows = Array.isArray(record?.screens) ? record.screens : []
+  const out = []
+  for (const row of rows) {
+    const displayId = Number(row?.displayId)
+    const sessionId = typeof row?.sessionId === 'string' ? row.sessionId.trim() : ''
+    if (!Number.isInteger(displayId) || displayId <= 0 || sessionId === '') continue
+    out.push({
+      displayId,
+      sessionId,
+      createdAt: Number(row?.createdAt) || 0,
+      released: row?.released === true,
+      releasedAt: Number(row?.releasedAt) || 0,
+      missing: row?.missing === true,
+      reason: typeof row?.reason === 'string' ? row.reason : '',
+      lastError: typeof row?.lastError === 'string' ? row.lastError : '',
+      boot: typeof row?.boot === 'string' ? row.boot : '',
+    })
+  }
+  return out.slice(-EXPLORE_SCREENS_KEPT)
+}
+
+/**
+ * 归还这一场自己建的屏 (2.8.0 B2-a 的释放路共用这一条)
+ *
+ * 四条路 (步数 / deadline / finish+stub / 重启) 只差一个 reason; 判据三件:
+ * **只碰 sessionId 相同的**、**幂等** (已释放的行不再调桥)、**不抛** (失败留在账上等下一次, 摘要照写)。
+ * 用户先关掉的屏只记 `missing: true`, 不当失败
+ */
+async function exploreReleaseOwnedScreens(reason, sessionId = exploreRun.session) {
+  const outcome = {
+    reason: String(reason ?? ''),
+    session: String(sessionId ?? ''),
+    released: [],
+    missing: [],
+    failed: [],
+  }
+  const boot = await exploreBootId()
+  const targets = exploreScreensOfSession(exploreScreens, sessionId)
+  for (const entry of targets) {
+    if (!exploreScreenSurvives(entry, boot)) {
+      // 设备重启过: 这一串号现在可能已经是别的会话新开的屏, 只记 missing, 绝不去关
+      const why = 'the device rebooted after this screen was made, so its displayId may belong to'
+        + ' another screen now - the ledger entry was closed without touching the device'
+      outcome.missing.push({ displayId: entry.displayId, why })
+      exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, {
+        released: true, releasedAt: Date.now(), reason: 'reboot', missing: true, lastError: '',
+      })
+      continue
+    }
+    try {
+      const answer = await call('release', { displayId: entry.displayId })
+      const at = Date.now()
+      if (answer?.released === true) {
+        outcome.released.push(entry.displayId)
+        exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, {
+          released: true, releasedAt: at, reason: outcome.reason, missing: false, lastError: '',
+        })
+      } else {
+        // 用户先关屏 / 建新屏时已被替换: 只记 missing, 不当失败
+        outcome.missing.push({ displayId: entry.displayId, why: String(answer?.error ?? 'the screen was already gone') })
+        exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, {
+          released: true, releasedAt: at, reason: outcome.reason, missing: true, lastError: '',
+        })
+      }
+    } catch (error) {
+      // 桥不通 / 应用没答: 留在账上 (released 仍是 false), 下一次收尾还能补
+      const why = String(error?.message ?? error)
+      outcome.failed.push({ displayId: entry.displayId, why })
+      exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, { lastError: why })
+    }
+  }
+  if (targets.length > 0) await exploreStateWrite()
+  return outcome
+}
+
+/**
+ * `lw_screen_create` 在探索场成功时把 displayId 记进这本账 (2.8.0 B2-a ②)
+ *
+ * 只认**这一场**的建屏: 别的会话建的屏不登记, 于是收尾时那块屏不会被当成"探索的"关掉。建新屏把旧屏
+ * 就地关掉时, 旧的那块如果也在这本账上, 直接记 `replaced` —— 不再去桥上问一次"它还在吗"
+ */
+async function exploreNoteCreatedScreen(created, sessionId) {
+  if (created?.created !== true) return false
+  const exploreSession = exploreRun.session
+  if (exploreSession === null || sessionId !== exploreSession) return false
+  const displayId = Number(created?.displayId)
+  if (!Number.isInteger(displayId) || displayId <= 0) return false
+  const replaced = Number(created?.replaced)
+  if (Number.isInteger(replaced) && replaced > 0 && replaced !== displayId) {
+    exploreScreens = exploreScreenMarked(exploreScreens, replaced, {
+      released: true, releasedAt: Date.now(), reason: 'replaced', missing: false, lastError: '',
+    })
+  }
+  exploreScreens = exploreScreenRecord(exploreScreens, displayId, exploreSession, Date.now(), await exploreBootId())
+  exploreScreensLoaded = true
+  await exploreStateWrite()
+  console.log(`luwi-channel: exploration ${shortSession(exploreSession)} now owns display ${displayId}`)
+  return true
+}
+
 /** 探索那一场的工作区注册读数 (形状与 [ballWorkspaceState] 同, 判据见 [ensureChannelWorkspace]) */
 const exploreWorkspaceState = { path: null, id: null, registered: null, why: null }
 
@@ -8189,7 +8388,7 @@ function exploreStateWrite() {
   return exploreStateQueue
 }
 
-/** 把内存里那一份写进文件: **未知键原样留着**, 只换 `v` / `updatedAt` / `run` */
+/** 把内存里那一份写进文件: **未知键原样留着**, 只换 `v` / `updatedAt` / `run` / `screens` */
 async function exploreStateWriteNow() {
   const path = exploreStatePath()
   if (path === null) return
@@ -8199,6 +8398,10 @@ async function exploreStateWriteNow() {
     v: 1,
     updatedAt: Date.now(),
     run: exploreRun.session === null ? null : { ...exploreRun },
+    // 屏账 (2.8.0 B2-a): 还没从文件读过时保留文件里那一份, 不让一个空数组把上一次重启前留下的行盖掉
+    screens: exploreScreensLoaded
+      ? exploreScreens
+      : (Array.isArray(base.screens) ? base.screens : []),
     // 设置页要看的那四项 (2.7.9 T5): 它们原来只在内存里, 也就是只在 `lw_explore op=status`
     // 里出现; 写进这份文件之后应用那一侧不用问模型也看得见 (F20)
     status: {
@@ -8218,9 +8421,15 @@ async function exploreStateWriteNow() {
   }
 }
 
-/** 宿主起来时把那一场接回来 (`run` 还在且没 over): 只按文件重挂预算, 不做别的 */
+/**
+ * 宿主起来时把那一场接回来 (`run` 还在且没 over): 只按文件重挂预算, 不做别的
+ *
+ * **屏账先回来** (2.8.0 B2-a): 没有 `run` 也要回 —— 上一场留下的屏还要能在下一次收尾时按场次关掉
+ */
 async function exploreStateRestore() {
   const record = await exploreStateRead()
+  exploreScreens = exploreScreensFromRecord(record)
+  exploreScreensLoaded = true
   const run = record?.run
   if (run === null || typeof run !== 'object') return false
   if (typeof run.session !== 'string' || run.session === '') return false
@@ -8316,14 +8525,61 @@ async function exploreSay(ctx, text, options = {}) {
 }
 
 /**
+ * 归还探索自己建的屏 (2.8.0 B2-b 的 ④⑤⑥ 三条触发点共用 [exploreReleaseOwnedScreens])
+ *
+ * ⑦ 宿主重启那条在 B2-a 的 apply 恢复段里: 没有能接回来的 run 时当场归还遗留屏, **还活着的 run
+ * 不动它** —— 恢复之后它走到步数 / deadline / finish 时按同一本账归还 (B2-a 把账落进了 explore.json,
+ * 所以重启不会把"哪块屏是这一场的"丢掉)
+ *
+ * 这一层只多做两件事: **不抛** (它从同步的步数闸 / 到点那一拍 / 收尾的 `finally` 里调, 抛出来
+ * 没人接, 在 `finally` 里还会把摘要的答案盖掉) 与**留一行读数** (三条路各调一次, 没有这行就只能
+ * 从日志里猜屏到底关没关)。B2-a 那本账没跟着这次提交进来时**不拿"哪块屏是探索的"去猜** ——
+ * 猜错就是关掉别人的屏
+ */
+async function exploreReleaseScreens(reason, sessionId = exploreRun.session) {
+  if (typeof exploreReleaseOwnedScreens !== 'function') {
+    console.warn(`luwi-channel: no explore screen ledger in this build, so the ${reason} path released nothing`)
+    return null
+  }
+  let outcome = null
+  try {
+    outcome = await exploreReleaseOwnedScreens(reason, sessionId)
+  } catch (error) {
+    console.warn(`luwi-channel: the ${reason} screen release threw: ${error?.message ?? error}`)
+    return null
+  }
+  const gone = outcome.released.length + outcome.missing.length
+  if (gone > 0 || outcome.failed.length > 0) {
+    console.log(
+      `luwi-channel: exploration screens after ${reason}: ${outcome.released.length} released,`
+        + ` ${outcome.missing.length} already gone, ${outcome.failed.length} failed`
+        + ` (session ${shortSession(sessionId)})`,
+    )
+  }
+  return outcome
+}
+
+/**
+ * 那一句里"屏"的那一半: 宿主关掉了就说关掉了, 没关成就如实说 —— 屏是探索开的, 收拾它是宿主的事,
+ * 不该再让模型先调一次 `lw_screen_release`
+ */
+function exploreScreenNote(outcome) {
+  if (outcome === null) return ''
+  if (outcome.failed.length > 0) return `探索用的虚拟屏有 ${outcome.failed.length} 块没关成 (不用再调 lw_screen_release); `
+  if (outcome.released.length > 0) return '宿主已经关闭虚拟屏 (不用再调 lw_screen_release); '
+  if (outcome.missing.length > 0) return '探索用的虚拟屏已经不在了 (不用再调 lw_screen_release); '
+  return ''
+}
+
+/**
  * 到步那一句: **只提醒, 不拒** (D9 那一档: 主机不拦工具调用)
  *
  * 只在第 stepLimit 步发一次 (`exploreRun.reminded` 是那道闸); 失败只记读数 —— 这个函数是从同步的
  * guard 里 `void` 出去的, 抛出来没人接
  */
-async function exploreStepNote(ctx) {
+async function exploreStepNote(ctx, outcome = null) {
   if (ctx === null) return
-  const text = `预算用完了 (${exploreRun.steps} 步), 该收尾了: 立刻 lw_screen_release 关闭虚拟屏, 再 lw_explore `
+  const text = `预算用完了 (${exploreRun.steps} 步), ${exploreScreenNote(outcome)}该收尾了: 立刻 lw_explore `
     + '{op:"finish", summary:"..."}, 不要再开新的事'
   try {
     const sent = await exploreSay(ctx, text, { steer: true })
@@ -8332,6 +8588,17 @@ async function exploreStepNote(ctx) {
     exploreState.lastError = `the step note was not sent: ${error?.message ?? error}`
     console.warn(`luwi-channel: ${exploreState.lastError}`)
   }
+}
+
+/**
+ * 到步那一条的次序 (2.8.0 B2-b ④): **先归还屏, 再提醒**
+ *
+ * 步数闸是同步的, 所以这一条从 `void` 里跑: 等归还完才发那句提醒, 模型读到提醒时屏已经没了 ——
+ * 这正是"不依赖模型调用 lw_screen_release"那一句
+ */
+async function exploreStepLimit(ctx) {
+  const outcome = await exploreReleaseScreens('steps')
+  await exploreStepNote(ctx, outcome)
 }
 
 /**
@@ -8350,7 +8617,7 @@ function exploreStepGuard(exec) {
   if (exploreRun.steps === exploreRun.stepLimit && !exploreRun.reminded) {
     exploreRun.reminded = true
     void exploreStateWrite()
-    void exploreStepNote(hostCtx)
+    void exploreStepLimit(hostCtx)
   }
   return undefined
 }
@@ -8362,10 +8629,15 @@ async function exploreTick(ctx) {
   const sessionId = exploreRun.session
   const minutes = exploreRun.minutes
   exploreRun.over = true
+  // ⑤ 先归还屏, 再取消那一轮: 与步数那条同一个次序, 到点那句"投收尾"是在屏已经关掉之后才发。
+  // 归还那一步自己会落盘 (账与 over 一起写); 没屏可还时由下面这一句把 over 落下来
+  const outcome = await exploreReleaseScreens('deadline', sessionId)
   await exploreStateWrite()
   console.log(`luwi-channel: exploration ${sessionId} hit its deadline (${minutes} min) - the turn was cancelled`)
   try {
-    await exploreSay(ctx, `到点了 (${minutes} 分钟), 立刻 lw_explore op=finish 收尾`, { cancel: true })
+    const note = `到点了 (${minutes} 分钟), ${exploreScreenNote(outcome)}`
+      + '立刻 lw_explore op=finish 收尾'
+    await exploreSay(ctx, note, { cancel: true })
   } catch (error) {
     exploreState.lastError = `the deadline notice was not sent: ${error?.message ?? error}`
     console.warn(`luwi-channel: ${exploreState.lastError}`)
@@ -8425,6 +8697,16 @@ async function exploreWriteSummary({ summary, ended = 'finish', stub = false }) 
 async function exploreStub() {
   if (exploreRun.session === null) return
   const sessionId = exploreRun.session
+  try {
+    await exploreStubSummary(sessionId)
+  } finally {
+    // ⑥ 桩摘要也走 finally: 摘要写失败 / 到点取消之后那一轮没起来, 屏都不能跟着留下
+    await exploreReleaseScreens('stub', sessionId)
+  }
+}
+
+/** 桩摘要本身: 与 finish 那条同一个写法, 只由 [exploreStub] 调 */
+async function exploreStubSummary(sessionId) {
   exploreState.stubs += 1
   console.log(`luwi-channel: exploration ${sessionId} ended without a summary - a stub was written instead`)
   const saved = await exploreWriteSummary({
@@ -8574,6 +8856,8 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     if (fresh) {
       const task = askedNext === '' ? null : await exploreTaskWrite(askedNext)
       if (task?.error) console.warn(`luwi-channel: the next task card was not written: ${task.error}`)
+      // ⑥ 上一次收尾如果桥不通、屏没关成, 这一次补上 (账是幂等的, 已经关掉的行不会再调桥)
+      await exploreReleaseScreens('finish', saved.session)
       return {
         saved: true,
         already: true,
@@ -8590,20 +8874,26 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     return { saved: false, why: 'the summary is empty: op=finish needs the body of the report' }
   }
   const ended = exploreRun.over === true ? 'deadline' : exploreRun.reminded === true ? 'steps' : 'finish'
-  const saved = await exploreWriteSummary({
-    summary,
-    ended,
-    stub: false,
-  })
-  if (saved.error) return { saved: false, why: saved.error }
-  const task = askedNext === '' ? null : await exploreTaskWrite(askedNext)
-  if (task?.error) console.warn(`luwi-channel: the next task card was not written: ${task.error}`)
-  else if (task !== null) {
-    console.log(`luwi-channel: the next exploration's task card now says ${task.chars} characters`)
+  const finishing = exploreRun.session
+  try {
+    const saved = await exploreWriteSummary({
+      summary,
+      ended,
+      stub: false,
+    })
+    if (saved.error) return { saved: false, why: saved.error }
+    const task = askedNext === '' ? null : await exploreTaskWrite(askedNext)
+    if (task?.error) console.warn(`luwi-channel: the next task card was not written: ${task.error}`)
+    else if (task !== null) {
+      console.log(`luwi-channel: the next exploration's task card now says ${task.chars} characters`)
+    }
+    exploreState.finished += 1
+    console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
+    return { saved: true, ...saved, nextTask: task }
+  } finally {
+    // ⑥ finish 走 finally: 摘要 / 写卡哪一步失败都不许把屏留下, 归还自己的错也不许盖掉摘要的答案
+    await exploreReleaseScreens(ended, finishing)
   }
-  exploreState.finished += 1
-  console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
-  return { saved: true, ...saved, nextTask: task }
 }
 
 /**
@@ -8692,6 +8982,8 @@ async function exploreStatus(ctx) {
     saidLimit: said.limit,
     saidDefault: EXPLORE_SAID_DEFAULT,
     nextTask: task,
+    screens: exploreScreens,
+    unreleasedScreens: exploreScreens.filter((one) => one.released !== true).length,
     preset: exploreState.preset,
     presetWhy: exploreState.presetWhy,
     started: exploreState.started,
@@ -8710,6 +9002,9 @@ async function exploreStatus(ctx) {
 async function exploreStatusText(ctx) {
   const readings = await exploreStatus(ctx)
   const when = (stamp) => (Number(stamp) > 0 ? new Date(Number(stamp)).toISOString() : '')
+  const pendingScreens = readings.screens
+    .filter((one) => one.released !== true)
+    .map((one) => one.displayId)
   const lines = [
     readings.running
       ? `exploration: running in ${shortSession(readings.session)} - ${readings.steps}/${readings.stepLimit} steps,`
@@ -8727,6 +9022,8 @@ async function exploreStatusText(ctx) {
     `latest summary: ${readings.summary || '(none yet)'}`,
     `said today: ${readings.saidToday} of ${readings.saidLimit} (task rules only; a manual run does not count)`,
     `next task card: ${readings.nextTask.path || '(none yet)'} (${readings.nextTask.chars} chars)`,
+    `screens: ${pendingScreens.length} unreleased of ${readings.screens.length} on the ledger`
+      + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,
     `this run: ${readings.started} started, ${readings.finished} finished, ${readings.stubs} stub(s),`
       + ` ${readings.refusals} refused`,
     `preset: ${readings.preset ?? '(the registry default)'}${readings.presetWhy ? ` - ${readings.presetWhy}` : ''}`,
@@ -8780,8 +9077,27 @@ function startExploreClock(ctx) {
     warn(ctx, `the explore budget timer could not be registered: ${error?.message ?? error}`)
   }
   void exploreStateRestore()
-    .then((restored) => {
-      if (!restored) return
+    .then(async (restored) => {
+      // 屏账 (2.8.0 B2-a) 的读数: 重启之后还欠着几块、是哪几块 —— 这一行就是"恢复回来了"的证据
+      const unreleased = exploreScreens.filter((one) => one.released !== true)
+      if (unreleased.length > 0) {
+        console.log(
+          `luwi-channel: ${unreleased.length} explore screen(s) from before the restart are still on the ledger:`
+            + ` ${unreleased.map((one) => `${one.displayId} (${shortSession(one.sessionId)})`).join(', ')}`,
+        )
+      }
+      if (!restored) {
+        // 没有能接回来的那一场 (已经收尾 / 到点了还没收尾): 账上那些屏已经没有主人, 这一下归还,
+        // 不必等下一场。**还活着的 run 不动它** —— 那条路归收尾 (2.8.0 B2-b 的 ⑦)
+        for (const sessionId of new Set(unreleased.map((one) => one.sessionId))) {
+          const outcome = await exploreReleaseOwnedScreens('restore', sessionId)
+          console.log(
+            `luwi-channel: ${outcome.released.length} orphaned explore screen(s) were given back,`
+              + ` ${outcome.missing.length} already gone, ${outcome.failed.length} still owed`,
+          )
+        }
+        return
+      }
       console.log(`luwi-channel: an exploration from before the restart is back on its budget: ${exploreRun.session}`)
       return exploreTick(ctx)
     })
@@ -8818,7 +9134,7 @@ function startExploreClock(ctx) {
 const BALANCE_REQUEST_FRESH_MS = 30 * 1000
 
 /** 一次取数最多等多久: 主人正看着那块框, 网络不通也要尽快给个答案 (失败也是答案) */
-const BALANCE_TIMEOUT_MS = 8000
+const BALANCE_TIMEOUT_MS = 6000
 
 /**
  * 试 DeepSeek 登录账号那条缝的 route (dsh 的 `llm-deepseek-account` 注册的那一个)
@@ -8850,26 +9166,52 @@ function balanceRequestPath() {
 }
 
 /**
- * 那个记号的时间戳 (主人刚写的那一下), 没有 / 过期就是 0
+ * 那个请求记号 (主人刚写的那一问), 没有 / 过期就是 null
  *
- * **同一个记号只算一次** (判据在 [startBalance] 里那个 handled): 记号在 [BALANCE_REQUEST_FRESH_MS]
- * 之内一直"新鲜", 而这条轮询是 3 s 一拍 —— 按布尔读的话, 点一次「看余额」会在半分钟里问十遍账号缝
+ * **同一个 seq 只算一次** (判据在 [startBalance] 里那个 handled): 记号在 [BALANCE_REQUEST_FRESH_MS]
+ * 之内一直"新鲜", 而这条轮询是 500 ms 一拍 —— 按布尔读的话, 点一次「看余额」会在半分钟里问上百遍
+ * 账号缝. 那一区分的不是"点了没有"而是"问的是哪一问", 所以按 `seq` 判, 不按时间戳
+ *
+ * v1 那一份记号只有 `{"at":ms}` (2026-10-16 的老应用): 拿 `at` 当 `seq` —— 老应用配新宿主照样能刷
  */
 async function balanceRequested() {
   const path = balanceRequestPath()
-  if (!path) return 0
+  if (!path) return null
   try {
-    const at = JSON.parse(await readFile(path, 'utf8'))?.at
+    const root = JSON.parse(await readFile(path, 'utf8'))
+    const at = root?.at
+    if (typeof at !== 'number') return null
     const age = Date.now() - at
-    return typeof at === 'number' && age >= 0 && age <= BALANCE_REQUEST_FRESH_MS ? at : 0
+    if (age < 0 || age > BALANCE_REQUEST_FRESH_MS) return null
+    return {
+      seq: typeof root?.seq === 'number' ? root.seq : at,
+      at,
+      force: root?.force === true,
+      provider: typeof root?.provider === 'string' ? root.provider : '',
+      model: typeof root?.model === 'string' ? root.model : '',
+    }
   } catch {
-    return 0
+    return null
   }
 }
 
 /** 金额那一档: 定点两位的十进制字符串 (算出来的数也走它, 不把浮点的尾巴露给人) */
 function decimalOf(value) {
   return Number.isFinite(value) ? (Math.round(value * 100) / 100).toFixed(2) : ''
+}
+
+/**
+ * 落盘前的金额: **只留两位小数** (2026-11-01 主人: "小数点部分应只显示小数点后两位")
+ *
+ * 账号缝与几家直读接口给的是原始串 (`236.9677291600000000`), 从前原样写进 `balance.json`; 显示这一层
+ * 现在也收一次 ([BalanceFile.moneyText]), 但那份文件是"宿主与应用共同的约定", 不该把二十位小数留在里面。
+ * 读不成数的原样留着 —— 那是"这一家答的东西读不出来", 不是 0
+ */
+function money2(raw) {
+  const text = raw === null || raw === undefined ? '' : String(raw).trim()
+  if (text === '') return ''
+  const value = Number(text)
+  return Number.isFinite(value) ? decimalOf(value) : text
 }
 
 /** 订阅制那几家给的是「已用百分比」, 取最紧的那一档算剩余 (几档窗口里最紧的才是主人要问的) */
@@ -9181,12 +9523,22 @@ async function readAccountBalance(ctx, payload, note = '') {
  *
  * @param ctx 宿主上下文 (拿服务与 locale)
  */
-async function refreshBalance(ctx) {
-  const now = Date.now()
+async function refreshBalance(ctx, request = null) {
+  const startedAt = Date.now()
   const path = balancePath()
-  if (path === null) return
+  if (path === null) return null
   const payload = {
-    v: 2, at: now, ok: false, unsupported: false, provider: '', label: '', model: '',
+    v: 3,
+    // 这一份是对哪一问的答案 (请求记号里的 seq): 应用按它认出"这是我刚问的那一次"
+    seq: request?.seq ?? 0,
+    at: startedAt,
+    // 人为重试 (主人在失败那一行上按了「重试」): 只当一个读数, 没有缓存层可绕
+    force: request?.force === true,
+    // 三段读数 (2026-11-01): 宿主看见那一问用了多久 / 网络用了多久 / 落盘用了多久
+    seenAfterMs: request === null ? 0 : Math.max(0, startedAt - request.at),
+    networkMs: 0,
+    writeMs: 0,
+    ok: false, unsupported: false, provider: '', label: '', model: '',
     kind: '', currency: '', value: '', bonus: '', percent: 0, reason: '',
   }
   try {
@@ -9234,14 +9586,26 @@ async function refreshBalance(ctx) {
   } catch (error) {
     payload.reason = `fetching the balance failed: ${error?.message ?? error}`
   }
+  // 两位小数在落盘前收一次 (账号缝给的是原始串, 见 [money2]); 额度那一档只看 percent, 不碰
+  payload.value = money2(payload.value)
+  payload.bonus = money2(payload.bonus)
+  payload.networkMs = Date.now() - startedAt
+  // `at` 是这份数**读出来**的那一刻 (不是请求写下来的那一刻): 应用按它算"多旧"
+  payload.at = Date.now()
   const temporary = `${path}.tmp`
   try {
+    // 落盘那一段量两次: 先把那一份写进 `.tmp`, 量完把 `writeMs` 填回去再写一次同一个 `.tmp`,
+    // 最后只 rename 一次 —— 这样文件里那个 `writeMs` 是这一次真的花了多久, 不是占位的 0
+    const writeStart = Date.now()
     await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`)
+    payload.writeMs = Date.now() - writeStart
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
     await rename(temporary, path)
   } catch (error) {
     console.warn(`luwi-channel: the balance file was not written: ${error?.message ?? error}`)
   }
+  return payload
 }
 
 /**
@@ -9256,20 +9620,79 @@ async function refreshBalance(ctx) {
  *      是"刚开机就先替你查一次钱" —— 这两件事都不该由应用替主人决定
  *
  * 所以链路收成一条: 点「看余额」→ 应用写 `balance-request.json` → 这条轮询看见 → 查一次 → 落
- * `balance.json` → 应用当场把「正在取…」换成真数。**同一个记号只认一次** (30 s 的新鲜窗口配一拍 3 s 的
- * 轮询, 不记住处理过哪个就会点一次问十遍), 一次取数最多 [BALANCE_TIMEOUT_MS]
+ * `balance.json` → 应用当场把「正在取…」换成真数。**同一个 seq 只认一次** (30 s 的新鲜窗口配一拍
+ * 500 ms 的兜底轮询, 不记住处理过哪一问就会点一次问上百遍), 一次取数最多 [BALANCE_TIMEOUT_MS]
  */
 function startBalance(ctx) {
-  /** 已经处理过的那个记号: 同一个只刷一次 ([balanceRequested] 那 30 s 窗口里它会一直被读成"新鲜") */
+  /** fs.watch 先试, 没接到就靠这一拍兜底 (2026-11-01: 500 ms, 从 3 s 收紧) */
+  const BALANCE_WATCH_MS = 500
+  /** 已经处理过的那个 seq: 同一个只刷一次 ([balanceRequested] 那 30 s 窗口里它会一直被读成"新鲜") */
   let handled = 0
-  const timer = setInterval(() => {
-    void balanceRequested().then((stamp) => {
-      if (stamp === 0 || stamp <= handled) return
-      handled = stamp
-      void refreshBalance(ctx)
-    })
-  }, PLUGIN_POLL_MS)
+  /** 一次只取一次: 网络最慢 6 s, 其间又来一问就先让它排队 (下一拍看见新 seq 再取) */
+  let busy = false
+
+  async function kick() {
+    if (busy) return
+    const request = await balanceRequested()
+    if (request === null || request.seq <= handled) return
+    handled = request.seq
+    busy = true
+    try {
+      await refreshBalance(ctx, request)
+    } finally {
+      busy = false
+    }
+  }
+
+  // `fs.watch` 优先: 应用那一笔写就落在同一个目录里, 事件到得比兜底那一拍早得多 (目标 <= 250 ms)
+  const path = balanceRequestPath()
+  let watcher = null
+  try {
+    if (path !== null) {
+      watcher = watch(dirname(path), () => { void kick() })
+      if (typeof watcher.unref === 'function') watcher.unref()
+    }
+  } catch (error) {
+    // inotify 在有些机器上是死的 (2026-10-15 在真机上量到过), 那还有下面那一拍
+    warn(ctx, `watching the balance request failed: ${error?.message ?? error}`)
+  }
+  // 兜底那一条: 不依赖 inotify, 也不依赖上面那个 watcher 建起来过
+  const timer = setInterval(() => { void kick() }, BALANCE_WATCH_MS)
   if (typeof timer.unref === 'function') timer.unref()
+
+  /**
+   * 每轮对话结束补一拍 (2026-11-01 主人: "在每轮对话结束时自动刷新, 因为此时扣费刚结算, 余额最准确")
+   *
+   * 它**只覆盖缓存** (写 `seq: 0`, 不在任何一问的编号上): 应用那一侧按 `seq` 认答案, 于是这一拍只更新
+   * `balance.json`, 不会凭空把框里的字换掉。与"点一下"那一问共用 [busy], 也不在 [QUIET_MIN_MS] 内连刷
+   * —— 一轮接一轮的快速问答不该把账号缝当成心跳
+   */
+  const QUIET_MIN_MS = 5_000
+  let quietAt = 0
+  async function refreshQuiet() {
+    if (busy) return
+    if (Date.now() - quietAt < QUIET_MIN_MS) return
+    quietAt = Date.now()
+    busy = true
+    try {
+      await refreshBalance(ctx, null)
+      noteQuietRefresh()
+    } finally {
+      busy = false
+    }
+  }
+  onSessionEvent(ctx, (session, event) => {
+    if (event?.type !== 'turn/end') return
+    void refreshQuiet()
+  })
+
+  // 起来先看一眼: host 重启这段时间里写下的那一问照样要答
+  void kick()
+}
+
+/** 安静那一拍的一行读数 (排查"缓存到底有没有在动"只看这一行) */
+function noteQuietRefresh() {
+  console.log('luwi-channel: the balance cache was refreshed after a turn ended')
 }
 
 /**

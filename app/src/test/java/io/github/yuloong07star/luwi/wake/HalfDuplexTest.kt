@@ -10,7 +10,7 @@ import org.junit.Test
  * 只丢样本不作废 (拼出"前半句+后半句")、闭闸时只哑切段而不哑唤醒词 (自唤醒)、以及开闸时忘了喂
  * 某一个消费者。现在它是纯函数, 三条就能一条条钉住, 而 [WakeWordService] 那一侧只负责照着答案做
  *
- * 与已归档的 `docs/wake-voice-states.md` 判据 6 是同一条 (git 历史可查): 那一条量的是"念的期间没被录进去"与"念完之后
+ * 与 `docs/wake-voice-states.md` 判据 6 是同一条: 那一条量的是"念的期间没被录进去"与"念完之后
  * 那一句是完整的", 这里的三种走法就是它的全部实现
  */
 class HalfDuplexTest {

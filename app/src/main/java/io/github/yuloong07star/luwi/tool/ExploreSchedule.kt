@@ -10,6 +10,7 @@ import android.util.Log
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.host.DshHost
+import io.github.yuloong07star.luwi.host.DshHostService
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.lock.LockReplay
 import io.github.yuloong07star.luwi.lock.LockSetting
@@ -28,6 +29,7 @@ import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 探索的排期 (2.7.8 批次 8): **每天一个时刻, 到点自己开始**
@@ -37,9 +39,11 @@ import java.util.concurrent.Executors
  *
  * 1. 主人设定 `HH:mm` 与总开关 (缺省关)
  * 2. [arm] 把下一次排进 `AlarmManager` (精确优先, 退 `setAndAllowWhileIdle`)
- * 3. 到点 [fire]: 宿主没在跑 / 上一场还在跑 → 跳过并记读数; 否则读 [ExploreTask] 的卡
- *    (空就是"自由探索这台手机"), 写一行收件箱 (`source:"explore"`, 带着每场预算 `minutes` / `steps`)
- *    —— 宿主那边照批次 7 的 `startExplore` 开一场, `Luwi` 工作区 / `explore` 预设都不变
+ * 3. 到点 [fire]: 上一场还在跑 → 跳过并记读数; **宿主没在跑就先把它拉起来** (["2.8.0 #9"]:
+ *    闹钟本来就能把应用进程叫醒, 卡住的是"进程起来了, 宿主那半是死的, 于是只记 skipped"),
+ *    等它就绪再读 [ExploreTask] 的卡 (空就是"自由探索这台手机"), 写一行收件箱
+ *    (`source:"explore"`, 带着每场预算 `minutes` / `steps`) —— 宿主那边照批次 7 的
+ *    `startExplore` 开一场, `Luwi` 工作区 / `explore` 预设都不变
  * 4. 不管跑没跑, 都写一份 `last` 读数并重排明天
  *
  * **省电模式不拦这一档** (2026-10-26 主人: "探索功能当前被省电模式阻止启动，看能不能忽略省电"):
@@ -73,6 +77,17 @@ internal object ExploreSchedule {
 
     /** 与自动指令那个闹钟 (41) 分开, 两边互不覆盖 */
     private const val REQUEST = 42
+
+    /**
+     * 宿主不在时最多等它多久 (毫秒)
+     *
+     * 平时从 `startForegroundService` 到 dsh 打出就绪行是几秒; 首次解包那棵树要更久, 所以给到三分钟
+     * —— 等着的是排期自己的单线程 worker, 不是广播 (广播那头在拉起服务之后立刻松手, 见 [fire])
+     */
+    const val HOST_WAIT_MS = 180_000L
+
+    /** 等宿主时多久看一眼 */
+    private const val HOST_POLL_MS = 200L
 
     private val json = Json { ignoreUnknownKeys = true }
     private val lock = Any()
@@ -184,15 +199,65 @@ internal object ExploreSchedule {
             .toEpochMilli()
     }
 
+    /** 到点这一趟该做什么 (纯函数, 单测钉着) */
+    enum class Due {
+        /** 关着: 什么都不做 */
+        OFF,
+
+        /** 宿主在跑, 上一场也结束了: 直接投那一行 */
+        QUEUE,
+
+        /**
+         * 宿主不在 (进程被系统杀掉 / 崩了): 先把宿主服务拉起来, 等它就绪再投
+         *
+         * 2.8.0 #9: 以前这一档是"记 skipped 收工", 于是凌晨三点那一场只跳过不开始 —— 闹钟明明
+         * 已经把应用叫醒了, 丢在"宿主那半是死的"这一步
+         */
+        WAKE_HOST,
+
+        /** 上一场探索还在跑: 跳过, 不重开 */
+        SKIP_RUNNING,
+    }
+
     /**
-     * 到点这一趟要不要跳过 (纯函数): 跳过的原因 (中文) 或 null
+     * 到点这一趟该做什么 (纯函数)
      *
-     * 只剩两条, 顺序也是"先看宿主活没活, 再看上一场": **省电不在其中** (见文件头那一段)
+     * 顺序是"关着 → 上一场 → 宿主", **省电不在其中** (见文件头那一段); 宿主没在跑不再等于跳过,
+     * 而是先拉起来 (见 [Due.WAKE_HOST])
      */
-    fun skipReason(hostRunning: Boolean, running: Boolean): String? = when {
-        !hostRunning -> "宿主没在跑"
-        running -> "上一场探索还在跑"
-        else -> null
+    fun dueOf(enabled: Boolean, hostRunning: Boolean, running: Boolean): Due = when {
+        !enabled -> Due.OFF
+        running -> Due.SKIP_RUNNING
+        hostRunning -> Due.QUEUE
+        else -> Due.WAKE_HOST
+    }
+
+    /**
+     * 宿主不在时把它拉起来, 等就绪最多 [HOST_WAIT_MS]; 已经在跑就直接 true
+     *
+     * 只该在排期自己的 worker 线程上调 (它会睡); 广播那头在拉起服务之后立刻松手, 见 [fireAsync]。
+     * 等的时候拿一把 partial wakelock: 这一档本来就发生在凌晨三点的 Doze 里, 广播那几秒的唤醒
+     * 窗口撑不到 dsh 打出就绪行, CPU 一睡这轮等待就停在半路
+     */
+    fun wakeHost(context: Context, timeoutMs: Long = HOST_WAIT_MS): Boolean {
+        if (DshHost.status is HostStatus.Running) return true
+        val wake = runCatching {
+            context.getSystemService(PowerManager::class.java)
+                ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "luwi:explore-host")
+                ?.apply { acquire(timeoutMs + 10_000L) }
+        }.getOrNull()
+        try {
+            runCatching { DshHostService.start(context) }
+                .onFailure { Log.w(TAG, "the host service could not be started for the exploration", it) }
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (DshHost.status is HostStatus.Running) return true
+                runCatching { Thread.sleep(HOST_POLL_MS) }
+            }
+            return DshHost.status is HostStatus.Running
+        } finally {
+            runCatching { wake?.takeIf { it.isHeld }?.release() }
+        }
     }
 
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
@@ -231,16 +296,24 @@ internal object ExploreSchedule {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** 接收器那条: 放到自己的工作线程上做, 不占主线程 (做完才 finish goAsync) */
+    /**
+     * 接收器那条: 放到自己的工作线程上做, 不占主线程
+     *
+     * 广播只有十秒, 而"宿主不在 → 拉起来 → 等就绪"可能是几十秒, 所以这里把手上的 [done] 做成
+     * 可以提前松手的一次性钩子: [fire] 一拉起宿主服务就调用它 (服务进前台之后进程就活着了,
+     * 剩下的等待放在 worker 上照常走)
+     */
     fun fireAsync(context: Context, done: () -> Unit) {
         val application = context.applicationContext
         worker.execute {
+            val released = AtomicBoolean(false)
+            val release = { if (released.compareAndSet(false, true)) done() }
             try {
-                fire(application, System.currentTimeMillis())
+                fire(application, System.currentTimeMillis(), release)
             } catch (problem: Throwable) {
                 Log.w(TAG, "the scheduled exploration could not be fired", problem)
             } finally {
-                done()
+                release()
             }
         }
     }
@@ -250,21 +323,36 @@ internal object ExploreSchedule {
      *
      * 那行 `why` 是给人看的 (设置页那行"上一次"与回执都读它), 与 `history.jsonl` 的 `reason` 同一种写法
      */
-    private fun fire(context: Context, now: Long) {
+    private fun fire(context: Context, now: Long, release: () -> Unit) {
         val current = plan(context)
         if (!current.enabled) return
-        // 省电只当读数 (2026-10-26): 它不再是跳过的一条 —— 顺序里只剩宿主与上一场
+        // 省电只当读数 (2026-10-26): 它不再是跳过的一条
         val powerSave = LwWakeWord.powerSave(context)
-        val skip = skipReason(
+        val due = dueOf(
+            enabled = true,
             hostRunning = DshHost.status is HostStatus.Running,
             running = ExploreTask.running(context, now) != null,
         )
-        if (skip != null) {
-            Log.i(TAG, "the scheduled exploration at ${current.at} was skipped: $skip")
-            save(context, current.copy(last = Last(now, "skipped", skip)))
+        if (due == Due.SKIP_RUNNING) {
+            val why = "上一场探索还在跑"
+            Log.i(TAG, "the scheduled exploration at ${current.at} was skipped: $why")
+            save(context, current.copy(last = Last(now, "skipped", why)))
             // 只写文件的话, 主人要等下次打开设置页才知道这一场没开成 (2.7.9 T5)
-            report(context, skip)
+            report(context, why)
             return
+        }
+        if (due == Due.WAKE_HOST) {
+            // 2.8.0 #9: 闹钟到点把应用叫醒了, 但宿主那半是死的 (进程被系统杀掉) —— 以前这里记一笔
+            // skipped 就收工, 于是"两晚都只有跳过没有开始"; 现在先把它拉起来, 等服务就绪再投
+            Log.i(TAG, "the host was not running at ${current.at}, starting it for the exploration")
+            release()
+            if (!wakeHost(context)) {
+                val why = "宿主起不来 (等了 ${HOST_WAIT_MS / 1000} 秒)"
+                Log.w(TAG, "the scheduled exploration at ${current.at} was skipped: $why")
+                save(context, current.copy(last = Last(now, "skipped", why)))
+                report(context, why)
+                return
+            }
         }
         // 允许锁屏解锁 (2.7.10): 先让屏幕亮起来并解开, 再投那一行 —— 模型一开口看到的就是能用的屏,
         // 而不是一块锁屏; 开关关着时这一段一个字都不走 (与 2.7.9 的行为一模一样)

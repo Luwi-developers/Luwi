@@ -74,8 +74,10 @@ check.run(
 )
 check.run(
   '帧源: 有预览时按帧间隔镜像, 没有预览时只缓存',
-  frames.includes('PREVIEW_GAP_MS') && frames.includes('FRAME_KEEP_MS'),
-  'FrameCache 的缓存节流与预览镜像都要在',
+  frames.includes('previewGapFor') && frames.includes('FRAME_KEEP_MS')
+    && /val interval = if \(target != null\) previewGap else FRAME_KEEP_MS/u.test(frames),
+  '没有预览时按 FRAME_KEEP_MS 只留最新一帧, 有预览时按 previewGapFor() 算出的间隔镜像'
+    + ' (旧的 PREVIEW_GAP_MS 常量已被那支纯函数取代, 这条判据跟着改口径)',
 )
 check.run(
   '桥: 建屏答案带着被替换的那一块',
@@ -86,6 +88,26 @@ check.run(
   '截图: 虚拟屏不再走特权侧的 screencap',
   capture.includes('capturePrimary') && !capture.includes('fun capture('),
   'LwCapture 应只剩 capturePrimary (display 0), 虚拟屏的帧在 FrameCache 里',
+)
+
+/* ── 主页: 错误只弹一次, 且不看屏的时候也弹 (2.8.0 B2-c) ────────────────── */
+
+const home = source('../app/src/main/java/io/github/yuloong07star/luwi/ui/HostScreen.kt')
+check.run(
+  '主页: 屏没选中时也不再常驻一行「虚拟屏: …」',
+  !home.includes('text = "虚拟屏: $reason"'),
+  '失败那句话以前挂在 `selected == null` 那一支上, 要等下一次成功才消失',
+)
+check.run(
+  '主页: 错误 Dialog 与浮标同级 (有没有屏在看都会弹), 不是只挂在"没屏"那一支上',
+  /FloatingBall\([\s\S]{0,900}?screenError\?\.let \{ reason ->\n\s*OverlayDialog\(/u.test(home),
+  '弹窗要放在 Box 那一层, 紧跟 FloatingBall —— 挂在 selected == null 里面就变成"有屏时不报错"',
+)
+check.run(
+  '主页: 同一句 reason 30 s 内只弹一次',
+  home.includes('screenErrorOnce.take(reason, SystemClock.uptimeMillis())')
+    && home.includes('internal const val SCREEN_ERROR_WINDOW_MS = 30_000L'),
+  '去重状态要挂在文件级 (remember 会在离开组合时丢掉)',
 )
 
 /* ── 插件: 工具定义与答案 ────────────────────────────────────────────────── */

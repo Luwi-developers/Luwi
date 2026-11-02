@@ -49,7 +49,7 @@ internal object WakeWordDownload {
 
     /** 我们自己的 Release, 镜像优先: 这台设备上 github.com 直连只回 302, 真正的字节在下一跳上 */
     private const val RELEASE =
-        "https://github.com/Luwi-developers/Luwi/releases/download/models-kws-2024-01-01"
+        "https://github.com/yuloong07-star/Luwi/releases/download/models-kws-2024-01-01"
 
     private val SOURCES = listOf("https://ghfast.top/$RELEASE", RELEASE)
 

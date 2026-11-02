@@ -333,9 +333,13 @@
     <string name="ball_balance_bonus">incl. bonus %1$s</string>
     <string name="ball_balance_just_now">just now</string>
     <string name="ball_balance_minutes">%1$d min ago</string>
+    <string name="ball_balance_stale">may be out of date</string>
     <string name="ball_balance_pending">Fetching the balance…</string>
+    <string name="ball_balance_refreshing">Refreshing…</string>
     <string name="ball_balance_unsupported">Balance lookup is not supported for the current model</string>
     <string name="ball_balance_failed">Balance unavailable: %1$s</string>
+    <string name="ball_balance_retry">Retrying…</string>
+    <string name="ball_balance_no_answer">The host has not answered yet; tap Balance again to retry</string>
     <string name="ball_menu_release_camera">Release video mode</string>
     <string name="ball_menu_close">Close the ball</string>
     <string name="ball_voice_stopped">Not listening to this one any more; tap again to start it</string>

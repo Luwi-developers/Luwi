@@ -1,6 +1,6 @@
 # plugins —— 这里不再放 `.lwp`
 
-**插件包的家只有一个: [Luwi-developers/luwi-plugins](https://github.com/Luwi-developers/luwi-plugins)** 的
+**插件包的家只有一个: [yuloong07-star/luwi-plugins](https://github.com/yuloong07-star/luwi-plugins)** 的
 `packages/` (源在它的 `samples/*/plugin/`, 由 `tools/lw-plugin-sign.mjs` 签出来)。
 
 Luwi 这一层从 2026-10-11 起**不再放签好的包** —— 那是插件生态的东西, 不该往应用仓库里塞 (主人当天的
@@ -17,10 +17,10 @@ Luwi → 设置 → 插件 → **从链接装入**, 把下面那一条粘进去 
 
 | 包 | 它是什么 | 链接 |
 | :-- | :-- | :-- |
-| `art-whale-widget-2.0.0.lwp` | **鲸鱼娘 (`art` 域)**: 零代码、零能力, 桌面那一格由主 APK 的宿主槽画 | `https://cdn.jsdelivr.net/gh/Luwi-developers/luwi-plugins@plugins-2.7.6/packages/art-whale-widget-2.0.0.lwp` |
-| `art-ball-theme-1.0.0.lwp` | **浮标外观 (`art` 域)**: 五个状态五张图, 装完在设置页「浮标外观」那一行挑 | `https://cdn.jsdelivr.net/gh/Luwi-developers/luwi-plugins@plugins-2.7.6/packages/art-ball-theme-1.0.0.lwp` |
-| `inline-timer-1.0.0.lwp` | 番茄钟 (`inline` 域样例)。**要先把作者指纹写进 `.inline-allow.json`**, 否则会被拒 | `https://cdn.jsdelivr.net/gh/Luwi-developers/luwi-plugins@plugins-2.7.6/packages/inline-timer-1.0.0.lwp` |
-| `whale-widget-1.1.4.lwp` | 旧那一片 (companion 那条路; 伴侣 APK 的地址写在包里) —— 已被上面那份 2.0.0 取代 | `https://cdn.jsdelivr.net/gh/Luwi-developers/luwi-plugins@whale-widget-1.1.4/packages/whale-widget-1.1.4.lwp` |
+| `art-whale-widget-2.0.0.lwp` | **鲸鱼娘 (`art` 域)**: 零代码、零能力, 桌面那一格由主 APK 的宿主槽画 | `https://cdn.jsdelivr.net/gh/yuloong07-star/luwi-plugins@plugins-2.7.6/packages/art-whale-widget-2.0.0.lwp` |
+| `art-ball-theme-1.0.0.lwp` | **浮标外观 (`art` 域)**: 五个状态五张图, 装完在设置页「浮标外观」那一行挑 | `https://cdn.jsdelivr.net/gh/yuloong07-star/luwi-plugins@plugins-2.7.6/packages/art-ball-theme-1.0.0.lwp` |
+| `inline-timer-1.0.0.lwp` | 番茄钟 (`inline` 域样例)。**要先把作者指纹写进 `.inline-allow.json`**, 否则会被拒 | `https://cdn.jsdelivr.net/gh/yuloong07-star/luwi-plugins@plugins-2.7.6/packages/inline-timer-1.0.0.lwp` |
+| `whale-widget-1.1.4.lwp` | 旧那一片 (companion 那条路; 伴侣 APK 的地址写在包里) —— 已被上面那份 2.0.0 取代 | `https://cdn.jsdelivr.net/gh/yuloong07-star/luwi-plugins@whale-widget-1.1.4/packages/whale-widget-1.1.4.lwp` |
 
 `cdn.jsdelivr.net` 不通时换边缘域名即可: `fastly.` / `gcore.` / `testingcf.` 三个前缀都行, 内容同一份。
 

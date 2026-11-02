@@ -119,7 +119,7 @@ class LockStepsTest {
             LockStep.Swipe(0.5f, 0.4f, 0.5f, 0.8f, 100L),
             LockStep.Secret,
         )
-        val typed = LockSecretData(kind = LockSecretData.TEXT, text = "074151")
+        val typed = LockSecretData(kind = LockSecretData.TEXT, text = "test-pin")
         // 开着: 一条录好的序列收成"只注入密码"那一步, 手势一步都不走
         assertEquals(listOf(LockStep.Secret), LockSteps.injected(recorded, typed, inject = true))
         // 关着: 一个字都不动

@@ -27,7 +27,7 @@ internal object AboutSettings {
      * **技能**从哪儿检测, 不是应用更新) —— 而且那个仓库没有 Release 也没有 Tag
      * (`releases/latest` 直接 404), 改过去只会查到"查不到发布"。已撤回: 应用自己的更新仍然认这一条
      */
-    const val DEFAULT_SOURCE = "https://api.github.com/repos/Luwi-developers/Luwi/releases/latest"
+    const val DEFAULT_SOURCE = "https://api.github.com/repos/yuloong07-star/Luwi/releases/latest"
 
     /** 缺省那一条的镜像前缀: 拿不到直连时按同一个路径再试一次 */
     const val MIRROR_PREFIX = "https://ghfast.top/"

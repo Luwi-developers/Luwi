@@ -16,12 +16,16 @@
  *      三处的键名 / 缺省 / 范围必须一致, 老文件 (没有那两个键) 仍落 30 / 60
  *   6. **工作区与读数** (2.7.9 T5): 宿主起来就注册 `Luwi` 工作区、status 四项写进 `explore.json`、
  *      设置页读得到、排期没开成时有一条通知、最近一份摘要能在应用里打开
+ *   7. **屏所有权与持久化** (2.8.0 B2-a): 探索场建屏登记 displayId、`explore.json` 的 `screens` 账、
+ *      四条释放路 (步数 / deadline / finish+stub / 重启) 只碰这一场的屏
  *
  * 跑法: `node tools/check-explore.mjs`
  * 它**直接取 `host-plugin/index.mjs` 里那一段源码来跑** (不复制第二份), 所以测的是上线那一份
  */
 
-import { readFile, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const root = new URL('../', import.meta.url)
 const read = (path) => readFile(new URL(path, root), 'utf8')
@@ -431,12 +435,21 @@ check('排期: 每天一个时刻 / 缺省 03:00 / requestCode 42', [
   /const val DEFAULT_AT = "03:00"/.test(schedule),
   /private const val REQUEST = 42/.test(schedule),
   /fun nextAt\(at: String, now: Long/.test(schedule),
-  /fun skipReason\(hostRunning: Boolean, running: Boolean\)/.test(schedule),
+  /fun dueOf\(enabled: Boolean, hostRunning: Boolean, running: Boolean\): Due/.test(schedule),
 ], [true, true, true, true])
 
+check('宿主不在就叫醒它 (2.8.0 #9): 到点先拉宿主, 不再只记 skipped', [
+  /enum class Due \{/.test(schedule),
+  /WAKE_HOST,/.test(schedule),
+  /fun wakeHost\(context: Context, timeoutMs: Long = HOST_WAIT_MS\): Boolean/.test(schedule),
+  /DshHostService\.start\(context\)/.test(schedule),
+  /if \(due == Due\.WAKE_HOST\) \{/.test(schedule),
+  /const val HOST_WAIT_MS = 180_000L/.test(schedule),
+], [true, true, true, true, true, true])
+
 check('探索不再被省电拦: 跳过只剩宿主与上一场, 省电只进读数', [
-  !/fun skipReason\(hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
-  /val skip = skipReason\(\s*hostRunning = DshHost\.status is HostStatus\.Running,\s*running = ExploreTask\.running\(context, now\) != null,\s*\)/u.test(schedule),
+  !/fun dueOf\(enabled: Boolean, hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
+  /val due = dueOf\(\s*enabled = true,\s*hostRunning = DshHost\.status is HostStatus\.Running,\s*running = ExploreTask\.running\(context, now\) != null,\s*\)/u.test(schedule),
   /省电模式里照常开了/.test(schedule),
   /设备在深度省电 \(Doze\) 里, 网络可能要等维护窗口/.test(schedule),
   /isDeviceIdleMode\(\)/.test(schedule),
@@ -445,7 +458,7 @@ check('探索不再被省电拦: 跳过只剩宿主与上一场, 省电只进读
 check('到点那几件事都在: 读卡 / 写收件箱 / 记 last', [
   /ExploreTask\.read\(context\)/.test(schedule),
   /VoiceInbox\.append\(\s*context,\s*text,\s*source = VoiceInbox\.SOURCE_EXPLORE/u.test(schedule),
-  /save\(context, current\.copy\(last = Last\(now, "skipped", skip\)\)\)/.test(schedule),
+  /save\(context, current\.copy\(last = Last\(now, "skipped", why\)\)\)/.test(schedule),
   /save\(context, current\.copy\(last = Last\(now, "started", why\)\)\)/.test(schedule),
 ], [true, true, true, true])
 
@@ -673,6 +686,192 @@ check('三条字符串两边都在, 先后顺序也一致', [
 check('persona 写清锁屏那一条 (解不开就记进摘要, 不绕)', [
   persona.includes('lw_lock op=unlock'),
   persona.includes('不绕'),
+], [true, true])
+
+/* ── 十六、屏所有权与持久化 (2.8.0 B2-a) ─────────────────────────────── */
+
+/**
+ * 这四条是**释放路**的判据 (2.8.0 #14 ①)。四条路共用 [exploreReleaseOwnedScreens], 这里各钉一件事:
+ * **只碰这一场的屏** (11-5 不误关非探索屏)、**幂等 + 用户先关掉只记 missing**、**失败不抛**、
+ * **重启后账从 explore.json 回来** (11-5)。重启那一条已经接在 apply 的恢复段上 (没有能接回来的 run
+ * 时才归还), 步数 / deadline / finish+stub 三条触发点留给 #15 (B2-b)。判据不碰真设备: 桥那一步
+ * 用 mock 的 `call` 替掉
+ */
+
+const screenHome = await mkdtemp(join(tmpdir(), 'lw-explore-screens-'))
+const previousHome = process.env.DSH_HOME
+process.env.DSH_HOME = screenHome
+
+const releaseCalls = []
+let releaseAnswer = (displayId) => ({ released: true, displayId })
+const screensApi = new Function(
+  'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'call', 'shortSession',
+  `${section}\nreturn { getScreens: () => exploreScreens,`
+    + ' setScreens: (next) => { exploreScreens = next; exploreScreensLoaded = true },'
+    + ' resetScreens: () => { exploreScreens = []; exploreScreensLoaded = true },'
+    + ' exploreRun, exploreNoteCreatedScreen, exploreReleaseOwnedScreens, exploreStateRestore,'
+    + ' exploreScreenRecord, exploreScreensOfSession, exploreScreenSurvives }',
+)(
+  readFile, readdir, join, dirname, mkdir, writeFile, rename, rm,
+  async (method, params = {}) => {
+    releaseCalls.push({ method, displayId: params.displayId })
+    return releaseAnswer(params.displayId)
+  },
+  (id) => String(id).slice(0, 8),
+)
+
+const owned = (displayId, sessionId) => ({ displayId, sessionId, createdAt: 1, released: false })
+
+screensApi.resetScreens()
+screensApi.exploreRun.session = 'explore-a'
+const noted = await screensApi.exploreNoteCreatedScreen({ created: true, displayId: 12, replaced: -1 }, 'explore-a')
+const foreign = await screensApi.exploreNoteCreatedScreen({ created: true, displayId: 13, replaced: -1 }, 'other-session')
+const failedCreate = await screensApi.exploreNoteCreatedScreen({ created: false, displayId: -1, replaced: -1 }, 'explore-a')
+const replacedCreate = await screensApi.exploreNoteCreatedScreen({ created: true, displayId: 15, replaced: 12 }, 'explore-a')
+const persisted = JSON.parse(await readFile(join(screenHome, 'lw', 'explore.json'), 'utf8'))
+check('屏账 ②: 探索场建屏后 displayId 进账并落进 explore.json (别的场 / 建失败不记, 替换记 replaced)', [
+  noted, foreign, failedCreate, replacedCreate,
+  screensApi.getScreens().map((one) => [one.displayId, one.released, one.reason ?? '']),
+  persisted.screens.map((one) => one.displayId),
+], [true, false, false, true, [[12, true, 'replaced'], [15, false, '']], [12, 15]])
+
+screensApi.setScreens([owned(12, 'explore-a'), owned(13, 'someone-else'), owned(14, 'explore-a')])
+releaseCalls.length = 0
+releaseAnswer = (displayId) => ({ released: true, displayId })
+const steps = await screensApi.exploreReleaseOwnedScreens('steps', 'explore-a')
+check('释放路 ① 步数上限: 只归还这一场自己的屏, 别的会话那块一个字节不碰 (11-1, 11-5)', [
+  steps.released,
+  releaseCalls.map((one) => one.displayId),
+  screensApi.getScreens().map((one) => [one.displayId, one.released]),
+], [[12, 14], [12, 14], [[12, true], [13, false], [14, true]]])
+
+screensApi.setScreens([owned(20, 'explore-b')])
+releaseCalls.length = 0
+releaseAnswer = (displayId) => ({ released: false, displayId, error: 'the user closed the virtual screen' })
+const deadline = await screensApi.exploreReleaseOwnedScreens('deadline', 'explore-b')
+const deadlineAgain = await screensApi.exploreReleaseOwnedScreens('deadline', 'explore-b')
+const gone = screensApi.getScreens()[0]
+check('释放路 ② deadline: 用户先关屏只记 missing, 再放一次什么都不做 (幂等)', [
+  deadline.missing.length, deadline.released.length,
+  deadlineAgain.missing.length, deadlineAgain.released.length,
+  releaseCalls.length, gone.released, gone.missing,
+], [1, 0, 0, 0, 1, true, true])
+
+screensApi.setScreens([owned(30, 'explore-c')])
+releaseCalls.length = 0
+releaseAnswer = () => { throw new Error('the privileged channel is down') }
+let finish = null
+let releaseThrew = false
+try {
+  finish = await screensApi.exploreReleaseOwnedScreens('finish', 'explore-c')
+} catch {
+  releaseThrew = true
+}
+const kept = screensApi.getScreens()[0]
+releaseAnswer = (displayId) => ({ released: true, displayId })
+const stub = await screensApi.exploreReleaseOwnedScreens('stub', 'explore-c')
+check('释放路 ③ finish 与 stub: 释放失败不抛, 账上留 lastError, 下一次还能补上', [
+  releaseThrew, finish?.failed.length, kept.released, kept.lastError !== '',
+  stub.released, screensApi.getScreens()[0].released,
+], [false, 1, false, true, [30], true])
+
+screensApi.resetScreens()
+await mkdir(join(screenHome, 'lw'), { recursive: true })
+await writeFile(join(screenHome, 'lw', 'explore.json'), JSON.stringify({
+  v: 1,
+  run: { session: 'explore-d', deadline: Date.now() + 60_000, steps: 1, stepLimit: 60 },
+  screens: [
+    { displayId: 41, sessionId: 'explore-d', createdAt: 1, released: false },
+    { displayId: 42, sessionId: 'explore-d', createdAt: 1, released: true, releasedAt: 2, reason: 'finish' },
+    { displayId: 43, sessionId: 'someone-else', createdAt: 1, released: false },
+    { displayId: 0, sessionId: 'explore-d', createdAt: 1, released: false },
+    { displayId: 44, sessionId: '', createdAt: 1, released: false },
+    'not-a-row',
+  ],
+}))
+const restored = await screensApi.exploreStateRestore()
+releaseCalls.length = 0
+releaseAnswer = (displayId) => ({ released: true, displayId })
+const afterRestart = await screensApi.exploreReleaseOwnedScreens('restore')
+const rewritten = JSON.parse(await readFile(join(screenHome, 'lw', 'explore.json'), 'utf8'))
+check('释放路 ④ 宿主重启: 账从 explore.json 回来, 恢复后只归还本场未释放的那块 (11-5)', [
+  restored,
+  screensApi.getScreens().map((one) => one.displayId),
+  releaseCalls.map((one) => one.displayId),
+  afterRestart.released,
+  rewritten.screens.map((one) => [one.displayId, one.released]),
+], [true, [41, 42, 43], [41], [41], [[41, true], [42, true], [43, false]]])
+
+await rm(screenHome, { recursive: true, force: true })
+if (previousHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = previousHome
+
+check('屏账 ②: lw_screen_create 建完之后把 displayId 交给登记 (别的场不记)', [
+  /async execute\(args, exec\)[\s\S]{0,400}exploreNoteCreatedScreen\(created, sessionIdOf\(exec\)\)/u
+    .test(host.slice(host.indexOf("name: 'lw_screen_create'"), host.indexOf("name: 'lw_screen_resize'"))),
+], [true])
+
+check('屏账 ③: 写盘带 screens, 重启时从文件把账读回来', [
+  /\n {4}screens: exploreScreensLoaded/u.test(stateWrite),
+  /exploreScreens = exploreScreensFromRecord\(record\)/u.test(host),
+], [true, true])
+
+check('屏幕账 ③: 开机记号不同就当屏已经没了 (跨重启的旧账不去关撞号的新屏)', [
+  screensApi.exploreScreenSurvives({ boot: 'boot-a' }, 'boot-a'),
+  screensApi.exploreScreenSurvives({ boot: 'boot-a' }, 'boot-b'),
+  screensApi.exploreScreenSurvives({ boot: '' }, 'boot-b'),
+  screensApi.exploreScreenSurvives({ boot: 'boot-a' }, ''),
+], [true, false, true, true])
+
+check('释放路 ④: 重启恢复段没有能接回来的 run 时归还遗留屏 (活着的 run 不动它)', [
+  /if \(!restored\) \{[\s\S]{0,500}exploreReleaseOwnedScreens\('restore', sessionId\)/u.test(host),
+  /orphaned explore screen\(s\) were given back/u.test(host),
+], [true, true])
+
+/* ── 十七、一次性错误 Dialog (2.8.0 B2-c) ─────────────────────────────── */
+
+/**
+ * ⑧⑨⑩ 这一簇管的是**主页怎么把失败说给用户**: 以前 `selected == null` 时常驻一行「虚拟屏: …」,
+ * 那句话要等下一次成功才消失 —— 人分不清它是刚刚发生的还是昨天留下的。改成弹一次就走, 同一个
+ * reason 30 s 内只弹一次 (连点几下会连着失败三四回, 每回一个窗等于什么都没说)
+ *
+ * ⑧ 删的是**常驻显示**, 不是 `VirtualScreen.lastError` 这个字段: 桥还是拿它当失败理由, 删了字段
+ * 工具那边就只剩一句空话。所以两边一起钉 —— 页面上没有那一行, 桥里还有那一句
+ */
+const homeScreen = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/HostScreen.kt')
+const privilegedBridge = await read('app/src/main/java/io/github/yuloong07star/luwi/channel/PrivilegedBridge.kt')
+const virtualScreen = await read('app/src/main/java/io/github/yuloong07star/luwi/channel/VirtualScreen.kt')
+
+check('⑧ 主页不再常驻一行「虚拟屏: …」', [
+  /text = "虚拟屏: \$reason"/u.test(homeScreen),
+  /VirtualScreen\.lastError\?\.let \{ reason ->\n\s*Text\(/u.test(homeScreen),
+], [false, false])
+
+check('⑧ 删的是常驻显示, 不是字段: 桥仍然拿它当失败理由', [
+  /put\("lastError", VirtualScreen\.lastError/u.test(privilegedBridge),
+  /put\("error", VirtualScreen\.lastError/u.test(privilegedBridge),
+  /var lastError: String\? by mutableStateOf\(null\)\n\s*private set/u.test(virtualScreen),
+], [true, true, true])
+
+check('⑨ 改成一次性 Dialog: lastError 变了才弹, 关掉就没了', [
+  /LaunchedEffect\(VirtualScreen\.lastError\)/u.test(homeScreen),
+  /OverlayDialog\(\n\s*show = true,/u.test(homeScreen),
+  /onDismissRequest = \{ screenError = null \}/u.test(homeScreen),
+], [true, true, true])
+
+check('⑩ 同一句 reason 30 s 内只弹一次, 去重状态挂在文件级 (进出主页不重置)', [
+  /internal const val SCREEN_ERROR_WINDOW_MS = 30_000L/u.test(homeScreen),
+  /private val screenErrorOnce = ScreenErrorOnce\(\)/u.test(homeScreen),
+  /if \(screenErrorOnce\.take\(reason, SystemClock\.uptimeMillis\(\)\)\) screenError = reason/u.test(homeScreen),
+], [true, true, true])
+
+check('⑩ 30 s 窗口与三种情形各有单测 (第一次弹 / 窗口内丢 / 窗口过再弹 / 空理由不弹)', [
+  /class ScreenErrorOnceTest/u.test(
+    await read('app/src/test/java/io/github/yuloong07star/luwi/ui/ScreenErrorOnceTest.kt'),
+  ),
+  /fun `same reason inside the window is dropped`/u.test(
+    await read('app/src/test/java/io/github/yuloong07star/luwi/ui/ScreenErrorOnceTest.kt'),
+  ),
 ], [true, true])
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */

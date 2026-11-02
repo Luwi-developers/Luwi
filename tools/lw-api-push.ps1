@@ -12,10 +12,15 @@ param(
     [int]$Limit = 0,
     [switch]$Apply,
     [string]$RepoRoot = 'D:\apk\Luwi',
-    [string]$Repo = 'Luwi-developers/Luwi',
+    [string]$Repo = 'yuloong07-star/Luwi',
     [string]$Gh = 'D:\Codex\gh-cli\gh.exe',
     [string]$RemoteRef = 'luwi/main',
-    [string]$Tag = 'v1.0.3'
+    [string]$Tag = 'v1.0.3',
+    # 推**功能分支**（PR 用）：留空＝老行为（推 heads/main 并打标）；填了就只动 refs/heads/<Branch>。
+    # 分支已存在 → PATCH；不存在 → POST 创建。对象照旧逐个比对 SHA，全对才动 ref。
+    [string]$Branch = '',
+    # 只动 ref、不重放 tag（推 PR 分支时默认就不打 tag，这里留个显式开关给特殊场景）
+    [switch]$NoTag
 )
 
 $ErrorActionPreference = 'Stop'
@@ -196,11 +201,31 @@ if (-not $Apply) {
 }
 if ($commits.Count -ne @(git rev-list --reverse "$RemoteRef..HEAD").Count) { throw "refusing -Apply on a partial replay" }
 
+$targetRef = if ($Branch) { "refs/heads/$Branch" } else { 'refs/heads/main' }
 $body = @{ sha = $parentSha; force = $false } | ConvertTo-Json -Compress
 [IO.File]::WriteAllText($jsonFile, $body, $utf8)
-$moved = (& $Gh api -X PATCH "repos/$Repo/git/refs/heads/main" --input $jsonFile --jq '.object.sha').Trim()
+$moved = ''
+if ($Branch) {
+    # 分支：已存在就 PATCH，不存在就创建。远端有没有这条 ref 用 GET 探一次，
+    # 别拿 PATCH 的 422 当"不存在"的判据（那会掩盖权限/网络错误）。
+    & $Gh api "repos/$Repo/git/ref/heads/$Branch" 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $moved = (& $Gh api -X PATCH "repos/$Repo/git/refs/heads/$Branch" --input $jsonFile --jq '.object.sha').Trim()
+    } else {
+        $body = @{ ref = "refs/heads/$Branch"; sha = $parentSha } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($jsonFile, $body, $utf8)
+        $moved = (& $Gh api -X POST "repos/$Repo/git/refs" --input $jsonFile --jq '.object.sha').Trim()
+    }
+} else {
+    $moved = (& $Gh api -X PATCH "repos/$Repo/git/refs/heads/main" --input $jsonFile --jq '.object.sha').Trim()
+}
 if ($moved -ne $parentSha) { throw "ref update returned $moved, wanted $parentSha" }
-Write-Host "main is now $moved" -ForegroundColor Green
+Write-Host "$targetRef is now $moved" -ForegroundColor Green
+
+if ($Branch -or $NoTag) {
+    Write-Host 'branch/no-tag mode: annotated tag step skipped' -ForegroundColor DarkGray
+    exit 0
+}
 
 # 标签: 与 v1.0.2 一样是**带注解的 tag**, 所以连 tag 对象也逐字节重放并比对
 $tagObjFile = Join-Path $tmp 'tag.obj'

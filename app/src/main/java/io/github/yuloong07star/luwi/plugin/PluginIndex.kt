@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 插件仓库的那份官方索引 (`lw-plugin-index/1`, 协议第 13 节): **读、搜、下** 的应用侧一半
  *
- * 索引住在生态仓 (`Luwi-developers/luwi-plugins`) 的根上, 由 `tools/lw-plugin-index.mjs` 从 `packages/`
+ * 索引住在生态仓 (`yuloong07-star/luwi-plugins`) 的根上, 由 `tools/lw-plugin-index.mjs` 从 `packages/`
  * 里那些签好名的包**现算**出来: 整包 sha256、逐文件哈希、发布者指纹与签名都验过才进索引。所以它比
  * "一张写死的下载链接表"多了一件要紧的事 —— **它给每份包钉了一个整包摘要**, 装之前对得上才装
  * (协议第 14 节第 3 条点名的洞: 索引被替换会变成"把你引到一个同名不同发布者的包")
@@ -114,9 +114,9 @@ internal object PluginIndex {
     /** 默认那一份地址表: 现行 tag 的三个镜像, 再垫一份旧 tag (逐条试, 谁通用谁) */
     fun addresses(): List<String> = buildList {
         for (host in listOf("cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net")) {
-            add("https://$host/gh/Luwi-developers/luwi-plugins@$REF_CURRENT/index.json")
+            add("https://$host/gh/yuloong07-star/luwi-plugins@$REF_CURRENT/index.json")
         }
-        add("https://fastly.jsdelivr.net/gh/Luwi-developers/luwi-plugins@$REF_PREVIOUS/index.json")
+        add("https://fastly.jsdelivr.net/gh/yuloong07-star/luwi-plugins@$REF_PREVIOUS/index.json")
     }
 
     /** 现在缓存里那一份 (没有 / 坏了就是 null —— 那是"还没取过", 不是"没有插件") */

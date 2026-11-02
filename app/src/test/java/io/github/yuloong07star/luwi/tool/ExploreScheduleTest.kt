@@ -16,8 +16,9 @@ import java.time.ZoneId
  * 三个地方错了都不会当场报错, 只会在"该跑的那天没跑"或"到点了却跳过了"上表现出来:
  *
  * - [ExploreSchedule.nextAt]: 今天还没到就今天, 过了就明天; 时刻认不出来就是 null
- * - [ExploreSchedule.skipReason]: 宿主 / 上一场两条, 顺序不能反 (**省电从 2026-10-26 起不在这两条里**,
- *   它只进 `last.why`, 所以这一条判据要钉住"省电开着也不跳过")
+ * - [ExploreSchedule.dueOf]: 关着 / 上一场 / 宿主三条, 顺序不能反 (**省电从 2026-10-26 起不在其中**,
+ *   它只进 `last.why`, 所以这一条判据要钉住"省电开着也不跳过"); 宿主没在跑是"叫醒它"不是"跳过"
+ *   (2.8.0 #9)
  * - [ExploreSchedule.planOf]: 读坏了退回"关着 + 03:00", 而不是让整段设置页炸掉
  */
 class ExploreScheduleTest {
@@ -57,19 +58,61 @@ class ExploreScheduleTest {
         assertNull(ExploreSchedule.nextAt("tomorrow", 0L, zone))
     }
 
+    /* ── 到点这一趟该做什么 (2.8.0 #9) ───────────────────────────────────── */
+
+    /**
+     * 宿主被系统杀掉的凌晨三点: 不再"只跳过不开始" —— 先拉宿主服务, 等它就绪再投那一行
+     *
+     * 这一条是 #9 的核心: 闹钟本来就能把进程叫起来 (2.7.8 已换 AlarmManager), 卡住的是
+     * "进程起来了但宿主那半不在, 于是直接记 skipped"
+     */
     @Test
-    fun theSkipReasonsComeInOrder() {
-        // 省电不在参数里 (2026-10-26): 签名少一个布尔, 于是"省电里跳过"这件事在类型上就写不出来
-        assertEquals("宿主没在跑", ExploreSchedule.skipReason(hostRunning = false, running = false))
+    fun aMissingHostMeansWakeItInsteadOfSkipping() {
         assertEquals(
-            "宿主没在跑",
-            ExploreSchedule.skipReason(hostRunning = false, running = true),
+            ExploreSchedule.Due.WAKE_HOST,
+            ExploreSchedule.dueOf(enabled = true, hostRunning = false, running = false),
+        )
+    }
+
+    /** 宿主在跑, 也没有上一场: 直接投 (与改之前一样) */
+    @Test
+    fun aLiveHostQueuesRightAway() {
+        assertEquals(
+            ExploreSchedule.Due.QUEUE,
+            ExploreSchedule.dueOf(enabled = true, hostRunning = true, running = false),
+        )
+    }
+
+    /** 上一场还在跑: 照样跳过 —— 拉宿主那一条不能把这一条也放宽 */
+    @Test
+    fun aRunInFlightStillSkips() {
+        assertEquals(
+            ExploreSchedule.Due.SKIP_RUNNING,
+            ExploreSchedule.dueOf(enabled = true, hostRunning = true, running = true),
         )
         assertEquals(
-            "上一场探索还在跑",
-            ExploreSchedule.skipReason(hostRunning = true, running = true),
+            ExploreSchedule.Due.SKIP_RUNNING,
+            ExploreSchedule.dueOf(enabled = true, hostRunning = false, running = true),
         )
-        assertNull(ExploreSchedule.skipReason(hostRunning = true, running = false))
+    }
+
+    /** 关着就什么都不做: 别为了"到点了"去拉一个主人没开的宿主 */
+    @Test
+    fun theSwitchOffMeansNothingHappens() {
+        assertEquals(
+            ExploreSchedule.Due.OFF,
+            ExploreSchedule.dueOf(enabled = false, hostRunning = false, running = false),
+        )
+        assertEquals(
+            ExploreSchedule.Due.OFF,
+            ExploreSchedule.dueOf(enabled = false, hostRunning = true, running = true),
+        )
+    }
+
+    /** 等宿主那一段必须有上限 (广播那头 10 s 就得松手, 所以它是一个有界的常数) */
+    @Test
+    fun theHostWaitIsBounded() {
+        assertTrue(ExploreSchedule.HOST_WAIT_MS in 30_000L..300_000L)
     }
 
     @Test
