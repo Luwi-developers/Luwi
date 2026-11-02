@@ -555,6 +555,8 @@ fun SettingsScreen() {
                     }
                 }
 
+                item { Card { ReadyCard() } }
+
                 settingsSection(
                     key = "channel",
                     title = R.string.settings_section_channel,
