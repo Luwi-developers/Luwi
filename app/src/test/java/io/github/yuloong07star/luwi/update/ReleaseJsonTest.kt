@@ -19,8 +19,8 @@ class ReleaseJsonTest {
 
     private val sample = """
         {
-          "url": "https://api.github.com/repos/Luwi-developers/Luwi/releases/1",
-          "html_url": "https://github.com/Luwi-developers/Luwi/releases/tag/v2.5.0",
+          "url": "https://api.github.com/repos/yuloong07-star/Luwi/releases/1",
+          "html_url": "https://github.com/yuloong07-star/Luwi/releases/tag/v2.5.0",
           "id": 12345,
           "tag_name": "v2.5.0",
           "target_commitish": "release/2.0.0",
@@ -52,7 +52,7 @@ class ReleaseJsonTest {
         assertEquals("2.5.0", release.version)
         assertEquals("Luwi 2.5.0", release.name)
         assertEquals("2026-10-08", release.published)
-        assertEquals("https://github.com/Luwi-developers/Luwi/releases/tag/v2.5.0", release.pageUrl)
+        assertEquals("https://github.com/yuloong07-star/Luwi/releases/tag/v2.5.0", release.pageUrl)
         assertEquals("Luwi-2.5.0.apk", release.apkName)
         assertEquals(314_572_800L, release.apkBytes)
         assertEquals("https://example.invalid/Luwi-2.5.0.apk", release.apkUrl)

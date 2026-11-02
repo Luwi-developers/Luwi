@@ -229,7 +229,7 @@ APK 自带 host 树（3.58 万个文件 / 约 341 MB，打包成 99 MB 的 zip�
 需要 JDK 21、Android SDK（`compileSdk 37` / `build-tools 37.0.0`）、NDK `29.0.14206865`，以及 Node + pnpm。
 
 ```bash
-git clone --recursive https://github.com/Luwi-developers/Luwi.git
+git clone --recursive https://github.com/yuloong07-star/Luwi.git
 cd Luwi
 ./gradlew assembleDebug
 ```

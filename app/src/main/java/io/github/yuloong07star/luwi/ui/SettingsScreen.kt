@@ -235,7 +235,7 @@ private const val SIGN_IN_URL = "https://luwi.dpdns.org/login"
  * 手机这一端只负责扫码配对, 真正跑镜像与面板的是电脑 dsh 里这个插件; 这里只给一个可点开的地址,
  * 不做"一键安装" —— 装插件要在电脑上走 dsh 自己的插件安装
  */
-private const val SYNC_PLUGIN_URL = "https://github.com/Luwi-developers/luwi-dsh-sync"
+private const val SYNC_PLUGIN_URL = "https://github.com/yuloong07-star/luwi-dsh-sync"
 
 /**
  * 缺省展开的白名单 (D1, 2026-10-17 主人拍板): 省电那一段 + 「常用」一级分组下那六段

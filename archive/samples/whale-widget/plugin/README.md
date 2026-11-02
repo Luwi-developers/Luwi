@@ -59,7 +59,7 @@ XML), 代价只是包大一点。
 会顺手把伴侣也装上** —— 有 root / Shizuku 时静默装, 没有时交给系统安装器让你点一下, 这一份一条
 能力都不要, 所以没有要勾的。下面这三步是从零构建那一份时的走法。
 
-**那两条地址都在插件生态仓库** (`Luwi-developers/luwi-plugins` 的 `packages/`) **走 jsDelivr**: 这台
+**那两条地址都在插件生态仓库** (`yuloong07-star/luwi-plugins` 的 `packages/`) **走 jsDelivr**: 这台
 开发机与常见的国内网络都连不上 `github.com` 的 Release 直链 (2026-10-11 在真机上实测: ICMP 通而
 443 超时), 而 jsDelivr 是通的 —— 协议那边认的是"任意 https", 换一条能下到字节的就行
 

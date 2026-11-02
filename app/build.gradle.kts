@@ -281,8 +281,12 @@ android {
         // 老 WebView 兼容层 (文档开始垫 polyfill, 还缺就弹窗让人去更新) / 一状态多支动作 (ball.json 的
         // frames 收数组) / 立绘按高贴满 / 半隐改一半 (0.35 → 0.5) / 鲸鱼娘外观随包发 / API 音色库 /
         // 接口文档那一段
-        versionCode = 18
-        versionName = "2.7.10"
+        // 2.8.0: 稳定手机核心 —— 余额快路径 (先显示旧值, 网络预算 6 s, 同一 seq 只刷一次) / 探索到上限或
+        // 到时先释放自己建的虚拟屏 / 手机直连优先原生 API 与 Intent (常见动作不建屏, 快应用失败即 unsupported) /
+        // 主动对话从探索里拆开 (保 30 分钟闸, 取消每日次数上限) / 规则引擎加日历临近, 电量与通知摘要,
+        // 规则搬进 rules/ 且 settings.json 不再当规则读
+        versionCode = 19
+        versionName = "2.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

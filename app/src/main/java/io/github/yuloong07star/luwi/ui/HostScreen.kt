@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.os.Message
+import android.os.SystemClock
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -124,9 +125,11 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SnackbarHost
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Remove
 import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -137,6 +140,57 @@ import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.menu.OverlayIconCascadingDropdownMenu
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+
+/**
+ * 同一句虚拟屏错误在这段时间里只弹一次
+ *
+ * 30 s 是主人定的口径 (2.8.0 B2-c ⑩): 连点几下会连着失败三四回, 每回都弹一个窗等于什么都没说,
+ * 而半分钟之后还是同一句, 说明事情没过去, 该再说一遍
+ */
+internal const val SCREEN_ERROR_WINDOW_MS = 30_000L
+
+/**
+ * 主页那条错误提示的去重状态
+ *
+ * 以前失败那句话是**常驻**的 (`selected == null` 时页面上一直挂着一行「虚拟屏: …」), 要等下一次
+ * 成功才消失 —— 人分不清它是刚刚发生的还是昨天留下的。现在改成弹一次就走, 于是"什么时候该再弹"
+ * 成了一件事: 第一句弹, 同一句在窗口内丢掉, 窗口过了再弹, 换了一句立刻弹
+ *
+ * 时钟是参数而不是 `SystemClock` 直接读, 所以这一条单测能直接量 (见 `ScreenErrorOnceTest`), 不用
+ * 等真机上失败三回
+ *
+ * @param windowMs 同一句理由的去重窗口, 默认 [SCREEN_ERROR_WINDOW_MS]
+ */
+internal class ScreenErrorOnce(private val windowMs: Long = SCREEN_ERROR_WINDOW_MS) {
+
+    /** 上一次真弹出去的那句理由, null 表示还没弹过 */
+    private var reason: String? = null
+
+    /** 它弹出去的那个时刻 (调用方给的时钟读数) */
+    private var at = 0L
+
+    /**
+     * 这一句该不该弹
+     * @param next 现在的 `VirtualScreen.lastError`, null / 空白表示没有错误
+     * @param now 单调时钟的读数 ([SystemClock.uptimeMillis]), 只用来量窗口
+     * @return true = 弹这一次; false = 同一句还在窗口里, 或者根本没有错误
+     */
+    fun take(next: String?, now: Long): Boolean {
+        if (next.isNullOrBlank()) return false
+        if (next == reason && now - at < windowMs) return false
+        reason = next
+        at = now
+        return true
+    }
+}
+
+/**
+ * 那一条去重状态
+ *
+ * **挂在这一层而不是 `remember` 里**: 它离开组合 (进设置页、回来) 时 remember 就没了, 于是"30 s
+ * 内只弹一次"会悄悄变成"每次回到主页都弹" —— 而这正是它要挡的那件事
+ */
+private val screenErrorOnce = ScreenErrorOnce()
 
 /**
  * 主页面: dsh 的 Web GUI 占满, 虚拟屏的画面浮在它上面
@@ -165,6 +219,14 @@ fun HostScreen(modifier: Modifier = Modifier) {
     var windowHidden by remember { mutableStateOf(false) }
     // 浮标菜单里的「Luwi反馈」: 与设置页 ⋮ 第一条同一个窗 (2026-10-29)
     var feedbackOpen by remember { mutableStateOf(false) }
+    // 正在弹的那条虚拟屏错误, null 表示没有 (2.8.0 B2-c): 以前这里是一行常驻文字, 现在是一次性的
+    var screenError by remember { mutableStateOf<String?>(null) }
+
+    // lastError 一变就判一次该不该弹: 同一句 30 s 内只弹一次 (⑩), 判过就把它记进 screenError
+    LaunchedEffect(VirtualScreen.lastError) {
+        val reason = VirtualScreen.lastError
+        if (screenErrorOnce.take(reason, SystemClock.uptimeMillis())) screenError = reason
+    }
 
     // **这一页没有顶栏**: 原来那条写着应用名的 `SmallTopAppBar` 去掉了, 顶上那点位置让给会话。
     // 唯一的菜单入口是浮标 (见 FloatingBall)。`innerPadding` 仍然带着状态栏那条 inset, 所以内容
@@ -173,15 +235,6 @@ fun HostScreen(modifier: Modifier = Modifier) {
         Box(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
                 // 画面空着就是空着, 页面上不留一行字 - 有没有屏、选中哪一块, ⋮ 菜单里都写着
-                // 只有出错时才说话, 否则失败会被静默吞掉
-                if (selected == null) {
-                    VirtualScreen.lastError?.let { reason ->
-                        Text(
-                            text = "虚拟屏: $reason",
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
-                    }
-                }
                 when (val status = DshHost.status) {
                     is HostStatus.Running -> {
                         // host 一就绪 WebView 就挂上, 而它把八百多 KB 的前端跑起来还要一两秒 —— 那一段
@@ -238,6 +291,27 @@ fun HostScreen(modifier: Modifier = Modifier) {
                 onToggleWindow = { windowHidden = !windowHidden },
                 modifier = Modifier.padding(innerPadding),
             )
+            // 错误只弹一次 (2.8.0 B2-c ⑨): 与浮标同级, 所以**有没有屏在看都会弹** —— 以前那一行
+            // 只在 `selected == null` 时出现, 于是"正看着一块坏屏"反倒没有任何提示
+            screenError?.let { reason ->
+                OverlayDialog(
+                    show = true,
+                    title = "虚拟屏出错",
+                    defaultWindowInsetsPadding = false,
+                    onDismissRequest = { screenError = null },
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(text = reason, color = colorScheme.error)
+                        TextButton(
+                            text = "知道了",
+                            onClick = { screenError = null },
+                            modifier = Modifier
+                                .align(Alignment.End)
+                                .padding(top = 12.dp),
+                        )
+                    }
+                }
+            }
             if (feedbackOpen) {
                 FeedbackDialog(onDismissRequest = { feedbackOpen = false })
             }

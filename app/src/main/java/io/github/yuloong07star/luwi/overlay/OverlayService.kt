@@ -649,14 +649,50 @@ class OverlayService : Service() {
      */
     private var balanceAskedAt: Long = 0L
 
+    /**
+     * 最近一问的编号 (`balance-request.json` 里那个 `seq`, 2026-11-01)
+     *
+     * 答案里也带 `seq`: 对得上就说明"那一问已经有回音了", 这时主人再点一下就该重新问, 而不是干等
+     * [BalanceFile.IN_FLIGHT_MS] 那一整段 (断网 6.2 s 内可重试那条判据靠的就是这个)
+     */
+    private var balanceAskedSeq: Long = 0L
+
+    /**
+     * 已经上过屏的那一份答案的编号 (2026-11-01 深夜)
+     *
+     * 交付按 **seq 对不对得上** 判, 不按"点下去之后 30 s 之内"判: 宿主刚好在重启时那一问可能晚十几秒才答,
+     * 从前那段窗口一过答案就永远不显示 (主人 2026-11-01: "在文本框关闭时也没有查询到")。同一个 seq 只上
+     * 一次屏, 也用它挡掉重复渲染
+     */
+    private var balanceShownSeq: Long = 0L
+
+    /**
+     * 「主人还等着这一行」的兜底: 到点还没有回音就把那句「正在取余额…」换成一句实话 (2026-11-01)
+     *
+     * 从前没有这一拍, 宿主没答时那块框就一直停在「正在取余额…」, 直到 20 s 后自己收掉 —— 主人看到的
+     * 是"点了没反应"。这句给人一个"再点一次"的去处
+     */
+    private var balanceNoAnswer: Runnable? = null
+
     /** 上一拍画的那个环色: 会话换了而字没换时也得重画一次 (见 [refresh]) */
     private var lastRing: Int? = null
 
-    /** 余额那份文件多新才算"直接给" (过了这个数就先写「正在取」再让宿主刷) */
-    private val BALANCE_FRESH_MS = 60_000L
+    /**
+     * 余额那份文件多新才算"直接给" (2026-11-01, B1-c ⑨: 5 分钟)
+     *
+     * 5 分钟以内照常上屏, 更旧就在那一行后面标一句「可能不是最新的」 (见 [balanceLine]) —— 余额是
+     * "刚才那一下"的数, 隔久了那个数可能早变了, 不能装作刚查过。窗口只认 [BalanceFile.FRESH_MS] 那
+     * 一份, 两边各写一个数迟早漂开
+     */
+    private val BALANCE_FRESH_MS = BalanceFile.FRESH_MS
 
-    /** 「看余额」之后多久之内的失败才算"主人正等着" (只有这一段里失败才值得往框里塞一句 ⚠) */
-    private val BALANCE_ASK_WINDOW_MS = 30_000L
+    /**
+     * 「宿主还没回音」这句实话什么时候说 (2026-11-01 深夜)
+     *
+     * 宿主的网络预算 6 s + 认模型 / 取凭据那一小段, 9 s 还没到就说明这一问多半走丢了 (宿主在重启, 或者
+     * 那条路自己崩了)。这时把「正在取余额…」换成「再点一次」, 而不是让主人对着同一句话干等
+     */
+    private val BALANCE_NO_ANSWER_MS = 9_000L
 
     /**
      * 上一拍浮标外观挑的是哪一个 (协议 10.1 / 方案 3.2)
@@ -2251,8 +2287,9 @@ class OverlayService : Service() {
     }
 
     /**
-     * 「看余额」那一拍: **查的是当前模型那一边** (宿主先认模型再认余额源) —— 新鲜的直接给, 已经有
-     * 答案的失败也直接给, 否则先「正在取」再给宿主递一个请求记号
+     * 「看余额」那一拍: **查的是当前模型那一边** (宿主先认模型再认余额源) —— 哪一档该说什么由
+     * [BalanceFile.decide] 定 (新鲜 / 旧值 + 正在刷新 / 正在取 / 失败即重试 / 不支持), 这里只负责上屏
+     * 与写那一问
      *
      * 数到真身之后 [readBalance] 会把那一行**就地改写** ([BoxView.replaceInfo]), 屏上不会留两行
      *
@@ -2261,19 +2298,35 @@ class OverlayService : Service() {
      * [BalanceFile.KIND_QUOTA] 与一个厂商名, 取数一个字节都不管
      */
     private fun showBalance() {
-        val snapshot = BalanceFile.snapshot(this)
-        if (snapshot != null && System.currentTimeMillis() - snapshot.at <= BALANCE_FRESH_MS) {
-            if (snapshot.ok) {
-                showLocalInfo(balanceLine(snapshot))
-            } else {
-                // 已经有答案的失败就地给: 「不支持」是稳定事实, 不该每次都「正在取」再绕一圈
-                showLocalNote(balanceFailure(snapshot))
+        val now = System.currentTimeMillis()
+        val decision = BalanceFile.decide(BalanceFile.snapshot(this), balanceAskedAt, balanceAskedSeq, BALANCE_FRESH_MS, now)
+        val cached = decision.snapshot
+        when (decision.ask) {
+            // 5 分钟内的数照旧直接给
+            BalanceFile.Ask.FRESH -> cached?.let { showLocalInfo(balanceLine(it)) }
+            // 旧值先上屏再问: 主人点一下要马上看见数, 不能先干等那一问; 过了 5 分钟的旧值那一行
+            // 带着「可能不是最新的」 (balanceLine 里统一挂), 这里再加一句「正在刷新」
+            BalanceFile.Ask.OLD -> cached?.let {
+                showLocalInfo("${balanceLine(it)} · ${getString(R.string.ball_balance_refreshing)}")
             }
-            return
+            // 失败那一行本身就是重试的入口: 原话照念, 这一下已经在重试 (新 seq + force)
+            BalanceFile.Ask.RETRY -> cached?.let {
+                showLocalNote("${balanceFailure(it)} · ${getString(R.string.ball_balance_retry)}")
+            }
+            // 「不支持」是稳定事实, 不该每次都「正在取」再绕一圈
+            BalanceFile.Ask.UNSUPPORTED -> cached?.let { showLocalNote(balanceFailure(it)) }
+            BalanceFile.Ask.PENDING -> showLocalInfo(getString(R.string.ball_balance_pending))
         }
-        showLocalInfo(getString(R.string.ball_balance_pending))
-        balanceAskedAt = System.currentTimeMillis()
-        BalanceFile.request(this)
+        if (!decision.request) return
+        balanceAskedAt = now
+        balanceAskedSeq = BalanceFile.request(this, force = decision.force)
+        // 还等着这一行的兜底: 宿主没答 (在重启 / 那一条路崩了) 时, 到点给一句实话而不是一直「正在取」
+        balanceNoAnswer?.let { handler.removeCallbacks(it) }
+        val late = Runnable {
+            if (balanceShownSeq != balanceAskedSeq) showLocalNote(getString(R.string.ball_balance_no_answer))
+        }
+        balanceNoAnswer = late
+        handler.postDelayed(late, BALANCE_NO_ANSWER_MS)
     }
 
     /** 失败那一句话: 当前模型没有余额源说「不支持」, 其余把宿主那句原话递上去 */
@@ -2287,22 +2340,25 @@ class OverlayService : Service() {
     /**
      * 宿主把余额那份文件刷新了: 就地把那一行改掉 / 把失败如实递上去
      *
-     * **只在主人刚点过菜单那一段里上屏** ([BALANCE_ASK_WINDOW_MS]): 「看余额」是唯一能让这一行出现的
-     * 入口 (2026-10-17 主人: 「余额查询只能用户主动在 ball 菜单主动查询」) —— 宿主那一侧现在也只在
-     * 请求记号出现时才去查, 但"文件变了就写框"这条路照样要带闸, 否则那一行会撞在主人刚收到的回答后面
-     * (2026-10-17 真机上量到的那一次就是: 宿主起来那几拍补刷正好压在第一次问答的尾巴上)
+     * 交付的判据是 **`seq` 对不对得上**（2026-11-01 深夜改）: 「看余额」仍然是唯一入口，但"什么时候算数"
+     * 不再按点下去之后那 30 s —— 宿主刚好在重启时那一问会晚十几秒才答，按时间窗口判的话答案就永远不显示
+     * （主人 2026-11-01: "在文本框关闭时也没有查询到"）。对得上就是我刚问的那一问, 框已经收掉也要张回来给
+     * 主人看: 他自己点的那一下, 结果不该因为等了十几秒就消失
      */
     private fun readBalance() {
         val snapshot = BalanceFile.snapshot(this) ?: return
-        val asked = balanceAskedAt > 0 && System.currentTimeMillis() - balanceAskedAt <= BALANCE_ASK_WINDOW_MS
-        if (!asked) return
+        if (balanceAskedSeq <= 0L || snapshot.seq != balanceAskedSeq) return
+        if (snapshot.seq == balanceShownSeq) return
+        balanceShownSeq = snapshot.seq
+        balanceNoAnswer?.let { handler.removeCallbacks(it) }
         if (snapshot.ok) {
-            // 只有"框在屏上"才值得写: 主人关掉框之后余额到账, 那一行不该凭空把框弹回来
-            if (boxOnScreen) runCatching { boxView?.replaceInfo(balanceLine(snapshot)) }
+            if (!boxOnScreen) openChannel(focus = false)
+            runCatching { boxView?.replaceInfo(balanceLine(snapshot)) }
             return
         }
         // 失败: 走 ⚠ 那一条, 那是"系统在说哪里不对"的位置
-        if (boxOnScreen) runCatching { boxView?.appendNote(balanceFailure(snapshot)) }
+        if (!boxOnScreen) openChannel(focus = false)
+        runCatching { boxView?.appendNote(balanceFailure(snapshot)) }
     }
 
     /**
@@ -2315,23 +2371,31 @@ class OverlayService : Service() {
     private fun balanceLine(snapshot: BalanceFile.Snapshot): String {
         val name = snapshot.label.takeIf { it.isNotBlank() }
         val age = balanceAge(snapshot.at)
-        if (snapshot.kind == BalanceFile.KIND_QUOTA) {
+        val line = if (snapshot.kind == BalanceFile.KIND_QUOTA) {
             val percent = snapshot.percent.coerceIn(0, 100)
-            return if (name == null) {
+            if (name == null) {
                 getString(R.string.ball_balance_quota_line, percent, age)
             } else {
                 getString(R.string.ball_balance_quota_line_by, name, percent, age)
             }
-        }
-        val symbol = if (snapshot.currency == "USD") "$" else "¥"
-        val bonus = snapshot.bonus.takeIf { it.isNotBlank() }
-            ?.let { " (${getString(R.string.ball_balance_bonus, "$symbol$it")})" }
-            .orEmpty()
-        val amount = "$symbol${snapshot.value}$bonus"
-        return if (name == null) {
-            getString(R.string.ball_balance_line, amount, age)
         } else {
-            getString(R.string.ball_balance_line_by, name, amount, age)
+            val symbol = if (snapshot.currency == "USD") "$" else "¥"
+            // 两位小数在显示这一层再收一次 (2026-11-01 主人): 账号缝与几家直读接口给的是原始串
+            val bonus = snapshot.bonus.takeIf { it.isNotBlank() }
+                ?.let { " (${getString(R.string.ball_balance_bonus, "$symbol${BalanceFile.moneyText(it)}")})" }
+                .orEmpty()
+            val amount = "$symbol${BalanceFile.moneyText(snapshot.value)}$bonus"
+            if (name == null) {
+                getString(R.string.ball_balance_line, amount, age)
+            } else {
+                getString(R.string.ball_balance_line_by, name, amount, age)
+            }
+        }
+        // 更旧明确标旧 (2026-11-01, B1-c ⑨): 过了那 5 分钟, 这一行就不是"刚查过"的语气了
+        return if (BalanceFile.isOld(snapshot.at)) {
+            "$line · ${getString(R.string.ball_balance_stale)}"
+        } else {
+            line
         }
     }
 

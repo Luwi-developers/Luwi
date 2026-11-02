@@ -97,7 +97,7 @@
 | `apk-bytes.py` | 找 APK 里没有被任何 zip 条目算进去的字节 (体积账) | 人 |
 | `host-tree-size.py` | 按包把 host 树的条目归并 (要裁的时候得先有数) | 人 |
 
-**这几个是构建链路的一部分, 改之前先看构建事实（原 `docs/host-build.md`, 已归档到 git 历史）**: `pack-host.mjs` / `zip-host.mjs`
+**这几个是构建链路的一部分, 改之前先看 `docs/host-build.md`**: `pack-host.mjs` / `zip-host.mjs`
 被 Gradle 直接调用, 名字与参数都不能随手换
 
 ## 四、工作区

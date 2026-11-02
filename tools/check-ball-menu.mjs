@@ -7,10 +7,11 @@
  *   2. **文本框那三档分得开**: 余额走 `¥` 那一档, 它**不许**碰那三笔会话账 (双击回复框与「返回应用」
  *      的去向是 2026-10-09/11 两轮定下来的口径, 不能因为看了一眼余额就变)
  *   3. **文件字段两侧一致**: `balance.json` 那几个键应用与宿主各写一份约定 (与 ball-phase.json 同一条
- *      规矩), 还要校验签名清单之外的 sha256; 两个窗口数 (新鲜 60 s / 请求记号 30 s) 谁都不许单边改
+ *      规矩), 还要校验签名清单之外的 sha256; 两个窗口数 (旧值 5 分钟 / 请求记号 30 s) 谁都不许单边改
  *   4. **候选只有一份口径**: 设置页那份对话框与球菜单那行「换个形象」都认 `BallTheme.choices`
- *   5. **余额只有主人点菜单那一条触发** (2026-10-17): 宿主自己起来那几拍与「每轮结束刷一次」都拿掉了,
- *      应用那一侧"文件到了就写框"那条路也带上了「主人刚要过」的闸 —— 两处缺一个, 那一行就会长在回答后面
+ *   5. **余额两条触发** (2026-11-01 深夜改口径): 每轮对话结束覆盖缓存 (seq 0, 只动文件不进框) 与
+ *      主人点「看余额」(先给上次那份, 同时发一问); 应用上屏按 seq 认答案, 框已经被关掉也会张回来 ——
+ *      三处缺一个, 要么结果消失, 要么那一行会自己长在回答后面
  *
  * 不需要设备: 全是拿真源码对着核 (与 `check-image-edit.mjs` 同一个办法)。
  *
@@ -59,8 +60,11 @@ const KEYS = [
   'ball_balance_bonus',
   'ball_balance_just_now',
   'ball_balance_minutes',
+  'ball_balance_stale',
   'ball_balance_pending',
+  'ball_balance_refreshing',
   'ball_balance_failed',
+  'ball_balance_retry',
 ]
 const keysOf = (text) => [...text.matchAll(/name="(ball_[a-z_]+)"/g)].map((one) => one[1])
 const enBall = keysOf(en)
@@ -104,22 +108,61 @@ check(
   ],
   [true, true, true, true, true],
 )
-// 那一道闸 2026-10-17 加的 (主人: 「余额查询只能用户主动在 ball 菜单主动查询」): 宿主往那份文件里写了
-// 新数**不再是上屏的理由** —— 成功那一档从前没有闸, 于是它自己刷出来的那一份会悄没声地长在回答后面
+// 那一道闸 2026-10-17 加的 (主人: 「余额查询只能用户主动在 ball 菜单主动查询」), 2026-11-01 深夜改成
+// **按 seq 认答案**: 宿主每轮结束也会覆盖缓存 (seq 0), 那一份不该自己上屏; 而主人真点过的那一问迟到的
+// 答案 (宿主在重启时可能晚十几秒) 反而必须上屏 —— 所以闸从"30 s 窗口"换成"这一问的编号"
 const readBalance = overlay.slice(
   overlay.indexOf('private fun readBalance()'),
   overlay.indexOf('private fun balanceLine('),
 )
 check(
-  '文件到了也不许自己上屏: 成功那一档与失败那一档合用一个「主人刚要过」的闸',
+  '文件到了也不许多长一行: 按 seq 认答案, 只有主人点过的那一问才上屏',
   [
-    readBalance.includes('val asked = balanceAskedAt > 0'),
-    readBalance.includes('BALANCE_ASK_WINDOW_MS'),
-    readBalance.includes('if (!asked) return'),
+    readBalance.includes('snapshot.seq != balanceAskedSeq'),
+    readBalance.includes('balanceShownSeq'),
+    // 关掉的框也要拿到答案: 张回来给主人看, 而不是让结果消失
+    readBalance.includes('if (!boxOnScreen) openChannel(focus = false)'),
     // 「正在取…」被真数顶掉那一条仍在 (点菜单那条路照旧, 屏上不会留两行)
     readBalance.includes('replaceInfo(balanceLine(snapshot))'),
   ],
   [true, true, true, true],
+)
+
+// B1-b (2026-11-01): 点「看余额」那一拍分四档 —— 旧值先上屏再问、没有数就是「正在取」、失败那一行
+// 本身就是重试的入口 (新 seq + force)、「不支持」是稳定事实不进重试. 判据落在 `BalanceFile.decide`
+// 那个纯函数上 (单测在 `BalanceFileTest`), 这里只钉"服务那一侧真的接上了"
+check(
+  '「看余额」四档都接上了, 失败那一行就是重试的入口 (B1-b ⑤~⑧)',
+  [
+    overlay.includes('BalanceFile.decide('),
+    overlay.includes('R.string.ball_balance_refreshing'),
+    overlay.includes('R.string.ball_balance_retry'),
+    overlay.includes('balanceAskedSeq = BalanceFile.request(this, force = decision.force)'),
+    balance.includes('Decision(Ask.RETRY, snapshot, request = true, force = true)'),
+    balance.includes('Ask.UNSUPPORTED'),
+  ],
+  [true, true, true, true, true, true],
+)
+
+// B1-c (2026-11-01): ⑨ 5 分钟内的旧值正常、更旧明确标旧 —— 窗口只有一个数 (`BalanceFile.FRESH_MS`),
+// 服务那一侧把它传进 `decide`; 那一行由 `balanceLine` 统一挂「可能不是最新的」, 两档 `strings` 都得有
+const balanceLine = overlay.slice(
+  overlay.indexOf('private fun balanceLine('),
+  overlay.indexOf('private fun balanceAge('),
+)
+check(
+  '旧值 5 分钟窗口有读, 更旧那一行明确标旧 (B1-c ⑨)',
+  [
+    balance.includes('fun isOld(at: Long'),
+    balance.includes('const val FRESH_MS = 5 * 60_000L'),
+    overlay.includes('private val BALANCE_FRESH_MS = BalanceFile.FRESH_MS'),
+    overlay.includes('BalanceFile.decide(BalanceFile.snapshot(this), balanceAskedAt, balanceAskedSeq, BALANCE_FRESH_MS, now)'),
+    balanceLine.includes('BalanceFile.isOld(snapshot.at)'),
+    balanceLine.includes('R.string.ball_balance_stale'),
+    en.includes('name="ball_balance_stale">may be out of date<'),
+    zh.includes('name="ball_balance_stale">可能不是最新的<'),
+  ],
+  Array.from({ length: 8 }, () => true),
 )
 
 /* ── 三、文件约定两侧一致 (字段 + 两个窗口数) ─────────────────────────── */
@@ -144,13 +187,14 @@ for (const [field, literal] of Object.entries(HOST_KEYS)) {
   check(`balance.json 的 ${field} 宿主侧写得出`, plugin.includes(literal), true)
 }
 check(
-  '两个窗口数谁都不许单边改 (新鲜 60 s 在 OverlayService, 请求记号 30 s 两侧)',
+  '两个窗口数谁都不许单边改 (旧值 5 分钟只在 BalanceFile, 应用只认那一份; 请求记号 30 s 两侧, 没回音 9 s 应用侧)',
   [
-    overlay.includes('BALANCE_FRESH_MS = 60_000L'),
-    overlay.includes('BALANCE_ASK_WINDOW_MS = 30_000L'),
+    balance.includes('const val FRESH_MS = 5 * 60_000L'),
+    overlay.includes('BALANCE_FRESH_MS = BalanceFile.FRESH_MS'),
+    overlay.includes('BALANCE_NO_ANSWER_MS = 9_000L'),
     plugin.includes('BALANCE_REQUEST_FRESH_MS = 30 * 1000'),
   ],
-  [true, true, true],
+  [true, true, true, true],
 )
 check(
   '宿主侧原子写 ( .tmp + rename), 失败如实不编 0',
@@ -260,13 +304,17 @@ const balanceFeed = plugin.slice(
   plugin.indexOf('function registerVoiceInput(ctx)'),
 )
 check(
-  '余额只有「主人点菜单」那一条触发 (起来那几拍 / 每轮结束那两条都不许回来)',
+  '余额只有两条触发: 主人点菜单 + 每轮对话结束覆盖缓存 (起来那几拍仍不许回来)',
   [
     balanceFeed.includes('balanceRequested()'),
-    balanceFeed.includes('PLUGIN_POLL_MS'),
-    // 一个记号只刷一次 (30 s 窗口配 3 s 轮询, 不记住处理过哪个就是点一次问十遍)
-    balanceFeed.includes('stamp <= handled'),
-    !balanceFeed.includes('onSessionEvent'),
+    balanceFeed.includes('BALANCE_WATCH_MS'),
+    // 一个 seq 只刷一次 (30 s 窗口配 500 ms 兜底轮询, 不记住处理过哪一问就是点一次问上百遍)
+    balanceFeed.includes('request.seq <= handled'),
+    // 2026-11-01 主人: 「每轮对话结束时自动刷新, 此时扣费刚结算」—— 只覆盖缓存 (seq 0), 不进框
+    balanceFeed.includes('refreshQuiet'),
+    balanceFeed.includes("event?.type !== 'turn/end'"),
+    balanceFeed.includes('QUIET_MIN_MS'),
+    // 起来那几拍 (3 / 10 / 30 s 补刷) 与"每轮结束当心跳"仍不许回来
     !plugin.includes('BALANCE_WARMUP_MS'),
     !plugin.includes('BALANCE_MIN_INTERVAL_MS'),
     !plugin.includes('balanceLast'),
@@ -274,7 +322,28 @@ check(
     plugin.includes("ctx.get('locale')"),
     !plugin.includes('ctx.locale?.'),
   ],
-  [true, true, true, true, true, true, true, true, true],
+  [true, true, true, true, true, true, true, true, true, true, true],
+)
+check(
+  '余额快路径 (2026-11-01): fs.watch 优先 + 500 ms 兜底, 请求带 seq / force, 答案带 seq 与三段读数',
+  [
+    balance.includes('internal data class Request('),
+    // 两个键在不在才是这一条要的: 值是 `JsonPrimitive(...)` 还是裸数由写的人挑 (两者都进同一份 JSON)
+    balance.includes('put("seq",'),
+    balance.includes('put("force",'),
+    balance.includes('val seq: Long'),
+    balance.includes('fun isOld(at: Long'),
+    balance.includes('const val FRESH_MS = 5 * 60_000L'),
+    plugin.includes('watch(dirname(path)'),
+    balanceFeed.includes('const BALANCE_WATCH_MS = 500'),
+    plugin.includes('async function balanceRequested()'),
+    plugin.includes('seenAfterMs:'),
+    plugin.includes('networkMs:'),
+    plugin.includes('writeMs:'),
+    // 网络那一笔预算 6 s (验收: 断网 6.2 s 之内能重试)
+    plugin.includes('const BALANCE_TIMEOUT_MS = 6000'),
+  ],
+  Array.from({ length: 13 }, () => true),
 )
 check(
   '地址与凭据都从 dsh 自己那份配置里读 (settings.describe + credentials.resolve)',
@@ -320,7 +389,7 @@ check(
 check(
   '已经有答案的失败就地给 (「不支持」是稳定事实, 不该每次都「正在取」)',
   [
-    overlay.includes('showLocalNote(balanceFailure(snapshot))'),
+    overlay.includes('showLocalNote(balanceFailure(it))'),
     overlay.includes('private fun showLocalNote(text: String)'),
   ],
   [true, true],
@@ -354,13 +423,13 @@ check(
 /* ── 七、会话事件看得见本机的轮次 (2026-10-15 真机: 「正在想」与回复框都是空的) ── */
 
 check(
-  '五条 session/event 订阅一律走 onSessionEvent, 而且真的带 { global: true } (余额那条 2026-10-17 拿掉了, 第五条是 2.7.8 批次 7 的探索收尾兜底)',
+  '六条 session/event 订阅一律走 onSessionEvent, 而且真的带 { global: true } (第六条是 2026-11-01 夜里加的余额缓存刷新)',
   [
     [...plugin.matchAll(/^\s*ctx\.on\('session\/event'/gm)].length,
     [...plugin.matchAll(/^\s*onSessionEvent\(ctx, \(session, event\) => \{/gm)].length,
     plugin.includes("ctx.on('session/event', listener, { global: true })"),
   ],
-  [0, 5, true],
+  [0, 6, true],
 )
 check(
   '投影判据两边都归一 (DSH_HOME 写 /data/user/0, 影子会话的 cwd 写 /data/data)',
@@ -416,6 +485,40 @@ check(
     replyChannelText('  '),
   ],
   ['好的', 2000, 2001, true, ''],
+)
+
+/* ── 余额: 两位小数 + 关掉的框也要拿到答案 (2026-11-01 深夜) ───────────── */
+
+// 两位小数在两条路上各收一次: 显示层 (BalanceFile.moneyText) 与落盘前 (host money2)
+const money2 = new Function(
+  `${plugin.slice(
+    plugin.indexOf('function decimalOf('),
+    plugin.indexOf('/**', plugin.indexOf('function money2(')),
+  )}; return money2`,
+)()
+check(
+  '金额只留两位小数: 落盘与上屏各收一次',
+  [
+    balance.includes('fun moneyText(raw: String)'),
+    overlay.includes('BalanceFile.moneyText(snapshot.value)'),
+    overlay.includes('BalanceFile.moneyText(it)'),
+    money2('236.9677291600000000'),
+    money2('12.3'),
+    money2(''),
+    money2('n/a'),
+  ],
+  [true, true, true, '236.97', '12.30', '', 'n/a'],
+)
+check(
+  '关掉的框也要拿到答案: 按 seq 交付 (不在 30 s 窗口外丢结果), 没回音就说实话',
+  [
+    overlay.includes('snapshot.seq != balanceAskedSeq'),
+    overlay.includes('if (!boxOnScreen) openChannel(focus = false)'),
+    overlay.includes('R.string.ball_balance_no_answer'),
+    en.includes('name="ball_balance_no_answer"'),
+    zh.includes('name="ball_balance_no_answer"'),
+  ],
+  [true, true, true, true, true],
 )
 
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)

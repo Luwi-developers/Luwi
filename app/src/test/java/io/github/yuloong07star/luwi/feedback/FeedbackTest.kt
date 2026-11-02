@@ -220,7 +220,7 @@ class FeedbackTest {
     /** 兜底打开的是这个仓库的 New Issue 页 (与更新源同一个仓库) */
     @Test
     fun `兜底去仓库的 new issue 页`() {
-        assertEquals("https://github.com/Luwi-developers/Luwi/issues/new", Feedback.ISSUE_PAGE)
+        assertEquals("https://github.com/yuloong07-star/Luwi/issues/new", Feedback.ISSUE_PAGE)
     }
 
     /** 私密那一档: mailto 只带主题, 空格与中文都要编码 (不然各家客户端会截断) */
