@@ -1936,6 +1936,15 @@ private fun HostBootPanel(
                 }
             }
         }
+        // 还差步骤时, 底部摆一张「开始使用」: 第一次装完的人就停在这一屏, 这里是他唯一
+        // 能同时看到"还差什么"和"点哪里办掉"的地方 ([ReadyCard] 自己判断该不该画)
+        ReadyCard(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = if (splash.credit.isNotBlank()) 52.dp else 20.dp),
+        )
         if (splash.credit.isNotBlank()) {
             Text(
                 text = splash.credit,
