@@ -60,11 +60,8 @@ const KEYS = [
   'ball_balance_bonus',
   'ball_balance_just_now',
   'ball_balance_minutes',
-  'ball_balance_stale',
   'ball_balance_pending',
-  'ball_balance_refreshing',
   'ball_balance_failed',
-  'ball_balance_retry',
 ]
 const keysOf = (text) => [...text.matchAll(/name="(ball_[a-z_]+)"/g)].map((one) => one[1])
 const enBall = keysOf(en)
@@ -131,8 +128,9 @@ check(
 // B1-b (2026-11-01): 点「看余额」那一拍分四档 —— 旧值先上屏再问、没有数就是「正在取」、失败那一行
 // 本身就是重试的入口 (新 seq + force)、「不支持」是稳定事实不进重试. 判据落在 `BalanceFile.decide`
 // 那个纯函数上 (单测在 `BalanceFileTest`), 这里只钉"服务那一侧真的接上了"
+// 2026-11-02 主人改口径: 那一行只给余额 + 时间, 「正在刷新…」「正在重试…」两句都不上屏 (键也删了)
 check(
-  '「看余额」四档都接上了, 失败那一行就是重试的入口 (B1-b ⑤~⑧)',
+  '「看余额」四档都接上了, 失败那一行就是重试的入口, 两档都不挂说明 (B1-b ⑤~⑧)',
   [
     overlay.includes('BalanceFile.decide('),
     overlay.includes('R.string.ball_balance_refreshing'),
@@ -141,17 +139,18 @@ check(
     balance.includes('Decision(Ask.RETRY, snapshot, request = true, force = true)'),
     balance.includes('Ask.UNSUPPORTED'),
   ],
-  [true, true, true, true, true, true],
+  [true, false, false, true, true, true],
 )
 
-// B1-c (2026-11-01): ⑨ 5 分钟内的旧值正常、更旧明确标旧 —— 窗口只有一个数 (`BalanceFile.FRESH_MS`),
-// 服务那一侧把它传进 `decide`; 那一行由 `balanceLine` 统一挂「可能不是最新的」, 两档 `strings` 都得有
+// B1-c (2026-11-01): ⑨ 5 分钟窗口仍在 —— 它现在只决定要不要再发后台那一问.
+// **上屏不标旧** (2026-11-02 主人: "不要显示'当前不是最新''正在刷新'这样的句子, 只告诉我余额+时间"):
+// 那一行只有余额 + 「N 分钟前」, 三句说明的键一份都不许留
 const balanceLine = overlay.slice(
   overlay.indexOf('private fun balanceLine('),
   overlay.indexOf('private fun balanceAge('),
 )
 check(
-  '旧值 5 分钟窗口有读, 更旧那一行明确标旧 (B1-c ⑨)',
+  '旧值 5 分钟窗口还在, 但那一行不再标旧 (B1-c ⑨ + 2026-11-02 改口径)',
   [
     balance.includes('fun isOld(at: Long'),
     balance.includes('const val FRESH_MS = 5 * 60_000L'),
@@ -159,10 +158,37 @@ check(
     overlay.includes('BalanceFile.decide(BalanceFile.snapshot(this), balanceAskedAt, balanceAskedSeq, BALANCE_FRESH_MS, now)'),
     balanceLine.includes('BalanceFile.isOld(snapshot.at)'),
     balanceLine.includes('R.string.ball_balance_stale'),
-    en.includes('name="ball_balance_stale">may be out of date<'),
-    zh.includes('name="ball_balance_stale">可能不是最新的<'),
+    en.includes('name="ball_balance_stale"'),
+    zh.includes('name="ball_balance_stale"'),
   ],
-  Array.from({ length: 8 }, () => true),
+  [true, true, true, true, false, false, false, false],
+)
+
+// 2026-11-02 主人: 只显示最近余额 + 时间. 钉住"上屏那一行只有 balanceLine 一个来源" ——
+// FRESH 与 OLD 两档都是 `showBalanceInfo(balanceLine(it))`, 后面不接任何一句; 连点几次也只留一行
+const showBalance = overlay.slice(
+  overlay.indexOf('private fun showBalance()'),
+  overlay.indexOf('private fun balanceFailure('),
+)
+const showBalanceInfo = overlay.slice(
+  overlay.indexOf('private fun showBalanceInfo('),
+  overlay.indexOf('private fun showLocalInfo('),
+)
+check(
+  '看余额那一行只有余额 + 时间, 旧值与失败两档都不挂说明',
+  [
+    (showBalance.match(/showBalanceInfo\(balanceLine\(it\)\)/gu) ?? []).length,
+    showBalanceInfo.includes('boxView?.replaceInfo(text)'),
+    // 屏上已经有数时, pending / 失败 / 无回音一律不吭声 (2026-11-02)
+    showBalance.includes('if (!balanceShownMoney)'),
+    readBalance.includes('if (balanceShownMoney) return'),
+    // 真机 A 上 inotify 不叫醒: tick 那一拍拿 mtime 兜一眼, 不然新数永远上不了屏 (2026-11-02)
+    overlay.includes('BalanceFile.file(this@OverlayService).lastModified()'),
+    showBalance.includes('ball_balance_refreshing'),
+    showBalance.includes('ball_balance_retry'),
+    showBalance.includes('ball_balance_stale'),
+  ],
+  [2, true, true, true, true, false, false, false],
 )
 
 /* ── 三、文件约定两侧一致 (字段 + 两个窗口数) ─────────────────────────── */
