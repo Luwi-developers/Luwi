@@ -621,6 +621,14 @@ class OverlayService : Service() {
                 phaseStamp = stamp
                 runCatching { readBallPhase() }
             }
+            // **余额那份同一个兜法** (2026-11-02 真机实测: 这台机器上 inotify 对 `lw/` 目录也不叫醒 ——
+            // 宿主回了新数, 屏上却一直停在上一次那份, 再点一次只是把旧数又写一遍)。一次 stat 而已,
+            // inotify 那条仍是最快的, 它坏了最多晚一拍 (400 ms)
+            val balanceStampNow = runCatching { BalanceFile.file(this@OverlayService).lastModified() }.getOrDefault(0L)
+            if (balanceStampNow != balanceStamp) {
+                balanceStamp = balanceStampNow
+                runCatching { readBalance() }
+            }
             handler.postDelayed(this, TICK_MS)
         }
     }
@@ -638,6 +646,14 @@ class OverlayService : Service() {
 
     /** 那份余额文件: 同一个盯法 (见 [BalanceFile], 2026-10-16) */
     private var balanceWatch: BalanceFile.Watch? = null
+
+    /**
+     * 上一次读到那份余额文件时的 mtime
+     *
+     * 它是 [tick] 那一拍的兜底判据 (2026-11-02 补): 真机 A 上 inotify 不叫醒我们, 光靠 watch 的话
+     * 「看余额」永远只显示上一次那份 —— 而主人要的正是最近那一份
+     */
+    private var balanceStamp = 0L
 
     /**
      * 上一次「看余额」是主人什么时候要的
@@ -667,10 +683,19 @@ class OverlayService : Service() {
     private var balanceShownSeq: Long = 0L
 
     /**
+     * 屏上现在有没有一行**金额/额度** (2026-11-02)
+     *
+     * 有它才决定"要不要多说一句": 有余额时失败与无回音一律不吭声 (主人: 只要余额 + 时间, 不用知道原因),
+     * 一行数都没有时才把失败原话递上去 —— 那是唯一能说的东西
+     */
+    private var balanceShownMoney: Boolean = false
+
+    /**
      * 「主人还等着这一行」的兜底: 到点还没有回音就把那句「正在取余额…」换成一句实话 (2026-11-01)
      *
      * 从前没有这一拍, 宿主没答时那块框就一直停在「正在取余额…」, 直到 20 s 后自己收掉 —— 主人看到的
-     * 是"点了没反应"。这句给人一个"再点一次"的去处
+     * 是"点了没反应"。这句给人一个"再点一次"的去处。
+     * **只在一次都没上过屏时说** (2026-11-02): 屏上已经有余额那一行, 旧数留着比一句"宿主没回音"有用
      */
     private var balanceNoAnswer: Runnable? = null
 
@@ -680,9 +705,9 @@ class OverlayService : Service() {
     /**
      * 余额那份文件多新才算"直接给" (2026-11-01, B1-c ⑨: 5 分钟)
      *
-     * 5 分钟以内照常上屏, 更旧就在那一行后面标一句「可能不是最新的」 (见 [balanceLine]) —— 余额是
-     * "刚才那一下"的数, 隔久了那个数可能早变了, 不能装作刚查过。窗口只认 [BalanceFile.FRESH_MS] 那
-     * 一份, 两边各写一个数迟早漂开
+     * 5 分钟以内与更旧**上屏的字一样** (2026-11-02 主人: 只给余额 + 时间, 不标「可能不是最新的」) ——
+     * 这个窗口现在只决定 [BalanceFile.decide] 走 FRESH 还是 OLD, 也就是"要不要再发一问"。窗口只认
+     * [BalanceFile.FRESH_MS] 那一份, 两边各写一个数迟早漂开
      */
     private val BALANCE_FRESH_MS = BalanceFile.FRESH_MS
 
@@ -899,6 +924,7 @@ class OverlayService : Service() {
         startPhaseWatch()
         // 余额那份文件同一个盯法 (2026-10-16): 宿主一刷, 框里那条「正在取」就地换成真数
         startBalanceWatch()
+        balanceStamp = runCatching { BalanceFile.file(this).lastModified() }.getOrDefault(0L)
         // 桌面对话那本账 (2.7.8 批次 6): 宿主写完 `assistant` 那一笔要有人重画桌面那一格 ——
         // 而这里起来的服务是"应用还活着"最可靠的那个标志
         runCatching { DesktopChatFile.ensure(this) { WidgetHost.refreshChat(this) } }
@@ -2288,8 +2314,11 @@ class OverlayService : Service() {
 
     /**
      * 「看余额」那一拍: **查的是当前模型那一边** (宿主先认模型再认余额源) —— 哪一档该说什么由
-     * [BalanceFile.decide] 定 (新鲜 / 旧值 + 正在刷新 / 正在取 / 失败即重试 / 不支持), 这里只负责上屏
+     * [BalanceFile.decide] 定 (新鲜 / 旧值 / 正在取 / 失败即重试 / 不支持), 这里只负责上屏
      * 与写那一问
+     *
+     * **屏上只有「余额 + 时间」那一行** (2026-11-02 主人: 不要「当前不是最新」「正在刷新」这种句子,
+     * 只给余额和几时) —— 有数就只上数, 后台那一问回来再就地改写 ([BoxView.replaceInfo])
      *
      * 数到真身之后 [readBalance] 会把那一行**就地改写** ([BoxView.replaceInfo]), 屏上不会留两行
      *
@@ -2299,31 +2328,42 @@ class OverlayService : Service() {
      */
     private fun showBalance() {
         val now = System.currentTimeMillis()
+        // 框已经收掉了 = 屏上那一行也不在了: 从"没有数"重新算起, 不然点了会一个字都不写 (2026-11-02)
+        if (!boxOnScreen) balanceShownMoney = false
         val decision = BalanceFile.decide(BalanceFile.snapshot(this), balanceAskedAt, balanceAskedSeq, BALANCE_FRESH_MS, now)
         val cached = decision.snapshot
         when (decision.ask) {
             // 5 分钟内的数照旧直接给
-            BalanceFile.Ask.FRESH -> cached?.let { showLocalInfo(balanceLine(it)) }
-            // 旧值先上屏再问: 主人点一下要马上看见数, 不能先干等那一问; 过了 5 分钟的旧值那一行
-            // 带着「可能不是最新的」 (balanceLine 里统一挂), 这里再加一句「正在刷新」
+            BalanceFile.Ask.FRESH -> cached?.let {
+                showBalanceInfo(balanceLine(it))
+                balanceShownMoney = true
+            }
+            // 旧值先上屏再问: 主人点一下要马上看见数, 不能先干等那一问。**那一行只有余额与时间**
+            // (2026-11-02 主人: "不要显示'当前不是最新''正在刷新'这样的句子, 只告诉我余额+时间") ——
+            // 数有多旧由「N 分钟前」自己说, 原因不上屏
             BalanceFile.Ask.OLD -> cached?.let {
-                showLocalInfo("${balanceLine(it)} · ${getString(R.string.ball_balance_refreshing)}")
+                showBalanceInfo(balanceLine(it))
+                balanceShownMoney = true
             }
-            // 失败那一行本身就是重试的入口: 原话照念, 这一下已经在重试 (新 seq + force)
-            BalanceFile.Ask.RETRY -> cached?.let {
-                showLocalNote("${balanceFailure(it)} · ${getString(R.string.ball_balance_retry)}")
-            }
+            // 失败那一行本身就是重试的入口: 原话照念, 这一下已经在重试 (新 seq + force);
+            // 「正在重试…」同样不上屏 (2026-11-02); 屏上已经有一行数时连失败原话也不追加
+            BalanceFile.Ask.RETRY -> cached?.let { if (!balanceShownMoney) showLocalNote(balanceFailure(it)) }
             // 「不支持」是稳定事实, 不该每次都「正在取」再绕一圈
-            BalanceFile.Ask.UNSUPPORTED -> cached?.let { showLocalNote(balanceFailure(it)) }
-            BalanceFile.Ask.PENDING -> showLocalInfo(getString(R.string.ball_balance_pending))
+            BalanceFile.Ask.UNSUPPORTED -> cached?.let { if (!balanceShownMoney) showLocalNote(balanceFailure(it)) }
+            // 没数才说「正在取」: 屏上已经有余额那一行时**一个字都不动**, 点了还是那份数 (2026-11-02)
+            BalanceFile.Ask.PENDING -> if (!balanceShownMoney) {
+                showBalanceInfo(getString(R.string.ball_balance_pending))
+            }
         }
         if (!decision.request) return
         balanceAskedAt = now
         balanceAskedSeq = BalanceFile.request(this, force = decision.force)
-        // 还等着这一行的兜底: 宿主没答 (在重启 / 那一条路崩了) 时, 到点给一句实话而不是一直「正在取」
+        // 还等着这一行的兜底: 宿主没答 (在重启 / 那一条路崩了) 时, 到点给一句实话而不是一直「正在取」。
+        // **屏上没有数时说话** (2026-11-02 主人: 只要余额 + 时间, 不用知道原因): 已经有余额那一行时,
+        // 旧数留着就好, 这一问走没走通不归主人操心
         balanceNoAnswer?.let { handler.removeCallbacks(it) }
         val late = Runnable {
-            if (balanceShownSeq != balanceAskedSeq) showLocalNote(getString(R.string.ball_balance_no_answer))
+            if (!balanceShownMoney) showLocalNote(getString(R.string.ball_balance_no_answer))
         }
         balanceNoAnswer = late
         handler.postDelayed(late, BALANCE_NO_ANSWER_MS)
@@ -2354,9 +2394,12 @@ class OverlayService : Service() {
         if (snapshot.ok) {
             if (!boxOnScreen) openChannel(focus = false)
             runCatching { boxView?.replaceInfo(balanceLine(snapshot)) }
+            balanceShownMoney = true
             return
         }
-        // 失败: 走 ⚠ 那一条, 那是"系统在说哪里不对"的位置
+        // 失败: 走 ⚠ 那一条, 那是"系统在说哪里不对"的位置。**屏上已经有一行数就不吭声** (2026-11-02) ——
+        // 主人要的是余额 + 时间, 这一问为什么没成不归他操心; 一行数都没有时它才是唯一能说的东西
+        if (balanceShownMoney) return
         if (!boxOnScreen) openChannel(focus = false)
         runCatching { boxView?.appendNote(balanceFailure(snapshot)) }
     }
@@ -2391,12 +2434,9 @@ class OverlayService : Service() {
                 getString(R.string.ball_balance_line_by, name, amount, age)
             }
         }
-        // 更旧明确标旧 (2026-11-01, B1-c ⑨): 过了那 5 分钟, 这一行就不是"刚查过"的语气了
-        return if (BalanceFile.isOld(snapshot.at)) {
-            "$line · ${getString(R.string.ball_balance_stale)}"
-        } else {
-            line
-        }
+        // (2026-11-02 主人改口径) 那一行**只留余额与时间**: 数有多旧由上面 `age` 那一截自己说, 不再追加
+        // 「可能不是最新的」—— 主人不需要知道原因, 只要"余额 + 几时"
+        return line
     }
 
     /** "数据多旧": 一分钟内说"刚刚", 其余按分钟 (宿主那侧每轮结束才刷一次, 别指望它实时) */
@@ -2407,6 +2447,16 @@ class OverlayService : Service() {
         } else {
             getString(R.string.ball_balance_minutes, minutes.toInt())
         }
+    }
+
+    /**
+     * 余额那一行写进框: 与 [showLocalInfo] 同一条路, 只是**就地改写**最后一条信息行
+     * ([BoxView.replaceInfo]) —— 连点几次也只留一行, 主人看到的永远是最近那份余额 (2026-11-02)
+     */
+    private fun showBalanceInfo(text: String) {
+        if (!boxOnScreen) openChannel(focus = false)
+        // 张框那一步是同步挂窗的, 挂失败时 boxView 为 null, 什么都不做
+        runCatching { boxView?.replaceInfo(text) }
     }
 
     /**
