@@ -6,11 +6,13 @@ import java.util.concurrent.TimeUnit
 /**
  * Starting an app onto one of the virtual screens
  *
- * Nothing in this app can do this for itself. The `am` command presents itself as the shell's
- * package, so the activity manager refuses it from an app uid outright - "Permission Denial:
- * package=com.android.shell does not belong to uid=..." - which was measured rather than assumed,
- * and which is also why this belongs on the privileged side with the other things that need a uid
- * the platform trusts
+ * This is the virtual-screen half only. On the phone's own screen an app is started from the app's
+ * own process with PackageManager and Context ([DeviceNativeStart]), which needs no privileged uid
+ * at all. A virtual screen is different: only the platform can put an activity on a display that is
+ * not the default one, and the `am` command presents itself as the shell's package, so the activity
+ * manager refuses it from an app uid outright - "Permission Denial: package=com.android.shell does
+ * not belong to uid=..." - which was measured rather than assumed, and which is also why this
+ * belongs on the privileged side with the other things that need a uid the platform trusts
  *
  * It is deliberately thin: one `am start`, with the two ways of naming a target a caller actually
  * has. A component is used as given; a package is resolved by the platform's own launcher intent,

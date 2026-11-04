@@ -1,7 +1,13 @@
 package io.github.yuloong07star.luwi.channel
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
+import android.net.Uri
 import android.os.SystemClock
+import android.provider.AlarmClock
 import android.util.Log
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.lock.LwLock
@@ -103,6 +109,9 @@ object PrivilegedBridge {
 
     private var server: ServerSocket? = null
     private var worker: Thread? = null
+
+    /** 直连路由: `lw_launch` / `lw_intent` 该走应用进程还是特权 am, 由它一处回答 */
+    private val actions = DeviceActionBroker()
 
     @Volatile
     private var running = false
@@ -624,69 +633,154 @@ object PrivilegedBridge {
             }
         }
 
+        // 这一版认得哪些直连动作, 以及它们此刻的状态 (B3-c ⑧)
+        //
+        // 表只有一份 (DeviceActionRegistry), 路由也只有一份 (DeviceActionBroker): 这里只是把两边
+        // 摆给模型看, 于是"日历有没有给权限 / 快应用有没有 runtime / 无障碍开没开"不必先撞一次墙
+        // 才知道. 每一条都带 via / permission / 风险 / 失败原因 (12-4), 失败原因是所有通道都走不通
+        // 时交给模型的那句话
+        //
+        // 这一条**只读**: 探测快应用也只问 PackageManager, 不发 Intent, 更不碰虚拟屏
+        "capabilities" -> appContext { context ->
+            val quickApp = QuickAppCapability.probe(context)
+            buildJsonObject {
+                put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                putJsonArray("actions") {
+                    DeviceActionRegistry.actions.forEach { action ->
+                        val (state, note) = capabilityState(context, action, quickApp)
+                        add(
+                            buildJsonObject {
+                                put("name", action.name)
+                                put("title", action.title)
+                                put("via", action.via)
+                                put("permission", action.permission)
+                                put("risk", action.risk.name.lowercase())
+                                put("screenScoped", action.screenScoped)
+                                putJsonArray("routes") {
+                                    actions.routes(action, LwServiceProtocol.MAIN_DISPLAY).forEach { add(it) }
+                                }
+                                put("failureReason", action.failureReason)
+                                put("state", state)
+                                put("note", note)
+                            },
+                        )
+                    }
+                }
+                putJsonObject("quickApp") {
+                    putQuickAppProbe(quickApp)
+                }
+            }
+        }
+
+        // 快应用 (B3-c ⑨): probe 只问不打开, open 把 deep link 交给已注册的 runtime
+        //
+        // **这条路上没有建屏那一档**: runtime 自己决定把快应用画在哪, 它要的是手机自己的屏;
+        // 探测不到就回 unsupported (⑩), 不建屏也不重试. 静态判据 `check-phone-actions.mjs` 把
+        // "快应用这一条不许调建屏"钉在源码上 (⑫)
+        "quickapp" -> appContext { context ->
+            when (val op = request["op"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()) {
+                "", "probe" -> buildJsonObject {
+                    put("route", DeviceRoute.DEEP_LINK)
+                    put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                    putQuickAppProbe(QuickAppCapability.probe(context))
+                }
+
+                "open" -> {
+                    val opened = QuickAppCapability.open(
+                        context = context,
+                        uri = request["uri"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        packageName = request["package"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        path = request["path"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        query = request["query"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    )
+                    buildJsonObject {
+                        put("started", opened.started)
+                        put("unsupported", opened.unsupported)
+                        put("route", DeviceRoute.DEEP_LINK)
+                        put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                        put("uri", opened.uri)
+                        put("scheme", opened.scheme)
+                        put("handlerPackage", opened.handlerPackage)
+                        put("handlerComponent", opened.handlerComponent)
+                        put("reason", opened.reason)
+                    }
+                }
+
+                else -> throw IllegalArgumentException("quickapp has to be probe or open, not \"$op\"")
+            }
+        }
+
         // Start an app onto one screen
         //
-        // Nothing here can do this from the app's side: `am` calls itself the shell's package and
-        // is refused an app uid, so the one place it works is the privileged process - which is
-        // also why this is a transaction rather than a shell command a caller could run
+        // 手机自己的屏上由应用进程自己起: PackageManager 问 launcher activity, Context 发出去,
+        // 特权通道与虚拟屏都不参与 (12-1). 虚拟屏则相反: 应用进程放不上去, 只有特权 `am` 那一条
+        // (12-3) —— 走哪半边由 [DeviceActionBroker.launchRoute] 回答, 不在这里各写一份
         "launch" -> {
             val screen = namedScreen(request)
             VirtualScreen.requireAcceptsControl(screen)
             val asked = request["package"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val component = request["component"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            // 手里往往只有一个名字 ("设置" / "哔哩哔哩"), 而 am 要的是包名: 能唯一对上就用它, 一个都
+            // 手里往往只有一个名字 ("设置" / "哔哩哔哩"), 而两边要的都是包名: 能唯一对上就用它, 一个都
             // 对不上就按原样交下去 (那是调用方自己知道的包名), 对上不止一个就什么都不起
             val packageName = if (component.isBlank()) resolvePackage(asked) else asked
             // 双开的那份与原版同名同组件, 只有 userId 不同, 所以"起哪一个"就是这一个数字
             val userId = (request["user"]?.jsonPrimitive?.intOrNull ?: 0).coerceAtLeast(0)
-            val timeoutMs = (request["timeoutMs"]?.jsonPrimitive?.longOrNull ?: DEFAULT_LAUNCH_MS)
-                .coerceIn(MIN_LAUNCH_MS, MAX_LAUNCH_MS)
-            val service = PrivilegedChannel.ensure()
-                ?: throw IllegalStateException(
-                    PrivilegedChannel.state().error ?: "the privileged channel is not available",
-                )
-            val (code, output) = service.launch(
-                displayId = screen.displayId,
-                userId = userId,
-                packageName = packageName,
-                component = component,
-                timeoutMs = timeoutMs,
-            )
-            buildJsonObject {
-                put("displayId", screen.displayId)
-                put("label", screen.label)
-                put("package", packageName)
-                put("asked", if (packageName == asked) "" else asked)
-                put("component", component)
-                put("user", userId)
-                put("code", code)
-                put("started", code == 0 && output.contains(STARTED_MARK))
-                // 起完自查一次窗口: 见 waitForWindow 上那段。**无障碍没开时不下这个结论** —— 那时
-                // 窗口列表根本读不到, "没有窗口"与"读不到窗口"是两件事, 而前者会让模型白白去重建屏
-                val window = if (LwAccessibility.running) waitForWindow(screen.displayId) else null
-                put("windowOnDisplay", window)
-                when (window) {
-                    false -> put(
-                        "windowNote",
-                        "the launch was accepted but displayId ${screen.displayId} still has no" +
-                            " window on it. An app that is already running keeps its window where it" +
-                            " already is - $packageName is most likely up on the phone's own screen or" +
-                            " on another screen of ours. Either name that screen instead, or make a" +
-                            " fresh one (lw_screen_create) and launch again: a second launch on the" +
-                            " same screen does not move the running window onto it.",
-                    )
-
-                    null -> put(
-                        "windowNote",
-                        "the launch was accepted, and this answer cannot say whether anything is on" +
-                            " displayId ${screen.displayId}: that check reads the accessibility" +
-                            " window list, and the accessibility service is off. Read the screen" +
-                            " back with lw_ui once it is on.",
-                    )
-
-                    true -> Unit
+            if (actions.launchRoute(screen.displayId) == DeviceRoute.NATIVE) {
+                appContext { context ->
+                    nativeLaunch(context, screen, asked, packageName, component, userId)
                 }
-                put("output", output.trim())
+            } else {
+                val timeoutMs = (request["timeoutMs"]?.jsonPrimitive?.longOrNull ?: DEFAULT_LAUNCH_MS)
+                    .coerceIn(MIN_LAUNCH_MS, MAX_LAUNCH_MS)
+                val service = PrivilegedChannel.ensure()
+                    ?: throw IllegalStateException(
+                        PrivilegedChannel.state().error ?: "the privileged channel is not available",
+                    )
+                val (code, output) = service.launch(
+                    displayId = screen.displayId,
+                    userId = userId,
+                    packageName = packageName,
+                    component = component,
+                    timeoutMs = timeoutMs,
+                )
+                buildJsonObject {
+                    put("displayId", screen.displayId)
+                    put("label", screen.label)
+                    put("package", packageName)
+                    put("asked", if (packageName == asked) "" else asked)
+                    put("component", component)
+                    put("user", userId)
+                    put("route", DeviceRoute.VIRTUAL_SCREEN)
+                    put("via", "privileged am")
+                    put("code", code)
+                    put("started", code == 0 && output.contains(STARTED_MARK))
+                    // 起完自查一次窗口: 见 waitForWindow 上那段。**无障碍没开时不下这个结论** —— 那时
+                    // 窗口列表根本读不到, "没有窗口"与"读不到窗口"是两件事, 而前者会让模型白白去重建屏
+                    val window = if (LwAccessibility.running) waitForWindow(screen.displayId) else null
+                    put("windowOnDisplay", window)
+                    when (window) {
+                        false -> put(
+                            "windowNote",
+                            "the launch was accepted but displayId ${screen.displayId} still has no" +
+                                " window on it. An app that is already running keeps its window where it" +
+                                " already is - $packageName is most likely up on the phone's own screen or" +
+                                " on another screen of ours. Either name that screen instead, or make a" +
+                                " fresh one (lw_screen_create) and launch again: a second launch on the" +
+                                " same screen does not move the running window onto it.",
+                        )
+
+                        null -> put(
+                            "windowNote",
+                            "the launch was accepted, and this answer cannot say whether anything is on" +
+                                " displayId ${screen.displayId}: that check reads the accessibility" +
+                                " window list, and the accessibility service is off. Read the screen" +
+                                " back with lw_ui once it is on.",
+                        )
+
+                        true -> Unit
+                    }
+                    put("output", output.trim())
+                }
             }
         }
 
@@ -1019,7 +1113,8 @@ object PrivilegedBridge {
         "speak" -> appContext { LwSpeak.dispatch(it, request) }
         "overlay" -> appContext { LwOverlay.dispatch(it, request) }
         "wakeword" -> appContext { LwWakeWord.dispatch(it, request) }
-        "syscmd" -> LwSystemCommand.dispatch(request)
+        // 原生优先那条路要一个 Context 才能发 Intent (B3-b ⑥); 特权那一半不读它
+        "syscmd" -> appContext { LwSystemCommand.dispatch(it, request) }
         // Linux 沙盒 (装 / 跑 / 问 / 删): 命令形状写死在特权那一侧 (见 LwLinuxSandbox), 这一侧只
         // 负责把随包的 base 抄出自己的 data 目录、把 work 过一道形状, 以及通道不在线时也能答的那半个状态
         "linux" -> LwLinux.dispatch(request)
@@ -1122,6 +1217,88 @@ object PrivilegedBridge {
         return block(context)
     }
 
+    /** 快应用的探测答案: `lw_capabilities` 里那一小块与 `lw_quickapp op=probe` 同一个形状 */
+    private fun JsonObjectBuilder.putQuickAppProbe(probe: QuickAppCapability.Probe) {
+        put("ready", probe.ready)
+        put("handlerPackage", probe.handlerPackage)
+        put("handlerComponent", probe.handlerComponent)
+        put("link", probe.link)
+        put("scheme", probe.scheme)
+        putJsonArray("tried") { probe.tried.forEach { add(it) } }
+        put("reason", probe.reason)
+    }
+
+    /**
+     * 一条直连动作此刻的状态
+     *
+     * 只有能马上回答的那几条才真的去问: 日历看权限, 通知 / 媒体看监听服务, 无障碍看服务, 打开
+     * 链接 / 闹钟 / 拨号看有没有应用接得下那个 Intent, 快应用看 runtime. "依赖调用时才有的东西"
+     * (要打开哪个应用、此刻有没有媒体在放) 一律写 on_demand, 不假装知道
+     *
+     * @returns 状态词与一句说明; 状态词是 `ready` / `needs_permission` / `unsupported` / `on_demand`
+     */
+    private fun capabilityState(
+        context: Context,
+        action: DeviceAction,
+        quickApp: QuickAppCapability.Probe,
+    ): Pair<String, String> = when (action.name) {
+        "quick_app" -> if (quickApp.ready) {
+            STATE_READY to ""
+        } else {
+            STATE_UNSUPPORTED to quickApp.reason
+        }
+
+        "calendar" -> if (
+            context.checkSelfPermission(Manifest.permission.READ_CALENDAR) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "calendar access has not been granted; grant it in the app's permissions"
+        }
+
+        "notifications" -> if (LwNotificationListener.running) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "notification access is off; turn it on in system settings"
+        }
+
+        "ui_tap" -> if (LwAccessibility.running) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "the accessibility service is off; turn it on in system settings"
+        }
+
+        "open_url" -> resolvableState(
+            context,
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
+            action.failureReason,
+        )
+
+        "alarm" -> resolvableState(context, Intent(AlarmClock.ACTION_SET_ALARM), action.failureReason)
+        "dial" -> resolvableState(context, Intent(Intent.ACTION_DIAL), action.failureReason)
+        "app_settings" -> STATE_READY to ""
+        "open_app" -> "on_demand" to "true for an app that is installed; lw_apps lists them"
+        "media" -> "on_demand" to "true while something is playing on the phone"
+        else -> "unknown" to ""
+    }
+
+    /** 有没有应用接得下这个 Intent; 问不到时如实说问不到, 不猜"没有" */
+    private fun resolvableState(
+        context: Context,
+        intent: Intent,
+        failure: String,
+    ): Pair<String, String> = try {
+        if (context.packageManager.queryIntentActivities(intent, 0).isEmpty()) {
+            STATE_UNSUPPORTED to failure
+        } else {
+            STATE_READY to ""
+        }
+    } catch (problem: Throwable) {
+        Log.w(TAG, "could not ask who answers ${intent.action}", problem)
+        "unknown" to (problem.message ?: "the package manager did not answer")
+    }
+
     /**
      * The screen one request names
      *
@@ -1145,8 +1322,8 @@ object PrivilegedBridge {
     /**
      * 等这块屏上出现窗口, 给 `lw_launch` 用来自查
      *
-     * `am start -W` 等到 activity 起来就返回, 而窗口进无障碍那份窗口列表要再晚一点, 所以这里是问几次
-     * 而不是问一次就下结论 —— 否则一个慢一点的启动会被说成"什么都没有"
+     * `am start -W` 与 `startActivity` 都只保证请求被收下, 而窗口进无障碍那份窗口列表要再晚一点, 所以
+     * 这里是问几次而不是问一次就下结论 —— 否则一个慢一点的启动会被说成"什么都没有"
      */
     private fun waitForWindow(displayId: Int): Boolean {
         val deadline = System.currentTimeMillis() + WINDOW_SETTLE_MS
@@ -1156,6 +1333,96 @@ object PrivilegedBridge {
             Thread.sleep(WINDOW_POLL_MS)
         }
     }
+
+    /**
+     * 手机自己的屏上起一个应用: 应用进程里的 PackageManager + Context
+     *
+     * 与特权 `am` 那一段回答同一个形状, 好让宿主插件不必按半边写两套话. 差别只有两处: 这里是
+     * `startActivity` 立即返回 (没有 `-W` 可等), 所以窗口要自己问几次; 以及**双开那一档做不到** ——
+     * 一个应用进程只能起自己那个用户里的东西, 别的用户要么交给虚拟屏那一档, 要么明确说不
+     */
+    private fun nativeLaunch(
+        context: Context,
+        screen: ScreenState,
+        asked: String,
+        packageName: String,
+        component: String,
+        userId: Int,
+    ): JsonObject {
+        val outcome = if (userId != LwApps.ownUser) {
+            DeviceNativeStart.Outcome(
+                started = false,
+                packageName = outcomePackage(asked, packageName, component),
+                component = component,
+                reason = "a cloned app lives in another Android user ($userId), and this app's own" +
+                    " process can only start apps as user ${LwApps.ownUser}: start it on a virtual" +
+                    " screen instead (lw_screen_create, then lw_launch with that displayId and" +
+                    " user=$userId)",
+            )
+        } else {
+            DeviceNativeStart.launch(context, packageName, component)
+        }
+        // 起完自查一次窗口: `startActivity` 不等窗口, 所以这里问几次再下结论; 无障碍没开时窗口列表
+        // 读不到, 那一种 answer 不知道, 不能当成"没有窗口"
+        val window = if (outcome.started && LwAccessibility.running) {
+            waitForWindow(screen.displayId)
+        } else {
+            null
+        }
+        val started = outcome.component.ifBlank {
+            outcome.packageName.ifBlank { packageName }
+        }
+        return buildJsonObject {
+            put("displayId", screen.displayId)
+            put("label", screen.label)
+            put("package", outcome.packageName.ifBlank { packageName })
+            put("asked", if (packageName == asked) "" else asked)
+            put("component", outcome.component.ifBlank { component })
+            put("user", userId)
+            put("route", DeviceRoute.NATIVE)
+            put("via", "package manager")
+            put("code", if (outcome.started) 0 else 1)
+            put("started", outcome.started)
+            put(
+                "output",
+                if (outcome.started) {
+                    "started $started through the package manager in this app's own process;" +
+                        " no privileged channel and no virtual screen were used"
+                } else {
+                    outcome.reason
+                },
+            )
+            put("windowOnDisplay", window)
+            when {
+                !outcome.started -> put(
+                    "windowNote",
+                    "nothing was started, so there is no new window to read; the reason above is" +
+                        " the package manager's own answer",
+                )
+
+                window == false -> put(
+                    "windowNote",
+                    "the start was accepted but displayId 0 still has no window on it. An app" +
+                        " that is already running keeps its window where it already is - it may be" +
+                        " up on one of our virtual screens. Name that screen if you meant to act on" +
+                        " the copy that is already there.",
+                )
+
+                window == null -> put(
+                    "windowNote",
+                    "the start was accepted, and this answer cannot say whether anything is on" +
+                        " displayId 0: that check reads the accessibility window list, and the" +
+                        " accessibility service is off. Read the screen back with lw_ui once it is on.",
+                )
+
+                else -> Unit
+            }
+        }
+    }
+
+    /** 组件那条的包名从组件里取; 只有包名时就是它自己 */
+    private fun outcomePackage(asked: String, packageName: String, component: String): String =
+        component.substringBefore('/').ifBlank { packageName.ifBlank { asked } }
 
     /**
      * 等这块屏上出现能打字的字段, 给"先按一下再打字"那条路用
@@ -1456,6 +1723,10 @@ object PrivilegedBridge {
 
     /** More apps than this in one answer is a listing nobody reads, so it is cut and said so */
     private const val MAX_APPS = 400
+
+    /** `lw_capabilities` 里那两条会说两遍的状态词 (别的状态只有一处用, 就地写) */
+    private const val STATE_READY = "ready"
+    private const val STATE_UNSUPPORTED = "unsupported"
 
     /** How many of an ambiguous name's candidates are named back, matching pressing by name */
     private const val MAX_CANDIDATES = 12
