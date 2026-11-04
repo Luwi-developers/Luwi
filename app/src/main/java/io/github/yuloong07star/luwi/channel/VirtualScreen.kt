@@ -220,6 +220,8 @@ object VirtualScreen {
                     screens = listOf(screen)
                     selected = screen
                     lastError = null
+                    // 记下这块屏多大: 重启之后 [ReadyCard] 照着它重建, 而不是赌设备默认尺寸
+                    application?.let { RecoveryStore.remember(it, screen) }
                     made = screen
                 } catch (problem: Throwable) {
                     frame.close()
@@ -282,6 +284,9 @@ object VirtualScreen {
                 screens = screens.map { if (it.displayId == screen.displayId) updated else it }
                 if (selected?.displayId == screen.displayId) selected = updated
                 lastError = null
+                // 记下这块屏现在多大: 重启之后 [ReadyCard] 要照着这个尺寸把它重建回来, 而不是
+                // 赌设备默认尺寸 (有人特意换过比例的屏, 重建成别的比例就是另一块屏了)
+                application?.let { RecoveryStore.remember(it, updated) }
                 resized = updated
             }.get(CREATE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             resized

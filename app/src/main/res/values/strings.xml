@@ -154,6 +154,11 @@
     <string name="settings_ready_connect">Connect Shizuku</string>
     <string name="settings_ready_turn_on">Turn accessibility on</string>
     <string name="settings_ready_create">Create a virtual screen</string>
+    <string name="settings_ready_recover_title">Needs a repair</string>
+    <string name="settings_ready_recover_action">Repair everything</string>
+    <string name="settings_ready_recover_working">Repairing...</string>
+    <string name="settings_ready_recover_channel">The Shizuku process is not running and only you can start it: open Shizuku, then come back here.</string>
+    <string name="settings_ready_recover_accessibility">This device refused the write: turn the service on in accessibility settings, then come back here.</string>
     <string name="settings_channel_autostart">Allow Luwi to start on boot</string>
     <string name="settings_channel_autostart_summary">Opens the system page; this row only navigates, it changes nothing</string>
     <string name="settings_channel_autostart_failed">This device has no page to open for it</string>
