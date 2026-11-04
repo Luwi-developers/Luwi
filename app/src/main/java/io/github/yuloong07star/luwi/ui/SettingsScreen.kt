@@ -555,6 +555,10 @@ fun SettingsScreen() {
                     }
                 }
 
+                // ReadyCard 自己画那张卡: 这里再包一层 Card 就成了卡里套卡, 而全绿时它整块不画,
+                // 留下的会是一张有底色、有内边距、里面什么都没有的空卡
+                item { ReadyCard() }
+
                 settingsSection(
                     key = "channel",
                     title = R.string.settings_section_channel,
