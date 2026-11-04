@@ -296,6 +296,8 @@
     <string name="settings_ball_translucent_summary">闲着 5 秒后整颗球淡到一半不透明度, 不那么挡屏幕底下的东西; 碰一下立刻回到全不透明, 说与听时那口呼吸照旧</string>
     <string name="settings_ball_peek">半藏</string>
     <string name="settings_ball_peek_summary">再闲一会儿 (5 秒) 就把球挪一半到屏幕外, 碰一下滑回来; 关掉它就一直在那儿露着, 只有你拖它才动</string>
+    <string name="settings_ball_tap_voice">点击语音输入</string>
+    <string name="settings_ball_tap_voice_summary">开: 点一下球就进语音; 关掉后点球不说话, 只当普通点击 (长按照旧弹菜单)</string>
     <string name="settings_ball_state_up">球在屏幕上, 停在%1$s</string>
     <string name="settings_ball_state_down">球现在不在屏幕上</string>
     <string name="settings_ball_permission">缺「显示在其他应用上层」这条权限, 上面那个开关打开也不会出现</string>
@@ -332,12 +334,9 @@
     <string name="ball_balance_bonus">赠金 %1$s</string>
     <string name="ball_balance_just_now">刚刚</string>
     <string name="ball_balance_minutes">%1$d 分钟前</string>
-    <string name="ball_balance_stale">可能不是最新的</string>
     <string name="ball_balance_pending">正在取余额…</string>
-    <string name="ball_balance_refreshing">正在刷新…</string>
     <string name="ball_balance_unsupported">当前模型不支持查询余额</string>
     <string name="ball_balance_failed">余额拿不到: %1$s</string>
-    <string name="ball_balance_retry">正在重试…</string>
     <string name="ball_balance_no_answer">宿主还没回音, 再点一次「看余额」</string>
     <string name="ball_menu_release_camera">释放视频模式</string>
     <string name="ball_menu_close">关掉浮标</string>

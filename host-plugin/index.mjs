@@ -2612,7 +2612,10 @@ const TOOLS = [
       + 'lw_screen_create takes a width and a height - because an app that declares an orientation '
       + 'of its own keeps it and sits in a band in the middle of a screen shaped the other way. Use '
       + 'this rather than a shell: the am command refuses an app uid on this device, so a launch '
-      + 'attempted from a shell fails. Call lw_ui or lw_screenshot after it to see the result.',
+      + 'attempted from a shell fails. **On the phone\'s own screen (displayId 0) the app is started '
+      + 'through the package manager in Luwi\'s own process**, so no privileged channel and no '
+      + 'virtual screen are involved; only a virtual screen needs the privileged am. Call lw_ui or '
+      + 'lw_screenshot after it to see the result.',
     parameters: {
       displayId: DISPLAY_ID,
       package: {
@@ -3146,8 +3149,10 @@ const TOOLS = [
       + ' when the user named something more specific: a mail composer (android.intent.action.SENDTO'
       + ' with a mailto: address), a settings page of another app, a specific class. The screen is'
       + ' named the same way every other acting tool names one, and the activity lands on it.'
-      + ' Nothing here is a shell: the one command this reaches is `am start`, with an action, a'
-      + ' piece of data, a component and a display.',
+      + ' On the phone\'s own screen (displayId 0) the intent is handed to Android from Luwi\'s own'
+      + ' process, so no privileged channel and no virtual screen are involved; on a virtual screen'
+      + ' it reaches the privileged `am start`, with an action, a piece of data, a component and a'
+      + ' display.',
     parameters: {
       op: {
         type: 'string',
@@ -5296,14 +5301,22 @@ function formatLaunched(result, note) {
   const target = result.package || result.component
   const whose = result.user > 0 ? ` as user ${result.user}` : ''
   const from = result.asked ? ` (from ${JSON.stringify(result.asked)})` : ''
+  // 走的哪半边: 手机自己的屏是应用进程里的 PackageManager, 虚拟屏才是特权 am (B3-b ⑤⑦)
+  const via = result.via ? ` via ${result.via}` : ''
   const lines = result.started === true
-    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"`]
+    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"${via}`]
     : [
       `the launch of ${target}${from}${whose} on displayId ${result.displayId} did not report`
-      + ` success (am exited ${result.code}); what it said follows`,
+      + ` success (${result.route === 'native' ? 'the package manager refused it' : `am exited ${result.code}`});`
+      + ' what it said follows',
     ]
   const output = (result.output ?? '').trim()
   if (output) lines.push(output)
+  // 没起成时下面那段"读回屏幕"没有意义: 没有新窗口可读, 原因已经在上面
+  if (result.started !== true) {
+    if (result.windowNote) lines.push(result.windowNote)
+    return said(lines.join('\n'), note)
+  }
   // 起完的自查: `am start` 报成功不等于窗口落在这块屏上, 而"没有窗口"这件事以前只有模型自己去发现
   // (windowOnDisplay 为 null 表示这次查不了: 无障碍没开, 窗口列表读不到)
   if (result.windowOnDisplay === false || result.windowOnDisplay === null) {
