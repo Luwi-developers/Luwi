@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,11 +28,19 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.ChannelSetting
+import io.github.yuloong07star.luwi.channel.RecoveryOutcome
+import io.github.yuloong07star.luwi.channel.RecoveryRunner
+import io.github.yuloong07star.luwi.channel.RecoveryStep
+import io.github.yuloong07star.luwi.channel.RecoveryStore
 import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import kotlinx.coroutines.Dispatchers
@@ -75,6 +84,19 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
     // 所以按钮自己得挡住连点, 否则点三下就是三块屏
     var creating by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    // 这台机器全绿过没有。它在"缺东西"这条路上分出两种人: 第一次装的人要的是引导, 用过一阵又掉了
+    // 的人要的是**把掉的东西弄回来**。两种在状态上完全一样, 只有这个过去的记号分得开
+    //
+    // 读一次就记住: 组合里每帧读 SharedPreferences 是不必要的, 而它一旦为真就不会再变回假
+    var everReady by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { everReady = RecoveryStore.ready(context) }
+    // 正在恢复, 以及现在走到哪一步 —— 按钮上那句话以及"为什么它灰着"都来自这里
+    var recovering by remember { mutableStateOf(false) }
+    var recoveringStep by remember { mutableStateOf<RecoveryStep?>(null) }
+    // 恢复停在哪一步等人。它同时是「从别处回来要不要接着跑」的开关: 没人去点的那几步不点就永远不通
+    var waitingAt by remember { mutableStateOf<RecoveryStep?>(null) }
+
     LaunchedEffect(Unit) {
         // 进页面时读一次。两者都不在主线程上做事: 读一次要起几个 settings/cmd 子进程
         ChannelSetting.refresh()
@@ -116,6 +138,11 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
 
     val missing = steps.count { !it.done }
 
+    // 这张卡以「缺东西」的身份出现, 而这台机器以前全绿过: 那它说的是「需要恢复一下」
+    //
+    // 算出来的, 不存: 恢复跑完之后 missing 落到 0, 它自己就变回 false, 不需要谁去清
+    val recoverMode = everReady && missing > 0
+
     // 入场进度 0→1: 一次性, 不跟随状态刷新重播 (remember 跨重组保留, 只有真的离开这页再回来才重来)
     val appear = remember { Animatable(0f) }
     // 这张卡在这页上"露过面"没有。它决定全绿时是直接不画 (本来就没露过) 还是先亮一下再收
@@ -139,6 +166,56 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
             appear.animateTo(0f, tween(durationMillis = 220, easing = FastOutSlowInEasing))
             shown = false
         }
+        // 真的全绿过一次就记下来: 以后这张卡再出现时, 它该是「需要恢复一下」而不是「开始使用」
+        if (missing == 0) {
+            RecoveryStore.markReady(context)
+            everReady = true
+        }
+    }
+
+    /**
+     * 动手恢复。参数是"要不要把人送到该去的地方"
+     *
+     * 点按钮那一次要送 (卡住了就得让他去点), 而从别的页面回来那一次不能送 —— 否则人一从 Shizuku
+     * 回来就又被弹出去, 永远回不到这一页
+     */
+    val startRecovery: (Boolean) -> Unit = { openWhenNeeded ->
+        if (!recovering) {
+            recovering = true
+            waitingAt = null
+            scope.launch {
+                val outcome = RecoveryRunner.run(context) { step -> recoveringStep = step }
+                recovering = false
+                recoveringStep = null
+                when (outcome) {
+                    // 三项都办了: missing 自己会变 0, 卡片按原来那套亮一下再收
+                    RecoveryOutcome.Done -> Unit
+                    is RecoveryOutcome.NeedsUser -> {
+                        waitingAt = outcome.step
+                        if (openWhenNeeded) {
+                            when (outcome.step) {
+                                // 只有把人送到 Shizuku 那个 App 里, 才可能把它再拉起来; 拉不起来
+                                // (走 root 那条路的机器上根本没有它) 就什么都不做, 卡片上那句
+                                // 说明已经说清了要去点一下
+                                RecoveryStep.CHANNEL -> RecoveryRunner.openChannelApp(context)
+                                else -> RecoveryRunner.openAccessibilitySettings(context)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 从 Shizuku / 无障碍页回来就接着跑: 只有人在那边点完了, 这边才可能通, 而回来这一下正是那个
+    // 信号 (与设置页那几处 ON_RESUME 同一个做法, 用的是已有依赖, 不另引一套)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && waitingAt != null) startRecovery(false)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // 还没读到就不画: 两个 state 的初值都是 null, 否则刚进页面会闪一下"还差 3 项", 一帧后变少
@@ -165,7 +242,11 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = stringResource(R.string.settings_ready_title, steps.size - missing, steps.size),
+                    text = if (recoverMode) {
+                        stringResource(R.string.settings_ready_recover_title)
+                    } else {
+                        stringResource(R.string.settings_ready_title, steps.size - missing, steps.size)
+                    },
                     modifier = Modifier.weight(1f),
                 )
                 ReadyRing(done = steps.size - missing, total = steps.size)
@@ -183,6 +264,26 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
             // 只给**下一步该做的那一件**一个按钮。三项各给一个按钮的话, 用户会按顺序全按一遍, 而第二、
             // 三个按下去只会报"特权通道还没通"
             when {
+                // 老用户掉线: 只给一个按钮, 它自己按依赖顺序把三件事办完。三件事里有两步可能停在人
+                // 身上 (重启后 Shizuku 那个进程没人能替他拉起来), 那时候按钮下面那句话会说清去哪
+                recoverMode -> Button(
+                    onClick = { startRecovery(true) },
+                    enabled = !recovering,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = UiSpacing.Medium),
+                ) {
+                    Text(
+                        text = stringResource(
+                            if (recovering) {
+                                R.string.settings_ready_recover_working
+                            } else {
+                                R.string.settings_ready_recover_action
+                            },
+                        ),
+                    )
+                }
+
                 channel?.connected != true -> Button(
                     onClick = { ChannelSetting.connect() },
                     enabled = !ChannelSetting.working,
@@ -223,6 +324,23 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
                 ) {
                     Text(text = stringResource(R.string.settings_ready_create))
                 }
+            }
+
+            // 停在某一步等人时, 说清那个动作在哪 —— "去设置里开一下"这句没用, 卡在哪一步才是他要知道的
+            val stuck = waitingAt
+            if (recoverMode && stuck != null) {
+                Text(
+                    text = stringResource(
+                        when (stuck) {
+                            // 通道那一步: 能自动的都试过了, 只有人能在 Shizuku 里把它启动起来
+                            RecoveryStep.CHANNEL -> R.string.settings_ready_recover_channel
+                            else -> R.string.settings_ready_recover_accessibility
+                        },
+                    ),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(top = UiSpacing.Small),
+                )
             }
         }
     }

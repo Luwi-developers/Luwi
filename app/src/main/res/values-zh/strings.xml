@@ -153,6 +153,11 @@
     <string name="settings_ready_connect">连接 Shizuku</string>
     <string name="settings_ready_turn_on">打开无障碍</string>
     <string name="settings_ready_create">建一块虚拟屏</string>
+    <string name="settings_ready_recover_title">需要恢复一下</string>
+    <string name="settings_ready_recover_action">一键恢复</string>
+    <string name="settings_ready_recover_working">正在恢复...</string>
+    <string name="settings_ready_recover_channel">Shizuku 那个进程没在跑, 这一步只能你去点: 打开 Shizuku, 回来接着弄</string>
+    <string name="settings_ready_recover_accessibility">这台设备拒绝了写入: 去无障碍设置里自己打开那个开关, 回来接着弄</string>
     <string name="settings_channel_autostart">允许 Luwi 自启动</string>
     <string name="settings_channel_autostart_summary">只是一行跳转: 去系统那一页自己点, 应用不改任何开关</string>
     <string name="settings_channel_autostart_failed">这台设备上没有能打开的那一页</string>
