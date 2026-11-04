@@ -395,22 +395,22 @@ check(
   [true, true],
 )
 
-/* ── 六、设置页那个刷新按钮 (2026-10-17 主人: 改完设置当场生效) ───────────── */
+/* ── 六、设置页那个刷新按钮 (2026-10-17 加; 2026-11-04 主人 #4 撤掉了) ──────── */
 
 check(
-  '刷新按钮在「更多」左边, 而且真的把那一页重读一遍',
+  '设置页右上角那个刷新的圆图标没了, 连它的 reload 计数也一起撤了',
   [
-    settings.includes('MiuixIcons.Refresh'),
-    settings.includes('var reload by remember { mutableIntStateOf(0) }'),
-    settings.includes('key(reload) {'),
-    settings.includes('reload += 1'),
-    settings.includes('R.string.settings_refreshed'),
-    settings.includes('R.string.settings_refresh'),
+    !settings.includes('MiuixIcons.Refresh'),
+    !settings.includes('var reload by remember { mutableIntStateOf(0) }'),
+    !settings.includes('key(reload) {'),
+    !settings.includes('reload += 1'),
+    !settings.includes('R.string.settings_refreshed'),
+    !settings.includes('R.string.settings_refresh'),
   ],
   [true, true, true, true, true, true],
 )
 check(
-  '刷新那两条文案两份 strings 都有 (键与顺序由上面那份 ball_* 判据之外单看)',
+  '刷新那两条文案仍在两份 strings 里 (撤的是入口, 不是文案; 私有树那一份可能还在引)',
   [
     en.includes('name="settings_refresh">Refresh<'),
     zh.includes('name="settings_refresh">刷新<'),

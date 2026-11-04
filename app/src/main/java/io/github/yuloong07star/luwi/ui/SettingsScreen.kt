@@ -178,7 +178,6 @@ import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.More
-import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.menu.OverlayIconDropdownMenu
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
@@ -360,11 +359,12 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val settings = ThemeStore.current
     val scrollBehavior = MiuixScrollBehavior()
-    // 右上角那个刷新 (2026-10-17 主人): 这一页里那些"进页面读一次"的设置都活在下面那棵子树的
-    // remember 里 (同步 / 视频模式模型 / 模型目录 / 各个偏好), 加一下这个数就把它们整棵重建一遍 ——
-    // 每个 remember 重新去读文件, 每个 LaunchedEffect(Unit) 重新跑一次。收起来的那几段是
-    // rememberSaveable, 刷新不动它 (那记的是"看哪儿", 不是数据)
-    var reload by remember { mutableIntStateOf(0) }
+    // **右上角那个刷新按钮 2026-11-04 去掉了** (主人 #4): 它原来做的是把下面那棵子树整棵重建一遍 ——
+    // 这一页那些"进页面读一次"的设置都活在各自的 remember / LaunchedEffect(Unit) 里, 加一下计数就
+    // 让每个 remember 重新读一次文件、每个效果体重新跑一次 (收起来的那几段是 rememberSaveable,
+    // 记的是"看哪儿"不是数据, 刷新本来也不动它)。现在只剩"进页面读一次"这一条路: 要重读某一项,
+    // 退出设置页再进来; 要看"还差什么没办", 走最上面那一行「检查所需依赖」
+
     // ⋮ 里那几件事 (反馈 / 检测更新 / 关于 …) 共用这一个"现在开着哪一页"的记号, null = 都没开
     // 同一刻只画一个对话框, 见 AboutDialogs 的文件头
     var about by remember { mutableStateOf<AboutPage?>(null) }
@@ -382,9 +382,14 @@ fun SettingsScreen() {
         sessionCollapsed = collapsed
     }
 
+    // 「检查所需依赖」那一行弹出来的那张体检表 (2026-11-04 主人 #1②/#2): 与首启那个对话框是同一个
+    // ([ReadyCardDialog]), 只是这里随时打得开
+    var readyOpen by remember { mutableStateOf(false) }
+
     // 「酒馆」那一段的摘要要**在收起时就对** (未绑定 / 已绑定 / 不匹配 / 关着), 所以读一次读数这件事
-    // 挂在这一层, 不挂在段里 —— 段里的 LaunchedEffect 只有展开之后才会跑
-    LuwiTavern.summaryEffect(reload)
+    // 挂在这一层, 不挂在段里 —— 段里的 LaunchedEffect 只有展开之后才会跑。
+    // 参数是"重读的计数", 原来由右上角那个刷新按钮 +1 (2026-11-04 去掉); 现在恒为 0, 只读一次
+    LuwiTavern.summaryEffect(0)
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -409,17 +414,10 @@ fun SettingsScreen() {
                 // 点开必白页; 真要看/操作电脑那份 GUI, 走浏览器与「（PC）」影子工作区那两条路
                 // (插件侧名片与 `/sync peers` 不受影响, 那两样是 G1-D 的读数面)
                 actions = {
-                    // 「更多」左边那一个刷新 (2026-10-17 主人): 把这一页的设置当场重读一遍, 不必退出去
-                    // 再进来 —— 改完**要重启 host** 的那几项仍然要重启 (那是另一件事, 仍在右边那个 ⋮ 里)
-                    IconButton(onClick = {
-                        reload += 1
-                        Toast.makeText(context, R.string.settings_refreshed, Toast.LENGTH_SHORT).show()
-                    }) {
-                        Icon(
-                            imageVector = MiuixIcons.Refresh,
-                            contentDescription = stringResource(R.string.settings_refresh),
-                        )
-                    }
+                    // 原来这里还有一个刷新的圆图标 (2026-10-17 加的): 2026-11-04 主人 #4 把它去掉了 ——
+                    // 它干的活是"把这一页的设置当场重读一遍", 而这一页现在没有"改完要不要重读"这种
+                    // 悬念了 (改完立刻生效的那几项本来就不靠它; 要重启 host 的那几项仍在下面 ⋮ 里)。
+                    // 替代: 退出设置页再进来, 每段会照常"进页面读一次"
                     OverlayIconDropdownMenu(
                         entry = DropdownEntry(
                             items = listOf(
@@ -475,310 +473,320 @@ fun SettingsScreen() {
             )
         },
     ) { innerPadding ->
-        key(reload) {
-            LazyColumn(
-                contentPadding = innerPadding,
-                scrollBehavior = scrollBehavior,
-            ) {
-                // **省电那一段单独排在第一个** (主人 2026-10-08: "省电模式单独拿出来放第一排"): 它原本是
-                // 「唤醒词」里的三行, 而"现在别听我说话"这件事与唤醒词本身是两笔账 —— 一个是许可, 一个是
-                // 此刻的开关 (见 [PowerItems])。它自己一段之后, 要静音一次不必先展开唤醒词那一段
-                settingsSection(
-                    key = "power",
-                    title = R.string.settings_section_power,
-                    summary = R.string.settings_section_power_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { PowerItems() }
+        LazyColumn(
+            contentPadding = innerPadding,
+            scrollBehavior = scrollBehavior,
+        ) {
+            // **「检查所需依赖」放在「省电」那一段上方** (2026-11-04 主人 #1②): 一行, 点一下把那张体检表
+            // 居中弹出来 —— 与首启自动弹的那一次是同一个对话框 ([ReadyCardDialog]), 所以想再看一遍
+            // "还差什么没开"不必等下一次冷启动。它自己一张卡, 不归哪一段 (没有可收起的标题)
+            item {
+                Card {
+                    ArrowPreference(
+                        title = stringResource(R.string.ready_check),
+                        summary = stringResource(R.string.ready_check_summary),
+                        onClick = { readyOpen = true },
+                    )
                 }
+            }
 
-                // 两层分组的第一层 (2026-10-08 主人: "优化设置页排版"): 上面这一组是"天天要碰的",
-                // 下面那一组是"装完之后偶尔来调一次的能力", 而权限那一段仍然单独放在最后
-                item { GroupTitle(stringResource(R.string.settings_group_common)) }
+            // **省电那一段单独排在第一个** (主人 2026-10-08: "省电模式单独拿出来放第一排"): 它原本是
+            // 「唤醒词」里的三行, 而"现在别听我说话"这件事与唤醒词本身是两笔账 —— 一个是许可, 一个是
+            // 此刻的开关 (见 [PowerItems])。它自己一段之后, 要静音一次不必先展开唤醒词那一段
+            settingsSection(
+                key = "power",
+                title = R.string.settings_section_power,
+                summary = R.string.settings_section_power_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { PowerItems() }
+            }
 
-                settingsSection(
-                    key = "appearance",
-                    title = R.string.settings_section_appearance,
-                    summary = R.string.settings_section_appearance_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Column {
-                        TabRow(
-                            tabs = themeModes.map { stringResource(it) },
-                            selectedTabIndex = settings.mode.coerceIn(0, themeModes.lastIndex),
-                            onTabSelected = { ThemeStore.update(settings.copy(mode = it)) },
+            // 两层分组的第一层 (2026-10-08 主人: "优化设置页排版"): 上面这一组是"天天要碰的",
+            // 下面那一组是"装完之后偶尔来调一次的能力", 而权限那一段仍然单独放在最后
+            item { GroupTitle(stringResource(R.string.settings_group_common)) }
+
+            settingsSection(
+                key = "appearance",
+                title = R.string.settings_section_appearance,
+                summary = R.string.settings_section_appearance_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Column {
+                    TabRow(
+                        tabs = themeModes.map { stringResource(it) },
+                        selectedTabIndex = settings.mode.coerceIn(0, themeModes.lastIndex),
+                        onTabSelected = { ThemeStore.update(settings.copy(mode = it)) },
+                    )
+                    Spacer(modifier = Modifier.height(UiSpacing.ContentVertical))
+                    Card {
+                        SwitchPreference(
+                            title = stringResource(R.string.settings_monet),
+                            summary = stringResource(R.string.settings_monet_summary),
+                            checked = settings.monet,
+                            onCheckedChange = { ThemeStore.update(settings.copy(monet = it)) },
                         )
-                        Spacer(modifier = Modifier.height(UiSpacing.ContentVertical))
-                        Card {
-                            SwitchPreference(
-                                title = stringResource(R.string.settings_monet),
-                                summary = stringResource(R.string.settings_monet_summary),
-                                checked = settings.monet,
-                                onCheckedChange = { ThemeStore.update(settings.copy(monet = it)) },
+                        AnimatedVisibility(settings.monet) {
+                            OverlayDropdownPreference(
+                                title = stringResource(R.string.settings_monet_key_color),
+                                summary = stringResource(R.string.settings_monet_key_color_summary),
+                                items = MonetKeyColorOptions,
+                                selectedIndex = settings.seed.coerceIn(0, MonetKeyColorOptions.lastIndex),
+                                onSelectedIndexChange = { ThemeStore.update(settings.copy(seed = it)) },
                             )
-                            AnimatedVisibility(settings.monet) {
+                        }
+                        AnimatedVisibility(settings.monet && settings.seed > 0) {
+                            Column {
                                 OverlayDropdownPreference(
-                                    title = stringResource(R.string.settings_monet_key_color),
-                                    summary = stringResource(R.string.settings_monet_key_color_summary),
-                                    items = MonetKeyColorOptions,
-                                    selectedIndex = settings.seed.coerceIn(0, MonetKeyColorOptions.lastIndex),
-                                    onSelectedIndexChange = { ThemeStore.update(settings.copy(seed = it)) },
+                                    title = stringResource(R.string.settings_monet_palette_style),
+                                    summary = stringResource(R.string.settings_monet_palette_style_summary),
+                                    items = paletteStyles,
+                                    selectedIndex = settings.palette.coerceIn(0, paletteStyles.lastIndex),
+                                    onSelectedIndexChange = { ThemeStore.update(settings.copy(palette = it)) },
+                                )
+                                OverlayDropdownPreference(
+                                    title = stringResource(R.string.settings_monet_color_spec),
+                                    summary = stringResource(R.string.settings_monet_color_spec_summary),
+                                    items = colorSpecs,
+                                    selectedIndex = settings.spec.coerceIn(0, colorSpecs.lastIndex),
+                                    onSelectedIndexChange = { ThemeStore.update(settings.copy(spec = it)) },
                                 )
                             }
-                            AnimatedVisibility(settings.monet && settings.seed > 0) {
-                                Column {
-                                    OverlayDropdownPreference(
-                                        title = stringResource(R.string.settings_monet_palette_style),
-                                        summary = stringResource(R.string.settings_monet_palette_style_summary),
-                                        items = paletteStyles,
-                                        selectedIndex = settings.palette.coerceIn(0, paletteStyles.lastIndex),
-                                        onSelectedIndexChange = { ThemeStore.update(settings.copy(palette = it)) },
-                                    )
-                                    OverlayDropdownPreference(
-                                        title = stringResource(R.string.settings_monet_color_spec),
-                                        summary = stringResource(R.string.settings_monet_color_spec_summary),
-                                        items = colorSpecs,
-                                        selectedIndex = settings.spec.coerceIn(0, colorSpecs.lastIndex),
-                                        onSelectedIndexChange = { ThemeStore.update(settings.copy(spec = it)) },
-                                    )
-                                }
-                            }
-                            SwitchPreference(
-                                title = stringResource(R.string.settings_squircle),
-                                summary = stringResource(R.string.settings_squircle_summary),
-                                checked = settings.squircle,
-                                onCheckedChange = { ThemeStore.update(settings.copy(squircle = it)) },
-                            )
                         }
+                        SwitchPreference(
+                            title = stringResource(R.string.settings_squircle),
+                            summary = stringResource(R.string.settings_squircle_summary),
+                            checked = settings.squircle,
+                            onCheckedChange = { ThemeStore.update(settings.copy(squircle = it)) },
+                        )
                     }
                 }
+            }
 
-                // ReadyCard 自己画那张卡: 这里再包一层 Card 就成了卡里套卡, 而全绿时它整块不画,
-                // 留下的会是一张有底色、有内边距、里面什么都没有的空卡
-                item { ReadyCard() }
+            // 「开始使用」那张卡**不再挂在这一页中间** (2026-11-04 主人 #2): 它现在是一个居中对话框,
+            // 入口是页面最上面那一行「检查所需依赖」(首启另有一次自动弹, 见 [ReadyPrompt])
 
-                settingsSection(
-                    key = "channel",
-                    title = R.string.settings_section_channel,
-                    summary = R.string.settings_section_channel_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { ChannelItems() }
-                }
+            settingsSection(
+                key = "channel",
+                title = R.string.settings_section_channel,
+                summary = R.string.settings_section_channel_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { ChannelItems() }
+            }
 
-                // 浮标 / 唤醒词 / 说话 三段的顺序 (2026-10-08 一起排的): 先"球在不在", 再"喊一声", 最后
-                // "回答怎么念" —— 这正是第一次用的时候会依次碰到的三件事
-                settingsSection(
-                    key = "ball",
-                    title = R.string.settings_section_ball,
-                    summary = R.string.settings_section_ball_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { BallItems() }
-                }
+            // 浮标 / 唤醒词 / 说话 三段的顺序 (2026-10-08 一起排的): 先"球在不在", 再"喊一声", 最后
+            // "回答怎么念" —— 这正是第一次用的时候会依次碰到的三件事
+            settingsSection(
+                key = "ball",
+                title = R.string.settings_section_ball,
+                summary = R.string.settings_section_ball_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { BallItems() }
+            }
 
-                settingsSection(
-                    key = "wake",
-                    title = R.string.settings_section_wake,
-                    summary = R.string.settings_section_wake_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { WakeItems() }
-                }
+            settingsSection(
+                key = "wake",
+                title = R.string.settings_section_wake,
+                summary = R.string.settings_section_wake_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { WakeItems() }
+            }
 
-                settingsSection(
-                    key = "speak",
-                    title = R.string.settings_section_speak,
-                    summary = R.string.settings_section_speak_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { SpeakItems() }
-                }
+            settingsSection(
+                key = "speak",
+                title = R.string.settings_section_speak,
+                summary = R.string.settings_section_speak_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { SpeakItems() }
+            }
 
-                // 「模式与模型」那一段 (3.0.2 需求 2) 已并进「视频模式」那一段 (2026-10-16): 视频模式用
-                // 哪一个模型、走哪个端点, 与那台相机的参数是同一件事的两个面, 分两段反而要人两头找
+            // 「模式与模型」那一段 (3.0.2 需求 2) 已并进「视频模式」那一段 (2026-10-16): 视频模式用
+            // 哪一个模型、走哪个端点, 与那台相机的参数是同一件事的两个面, 分两段反而要人两头找
 
-                item { GroupTitle(stringResource(R.string.settings_group_ability)) }
+            item { GroupTitle(stringResource(R.string.settings_group_ability)) }
 
-                // 无障碍与 OCR 那两段 2026-10-19 并进了「特权通道」(第 7 条): 开关与后端都是"通道连上
-                // 之后才有得可开"的东西, 各占一段反而要人两头找 (见 [ChannelItems])
+            // 无障碍与 OCR 那两段 2026-10-19 并进了「特权通道」(第 7 条): 开关与后端都是"通道连上
+            // 之后才有得可开"的东西, 各占一段反而要人两头找 (见 [ChannelItems])
 
-                settingsSection(
-                    key = "notifications",
-                    title = R.string.settings_section_notifications,
-                    summary = R.string.settings_section_notifications_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { NotificationItems() }
-                }
+            settingsSection(
+                key = "notifications",
+                title = R.string.settings_section_notifications,
+                summary = R.string.settings_section_notifications_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { NotificationItems() }
+            }
 
-                settingsSection(
-                    key = "screenshot",
-                    title = R.string.settings_section_screenshot,
-                    summary = R.string.settings_section_screenshot_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { ScreenshotItems() }
-                }
+            settingsSection(
+                key = "screenshot",
+                title = R.string.settings_section_screenshot,
+                summary = R.string.settings_section_screenshot_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { ScreenshotItems() }
+            }
 
-                settingsSection(
-                    key = "look",
-                    title = R.string.settings_section_look,
-                    summary = R.string.settings_section_look_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    // 视频模式那几件事都住这一段 (2026-10-16 主人: "视频模式选择的 llm 的 url, api 等放
-                    // 到 luwi 的视频模式设置里"): **用哪一个模型说话**在最上面 (它原来是单独一段
-                    // 「模式与模型」, 归并过来是因为"视频模式用哪个模型"就是这一段的事), 后面才是那台
-                    // 相机自己的参数 (抓几张 / 隔多久 / 多大 / 要不要拼网格)
-                    Card {
-                        Column {
-                            ModeItems()
-                            LookItems()
-                        }
+            settingsSection(
+                key = "look",
+                title = R.string.settings_section_look,
+                summary = R.string.settings_section_look_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                // 视频模式那几件事都住这一段 (2026-10-16 主人: "视频模式选择的 llm 的 url, api 等放
+                // 到 luwi 的视频模式设置里"): **用哪一个模型说话**在最上面 (它原来是单独一段
+                // 「模式与模型」, 归并过来是因为"视频模式用哪个模型"就是这一段的事), 后面才是那台
+                // 相机自己的参数 (抓几张 / 隔多久 / 多大 / 要不要拼网格)
+                Card {
+                    Column {
+                        ModeItems()
+                        LookItems()
                     }
                 }
+            }
 
-                // 锁屏这一段是批次 5 的落点 (点亮屏幕 + 按主人自己录的那一条解锁); 自动指令那一段仍是
-                // 批次 8 留下的占位 —— "先有那一段"比"功能做完了再多插一段"更不容易漏
-                settingsSection(
-                    key = "lock",
-                    title = R.string.settings_section_lock,
-                    summary = R.string.settings_section_lock_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { LockItems() }
-                }
+            // 锁屏这一段是批次 5 的落点 (点亮屏幕 + 按主人自己录的那一条解锁); 自动指令那一段仍是
+            // 批次 8 留下的占位 —— "先有那一段"比"功能做完了再多插一段"更不容易漏
+            settingsSection(
+                key = "lock",
+                title = R.string.settings_section_lock,
+                summary = R.string.settings_section_lock_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { LockItems() }
+            }
 
-                // 探索 (2.7.8 批次 8): 主人 2026-10-17 的口径是"只定时开始, 没有手动入口", 所以这一段
-                // 只有开不开 / 每天几点 / 下一场那张任务卡 / 每天最多主动说几次, 外加两行读数
-                settingsSection(
-                    key = "explore",
-                    title = R.string.settings_section_explore,
-                    summary = R.string.settings_section_explore_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { ExploreItems() }
-                }
+            // 探索 (2.7.8 批次 8): 主人 2026-10-17 的口径是"只定时开始, 没有手动入口", 所以这一段
+            // 只有开不开 / 每天几点 / 下一场那张任务卡 / 每天最多主动说几次, 外加两行读数
+            settingsSection(
+                key = "explore",
+                title = R.string.settings_section_explore,
+                summary = R.string.settings_section_explore_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { ExploreItems() }
+            }
 
-                settingsSection(
-                    key = "automation",
-                    title = R.string.settings_section_automation,
-                    summary = R.string.settings_section_automation_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { AutomationItems() }
-                }
+            settingsSection(
+                key = "automation",
+                title = R.string.settings_section_automation,
+                summary = R.string.settings_section_automation_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { AutomationItems() }
+            }
 
-                // 快捷指令那一段 (批次 7): 与「自动指令」挨着, 因为两段都是"主人自己定的那几件事",
-                // 而这一段先做 (自动指令是批次 8)
-                settingsSection(
-                    key = "quick",
-                    title = R.string.settings_section_quick,
-                    summary = R.string.settings_section_quick_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { QuickItems() }
-                }
+            // 快捷指令那一段 (批次 7): 与「自动指令」挨着, 因为两段都是"主人自己定的那几件事",
+            // 而这一段先做 (自动指令是批次 8)
+            settingsSection(
+                key = "quick",
+                title = R.string.settings_section_quick,
+                summary = R.string.settings_section_quick_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { QuickItems() }
+            }
 
-                // 插件那一段 (2.5.1 批次 9 的 P0 / P1): 这一段是生态的入口 —— 装 / 启用 / 停用 / 卸 /
-                // 勾能力 / 看审计都在这里, 而"能力勾了才给"这一条只有这一页能答应
-                settingsSection(
-                    key = "plugin",
-                    title = R.string.settings_section_plugin,
-                    summary = R.string.settings_section_plugin_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { PluginItems() }
-                }
+            // 插件那一段 (2.5.1 批次 9 的 P0 / P1): 这一段是生态的入口 —— 装 / 启用 / 停用 / 卸 /
+            // 勾能力 / 看审计都在这里, 而"能力勾了才给"这一条只有这一页能答应
+            settingsSection(
+                key = "plugin",
+                title = R.string.settings_section_plugin,
+                summary = R.string.settings_section_plugin_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { PluginItems() }
+            }
 
-                // 技能那一段 (2.7.0): 与插件挨着 —— 两段都是"给这台机器加东西", 区别是技能只加提示词与
-                // 作业流程, 插件才碰得到能力。这一段的活儿只有一件: 按已安装的应用把对应技能装进 dsh
-                settingsSection(
-                    key = "skills",
-                    title = R.string.settings_section_skills,
-                    summary = R.string.settings_section_skills_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { SkillItems() }
-                }
+            // 技能那一段 (2.7.0): 与插件挨着 —— 两段都是"给这台机器加东西", 区别是技能只加提示词与
+            // 作业流程, 插件才碰得到能力。这一段的活儿只有一件: 按已安装的应用把对应技能装进 dsh
+            settingsSection(
+                key = "skills",
+                title = R.string.settings_section_skills,
+                summary = R.string.settings_section_skills_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { SkillItems() }
+            }
 
-                // Linux 沙盒那一段 (2.7.7): 也是"给这台机器加东西", 加的是一个能装包能编译的用户空间。
-                // 活儿有三件: 看状态与占用 / 装入 (或重装) / 删掉它 —— 第三件是这一页上唯二不可逆的动作
-                // (另一件是删技能), 所以走的也是"点一下先问一句"那条路
-                settingsSection(
-                    key = "linux",
-                    title = R.string.settings_section_linux,
-                    summary = R.string.settings_section_linux_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { LinuxItems() }
-                }
+            // Linux 沙盒那一段 (2.7.7): 也是"给这台机器加东西", 加的是一个能装包能编译的用户空间。
+            // 活儿有三件: 看状态与占用 / 装入 (或重装) / 删掉它 —— 第三件是这一页上唯二不可逆的动作
+            // (另一件是删技能), 所以走的也是"点一下先问一句"那条路
+            settingsSection(
+                key = "linux",
+                title = R.string.settings_section_linux,
+                summary = R.string.settings_section_linux_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { LinuxItems() }
+            }
 
-                // Luwi-dsh-sync 那一段 (G1-2): 两台机器怎么连上这件事全在这里 —— 会话仓库 / 工作区仓库 /
-                // 设备名 / 本机地址 / 对端地址与连接口令。写的是 `$DSH_HOME/lw/session-sync.json`,
-                // 改完要重启 host, 所以段首把那句话摆在人眼前 (重启那一条在右上角 ⋮ 里)
-                settingsSection(
-                    key = "sync",
-                    title = R.string.settings_section_sync,
-                    summary = R.string.settings_section_sync_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { SyncItems() }
-                }
+            // Luwi-dsh-sync 那一段 (G1-2): 两台机器怎么连上这件事全在这里 —— 会话仓库 / 工作区仓库 /
+            // 设备名 / 本机地址 / 对端地址与连接口令。写的是 `$DSH_HOME/lw/session-sync.json`,
+            // 改完要重启 host, 所以段首把那句话摆在人眼前 (重启那一条在右上角 ⋮ 里)
+            settingsSection(
+                key = "sync",
+                title = R.string.settings_section_sync,
+                summary = R.string.settings_section_sync_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { SyncItems() }
+            }
 
-                // 酒馆那一段 (P1, 2026-10-24): 一场多人对谈, 一轮一个人说话。它不建 DSH 会话、不碰
-                // 记忆, 数据只写 `$DSH_HOME/lw/tavern` —— 所以这一段只有开关 / 绑定 / 两个入口,
-                // 角色卡与会话都在它自己那一页 (TavernManageScreen) 里; 段本身归 LuwiTavern
-                // (公开构建换成 stub 就不画)
-                LuwiTavern.tavernSection(this, collapsed, toggleSection)
+            // 酒馆那一段 (P1, 2026-10-24): 一场多人对谈, 一轮一个人说话。它不建 DSH 会话、不碰
+            // 记忆, 数据只写 `$DSH_HOME/lw/tavern` —— 所以这一段只有开关 / 绑定 / 两个入口,
+            // 角色卡与会话都在它自己那一页 (TavernManageScreen) 里; 段本身归 LuwiTavern
+            // (公开构建换成 stub 就不画)
+            LuwiTavern.tavernSection(this, collapsed, toggleSection)
 
-                // 工作区与网络这两段已经从这里撤掉 (主人 2026-10-06): 工作区落在哪是 host 启动时按
-                // Workspace.resolve 那三档自己挑的, 网络那个开关改完也要重启 host —— 两件事都是"平时
-                // 不用动"的, 留在这里只把下面那些常用的段推得更远。**能力一个都没删**: 三档解析、
-                // Workspace.requestAllFilesAccess、HostSettings.lanAccess 与上面 ⋮ 里那条重启 host 照旧,
-                // 只是不再有这两个设置入口 (要改是 `tools/lw-install.ps1` 与重启那一步的事)
+            // 工作区与网络这两段已经从这里撤掉 (主人 2026-10-06): 工作区落在哪是 host 启动时按
+            // Workspace.resolve 那三档自己挑的, 网络那个开关改完也要重启 host —— 两件事都是"平时
+            // 不用动"的, 留在这里只把下面那些常用的段推得更远。**能力一个都没删**: 三档解析、
+            // Workspace.requestAllFilesAccess、HostSettings.lanAccess 与上面 ⋮ 里那条重启 host 照旧,
+            // 只是不再有这两个设置入口 (要改是 `tools/lw-install.ps1` 与重启那一步的事)
 
-                // 权限这一段放最后: 它是这一页最长的一段 (十七个能力), 放中间会把后面每一段都推到很远,
-                // 而这些权限本来就是装完之后偶尔来调一次的东西
-                settingsSection(
-                    key = "permissions",
-                    title = R.string.settings_section_permissions,
-                    summary = R.string.settings_section_permissions_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    Card { PermissionsItems() }
-                }
+            // 权限这一段放最后: 它是这一页最长的一段 (十七个能力), 放中间会把后面每一段都推到很远,
+            // 而这些权限本来就是装完之后偶尔来调一次的东西
+            settingsSection(
+                key = "permissions",
+                title = R.string.settings_section_permissions,
+                summary = R.string.settings_section_permissions_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                Card { PermissionsItems() }
+            }
 
-                // 开屏接口文档 (2026-10-25 主人: "不要加这个版块，你在设置末尾加个接口文档，能让用户用
-                // agent 自行设计开屏动画"): 不给一组开关, 只在最末放一份**文档** + 三个动作 (见 [ApiItems])
-                settingsSection(
-                    key = "api",
-                    title = R.string.settings_section_api,
-                    summary = R.string.settings_section_api_summary,
-                    collapsed = collapsed,
-                    onToggle = toggleSection,
-                ) {
-                    ApiItems()
-                }
+            // 开屏接口文档 (2026-10-25 主人: "不要加这个版块，你在设置末尾加个接口文档，能让用户用
+            // agent 自行设计开屏动画"): 不给一组开关, 只在最末放一份**文档** + 三个动作 (见 [ApiItems])
+            settingsSection(
+                key = "api",
+                title = R.string.settings_section_api,
+                summary = R.string.settings_section_api_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                ApiItems()
             }
         }
 
@@ -796,6 +804,10 @@ fun SettingsScreen() {
 
             null -> Unit
         }
+
+        // 最上面那一行「检查所需依赖」点出来的那张体检表 (2026-11-04 主人 #1②): 与首启自动弹的
+        // 那一次是同一个居中对话框
+        if (readyOpen) ReadyCardDialog(onDismiss = { readyOpen = false })
     }
 }
 

@@ -140,7 +140,10 @@
     <string name="ready_title">开始使用</string>
     <string name="ready_remaining">还差 %1$d 步</string>
     <string name="ready_complete">全部就绪</string>
+    <string name="ready_check">检查所需依赖</string>
+    <string name="ready_check_summary">看看还差什么没开</string>
     <string name="ready_reading">读取中...</string>
+    <string name="ready_dialog_close">知道了</string>
     <string name="ready_channel">特权通道</string>
     <string name="ready_channel_ok">已通过 %1$s 连上</string>
     <string name="ready_channel_off">还没连上</string>
@@ -163,7 +166,6 @@
     <string name="ready_action_download">下载 %1$s</string>
     <string name="ready_action_retry">重新下载 %1$s</string>
     <string name="ready_action_running">正在下载 %1$d%%</string>
-    <string name="ready_action_screen">建一块虚拟屏</string>
     <string name="settings_channel_autostart">允许 Luwi 自启动</string>
     <string name="settings_channel_autostart_summary">只是一行跳转: 去系统那一页自己点, 应用不改任何开关</string>
     <string name="settings_channel_autostart_failed">这台设备上没有能打开的那一页</string>

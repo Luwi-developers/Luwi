@@ -141,7 +141,10 @@
     <string name="ready_title">Getting started</string>
     <string name="ready_remaining">%1$d steps to go</string>
     <string name="ready_complete">All set</string>
+    <string name="ready_check">Check what\'s needed</string>
+    <string name="ready_check_summary">See what is still missing</string>
     <string name="ready_reading">Reading...</string>
+    <string name="ready_dialog_close">Got it</string>
     <string name="ready_channel">Privileged channel</string>
     <string name="ready_channel_ok">Connected through %1$s</string>
     <string name="ready_channel_off">Not connected yet</string>
@@ -164,7 +167,6 @@
     <string name="ready_action_download">Download %1$s</string>
     <string name="ready_action_retry">Try %1$s again</string>
     <string name="ready_action_running">Downloading %1$d%%</string>
-    <string name="ready_action_screen">Create a virtual screen</string>
     <string name="settings_channel_autostart">Allow Luwi to start on boot</string>
     <string name="settings_channel_autostart_summary">Opens the system page; this row only navigates, it changes nothing</string>
     <string name="settings_channel_autostart_failed">This device has no page to open for it</string>

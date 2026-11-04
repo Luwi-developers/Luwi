@@ -2,24 +2,23 @@
  * Hallmark · component: ready-card · genre: modern-minimal · theme: luwi-miuix
  * states: default · running(带确定进度) · done · failed · 锁住(下一件还点不动) · reading(读状态)
  * contrast: 颜色全部取 MiuixTheme.colorScheme, 没有写死色值; 可点的方框 >= 50dp
- * structure: 阶梯 (五件依赖排成一条竖轨 + 五个节点), 不是"标题 -> 五行状态 -> 按钮"
+ * structure: 阶梯 (五件依赖排成一条竖轨 + 五个节点), 装进一个**居中的对话框**
+ * placement: 首启自动弹一次 / 设置页「检查所需依赖」那一行随时再弹 (2026-11-04 主人 #1)
  */
 package io.github.yuloong07star.luwi.ui
 
-import androidx.compose.animation.AnimatedVisibility
+import android.content.Context
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,7 +30,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -52,12 +53,13 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.ChannelSetting
@@ -73,12 +75,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 「开始使用」: 第一次装完之后还差什么
+ * 「开始使用」: 第一次装完之后还差什么 —— **一张居中的对话框** (2026-11-04 主人 #1 / #2)
  *
- * **这不是教程, 是体检表**, 而且是一张**有先后**的体检表。第一次打开这一页的人不知道"特权通道"是什么,
+ * **这不是教程, 是体检表**, 而且是一张**有先后**的体检表。第一次打开应用的人不知道"特权通道"是什么,
  * 也不知道它跟"能不能用"有什么关系; 但"还差 3 步"和每一项后面那个按钮是他看得懂的。所以这里只做三件事:
  * 说清还差几件, 每一件现在什么样, 点一下把它办掉
  *
@@ -93,17 +96,141 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 百分比。语音这一件只算 SenseVoice + silero VAD (约 240 MB); GLM-ASR 那套要大得多, 要点名才下,
  * 不算进这张体检表的必做项
  *
- * 全部到位时**整张卡不画**: 用了一周的人不该每次进设置都看见一页"你已经做完了"。但**位置留着** ——
- * 启动页底部这块地方如果突然塌下去, 上面那几行会往上跳一下, 所以收起后按量到的高度占住 (见 reserve)
+ * **为什么改成对话框**: 它原来内嵌在两处 (启动页底部一块、设置页「外观」下面一个 item), 都在页面的
+ * 下半截, 而五件依赖排成一条竖轨之后比一屏还高 —— "还差几步"总有一半在屏幕外。对话框自己居中、自己
+ * 滚动, 而且进退都不牵动页面布局 (那两个内嵌的挂载点因此都撤掉了, 见 [ReadyPrompt] 与设置页那一行)
  *
- * 动效只干一件事: **让人看懂"这是一串有先后的事"**。卡片从下方滑上来 (280ms), 五行依次淡入 (每行差
- * 90ms, 顺序即依赖顺序), 某一行刚变成做完时弹一下, 下载中的那一行用确定进度 (节点环 + 细条 + 百分比),
- * 不是转圈。除了那个环与下载进度, 没有别的东西在动, 也没有循环动画
+ * **虚拟屏那一件只显示状态, 不再给按钮** (2026-11-04 主人 #3): 建屏是"用起来之后自然会发现"的事,
+ * 不该是这张体检表上的最后一道 CTA。所以 [ReadyActionRow] 只在**四件可操作的事**里挑下一步
  *
- * 最后一件事做完时**多停 900ms**再淡出: 否则第五行刚打上勾, 卡片就没了, 那道勾谁也看不见
+ * 动效只干一件事: **让人看懂"这是一串有先后的事"**。五行依次淡入 (每行差 90ms, 顺序即依赖顺序),
+ * 某一行刚变成做完时弹一下, 下载中的那一行用确定进度 (节点环 + 细条 + 百分比), 不是转圈。除了那个环
+ * 与下载进度, 没有别的东西在动, 也没有循环动画
+ *
+ * 关掉对话框不丢任何状态: 两个下载器的进度是它们自己的 Compose 状态, 窗关了照样在下, 再打开就接上
  */
 @Composable
-internal fun ReadyCard(modifier: Modifier = Modifier) {
+internal fun ReadyCardDialog(onDismiss: () -> Unit) {
+    Dialog(
+        // 点空白、按返回键两条路都能关: 这不是"必须答了才能用"的告示, 是一张随时能再打开的体检表
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        val scrim = remember { MutableInteractionSource() }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.4f))
+                .clickable(interactionSource = scrim, indication = null) { onDismiss() },
+            // **居中** (2026-11-04 主人 #2: 不要放底部)
+            contentAlignment = Alignment.Center,
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp)
+                    // 卡片自己吃掉点击: 点在里面不算"点空白"
+                    .clickable(interactionSource = scrim, indication = null) {},
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 五件依赖 + 那颗按钮在窄屏上比一屏还高: 卡片封在屏幕的 72%, 内容自己滚
+                        .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.72f).dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(UiSpacing.Large),
+                ) {
+                    ReadyCardBody()
+                    TextButton(
+                        text = stringResource(R.string.ready_dialog_close),
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = UiSpacing.Medium),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 首启自动弹的那一次 (2026-11-04 主人 #1①)
+ *
+ * 只在**还有没办的时候**弹, 而且一辈子只自动弹一次 ([ReadyDialogSeen] 落 `ready-dialog-seen`) ——
+ * 之后要看就走设置页那一行「检查所需依赖」。判与弹都挂在主线上: 判那一步在 IO 上做, 因为它要读磁盘
+ * 并等两个 worker 把通道 / 无障碍的状态读回来
+ */
+@Composable
+internal fun ReadyPrompt() {
+    val context = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (withContext(Dispatchers.IO) { ReadyDialogSeen.claim(context) }) open = true
+    }
+    if (open) ReadyCardDialog(onDismiss = { open = false })
+}
+
+/**
+ * 首启那一弹的账: 弹没弹过 (`ready-dialog-seen`) 与"这一次打开弹过没有"
+ *
+ * 与 [ModelSetup] / [BundledPluginNotice] 同一个写法: 跨启动的记号落 `luwi` 偏好, 进程里再记一个
+ * 布尔, 于是 Activity 重建 / 转屏不会又弹一遍。**写下记号那一刻就算弹过了** —— 进程中途被杀也不会
+ * 下一次又冒出来
+ */
+internal object ReadyDialogSeen {
+
+    private const val STORE = "luwi"
+
+    /** 自动弹过没有 (落偏好, 跨启动) */
+    private const val SEEN = "ready-dialog-seen"
+
+    /** 这一次打开应用里已经弹过 (Activity 重建不重弹, 进程死了自然归零) */
+    @Volatile
+    private var promptedThisRun = false
+
+    /** 通道与无障碍由各自的 worker 填, 最多等这么久; 等不到就按"读不出来"算还没办 */
+    private const val WAIT_MILLIS = 6_000L
+    private const val POLL_MILLIS = 100L
+
+    /** 这一次打开要不要弹; 返回 true 时记号已经写下了 */
+    fun claim(context: Context): Boolean {
+        if (promptedThisRun) return false
+        if (prefs(context).getBoolean(SEEN, false)) return false
+        if (!missing(context)) return false
+        promptedThisRun = true
+        runCatching { prefs(context).edit().putBoolean(SEEN, true).apply() }
+        return true
+    }
+
+    /**
+     * 四件**可操作**的事里还有没有没办的
+     *
+     * **虚拟屏那一件不算** (主人 2026-11-04 #3: 那一项只显示状态、不再给按钮): 只剩它没建时弹出来也是
+     * 一张没有按钮的窗, 不如不弹 —— 要看状态, 设置页那一行随时打得开这张表
+     */
+    private fun missing(context: Context): Boolean {
+        ChannelSetting.refresh()
+        AccessibilitySetting.refreshState()
+        WakeWordDownload.refresh(context)
+        SpeechModelDownload.refresh(context)
+        var waited = 0L
+        while ((ChannelSetting.state == null || AccessibilitySetting.state == null) && waited < WAIT_MILLIS) {
+            Thread.sleep(POLL_MILLIS)
+            waited += POLL_MILLIS
+        }
+        return ChannelSetting.state?.connected != true ||
+            AccessibilitySetting.state?.healthy != true ||
+            !WakeWordDownload.present(context) ||
+            !SpeechModelDownload.present(context)
+    }
+
+    private fun prefs(context: Context) = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
+}
+
+/** 对话框里那一坨: 一个环 + 五件依赖 + 下一步该按的那一颗按钮 */
+@Composable
+private fun ReadyCardBody() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // 这三个都是 Compose 状态: 通道与无障碍由各自的 Setting 在 worker 线程上填, 屏列表由
@@ -111,12 +238,9 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
     val channel = ChannelSetting.state
     val accessibility = AccessibilitySetting.state
     val screens = VirtualScreen.screens
-    // 建屏不像连接和开无障碍那样自带 working: [VirtualScreen.create] 每次都新建一块, 不去重,
-    // 所以按钮自己得挡住连点, 否则点三下就是三块屏
-    var creating by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        // 进页面时读一次。四件事都不在画帧的线程上做事: 通道与无障碍要起几个 settings/cmd 子进程;
+        // 打开时读一次。四件事都不在画帧的线程上做事: 通道与无障碍要起几个 settings/cmd 子进程;
         // 两个 refresh 只数磁盘上的模型文件, 不联网 (正在下的时候它们自己会让开)
         ChannelSetting.refresh()
         AccessibilitySetting.refreshState()
@@ -202,6 +326,7 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
             action = ReadyAction.SpeechDownload,
             bytes = speechBytes,
         ),
+        // 虚拟屏那一件**只报状态, 不给按钮** (2026-11-04 主人 #3): 所以它没有 action
         ReadyStep(
             state = if (screens.isNotEmpty()) ReadyState.DONE else ReadyState.TODO,
             title = stringResource(R.string.ready_screen),
@@ -210,127 +335,68 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
             } else {
                 stringResource(R.string.ready_screen_ok, screens.size)
             },
-            action = ReadyAction.CreateScreen,
         ),
     )
 
     val done = steps.count { it.state == ReadyState.DONE }
     val missing = steps.size - done
-    // **只给下一步该做的那一件**。五件各给一个按钮, 用户会按顺序全按一遍, 而第二件往后按下去只会报
-    // "特权通道还没通"; 正在下的那一件也不换按钮 —— 同一块方框就当地给它自己用 (见 [ReadyActionRow])
-    val next = steps.firstOrNull { it.state != ReadyState.DONE }
+    // **只给下一步该做的那一件**, 而且只在**四件可操作的事**里挑: 虚拟屏那一项现在只显示状态
+    // (2026-11-04 主人 #3), 于是"最后只剩一块屏没建"时这里没有按钮 —— 不会出现一个灰着的空方框。
+    // 五件各给一个按钮也不行: 用户会按顺序全按一遍, 而第二件往后按下去只会报"特权通道还没通"
+    val next = steps.firstOrNull { it.state != ReadyState.DONE && it.action != ReadyAction.None }
 
-    // 这张卡在这页上"露过面"没有: 决定全绿时是直接不画 (本来就没露过) 还是先亮一下再收
-    var shown by remember { mutableStateOf(false) }
-    // 正在收尾: 全绿了但还没淡出完。这个标志让下面的显示条件暂时别把卡片抽走
-    //
-    // 它是**算出来的**, 不是在 [LaunchedEffect] 里置位的: 效果体要等这一帧组合结束才跑, 而 missing
-    // 变 0 的那一刻就发生在组合里 —— 等到效果体再去置位, 中间那一帧已经按"全绿"把整棵子树抽掉了,
-    // 卡片会闪一下再带着重新播的入场动画回来
-    val lingering = missing == 0 && shown
-    LaunchedEffect(missing) {
-        if (missing > 0) {
-            shown = true
-        } else if (shown) {
-            // 最后一件事是当着面做完的: 让 5/5 亮一下, 再淡出
-            delay(LingerMillis)
-            shown = false
-        }
+    if (channel == null && accessibility == null) {
+        // 还没读到就不摆五行: 两个 state 的初值都是 null, 否则刚打开会闪一下"还差 5 步", 一帧后变少
+        Text(
+            text = stringResource(R.string.ready_reading),
+            style = MiuixTheme.textStyles.body2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        return
     }
 
-    // 收起之后按上一次量到的高度占住: 启动页底部这块地方突然塌下去, 上面那几行会跳一下。
-    // 一进来就全绿的 (从没露过面) 量不到高度, 于是**一个像素都不占**
-    var reserve by remember { mutableStateOf(0) }
-    val density = LocalDensity.current
-    val visible = missing > 0 || lingering
+    ReadyHead(done = done, total = steps.size, missing = missing)
 
-    // 还没读到就不画: 两个 state 的初值都是 null, 否则刚进页面会闪一下"还差 5 步", 一帧后变少
-    if (channel == null && accessibility == null) return
+    steps.forEachIndexed { index, step ->
+        // 用下标当身份: 五件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
+        ReadyRow(
+            step = step,
+            index = index,
+            last = index == steps.lastIndex,
+            modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
+        )
+    }
 
-    Box(
-        modifier = modifier.then(
-            if (visible || reserve == 0) {
-                Modifier
-            } else {
-                Modifier.height(with(density) { reserve.toDp() })
-            },
-        ),
-    ) {
-        AnimatedVisibility(
-            visible = visible,
-            // 入场只挂这一处, 而且交给 AnimatedVisibility 自己管: 原来那条 Animatable 会跟着 missing
-            // 重启 (每办完一件就重启一次), 被打断的那一帧停在半透明上, 五行就一起灰着 —— 现在没人
-            // 中途改它的值了
-            enter = fadeIn(tween(durationMillis = AppearMillis, easing = FastOutSlowInEasing)) +
-                slideInVertically(
-                    animationSpec = tween(durationMillis = AppearMillis, easing = FastOutSlowInEasing),
-                    initialOffsetY = { it / 24 },
-                ),
-            exit = fadeOut(tween(durationMillis = LeaveMillis, easing = FastOutSlowInEasing)),
-            modifier = Modifier.onSizeChanged { if (it.height > 0) reserve = it.height },
-        ) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(UiSpacing.Large),
-                ) {
-                    ReadyHead(done = done, total = steps.size, missing = missing)
-
-                    steps.forEachIndexed { index, step ->
-                        // 用下标当身份: 五件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
-                        ReadyRow(
-                            step = step,
-                            index = index,
-                            last = index == steps.lastIndex,
-                            modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
-                        )
+    // 没有"下一步"时整块不画: 五件里只剩虚拟屏那种情况就是这样 (它没有 CTA, 也不该留一块空框)
+    if (next != null) {
+        ReadyActionRow(
+            next = next,
+            onAction = { action ->
+                when (action) {
+                    ReadyAction.Connect -> ChannelSetting.connect()
+                    ReadyAction.Accessibility -> AccessibilitySetting.set(true)
+                    ReadyAction.WakeDownload -> scope.launch {
+                        // download() 是同步阻塞的一趟网络, 不能落在画帧的线程上
+                        withContext(Dispatchers.IO) {
+                            runCatching { WakeWordDownload.download(context) }
+                            // 模型没下过时 keywords.txt 也还没写过: 补上缺省那张词表,
+                            // 否则"模型就绪"了而服务照样起不来 (设置页那一条同理)
+                            if (LwWakeWord.names(context).isEmpty()) {
+                                LwWakeWord.setWords(context, WakeWordWords.defaultText())
+                            }
+                        }
                     }
 
-                    ReadyActionRow(
-                        next = next,
-                        enabled = !creating,
-                        onAction = { action ->
-                            when (action) {
-                                ReadyAction.Connect -> ChannelSetting.connect()
-                                ReadyAction.Accessibility -> AccessibilitySetting.set(true)
-                                ReadyAction.WakeDownload -> scope.launch {
-                                    // download() 是同步阻塞的一趟网络, 不能落在画帧的线程上
-                                    withContext(Dispatchers.IO) {
-                                        runCatching { WakeWordDownload.download(context) }
-                                        // 模型没下过时 keywords.txt 也还没写过: 补上缺省那张词表,
-                                        // 否则"模型就绪"了而服务照样起不来 (设置页那一条同理)
-                                        if (LwWakeWord.names(context).isEmpty()) {
-                                            LwWakeWord.setWords(context, WakeWordWords.defaultText())
-                                        }
-                                    }
-                                }
+                    ReadyAction.SpeechDownload -> scope.launch {
+                        withContext(Dispatchers.IO) {
+                            runCatching { SpeechModelDownload.download(context) }
+                        }
+                    }
 
-                                ReadyAction.SpeechDownload -> scope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        runCatching { SpeechModelDownload.download(context) }
-                                    }
-                                }
-
-                                ReadyAction.CreateScreen -> if (!creating) {
-                                    creating = true
-                                    scope.launch {
-                                        try {
-                                            // 建屏是一次 binder 往返, 而且是特权进程那边现场问合成器
-                                            withContext(Dispatchers.IO) { VirtualScreen.create() }
-                                        } finally {
-                                            creating = false
-                                        }
-                                    }
-                                }
-
-                                ReadyAction.None -> Unit
-                            }
-                        },
-                    )
+                    ReadyAction.None -> Unit
                 }
-            }
-        }
+            },
+        )
     }
 }
 
@@ -644,39 +710,36 @@ private fun ReadyBar(progress: Float, modifier: Modifier = Modifier) {
  *
  * 形态是设置页那种**圆角矩形**, 不是主色实心按钮 —— 这一块是"点一下办掉", 不是"快买"。下载中它不换
  * 位置、不换高度, 只把同一块方框当成进度条用 (底色按比例从左往右长), 所以开始下载时整张卡不重排
+ *
+ * **虚拟屏那一件没有这一块** (2026-11-04 主人 #3): 调用方只会在四件可操作的事里挑, 所以这里的 [next]
+ * 一定是"能办的", 不再有"没有下一步"那一档文案
  */
 @Composable
-private fun ReadyActionRow(
-    next: ReadyStep?,
-    enabled: Boolean,
-    onAction: (ReadyAction) -> Unit,
-) {
+private fun ReadyActionRow(next: ReadyStep, onAction: (ReadyAction) -> Unit) {
     val colors = MiuixTheme.colorScheme
-    val running = next?.state == ReadyState.RUNNING
-    val failed = next?.state == ReadyState.FAILED
+    val running = next.state == ReadyState.RUNNING
+    val failed = next.state == ReadyState.FAILED
     val label = when {
-        next == null -> stringResource(R.string.ready_complete)
         running -> stringResource(R.string.ready_action_running, (next.progress * 100).toInt())
         next.action == ReadyAction.Connect -> stringResource(R.string.ready_action_connect)
         next.action == ReadyAction.Accessibility -> stringResource(R.string.ready_action_accessibility)
-        next.action == ReadyAction.CreateScreen -> stringResource(R.string.ready_action_screen)
         // 只有模型那两件有"重试"这一说; 通道与无障碍失败还是那一句原话
         failed -> stringResource(R.string.ready_action_retry, next.title)
         else -> stringResource(R.string.ready_action_download, next.title)
     }
     // 右边那串字是**这一步要花多少**: 唤醒词 5.3 MB, 语音 240 MB —— 别让人按下去才知道
     val hint = when {
-        next == null || running -> ""
+        running -> ""
         next.action == ReadyAction.WakeDownload || next.action == ReadyAction.SpeechDownload ->
             stringResource(R.string.ready_mb, "%.1f".format(next.bytes / 1024.0 / 1024.0))
 
         else -> ""
     }
-    val clickable = next != null && !running && enabled
+    val clickable = !running
     val accent = colors.primary
     val shape = RoundedCornerShape(16.dp)
     val fill by animateFloatAsState(
-        targetValue = if (running) next?.progress ?: 0f else 0f,
+        targetValue = if (running) next.progress else 0f,
         animationSpec = tween(durationMillis = RingMillis, easing = FastOutSlowInEasing),
         label = "ready-action",
     )
@@ -713,7 +776,7 @@ private fun ReadyActionRow(
                 .heightIn(min = ActionHeight)
                 .then(
                     if (clickable) {
-                        Modifier.clickable(role = Role.Button) { next?.let { onAction(it.action) } }
+                        Modifier.clickable(role = Role.Button) { onAction(next.action) }
                     } else {
                         Modifier
                     },
@@ -801,8 +864,12 @@ private data class ReadyStep(
 /** 四档状态: 没办 / 正在下 / 做完了 / 试过没成 */
 private enum class ReadyState { TODO, RUNNING, DONE, FAILED }
 
-/** 点一下办掉的那件事: 每一项只有一件, 走的是各自现成的入口 */
-private enum class ReadyAction { None, Connect, Accessibility, WakeDownload, SpeechDownload, CreateScreen }
+/**
+ * 点一下办掉的那件事: 每一项只有一件, 走的是各自现成的入口
+ *
+ * **没有 CreateScreen 这一档了** (2026-11-04 主人 #3): 虚拟屏那一件只显示状态, 不给按钮
+ */
+private enum class ReadyAction { None, Connect, Accessibility, WakeDownload, SpeechDownload }
 
 /** 环的直径。与标题那一行同高 */
 private val RingSize = 40.dp
@@ -837,12 +904,6 @@ private val ActionHeight = 50.dp
 /** 做完那一下弹到多大 */
 private const val PopScale = 1.06f
 
-/** 整张卡入场 */
-private const val AppearMillis = 280
-
-/** 整张卡淡出 */
-private const val LeaveMillis = 220
-
 /** 单行的入场 */
 private const val RowEnterMillis = 220
 
@@ -851,6 +912,3 @@ private const val RowStaggerMillis = 90L
 
 /** 环与进度条追一次用多久 */
 private const val RingMillis = 600
-
-/** 全绿之后卡片多停多久, 让最后那道勾看得见 */
-private const val LingerMillis = 900L
