@@ -4,7 +4,7 @@
 
 **DSH** for Android —— 把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）装进手机的一个应用
 
-一台安卓设备同时当 dsh 的**主机**与**受控端**：界面就是 dsh 自己的 Web GUI（装在 WebView 里），原生那一半把屏幕、输入与系统能力做成 dsh 原生工具交给模型。不需要第二台电脑，也不需要 Termux。
+一台安卓设备同时当 dsh 的**主机**与**受控端**：界面就是 dsh 自己的 Web GUI（装在 WebView 里），原生那一半把屏幕、输入与系统能力做成 dsh 原生工具交给模型。装好就能用，不需要第二台电脑，也不需要 Termux；想接着用电脑那一套时，开「局域网访问」用浏览器连过来，或者开 `luwi-dsh-sync` 把两边的会话与工作区镜像成一套（默认关，见下文）。
 
 一句话：**让 AI 像人一样操作你的手机。**
 
