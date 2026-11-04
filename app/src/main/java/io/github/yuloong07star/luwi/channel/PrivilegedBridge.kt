@@ -1,7 +1,13 @@
 package io.github.yuloong07star.luwi.channel
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
+import android.net.Uri
 import android.os.SystemClock
+import android.provider.AlarmClock
 import android.util.Log
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.lock.LwLock
@@ -624,6 +630,83 @@ object PrivilegedBridge {
             }
         }
 
+        // 这一版认得哪些直连动作, 以及它们此刻的状态 (B3-c ⑧)
+        //
+        // 表只有一份 (DeviceActionRegistry), 路由也只有一份 (DeviceActionBroker): 这里只是把两边
+        // 摆给模型看, 于是"日历有没有给权限 / 快应用有没有 runtime / 无障碍开没开"不必先撞一次墙
+        // 才知道. 每一条都带 via / permission / 风险 / 失败原因 (12-4), 失败原因是所有通道都走不通
+        // 时交给模型的那句话
+        //
+        // 这一条**只读**: 探测快应用也只问 PackageManager, 不发 Intent, 更不碰虚拟屏
+        "capabilities" -> appContext { context ->
+            val quickApp = QuickAppCapability.probe(context)
+            buildJsonObject {
+                put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                putJsonArray("actions") {
+                    DeviceActionRegistry.actions.forEach { action ->
+                        val (state, note) = capabilityState(context, action, quickApp)
+                        add(
+                            buildJsonObject {
+                                put("name", action.name)
+                                put("title", action.title)
+                                put("via", action.via)
+                                put("permission", action.permission)
+                                put("risk", action.risk.name.lowercase())
+                                put("screenScoped", action.screenScoped)
+                                putJsonArray("routes") {
+                                    actions.routes(action, LwServiceProtocol.MAIN_DISPLAY).forEach { add(it) }
+                                }
+                                put("failureReason", action.failureReason)
+                                put("state", state)
+                                put("note", note)
+                            },
+                        )
+                    }
+                }
+                putJsonObject("quickApp") {
+                    putQuickAppProbe(quickApp)
+                }
+            }
+        }
+
+        // 快应用 (B3-c ⑨): probe 只问不打开, open 把 deep link 交给已注册的 runtime
+        //
+        // **这条路上没有建屏那一档**: runtime 自己决定把快应用画在哪, 它要的是手机自己的屏;
+        // 探测不到就回 unsupported (⑩), 不建屏也不重试. 静态判据 `check-phone-actions.mjs` 把
+        // "快应用这一条不许调建屏"钉在源码上 (⑫)
+        "quickapp" -> appContext { context ->
+            when (val op = request["op"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()) {
+                "", "probe" -> buildJsonObject {
+                    put("route", DeviceRoute.DEEP_LINK)
+                    put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                    putQuickAppProbe(QuickAppCapability.probe(context))
+                }
+
+                "open" -> {
+                    val opened = QuickAppCapability.open(
+                        context = context,
+                        uri = request["uri"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        packageName = request["package"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        path = request["path"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                        query = request["query"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    )
+                    buildJsonObject {
+                        put("started", opened.started)
+                        put("unsupported", opened.unsupported)
+                        put("route", DeviceRoute.DEEP_LINK)
+                        put("displayId", LwServiceProtocol.MAIN_DISPLAY)
+                        put("uri", opened.uri)
+                        put("scheme", opened.scheme)
+                        put("handlerPackage", opened.handlerPackage)
+                        put("handlerComponent", opened.handlerComponent)
+                        put("reason", opened.reason)
+                    }
+                }
+
+                else -> throw IllegalArgumentException("quickapp has to be probe or open, not \"$op\"")
+            }
+        }
+
         // Start an app onto one screen
         //
         // Nothing here can do this from the app's side: `am` calls itself the shell's package and
@@ -1122,6 +1205,88 @@ object PrivilegedBridge {
         return block(context)
     }
 
+    /** 快应用的探测答案: `lw_capabilities` 里那一小块与 `lw_quickapp op=probe` 同一个形状 */
+    private fun JsonObjectBuilder.putQuickAppProbe(probe: QuickAppCapability.Probe) {
+        put("ready", probe.ready)
+        put("handlerPackage", probe.handlerPackage)
+        put("handlerComponent", probe.handlerComponent)
+        put("link", probe.link)
+        put("scheme", probe.scheme)
+        putJsonArray("tried") { probe.tried.forEach { add(it) } }
+        put("reason", probe.reason)
+    }
+
+    /**
+     * 一条直连动作此刻的状态
+     *
+     * 只有能马上回答的那几条才真的去问: 日历看权限, 通知 / 媒体看监听服务, 无障碍看服务, 打开
+     * 链接 / 闹钟 / 拨号看有没有应用接得下那个 Intent, 快应用看 runtime. "依赖调用时才有的东西"
+     * (要打开哪个应用、此刻有没有媒体在放) 一律写 on_demand, 不假装知道
+     *
+     * @returns 状态词与一句说明; 状态词是 `ready` / `needs_permission` / `unsupported` / `on_demand`
+     */
+    private fun capabilityState(
+        context: Context,
+        action: DeviceAction,
+        quickApp: QuickAppCapability.Probe,
+    ): Pair<String, String> = when (action.name) {
+        "quick_app" -> if (quickApp.ready) {
+            STATE_READY to ""
+        } else {
+            STATE_UNSUPPORTED to quickApp.reason
+        }
+
+        "calendar" -> if (
+            context.checkSelfPermission(Manifest.permission.READ_CALENDAR) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "calendar access has not been granted; grant it in the app's permissions"
+        }
+
+        "notifications" -> if (LwNotificationListener.running) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "notification access is off; turn it on in system settings"
+        }
+
+        "ui_tap" -> if (LwAccessibility.running) {
+            STATE_READY to ""
+        } else {
+            "needs_permission" to "the accessibility service is off; turn it on in system settings"
+        }
+
+        "open_url" -> resolvableState(
+            context,
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
+            action.failureReason,
+        )
+
+        "alarm" -> resolvableState(context, Intent(AlarmClock.ACTION_SET_ALARM), action.failureReason)
+        "dial" -> resolvableState(context, Intent(Intent.ACTION_DIAL), action.failureReason)
+        "app_settings" -> STATE_READY to ""
+        "open_app" -> "on_demand" to "true for an app that is installed; lw_apps lists them"
+        "media" -> "on_demand" to "true while something is playing on the phone"
+        else -> "unknown" to ""
+    }
+
+    /** 有没有应用接得下这个 Intent; 问不到时如实说问不到, 不猜"没有" */
+    private fun resolvableState(
+        context: Context,
+        intent: Intent,
+        failure: String,
+    ): Pair<String, String> = try {
+        if (context.packageManager.queryIntentActivities(intent, 0).isEmpty()) {
+            STATE_UNSUPPORTED to failure
+        } else {
+            STATE_READY to ""
+        }
+    } catch (problem: Throwable) {
+        Log.w(TAG, "could not ask who answers ${intent.action}", problem)
+        "unknown" to (problem.message ?: "the package manager did not answer")
+    }
+
     /**
      * The screen one request names
      *
@@ -1456,6 +1621,10 @@ object PrivilegedBridge {
 
     /** More apps than this in one answer is a listing nobody reads, so it is cut and said so */
     private const val MAX_APPS = 400
+
+    /** `lw_capabilities` 里那两条会说两遍的状态词 (别的状态只有一处用, 就地写) */
+    private const val STATE_READY = "ready"
+    private const val STATE_UNSUPPORTED = "unsupported"
 
     /** How many of an ambiguous name's candidates are named back, matching pressing by name */
     private const val MAX_CANDIDATES = 12

@@ -2609,6 +2609,89 @@ const TOOLS = [
     },
   }),
 
+  // 这一版认得哪些手机直连动作, 每条走哪条路、要什么权限、失败时说什么 (B3-c ⑧)
+  //
+  // 它是"选通道前先看一眼"的那一条: 动作表与路由都只有应用那一侧一份, 这里只把答案念出来,
+  // 不另存一张表 —— 否则模型读到的能力与真正执行的那条路迟早会漂开
+  defineTool({
+    name: 'lw_capabilities',
+    description:
+      'List the device actions this build knows and how each one is reached, before choosing a route:'
+      + ' every action says its name, its preferred route (native, intent or deep link,'
+      + ' accessibility, virtual screen), the permission it needs, its risk, and the sentence it'
+      + ' gives when every route fails. The answer also says whether each one looks usable right'
+      + ' now - calendar access granted, notification access on, the accessibility service running,'
+      + ' something answering ACTION_VIEW / ACTION_DIAL / ACTION_SET_ALARM, and whether a quick app'
+      + ' runtime answers on this device. **This is a reading, not an action**: it opens nothing and'
+      + ' creates no virtual screen. When an action comes back unsupported, say so instead of'
+      + ' creating a virtual screen to try it another way.',
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute() {
+      return formatCapabilities(await call('capabilities'))
+    },
+  }),
+
+  // 快应用: 先 probe 再 open (B3-c ⑨⑩)
+  defineTool({
+    name: 'lw_quickapp',
+    description:
+      'Probe for, or open, a quick app (快应用). op=probe asks whether a quick app runtime is'
+      + ' registered on this device and which one answers the standard hap://app/<package> link;'
+      + ' it opens nothing. op=open hands a deep link to that runtime, naming the quick app either'
+      + ' by package (com.example.app) or by a full link (hap://app/com.example.app/page?key=value,'
+      + ' or https://hapjs.org/app/...). It opens on the phone\'s own screen, the way the device'
+      + ' itself opens it. **No virtual screen is involved and none is created**: a quick app is'
+      + ' not an activity this app can place on a screen of its own, so when nothing answers the'
+      + ' link the answer is plainly unsupported - report that, and do not fall back to a virtual'
+      + ' screen.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'probe to ask, open to start one',
+        enum: ['probe', 'open'],
+      },
+      package: {
+        type: 'string',
+        description: 'The quick app package, for open, for example com.example.app - use either'
+          + ' this or uri, not both',
+      },
+      uri: {
+        type: 'string',
+        description: 'A full quick app link, for open: hap://app/<package>/[path][?key=value] or'
+          + ' https://hapjs.org/app/<package>/[path][?key=value]',
+      },
+      path: {
+        type: 'string',
+        description: 'The page inside the quick app, for open with package. The first page by'
+          + ' default',
+      },
+      query: {
+        type: 'string',
+        description: 'key=value pairs to pass to the quick app page, for open with package',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = args?.op === 'open' ? 'open' : 'probe'
+      const answer = await call('quickapp', {
+        op,
+        package: args?.package,
+        uri: args?.uri,
+        path: args?.path,
+        query: args?.query,
+      })
+      return op === 'open' ? formatQuickOpened(answer) : formatQuickProbe(answer)
+    },
+  }),
+
   defineTool({
     name: 'lw_launch',
     description:
@@ -5349,6 +5432,78 @@ function formatApps(result) {
   for (const app of apps) lines.push(`  ${app.label} - ${app.package}`)
   lines.push('Start one with lw_launch(package="..."), which takes the package or that name.')
   return lines.join('\n')
+}
+
+/**
+ * What the device says it can do, action by action
+ *
+ * 一条动作一行, 第二行是失败原因: 那正是模型最需要提前知道的一句 —— 撞上"日历没给权限"或
+ * "这台设备没有快应用 runtime"之后再去猜, 往往就去建一块屏了
+ */
+function formatCapabilities(result) {
+  const actions = Array.isArray(result.actions) ? result.actions : []
+  if (actions.length === 0) {
+    return 'the device reported no actions, which means it answered nothing rather than that it'
+      + ' cannot do anything: check that the app is the one this plugin belongs to'
+  }
+  const lines = [
+    `${actions.length} device actions are known on the phone's own screen (displayId 0):`,
+  ]
+  for (const action of actions) {
+    const permission = action.permission === 'none' ? 'no permission' : `permission ${action.permission}`
+    const note = action.note ? ` - ${action.note}` : ''
+    lines.push(
+      `- ${action.name} (${action.title}): via ${action.via}, ${permission}, risk ${action.risk},`
+      + ` ${action.state}${note}`,
+    )
+    lines.push(`    when it fails: ${action.failureReason}`)
+  }
+  const quick = result.quickApp ?? {}
+  lines.push(
+    quick.ready === true
+      ? `quick apps: supported - ${quick.handlerComponent || quick.handlerPackage} answers`
+        + ` ${quick.link}`
+      : `quick apps: unsupported - ${quick.reason || 'no quick app runtime answers'}`,
+  )
+  lines.push(
+    'An unsupported action is a plain answer: do not create a virtual screen to try it another way.',
+  )
+  return lines.join('\n')
+}
+
+/** What asking about a quick app runtime found */
+function formatQuickProbe(result) {
+  if (result.ready === true) {
+    return [
+      `quick apps: supported - ${result.handlerComponent || result.handlerPackage} answers`
+      + ` ${result.link} (${result.scheme})`,
+      'Open one with lw_quickapp op=open, naming it by package (com.example.app) or by its full'
+      + ' hap://app/... link. It opens on the phone\'s own screen through that deep link; no'
+      + ' virtual screen is created.',
+    ].join('\n')
+  }
+  return [
+    `quick apps: unsupported - ${result.reason || 'no quick app runtime answers'}`,
+    'Nothing on this device opens quick app links, and a virtual screen cannot change that: say'
+    + ' that this is unsupported instead of creating one.',
+  ].join('\n')
+}
+
+/** What handing a quick app deep link to its runtime did */
+function formatQuickOpened(result) {
+  if (result.started === true) {
+    return [
+      `opened ${result.uri} (${result.scheme} deep link) through`
+      + ` ${result.handlerComponent || result.handlerPackage} on the phone's own screen.`,
+      'No virtual screen was created. Read the screen back with lw_ui or lw_screenshot to see what'
+      + ' the quick app shows.',
+    ].join('\n')
+  }
+  return [
+    `unsupported: ${result.reason || 'the quick app could not be opened'}`,
+    'No virtual screen was created, and creating one would not make a quick app open on this'
+    + ' device: report that it is unsupported.',
+  ].join('\n')
 }
 
 /** What pressing by name did, which is the one call that can be ambiguous */
