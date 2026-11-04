@@ -109,9 +109,19 @@ internal object AutomationStore {
     fun file(context: Context, name: String): File =
         File(directory(context), "${normalizeArtifactName(name, "an automatic command", ".json")}.json")
 
+    /**
+     * 这个文件是不是一条规则
+     *
+     * 同一个目录里还躺着 `settings.json` 与 `places.json` —— 它们也以 `.json` 结尾, 所以按后缀收会
+     * 把它们当成规则去解析, 解析必然失败, 然后列表里就多出两条"坏掉的规则"(`BROKEN ...`), 主人点进去
+     * 才发现那是设置。按名字排掉它们, 与后缀判断一起收在这一个地方
+     */
+    fun isRuleFile(name: String): Boolean =
+        name.endsWith(".json") && name != SETTINGS_FILE && name != PLACES_FILE
+
     /** 现在的名字 (去掉 `.json`), 排序之后 */
     fun names(context: Context): List<String> =
-        (directory(context).listFiles { file -> file.isFile && file.name.endsWith(".json") } ?: emptyArray())
+        (directory(context).listFiles { file -> file.isFile && isRuleFile(file.name) } ?: emptyArray())
             .sortedBy { it.name }
             .take(MAX_LISTED)
             .map { it.name.removeSuffix(".json") }
@@ -122,7 +132,7 @@ internal object AutomationStore {
      * 每个文件都单独试: 一条坏的规则不该把整页变成空的
      */
     fun entries(context: Context): List<Entry> =
-        (directory(context).listFiles { file -> file.isFile && file.name.endsWith(".json") } ?: emptyArray())
+        (directory(context).listFiles { file -> file.isFile && isRuleFile(file.name) } ?: emptyArray())
             .sortedBy { it.name }
             .take(MAX_LISTED)
             .map { file ->
@@ -205,6 +215,16 @@ internal object AutomationStore {
         val raw = runCatching { File(directory(context), SETTINGS_FILE).takeIf { it.isFile }?.readText() }
             .getOrNull()
         val root = raw?.let { runCatching { AutomationJson.parse(it) }.getOrNull() } ?: JsonObject(emptyMap())
+        return settingsFrom(root)
+    }
+
+    /**
+     * 那份设置从 JSON 到 [Settings] 的那一段, 单独拎出来是为了能测
+     *
+     * 两条容易错的地方都在这里: ①`monitors` 严格按 [AutomationRule.WATCH_KINDS] 展开, 文件里多写的未知键
+     * 一律丢掉 (否则以后删掉的监测源会永远留着一行) ②缺键默认是"开", 所以老版本升上来不会静悄悄关掉监测
+     */
+    fun settingsFrom(root: JsonObject): Settings {
         val monitors = AutomationRule.objectOrEmpty(root["monitors"])
         return Settings(
             monitors = AutomationRule.WATCH_KINDS.associateWith { kind ->
