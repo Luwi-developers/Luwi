@@ -2,7 +2,7 @@
  * Hallmark · component: ready-card · genre: modern-minimal · theme: luwi-miuix
  * states: default · running(带确定进度) · done · failed · 锁住(下一件还点不动) · reading(读状态)
  * contrast: 颜色全部取 MiuixTheme.colorScheme, 没有写死色值; 可点的方框 >= 50dp
- * structure: 阶梯 (五件依赖排成一条竖轨 + 五个节点), 装进一个**居中的对话框**
+ * structure: 阶梯 (四件依赖排成一条竖轨 + 四个节点), 装进一个**居中的对话框**
  * placement: 首启自动弹一次 / 设置页「检查所需依赖」那一行随时再弹 (2026-11-04 主人 #1)
  */
 package io.github.yuloong07star.luwi.ui
@@ -63,7 +63,6 @@ import androidx.compose.ui.window.DialogProperties
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.ChannelSetting
-import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.voice.SpeechModelDownload
@@ -85,7 +84,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 也不知道它跟"能不能用"有什么关系; 但"还差 3 步"和每一项后面那个按钮是他看得懂的。所以这里只做三件事:
  * 说清还差几件, 每一件现在什么样, 点一下把它办掉
  *
- * **结构**: 五件按依赖顺序排成一条竖轨 (特权通道 → 无障碍 → 唤醒模型 → 语音模型 → 虚拟屏), 每件是一个
+ * **结构**: 四件按依赖顺序排成一条竖轨 (特权通道 → 无障碍 → 唤醒模型 → 语音模型), 每件是一个
  * 节点。轨道本身在说话: 已经通了的那一段是主题色, 还没到的那一段是暗的 —— "这是一串有先后的事"不用
  * 再写一句话解释, 看线就知道。无障碍要靠特权进程写 secure setting, 模型要靠无障碍那条链被叫起来, 虚拟屏
  * 要靠特权进程建; 所以上面那件没通, 下面那件的按钮就是灰的: 先给他一个点得动的, 而不是一个点了报错的
@@ -97,7 +96,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 不算进这张体检表的必做项
  *
  * **为什么改成对话框**: 它原来内嵌在两处 (启动页底部一块、设置页「外观」下面一个 item), 都在页面的
- * 下半截, 而五件依赖排成一条竖轨之后比一屏还高 —— "还差几步"总有一半在屏幕外。对话框自己居中、自己
+ * 下半截, 而四件依赖排成一条竖轨之后比一屏还高 —— "还差几步"总有一半在屏幕外。对话框自己居中、自己
  * 滚动, 而且进退都不牵动页面布局 (那两个内嵌的挂载点因此都撤掉了, 见 [ReadyPrompt] 与设置页那一行)
  *
  * **虚拟屏那一件只显示状态, 不再给按钮** (2026-11-04 主人 #3): 建屏是"用起来之后自然会发现"的事,
@@ -135,7 +134,7 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        // 五件依赖 + 那颗按钮在窄屏上比一屏还高: 卡片封在屏幕的 72%, 内容自己滚
+                        // 四件依赖 + 那颗按钮在窄屏上比一屏还高: 卡片封在屏幕的 72%, 内容自己滚
                         .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.72f).dp)
                         .verticalScroll(rememberScrollState())
                         .padding(UiSpacing.Large),
@@ -157,9 +156,9 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
 /**
  * 首启自动弹的那一次 (2026-11-04 主人 #1①)
  *
- * 只在**还有没办的时候**弹, 而且一辈子只自动弹一次 ([ReadyDialogSeen] 落 `ready-dialog-seen`) ——
- * 之后要看就走设置页那一行「检查所需依赖」。判与弹都挂在主线上: 判那一步在 IO 上做, 因为它要读磁盘
- * 并等两个 worker 把通道 / 无障碍的状态读回来
+ * 一辈子只自动弹一次 ([ReadyDialogSeen] 落 `ready-dialog-seen`), 弹不弹只看"看过没有" —— 这一窗是
+ * 第一次进应用的那一眼, 那四件齐不齐是它要**说**的事, 不是它该不该出现的前提。之后要看就走设置页
+ * 那一行「检查所需依赖」。判那一步仍在 IO 上做, 因为它要读偏好
  */
 @Composable
 internal fun ReadyPrompt() {
@@ -189,55 +188,27 @@ internal object ReadyDialogSeen {
     @Volatile
     private var promptedThisRun = false
 
-    /** 通道与无障碍由各自的 worker 填, 最多等这么久; 等不到就按"读不出来"算还没办 */
-    private const val WAIT_MILLIS = 6_000L
-    private const val POLL_MILLIS = 100L
-
     /** 这一次打开要不要弹; 返回 true 时记号已经写下了 */
     fun claim(context: Context): Boolean {
         if (promptedThisRun) return false
         if (prefs(context).getBoolean(SEEN, false)) return false
-        if (!missing(context)) return false
         promptedThisRun = true
         runCatching { prefs(context).edit().putBoolean(SEEN, true).apply() }
         return true
     }
 
-    /**
-     * 四件**可操作**的事里还有没有没办的
-     *
-     * **虚拟屏那一件不算** (主人 2026-11-04 #3: 那一项只显示状态、不再给按钮): 只剩它没建时弹出来也是
-     * 一张没有按钮的窗, 不如不弹 —— 要看状态, 设置页那一行随时打得开这张表
-     */
-    private fun missing(context: Context): Boolean {
-        ChannelSetting.refresh()
-        AccessibilitySetting.refreshState()
-        WakeWordDownload.refresh(context)
-        SpeechModelDownload.refresh(context)
-        var waited = 0L
-        while ((ChannelSetting.state == null || AccessibilitySetting.state == null) && waited < WAIT_MILLIS) {
-            Thread.sleep(POLL_MILLIS)
-            waited += POLL_MILLIS
-        }
-        return ChannelSetting.state?.connected != true ||
-            AccessibilitySetting.state?.healthy != true ||
-            !WakeWordDownload.present(context) ||
-            !SpeechModelDownload.present(context)
-    }
-
     private fun prefs(context: Context) = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
 }
 
-/** 对话框里那一坨: 一个环 + 五件依赖 + 下一步该按的那一颗按钮 */
+/** 对话框里那一坨: 一个环 + 四件依赖 + 下一步该按的那一颗按钮 */
 @Composable
 private fun ReadyCardBody() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    // 这三个都是 Compose 状态: 通道与无障碍由各自的 Setting 在 worker 线程上填, 屏列表由
-    // [VirtualScreen] 直接改写 —— 所以这里不需要轮询, 也不需要自己记住上一次读到什么
+    // 这两个都是 Compose 状态: 通道与无障碍由各自的 Setting 在 worker 线程上填 —— 所以这里不需要轮询,
+    // 也不需要自己记住上一次读到什么
     val channel = ChannelSetting.state
     val accessibility = AccessibilitySetting.state
-    val screens = VirtualScreen.screens
 
     LaunchedEffect(Unit) {
         // 打开时读一次。四件事都不在画帧的线程上做事: 通道与无障碍要起几个 settings/cmd 子进程;
@@ -326,27 +297,16 @@ private fun ReadyCardBody() {
             action = ReadyAction.SpeechDownload,
             bytes = speechBytes,
         ),
-        // 虚拟屏那一件**只报状态, 不给按钮** (2026-11-04 主人 #3): 所以它没有 action
-        ReadyStep(
-            state = if (screens.isNotEmpty()) ReadyState.DONE else ReadyState.TODO,
-            title = stringResource(R.string.ready_screen),
-            detail = if (screens.isEmpty()) {
-                stringResource(R.string.ready_screen_off)
-            } else {
-                stringResource(R.string.ready_screen_ok, screens.size)
-            },
-        ),
     )
 
     val done = steps.count { it.state == ReadyState.DONE }
     val missing = steps.size - done
-    // **只给下一步该做的那一件**, 而且只在**四件可操作的事**里挑: 虚拟屏那一项现在只显示状态
-    // (2026-11-04 主人 #3), 于是"最后只剩一块屏没建"时这里没有按钮 —— 不会出现一个灰着的空方框。
-    // 五件各给一个按钮也不行: 用户会按顺序全按一遍, 而第二件往后按下去只会报"特权通道还没通"
+    // **只给下一步该做的那一件**: 四件各给一个按钮不行 —— 用户会按顺序全按一遍, 而第二件往后
+    // 按下去只会报"特权通道还没通"
     val next = steps.firstOrNull { it.state != ReadyState.DONE && it.action != ReadyAction.None }
 
     if (channel == null && accessibility == null) {
-        // 还没读到就不摆五行: 两个 state 的初值都是 null, 否则刚打开会闪一下"还差 5 步", 一帧后变少
+        // 还没读到就不摆四行: 两个 state 的初值都是 null, 否则刚打开会闪一下"还差 4 步", 一帧后变少
         Text(
             text = stringResource(R.string.ready_reading),
             style = MiuixTheme.textStyles.body2,
@@ -358,7 +318,7 @@ private fun ReadyCardBody() {
     ReadyHead(done = done, total = steps.size, missing = missing)
 
     steps.forEachIndexed { index, step ->
-        // 用下标当身份: 五件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
+        // 用下标当身份: 四件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
         ReadyRow(
             step = step,
             index = index,
@@ -367,7 +327,7 @@ private fun ReadyCardBody() {
         )
     }
 
-    // 没有"下一步"时整块不画: 五件里只剩虚拟屏那种情况就是这样 (它没有 CTA, 也不该留一块空框)
+    // 没有"下一步"时整块不画 (四件都办完就是这样): 不该留一块空框
     if (next != null) {
         ReadyActionRow(
             next = next,
@@ -404,7 +364,7 @@ private fun ReadyCardBody() {
  * 卡片头: 一个环 + 两句
  *
  * 没有"这是什么"那种大标题: 这张卡的重点是"还差几步", 不是自我说明。环说比例, 第一句说还差几步,
- * 第二句说这五件的规矩 —— 后者是这张卡唯一需要解释的东西
+ * 第二句说这四件的规矩 —— 后者是这张卡唯一需要解释的东西
  */
 @Composable
 private fun ReadyHead(done: Int, total: Int, missing: Int) {

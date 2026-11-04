@@ -1,11 +1,11 @@
 /**
- * 「开始使用」引导窗 (五件依赖 + 两个模型下载) 的判据
+ * 「开始使用」引导窗 (四件依赖 + 两个模型下载) 的判据
  *
  * 2026-11-04 主人把这张卡改成了**居中对话框**: 首启自动弹一次、设置页「省电」上方那一行手动弹,
- * 原来内嵌的两处 (启动页底部 / 设置页那个 item) 都撤了; 虚拟屏那一项只剩状态、不再给 CTA;
+ * 原来内嵌的两处 (启动页底部 / 设置页那个 item) 都撤了; 虚拟屏那一行后来又整个撤了 (同日第二条);
  * 设置页右上角那个刷新图标也去掉了。所以这张卡的接缝比原来多几条, 每一处**漂开了都不会报错**:
  *
- *   1. **五件顺序**: 特权通道 → 无障碍 → 唤醒模型 → 语音模型 → 虚拟屏。这是**依赖顺序**, 不是重要性
+ *   1. **四件顺序**: 特权通道 → 无障碍 → 唤醒模型 → 语音模型。这是**依赖顺序**, 不是重要性
  *      顺序 —— 排错了不会崩, 只会让人按着一个点不动的按钮
  *   2. **键名与两份 strings**: 全部 `ready_*` 前缀, en 与 zh 都在, 顺序也一至; 半截用 `settings_ready_*`
  *      就会让那一半没字 (那一批键只该出现在这一张卡上)
@@ -15,8 +15,9 @@
  *      `total`; 自己再写一套 http 客户端就是第二份文件表与第二份 sha256
  *   5. **入口**: ① 首启一次 (prefs 键 `ready-dialog-seen`, 挂在 AppNav 最外层, 于是开屏那一屏上就
  *      盖得住) ② 设置页「省电」**上方**那一行。两处内嵌的挂载必须都不在了, 否则又是"底部半张卡"
- *   6. **虚拟屏不给 CTA**: 那一项只报状态。判定方式是"step 里 `action` 的赋值只有四处" +
- *      `CreateScreen` 全无 + 那两条文案也删了 —— 少一条它就悄悄长回一个按钮
+ *   6. **虚拟屏整行都不在了** (2026-11-04 主人: 那一行去掉): 判定是"step 里 `action` 的赋值只有
+ *      四处" + `CreateScreen` 全无 + `ready_screen` 那三条文案与 `VirtualScreen` 引用一起没了 ——
+ *      少一条它就悄悄长回一行
  *   7. **刷新按钮真的没了**: 它原来是 `reload` 计数 + `key(reload)` 整棵重建。删一半 (只删图标、留着
  *      `reload += 1`) 编译不过, 删错一半 (留着死代码) 则看不出问题, 所以四条一起看
  *
@@ -60,20 +61,20 @@ const code = card
   .replace(/\/\*[\s\S]*?\*\//gu, '')
   .replace(/\/\/[^\n]*/gu, '')
 
-/* ── 一、五件的顺序就是依赖顺序 ───────────────────────────────────────── */
+/* ── 一、四件的顺序就是依赖顺序 ───────────────────────────────────────── */
 
 // 顺序靠"步骤标题"认: 每一件在 [steps] 里只出现一次, 而且顺序看得见
 const stepTitles = [...card.matchAll(/title\s*=\s*stringResource\(R\.string\.(ready_[a-z_]+)\)/gu)]
   .map((one) => one[1])
 check(
-  '五件的顺序: 特权通道 → 无障碍 → 唤醒模型 → 语音模型 → 虚拟屏',
+  '四件的顺序: 特权通道 → 无障碍 → 唤醒模型 → 语音模型',
   stepTitles,
-  ['ready_channel', 'ready_accessibility', 'ready_wake', 'ready_speech', 'ready_screen'],
+  ['ready_channel', 'ready_accessibility', 'ready_wake', 'ready_speech'],
 )
 
 /* ── 二、键名 ready_* , 两份 strings 都在, 顺序一致 ────────────────────── */
 
-// 卡片里真正引用到的键 (含 CTA 与"知道了"那几句)
+// 卡片里真正引用到的键 (含 CTA 与"开始使用 Luwi"那句)
 const used = [...new Set([...card.matchAll(/R\.string\.(ready_[a-z_]+)/gu)].map((one) => one[1]))].sort()
 const enKeys = keysOf(en, 'ready_')
 const zhKeys = keysOf(zh, 'ready_')
@@ -181,7 +182,7 @@ check(
 /* ── 五、它现在是一个**居中对话框** (2026-11-04 主人 #1 / #2) ───────────── */
 
 check(
-  'ReadyCard 作为**居中对话框**的内容存在 (Dialog 居中 + 一张会滚的 Card + 一颗"知道了")',
+  'ReadyCard 作为**居中对话框**的内容存在 (Dialog 居中 + 一张会滚的 Card + 一颗"开始使用 Luwi")',
   [
     /internal fun ReadyCardDialog\(onDismiss: \(\) -> Unit\)/u.test(card),
     card.includes('Dialog('),
@@ -194,6 +195,15 @@ check(
     !card.includes('reserve.toDp()'),
   ],
   [true, true, true, true, true, true, true, true],
+)
+
+check(
+  '那颗按钮说的是"开始使用 Luwi" (2026-11-04 主人第二条)',
+  [
+    zh.includes('<string name="ready_dialog_close">开始使用 Luwi</string>'),
+    en.includes('<string name="ready_dialog_close">Start using Luwi</string>'),
+  ],
+  [true, true],
 )
 
 /* ── 六、设置页「省电」上方那一行, 与两处内嵌挂载都撤了 ────────────────── */
@@ -236,18 +246,19 @@ check(
   [true, true, true, true, true, true],
 )
 
-/* ── 八、虚拟屏那一项不给 CTA (2026-11-04 主人 #3) ────────────────────── */
+/* ── 八、虚拟屏那一行整个不在了 (2026-11-04 主人: 那一行去掉) ──────────── */
 
 check(
-  '虚拟屏那一项只显示状态, 不再给 CTA',
+  '虚拟屏整行撤了: 代码里没有它, 两份 strings 也没有它的字',
   [
     !/CreateScreen/u.test(code),
-    // 五个 step 里只有四处 action 赋值 (通道 / 无障碍 / 唤醒词 / 语音), 虚拟屏那一个没有
+    // 四个 step 各一处 action 赋值 (通道 / 无障碍 / 唤醒词 / 语音)
     [...code.matchAll(/^\s+action = ReadyAction\./gmu)].length,
-    !enKeys.includes('ready_action_screen'),
-    !zhKeys.includes('ready_action_screen'),
+    !/ready_screen/u.test(code),
+    !/VirtualScreen/u.test(code),
+    !enKeys.includes('ready_screen') && !zhKeys.includes('ready_screen'),
   ],
-  [true, 4, true, true],
+  [true, 4, true, true, true],
 )
 
 /* ── 九、设置页右上角那个刷新按钮没了 (2026-11-04 主人 #4) ──────────────── */
