@@ -31,6 +31,20 @@ import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
 const TOKEN_VARIABLE = 'LW_CHANNEL_TOKEN'
 
+/**
+ * A temporary name beside the file it is about to become
+ *
+ * 固定写 .tmp 会让同一个文件的两个写者在 rename 上撞车: 先到的把临时文件搬走, 后到的
+ * rename 报 ENOENT, 而两个写者都以为自己成功了 (2026-11-02, mode-model-state.json 与
+ * model-catalog.json 各撞过一次, 见真机日志)。进程号不同时天然分开, 进程内再加一个自增
+ * 序号, 于是同一个文件也永远不会用到同一个临时名
+ */
+let temporaryCount = 0
+function temporaryName(path) {
+  temporaryCount += 1
+  return `${path}.${process.pid}.${temporaryCount}.tmp`
+}
+
 /** How long a swipe takes when the caller does not say, which is a deliberate drag */
 const DEFAULT_SWIPE_MS = 300
 
@@ -1483,7 +1497,7 @@ async function writeModeModelState() {
   const configured = readModeModelConfig()
   // `configured` 由 [modeModelStatus] 现读给出, 这里只是把它记下来看下一拍要不要补写
   const payload = { v: 1, at: Date.now(), ...modeModelStatus() }
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -1528,7 +1542,7 @@ async function writeModelCatalog(ctx) {
     // 目录取不到不算失败: ok:false + 空 items, 应用那边退文本框, 不让请求死在这
     payload.reason = `building the model catalog failed: ${error?.message ?? error}`
   }
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -6847,7 +6861,7 @@ async function voiceReadingsWrite(ctx) {
   }
   try {
     await mkdir(dirname(path), { recursive: true })
-    const temporary = `${path}.tmp`
+    const temporary = temporaryName(path)
     await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`)
     await rename(temporary, path)
   } catch (error) {
@@ -7720,7 +7734,7 @@ async function writeDesktopChat(who, text) {
   if (last?.who === who && last?.text === line) return
   const kept = [...lines, { who, text: line, at: Date.now() }].slice(-DESKTOP_CHAT_LINES)
   const payload = { v: 1, at: Date.now(), lines: kept }
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -7901,7 +7915,7 @@ async function writeBallPhase() {
   // `last` 是**可选**键: 没有结束记录时整条不写, 版本号于是还是 1 —— 旧应用忽略这个键, 新应用
   // 容忍它缺席 (两边本来都不校验 v)
   if (ballEnded !== null) payload.last = ballEnded
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -8334,7 +8348,7 @@ async function exploreTaskWrite(text) {
   const path = exploreTaskPath()
   if (path === null) return { path: '', chars: 0, error: 'this host has no DSH_HOME' }
   const body = String(text ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${body}\n`)
@@ -8411,7 +8425,7 @@ async function exploreStateWriteNow() {
       powerSaveUnknown: exploreState.powerSaveUnknown,
     },
   }
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -9592,7 +9606,7 @@ async function refreshBalance(ctx, request = null) {
   payload.networkMs = Date.now() - startedAt
   // `at` 是这份数**读出来**的那一刻 (不是请求写下来的那一刻): 应用按它算"多旧"
   payload.at = Date.now()
-  const temporary = `${path}.tmp`
+  const temporary = temporaryName(path)
   try {
     // 落盘那一段量两次: 先把那一份写进 `.tmp`, 量完把 `writeMs` 填回去再写一次同一个 `.tmp`,
     // 最后只 rename 一次 —— 这样文件里那个 `writeMs` 是这一次真的花了多久, 不是占位的 0
