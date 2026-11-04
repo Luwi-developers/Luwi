@@ -547,5 +547,56 @@ check(
   [true, true, true, true, true],
 )
 
+/* ── 点击语音输入开关 + 换状态只跑一段过渡 (落实表 #33, 2026-11-04) ──────── */
+
+// show() 的身体: 从函数头切到 stateName 之前 —— 断言只许落在这一段里, 免得哪一句跑到别处
+const showStart = ball.indexOf('fun show(next: BallWord?')
+const showBody = ball.slice(showStart, ball.indexOf('private fun stateName', showStart))
+// 注释里也会提到那几个 API 名字 (那几行正是在讲改之前是什么样), 数动画之前先把注释剥掉
+const showCode = showBody.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+// tapAction 的身体: 单击真正动手的那四段都在这儿
+const tapStart = overlay.indexOf('private fun tapAction(now: Long)')
+const tapBody = overlay.slice(tapStart, overlay.indexOf('private fun leaveVideoMode', tapStart))
+
+check(
+  '「点击语音输入」: 键与缺省 true 都在 BallSpot 里, 关掉那一支挂在 tapAction 的 LISTEN 上',
+  [
+    ball.includes('KEY_TAP_VOICE = "ball-tap-voice"'),
+    ball.includes(
+      'fun tapVoice(context: Context): Boolean = prefs(context).getBoolean(KEY_TAP_VOICE, true)',
+    ),
+    ball.includes('fun setTapVoice(context: Context, on: Boolean)'),
+    // 关掉那一支: 点球不进语音 (只滑回来), 而这一支必须排在 listenNow 之前
+    tapBody.includes('if (!BallSpot.tapVoice(this))'),
+    tapBody.indexOf('if (!BallSpot.tapVoice(this))') < tapBody.indexOf('listenNow()'),
+    // 关着时也不排确认窗: 否则"点了一下球, 一秒半之后才有反应"
+    overlay.includes('if (!BallSpot.tapVoice(this@OverlayService))'),
+    // 长按那条路不许被这个开关牵连 —— 点球 != 长按, 菜单照旧
+    /override fun onLongPress\(\) \{\s*toggleMenu\(\)/.test(overlay),
+    settings.includes('BallSpot.setTapVoice(context, wanted)'),
+    en.includes('name="settings_ball_tap_voice"'),
+    zh.includes('name="settings_ball_tap_voice"'),
+  ],
+  [true, true, true, true, true, true, true, true, true, true],
+)
+
+check(
+  '换状态只跑一段过渡 (不再"先淡到 0 → withEndAction 里再淡回 1"那种双跳)',
+  [
+    // 那一段切得对: 真的落在 show() 里
+    showBody.includes('fun show(next: BallWord?'),
+    showCode.includes('withEndAction'),
+    // 一次换字只许有一个动画启动点; 也不许再链一条"淡出去再淡回来"
+    [...showCode.matchAll(/\.start\(\)/g)].length,
+    showCode.includes('withEndAction {'),
+    showCode.includes('.alpha(0f)'),
+    // alpha 动画只有一条 (淡回满亮那一趟), 前面那次归零是直接赋值, 不是第二段动画
+    (showCode.match(/\.animate\(\)\.alpha\(/g) || []).length,
+    // 归零与淡回之间不许夹"结束回调里再开一段"
+    /withEndAction\s*\{[\s\S]*alpha\(1f\)/.test(showCode),
+  ],
+  [true, false, 1, false, false, 1, false],
+)
+
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)
 process.exit(failures === 0 ? 0 : 1)

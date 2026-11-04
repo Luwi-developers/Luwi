@@ -5393,6 +5393,19 @@ private fun BallItems() {
             BallSpot.setAutoPeek(context, wanted)
         },
     )
+    // 「点击语音输入」那一档 (落实表 #33, 主人 2026-11-04: "浮标加一个点击语音输入的开关, 默认开"):
+    // **只关"点一下进语音"这一条路** —— 长按菜单、拖动、召出滑回来都照旧 (菜单走的是另一条手势,
+    // 关这一行不该顺手把菜单也关掉)。服务每一拍现读这个偏好, 所以改完当场算数, 不必重启浮标
+    var tapVoiceNow by remember { mutableStateOf(BallSpot.tapVoice(context)) }
+    SwitchPreference(
+        title = stringResource(R.string.settings_ball_tap_voice),
+        summary = stringResource(R.string.settings_ball_tap_voice_summary),
+        checked = tapVoiceNow,
+        onCheckedChange = { wanted ->
+            tapVoiceNow = wanted
+            BallSpot.setTapVoice(context, wanted)
+        },
+    )
     // 2026-10-24 主人: 「桌面对话组件」那一行从 ball 段去掉 —— 桌面组件本身还在 (已经放到桌面上的
     // 那一格照旧能说、能看气泡), 只是设置里不再有"再放一个上去"的入口。要恢复就把它加回来:
     //   ArrowPreference(title = settings_widget_chat_row, summary = settings_widget_chat_summary,

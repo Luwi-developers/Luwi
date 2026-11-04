@@ -31,20 +31,6 @@ import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
 const TOKEN_VARIABLE = 'LW_CHANNEL_TOKEN'
 
-/**
- * A temporary name beside the file it is about to become
- *
- * 固定写 .tmp 会让同一个文件的两个写者在 rename 上撞车: 先到的把临时文件搬走, 后到的
- * rename 报 ENOENT, 而两个写者都以为自己成功了 (2026-11-02, mode-model-state.json 与
- * model-catalog.json 各撞过一次, 见真机日志)。进程号不同时天然分开, 进程内再加一个自增
- * 序号, 于是同一个文件也永远不会用到同一个临时名
- */
-let temporaryCount = 0
-function temporaryName(path) {
-  temporaryCount += 1
-  return `${path}.${process.pid}.${temporaryCount}.tmp`
-}
-
 /** How long a swipe takes when the caller does not say, which is a deliberate drag */
 const DEFAULT_SWIPE_MS = 300
 
@@ -1497,7 +1483,7 @@ async function writeModeModelState() {
   const configured = readModeModelConfig()
   // `configured` 由 [modeModelStatus] 现读给出, 这里只是把它记下来看下一拍要不要补写
   const payload = { v: 1, at: Date.now(), ...modeModelStatus() }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -1542,7 +1528,7 @@ async function writeModelCatalog(ctx) {
     // 目录取不到不算失败: ok:false + 空 items, 应用那边退文本框, 不让请求死在这
     payload.reason = `building the model catalog failed: ${error?.message ?? error}`
   }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -2626,7 +2612,10 @@ const TOOLS = [
       + 'lw_screen_create takes a width and a height - because an app that declares an orientation '
       + 'of its own keeps it and sits in a band in the middle of a screen shaped the other way. Use '
       + 'this rather than a shell: the am command refuses an app uid on this device, so a launch '
-      + 'attempted from a shell fails. Call lw_ui or lw_screenshot after it to see the result.',
+      + 'attempted from a shell fails. **On the phone\'s own screen (displayId 0) the app is started '
+      + 'through the package manager in Luwi\'s own process**, so no privileged channel and no '
+      + 'virtual screen are involved; only a virtual screen needs the privileged am. Call lw_ui or '
+      + 'lw_screenshot after it to see the result.',
     parameters: {
       displayId: DISPLAY_ID,
       package: {
@@ -3160,8 +3149,10 @@ const TOOLS = [
       + ' when the user named something more specific: a mail composer (android.intent.action.SENDTO'
       + ' with a mailto: address), a settings page of another app, a specific class. The screen is'
       + ' named the same way every other acting tool names one, and the activity lands on it.'
-      + ' Nothing here is a shell: the one command this reaches is `am start`, with an action, a'
-      + ' piece of data, a component and a display.',
+      + ' On the phone\'s own screen (displayId 0) the intent is handed to Android from Luwi\'s own'
+      + ' process, so no privileged channel and no virtual screen are involved; on a virtual screen'
+      + ' it reaches the privileged `am start`, with an action, a piece of data, a component and a'
+      + ' display.',
     parameters: {
       op: {
         type: 'string',
@@ -5310,14 +5301,22 @@ function formatLaunched(result, note) {
   const target = result.package || result.component
   const whose = result.user > 0 ? ` as user ${result.user}` : ''
   const from = result.asked ? ` (from ${JSON.stringify(result.asked)})` : ''
+  // 走的哪半边: 手机自己的屏是应用进程里的 PackageManager, 虚拟屏才是特权 am (B3-b ⑤⑦)
+  const via = result.via ? ` via ${result.via}` : ''
   const lines = result.started === true
-    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"`]
+    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"${via}`]
     : [
       `the launch of ${target}${from}${whose} on displayId ${result.displayId} did not report`
-      + ` success (am exited ${result.code}); what it said follows`,
+      + ` success (${result.route === 'native' ? 'the package manager refused it' : `am exited ${result.code}`});`
+      + ' what it said follows',
     ]
   const output = (result.output ?? '').trim()
   if (output) lines.push(output)
+  // 没起成时下面那段"读回屏幕"没有意义: 没有新窗口可读, 原因已经在上面
+  if (result.started !== true) {
+    if (result.windowNote) lines.push(result.windowNote)
+    return said(lines.join('\n'), note)
+  }
   // 起完的自查: `am start` 报成功不等于窗口落在这块屏上, 而"没有窗口"这件事以前只有模型自己去发现
   // (windowOnDisplay 为 null 表示这次查不了: 无障碍没开, 窗口列表读不到)
   if (result.windowOnDisplay === false || result.windowOnDisplay === null) {
@@ -6861,7 +6860,7 @@ async function voiceReadingsWrite(ctx) {
   }
   try {
     await mkdir(dirname(path), { recursive: true })
-    const temporary = temporaryName(path)
+    const temporary = `${path}.tmp`
     await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`)
     await rename(temporary, path)
   } catch (error) {
@@ -7734,7 +7733,7 @@ async function writeDesktopChat(who, text) {
   if (last?.who === who && last?.text === line) return
   const kept = [...lines, { who, text: line, at: Date.now() }].slice(-DESKTOP_CHAT_LINES)
   const payload = { v: 1, at: Date.now(), lines: kept }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -7915,7 +7914,7 @@ async function writeBallPhase() {
   // `last` 是**可选**键: 没有结束记录时整条不写, 版本号于是还是 1 —— 旧应用忽略这个键, 新应用
   // 容忍它缺席 (两边本来都不校验 v)
   if (ballEnded !== null) payload.last = ballEnded
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -8348,7 +8347,7 @@ async function exploreTaskWrite(text) {
   const path = exploreTaskPath()
   if (path === null) return { path: '', chars: 0, error: 'this host has no DSH_HOME' }
   const body = String(text ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${body}\n`)
@@ -8425,7 +8424,7 @@ async function exploreStateWriteNow() {
       powerSaveUnknown: exploreState.powerSaveUnknown,
     },
   }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -9606,7 +9605,7 @@ async function refreshBalance(ctx, request = null) {
   payload.networkMs = Date.now() - startedAt
   // `at` 是这份数**读出来**的那一刻 (不是请求写下来的那一刻): 应用按它算"多旧"
   payload.at = Date.now()
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     // 落盘那一段量两次: 先把那一份写进 `.tmp`, 量完把 `writeMs` 填回去再写一次同一个 `.tmp`,
     // 最后只 rename 一次 —— 这样文件里那个 `writeMs` 是这一次真的花了多久, 不是占位的 0

@@ -65,7 +65,10 @@ internal object DeviceActionRegistry {
             name = "alarm",
             title = "set an alarm",
             via = DeviceRoute.INTENT,
-            permission = DeviceAction.NO_PERMISSION,
+            // 系统那条 SET_ALARM 是要权限的: 声明成 none 时真机上被拒成 "Permission Denial ...
+            // requires com.android.alarm.permission.SET_ALARM" (2026-11-03 真机读数). 它是安装时
+            // 自动给的那一档, 所以写出来只是把"要不要问用户"这件事说清, 不需要运行时弹窗
+            permission = "com.android.alarm.permission.SET_ALARM",
             risk = DeviceRisk.LOW,
             failureReason = "no clock app on this device answers to ACTION_SET_ALARM",
             fallbacks = listOf(DeviceRoute.UNSUPPORTED),

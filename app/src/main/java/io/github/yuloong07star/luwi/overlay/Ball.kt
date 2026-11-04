@@ -261,6 +261,9 @@ internal object BallSpot {
     /** 「休闲后半隐藏」那个开关: 关掉就永不自动贴边 (碰一下仍然会滑回来) */
     private const val KEY_AUTOPEEK = "ball-peek"
 
+    /** 「点击语音输入」那一档: 关掉时点球只当普通点击, 不进语音 (落实表 #33) */
+    private const val KEY_TAP_VOICE = "ball-tap-voice"
+
     fun on(context: Context): Boolean = prefs(context).getBoolean(KEY_ON, false)
 
     fun setOn(context: Context, on: Boolean) {
@@ -291,6 +294,20 @@ internal object BallSpot {
 
     fun setAutoPeek(context: Context, on: Boolean) {
         prefs(context).edit().putBoolean(KEY_AUTOPEEK, on).apply()
+    }
+
+    /**
+     * 「点击语音输入」: 点一下球要不要进语音会话 (落实表 #33, 主人 2026-11-04: "浮标加一个点击语音输入的
+     * 开关, 默认开")
+     *
+     * 缺省**开** —— 点球就说话是这颗球一直以来的行为, 开关只是给一个"别让它开口"的档。关掉之后**只关
+     * 这一条路**: 点击不再进语音 (见 `OverlayService.tapAction` 的 `BallAct.LISTEN` 那一支), 而长按菜单、
+     * 拖动、召出滑回来照旧 —— 长按菜单里那些动作 (键盘输入 / 识屏 / 关掉浮标) 是另一条独立的手势
+     */
+    fun tapVoice(context: Context): Boolean = prefs(context).getBoolean(KEY_TAP_VOICE, true)
+
+    fun setTapVoice(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean(KEY_TAP_VOICE, on).apply()
     }
 
     // **那个"手势提示只给一次"的记号已经删掉了** (2026-10-05 主人: 关于球的所有操作都不要有提示):
@@ -655,15 +672,22 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         if (!changed && !recolored && !rethemed && !repeeked && label.text.isNotEmpty()) return
         // 字换了才值得闪一下; 只换色 (会话轮换) 直接落色, 不该看着像闪了一下
         if (!changed || !animate) {
+            // 先把可能还在跑的那一段掐掉: [apply] 最后会把透明度拉回满亮, 被掐在半路的淡入就落定了
             label.animate().cancel()
             apply(next, text, size, color, peeked)
             return
         }
+        // **换状态只跑一段过渡** (落实表 #33, 主人 2026-11-04: "切换时会同时跑展开与收起两段动画,
+        // 看起来卡一下 —— 改成同一时刻只跑一段")
+        //
+        // 从前是两段: 先 `alpha(0f)` 淡出, 在 `withEndAction` 里换字再 `alpha(1f)` 淡回 —— 一次换字
+        // 要过两条动画线, 而 `refresh` 是 400 ms 一拍, 上一段还没跑完就可能被下一拍掐掉 (掐掉时
+        // `withEndAction` 不执行, 字就卡在透明那一半)。现在先落字, 再从透明**一口气**淡回满亮:
+        // 只有"目标那一段", 没有回程
         label.animate().cancel()
-        label.animate().alpha(0f).setDuration(FADE_MS / 2).withEndAction {
-            apply(next, text, size, color, peeked)
-            label.animate().alpha(1f).setDuration(FADE_MS / 2).start()
-        }.start()
+        apply(next, text, size, color, peeked)
+        label.alpha = 0f
+        label.animate().alpha(1f).setDuration(FADE_MS).start()
     }
 
     /**

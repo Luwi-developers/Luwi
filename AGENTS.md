@@ -122,7 +122,7 @@
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 特权侧写死白名单 `LwSystemCommandTable.kt`
 - `displayId` 可省略 = "手里那块" (预览选中 → 最新建 → 无虚拟屏才 0); 事件订阅不补
-- `lw_launch` 只走特权; 按键传名字不传编号; 打字优先 `ACTION_SET_TEXT`; `swipe` 均分 12 步、每步至少睡一帧
+- `lw_launch` 与 `lw_intent` 主屏 (display 0) 先走原生 (PackageManager / Context), 虚拟屏才走特权 `am`; 按键传名字不传编号; 打字优先 `ACTION_SET_TEXT`; `swipe` 均分 12 步、每步至少睡一帧
 - 验证: `tools/lw-bridge.ps1` / `tools/lw-plugin-call.mjs` / `tools/lw-device-turn.ps1`; **读图不能在 run-as 里验**
 
 ## 主屏 / 语音 / 无障碍
