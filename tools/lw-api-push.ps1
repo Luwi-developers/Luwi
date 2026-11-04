@@ -12,7 +12,7 @@ param(
     [int]$Limit = 0,
     [switch]$Apply,
     [string]$RepoRoot = 'D:\apk\Luwi',
-    [string]$Repo = 'Luwi-developers/Luwi',
+    [string]$Repo = 'yuloong07-star/Luwi',
     [string]$Gh = 'D:\Codex\gh-cli\gh.exe',
     [string]$RemoteRef = 'luwi/main',
     [string]$Tag = 'v1.0.3',
@@ -25,16 +25,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-Location $RepoRoot
-
-# 仓库可能被改名/转移 (2026-11-02 踩到: yuloong07-star/Luwi → Luwi-developers/Luwi)。
-# GET 会跟 307 自动跳转, 所以 base tree 校验照样通过; 但 **POST 不跟跳转** ——
-# `POST /git/blobs` 拿到 307、sha 为空, 报 `blob mismatch for AGENTS.md : api= local=...`。
-# 所以先把名字过一遍 API 换成规范 full_name, 后面所有 POST 都用它。
-$canonical = ''
-try { $canonical = (& $Gh api "repos/$Repo" --jq '.full_name' 2>$null) } catch { $canonical = '' }
-if ($LASTEXITCODE -eq 0 -and $canonical) { $Repo = $canonical.Trim() }
-Write-Host "repo: $Repo" -ForegroundColor DarkGray
-
 $tmp = 'D:\apk\.lwtmp\apipush'
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $blobFile = Join-Path $tmp 'blob.bin'

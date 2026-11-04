@@ -78,8 +78,7 @@
 - 设置页两层分组 (`GroupTitle` / `SectionTitle`), 缺省只展开省电与常用六段, **新加一段天然收起** (判据 `SettingsSectionsTest` + `check-settings-sections.mjs`)
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出"); **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 事件驱动零轮询; **会话钩子必须带 `{ global: true }`**
-- **余额两条触发** (2026-11-01 深夜改口径): ①**每轮对话结束**覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷 —— 那时扣费刚结算, 数最准); ②**主人点「看余额」**: 先把上次那份立刻上屏, 同时写一个新请求记号 (同一 seq 只刷一次, 成功/失败共用 30 s 闸)。应用按 **`seq` 对得上**才上屏 (不再按"点下去 30 s 之内"), 框已经被关掉也会张回来; 9 s 没回音就把「正在取…」换成「再点一次」(只在一次都没上过屏时)。金额上屏只留两位小数 (`BalanceFile.moneyText` + 宿主 `money2`)
-- **余额那一行只有「余额 + 时间」** (2026-11-02 主人: "不要显示'当前不是最新''正在刷新'这样的句子, 只告诉我余额+时间"): 不挂 `ball_balance_stale` / `_refreshing` / `_retry` 三句 (键已删), 5 分钟窗口只决定要不要再发后台那一问; 连点几次 `showBalanceInfo` 就地改写, 屏上只留最近一份
+- **余额两条触发** (2026-11-01 深夜改口径): ①**每轮对话结束**覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷 —— 那时扣费刚结算, 数最准); ②**主人点「看余额」**: 先把上次那份立刻上屏, 同时写一个新请求记号 (同一 seq 只刷一次, 成功/失败共用 30 s 闸)。应用按 **`seq` 对得上**才上屏 (不再按"点下去 30 s 之内"), 框已经被关掉也会张回来; 9 s 没回音就把「正在取…」换成「再点一次」。金额上屏只留两位小数 (`BalanceFile.moneyText` + 宿主 `money2`)
 - **手势**: 单击开麦等 `BallFeel.thinkingTapMs()` (430 ms); 三击只对"真要开麦"几支排队; **半隐与半藏都关时没有"召出", 单击当场开语音**; **手势只有防误触一档** (`BallFeel.GUARD` 220/450/1500 ms), 灵敏度下拉已撤
 - **球休闲两档 (半隐 / 半藏)**, 共用 `PEEK_IDLE_MS` 5 s; `TRANSLUCENT_ALPHA = 0.5` (半隐=一半透明度), 半藏不参与; 该收边时一定要收, **回弹判据是 `idleDueNow`, 不能拿 `wait.peek` 反推**
 - **一个状态可有多支动作** (`ball.json` 写数组), 进档随机起头、演完换下一支、下一支后台预解, 过 `MAX_DECODED_FRAMES` 就不预解
@@ -117,12 +116,12 @@
 
 ## dsh 工具
 
-- 全在 `host-plugin/index.mjs`, 现 66 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` …), 每个一次桥调用
+- 全在 `host-plugin/index.mjs`, 现 68 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` / `lw_capabilities` / `lw_quickapp` …), 每个一次桥调用
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入一律写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 特权侧写死白名单 `LwSystemCommandTable.kt`
 - `displayId` 可省略 = "手里那块" (预览选中 → 最新建 → 无虚拟屏才 0); 事件订阅不补
-- `lw_launch` 只走特权; 按键传名字不传编号; 打字优先 `ACTION_SET_TEXT`; `swipe` 均分 12 步、每步至少睡一帧
+- `lw_launch` 与 `lw_intent` 主屏 (display 0) 先走原生 (PackageManager / Context), 虚拟屏才走特权 `am`; 按键传名字不传编号; 打字优先 `ACTION_SET_TEXT`; `swipe` 均分 12 步、每步至少睡一帧
 - 验证: `tools/lw-bridge.ps1` / `tools/lw-plugin-call.mjs` / `tools/lw-device-turn.ps1`; **读图不能在 run-as 里验**
 
 ## 主屏 / 语音 / 无障碍

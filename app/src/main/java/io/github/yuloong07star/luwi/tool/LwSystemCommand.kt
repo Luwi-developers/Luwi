@@ -1,5 +1,7 @@
 package io.github.yuloong07star.luwi.tool
 
+import android.content.Context
+import io.github.yuloong07star.luwi.channel.DeviceNativeStart
 import io.github.yuloong07star.luwi.channel.KeyCodes
 import io.github.yuloong07star.luwi.channel.LwServiceProtocol
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
@@ -87,20 +89,23 @@ internal object LwSystemCommand {
      * **`disable` 仍然算破坏性**: 它比停应用更粘 —— 停掉的东西下次启动就回来了, 而被停用的应用从
      * 桌面上消失, 要有人记得回设置里打开。它在提示词那一层与另外四条一个待遇 (先问用户)
      */
-    suspend fun dispatch(request: JsonObject): JsonObject = when (val op = request.string("op")) {
-        // `installStaged` 与 `install` 的差别只有一个: 前者把路径当"这一侧自己读得到的一份文件",
-        // 先抄进 /data/local/tmp 再交出去。它**不在** `lw_app_control` 那个 op 名单里 —— 那是插件
-        // 装机链自己走的 (PluginCompanion), 不给模型多开一个口子, 与 `plugin op=grant` 同一个道理
-        "forceStop", "clearData", "uninstall", "install", "installStaged", "disable" -> destructive(op, request)
-        "airplane", "data", "wifi", "bluetooth" -> text(toggle(request, op))
-        "enable", "setHome", "openUrl", "intent" -> appControl(op, request)
-        "keyCombo" -> keyCombo(request)
-        else -> throw IllegalArgumentException(
-            "op has to be one of forceStop, clearData, uninstall, install, installStaged, disable, enable," +
-                " setHome, openUrl, intent, keyCombo, airplane, data, wifi, bluetooth," +
-                " not \"$op\"",
-        )
-    }
+    suspend fun dispatch(context: Context, request: JsonObject): JsonObject =
+        when (val op = request.string("op")) {
+            // `installStaged` 与 `install` 的差别只有一个: 前者把路径当"这一侧自己读得到的一份文件",
+            // 先抄进 /data/local/tmp 再交出去。它**不在** `lw_app_control` 那个 op 名单里 —— 那是插件
+            // 装机链自己走的 (PluginCompanion), 不给模型多开一个口子, 与 `plugin op=grant` 同一个道理
+            "forceStop", "clearData", "uninstall", "install", "installStaged", "disable" ->
+                destructive(op, request)
+
+            "airplane", "data", "wifi", "bluetooth" -> text(toggle(request, op))
+            "enable", "setHome", "openUrl", "intent" -> appControl(context, op, request)
+            "keyCombo" -> keyCombo(request)
+            else -> throw IllegalArgumentException(
+                "op has to be one of forceStop, clearData, uninstall, install, installStaged," +
+                    " disable, enable, setHome, openUrl, intent, keyCombo, airplane, data, wifi," +
+                    " bluetooth, not \"$op\"",
+            )
+        }
 
     /**
      * 1.0.3 那几条应用控制
@@ -109,11 +114,17 @@ internal object LwSystemCommand {
      * 校验就是那道边界: 一个不像包名的字符串、一个不像组件的字符串都在这里被拒成一句人话, 而不是
      * 交给 `am` / `pm` 去猜
      */
-    private fun appControl(op: String, request: JsonObject): JsonObject {
+    private fun appControl(context: Context, op: String, request: JsonObject): JsonObject {
         val userId = request.int("user", 0)
         // **intent 那条不读 package**: 它的组件是可选的, 而 `string()` 在缺字段时会直接抛 —— 一个
         // "必须给包名" 的要求会把不带组件的 intent 整条堵死 (第一版就是这么写的)
         val target = if (op == "intent") "" else request.string("package").trim()
+        // 原生优先 (B3-b ⑥⑦): 手机自己的屏上由 Context 发出去, 不借特权通道也不建屏; 只有虚拟屏
+        // 才需要特权 `am start --display`
+        val displayId = request.int("displayId", LwServiceProtocol.MAIN_DISPLAY)
+        if (displayId == LwServiceProtocol.MAIN_DISPLAY && (op == "openUrl" || op == "intent")) {
+            return nativeActivity(context, op, target, request)
+        }
         val arguments = when (op) {
             "enable" -> listOf(require(target, PACKAGE, "a package name"))
             "setHome" -> listOf(require(target, COMPONENT, "a component, as package/class"))
@@ -122,7 +133,7 @@ internal object LwSystemCommand {
                     "openUrl takes an http or https address, not \"$target\""
                 }
                 // `-d <url>` 之后跟目标屏: 不带 userId, 否则 `--user` 会插进 `-d` 与它的值中间
-                listOf("-d", target, "--display", request.int("displayId", 0).toString())
+                listOf("-d", target, "--display", displayId.toString())
             }
 
             else -> intentArguments(request)
@@ -141,6 +152,55 @@ internal object LwSystemCommand {
         }
         return text(
             "$what: $said" + if (result.code == 0) "" else " (exit code ${result.code})",
+        )
+    }
+
+    /**
+     * 手机自己的屏上那一条路: 由这个应用的 Context 发 Intent
+     *
+     * 校验与特权那条一样严 (地址只认 http/https, 动作 / 组件按同一个形状), 区别只在执行者: 这里不
+     * 经过桥, 也就没有"特权通道没连上"这一种失败. 平台拒绝时把它的原话交回去, 不抛成一条通道错误,
+     * 否则模型只看到"通道坏了", 看不到"这台设备没有能打开它的应用"
+     */
+    private fun nativeActivity(
+        context: Context,
+        op: String,
+        target: String,
+        request: JsonObject,
+    ): JsonObject {
+        if (op == "openUrl") {
+            require(target.startsWith("http://") || target.startsWith("https://")) {
+                "openUrl takes an http or https address, not \"$target\""
+            }
+            val outcome = DeviceNativeStart.openUrl(context, target)
+            return text(
+                if (outcome.started) {
+                    "opened $target on the phone's own screen through this app's own process" +
+                        " (ACTION_VIEW, no privileged channel, no virtual screen)"
+                } else {
+                    "could not open $target: ${outcome.reason}"
+                },
+            )
+        }
+        val action = request.string("action", "").trim()
+        if (action.isNotEmpty()) require(action, ACTION, "an action, as android.intent.action.X")
+        val data = request.string("data", "").trim()
+        val component = request.string("component", "").trim()
+        if (component.isNotEmpty()) {
+            require(component, COMPONENT, "a component, as package/class")
+        }
+        require(action.isNotEmpty() || component.isNotEmpty()) {
+            "an intent needs an action or a component: on its own, a display is not something to start"
+        }
+        val outcome = DeviceNativeStart.send(context, action, data, component)
+        val what = component.ifEmpty { action }.ifEmpty { "the intent" }
+        return text(
+            if (outcome.started) {
+                "started $what on the phone's own screen through this app's own process" +
+                    " (no privileged channel, no virtual screen)"
+            } else {
+                "could not start $what: ${outcome.reason}"
+            },
         )
     }
 

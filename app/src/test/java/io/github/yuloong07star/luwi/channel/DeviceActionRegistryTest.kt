@@ -64,6 +64,28 @@ internal class DeviceActionRegistryTest {
     }
 
     @Test
+    fun `每一条动作都声明了 risk 与 permission`() {
+        // B3-b ④: 声明不参与路由, 但少了它 "这条动作要什么权限 / 最多能造成多大影响" 就没有答案
+        val expected = mapOf(
+            "open_app" to DeviceRisk.LOW,
+            "open_url" to DeviceRisk.LOW,
+            "quick_app" to DeviceRisk.LOW,
+            "calendar" to DeviceRisk.NONE,
+            "notifications" to DeviceRisk.MEDIUM,
+            "alarm" to DeviceRisk.LOW,
+            "dial" to DeviceRisk.LOW,
+            "app_settings" to DeviceRisk.LOW,
+            "media" to DeviceRisk.MEDIUM,
+            "ui_tap" to DeviceRisk.HIGH,
+        )
+        DeviceActionRegistry.actions.forEach { action ->
+            assertEquals("${action.name}: risk", expected[action.name], action.risk)
+            assertTrue("${action.name}: permission is blank", action.permission.isNotBlank())
+        }
+        assertEquals(expected.size, DeviceActionRegistry.actions.size)
+    }
+
+    @Test
     fun `只对某块屏有意义的动作都留了虚拟屏那一条`() {
         DeviceActionRegistry.actions.filter { it.screenScoped }.forEach { action ->
             assertTrue(
@@ -78,11 +100,18 @@ internal class DeviceActionRegistryTest {
         val permissioned = DeviceActionRegistry.actions
             .filter { it.permission != DeviceAction.NO_PERMISSION }
             .map { it.name }
-        assertEquals(listOf("calendar", "notifications", "media", "ui_tap"), permissioned)
+        // alarm 也在这一列里: 系统要的是 com.android.alarm.permission.SET_ALARM. 声明成 none 时真机上
+        // 那句话被拒成 "Permission Denial ... requires com.android.alarm.permission.SET_ALARM"
+        // (2026-11-03 真机 OJZD5D6TMNSKFYHM 读数), 所以它有权限, 只是这条权限安装时就自动给了
+        assertEquals(listOf("calendar", "notifications", "alarm", "media", "ui_tap"), permissioned)
         assertEquals(DeviceAction.NO_PERMISSION, DeviceActionRegistry.require("open_app").permission)
         assertEquals(
             "android.permission.READ_CALENDAR",
             DeviceActionRegistry.require("calendar").permission,
+        )
+        assertEquals(
+            "com.android.alarm.permission.SET_ALARM",
+            DeviceActionRegistry.require("alarm").permission,
         )
     }
 

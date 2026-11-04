@@ -75,6 +75,22 @@ internal class DeviceActionBrokerTest {
     }
 
     @Test
+    fun `主屏用原生, 虚拟屏才用特权 am`() {
+        // 12-1 / B3-b: display 0 上 lw_launch 先问 PackageManager, lw_intent 先用 Context;
+        // 只有虚拟屏才把 activity 交给特权 am
+        assertEquals(DeviceRoute.NATIVE, broker.launchRoute(0))
+        assertEquals(DeviceRoute.INTENT, broker.intentRoute(0))
+        assertEquals(DeviceRoute.VIRTUAL_SCREEN, broker.launchRoute(7))
+        assertEquals(DeviceRoute.VIRTUAL_SCREEN, broker.intentRoute(7))
+    }
+
+    @Test
+    fun `原生那半边与动作表里的首选通道一致`() {
+        assertEquals(broker.routes("open_app", 0).first(), broker.launchRoute(0))
+        assertEquals(broker.routes("open_url", 0).first(), broker.intentRoute(0))
+    }
+
+    @Test
     fun `不认识的动作给空通道与一句失败原因`() {
         assertNull(broker.find("no_such_action"))
         assertTrue(broker.routes("no_such_action", 0).isEmpty())

@@ -10,6 +10,10 @@ package io.github.yuloong07star.luwi.channel
  *
  * 通道的顺序来自 [DeviceAction], 这里只按目标屏过滤; 空结果表示没有可走的通道, 调用方应当把
  * [failure] 交给模型并明确说 unsupported, 不建屏, 也不重试
+ *
+ * B3-b 起它也是"哪半边执行"的唯一判据: [launchRoute] 与 [intentRoute] 在手机自己的屏上给出
+ * [DeviceRoute.NATIVE] / [DeviceRoute.INTENT] (应用进程自己就能做), 只有虚拟屏才给
+ * [DeviceRoute.VIRTUAL_SCREEN] (那一档只有特权 `am` 落得下去, 见 12-3)
  */
 internal class DeviceActionBroker(
     actions: List<DeviceAction> = DeviceActionRegistry.actions,
@@ -50,6 +54,24 @@ internal class DeviceActionBroker(
     /** 所有通道都走不通时交给模型的那句话 */
     fun failure(name: String): String = find(name)?.failureReason
         ?: "this build does not know the device action \"$name\""
+
+    /**
+     * `lw_launch` 在这块屏上该走哪半边
+     *
+     * 手机自己的屏上先问 PackageManager: launcher activity 是应用进程自己查得到、也起得动的, 不必
+     * 借特权通道, 更不必为它建一块屏 (12-1). 虚拟屏上应用进程放不上去, 只有特权 `am` 那一条
+     */
+    fun launchRoute(displayId: Int = MAIN_DISPLAY): String =
+        if (displayId == MAIN_DISPLAY) DeviceRoute.NATIVE else DeviceRoute.VIRTUAL_SCREEN
+
+    /**
+     * `lw_intent` 在这块屏上该走哪半边
+     *
+     * 手机自己的屏上直接由 Context 发 Intent, 所以链接 / 闹钟 / 拨号 / 应用设置这些常见动作既不依赖
+     * 特权通道, 也不建屏; 只有虚拟屏才交给特权 `am start`
+     */
+    fun intentRoute(displayId: Int = MAIN_DISPLAY): String =
+        if (displayId == MAIN_DISPLAY) DeviceRoute.INTENT else DeviceRoute.VIRTUAL_SCREEN
 
     private companion object {
         /** 手机自己那块屏, 与 `LwServiceProtocol.MAIN_DISPLAY` 是同一个 0 */

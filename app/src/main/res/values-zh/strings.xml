@@ -332,9 +332,12 @@
     <string name="ball_balance_bonus">赠金 %1$s</string>
     <string name="ball_balance_just_now">刚刚</string>
     <string name="ball_balance_minutes">%1$d 分钟前</string>
+    <string name="ball_balance_stale">可能不是最新的</string>
     <string name="ball_balance_pending">正在取余额…</string>
+    <string name="ball_balance_refreshing">正在刷新…</string>
     <string name="ball_balance_unsupported">当前模型不支持查询余额</string>
     <string name="ball_balance_failed">余额拿不到: %1$s</string>
+    <string name="ball_balance_retry">正在重试…</string>
     <string name="ball_balance_no_answer">宿主还没回音, 再点一次「看余额」</string>
     <string name="ball_menu_release_camera">释放视频模式</string>
     <string name="ball_menu_close">关掉浮标</string>

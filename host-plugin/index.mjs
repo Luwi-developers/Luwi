@@ -31,20 +31,6 @@ import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
 const TOKEN_VARIABLE = 'LW_CHANNEL_TOKEN'
 
-/**
- * A temporary name beside the file it is about to become
- *
- * 固定写 .tmp 会让同一个文件的两个写者在 rename 上撞车: 先到的把临时文件搬走, 后到的
- * rename 报 ENOENT, 而两个写者都以为自己成功了 (2026-11-02, mode-model-state.json 与
- * model-catalog.json 各撞过一次, 见真机日志)。进程号不同时天然分开, 进程内再加一个自增
- * 序号, 于是同一个文件也永远不会用到同一个临时名
- */
-let temporaryCount = 0
-function temporaryName(path) {
-  temporaryCount += 1
-  return `${path}.${process.pid}.${temporaryCount}.tmp`
-}
-
 /** How long a swipe takes when the caller does not say, which is a deliberate drag */
 const DEFAULT_SWIPE_MS = 300
 
@@ -1497,7 +1483,7 @@ async function writeModeModelState() {
   const configured = readModeModelConfig()
   // `configured` 由 [modeModelStatus] 现读给出, 这里只是把它记下来看下一拍要不要补写
   const payload = { v: 1, at: Date.now(), ...modeModelStatus() }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -1542,7 +1528,7 @@ async function writeModelCatalog(ctx) {
     // 目录取不到不算失败: ok:false + 空 items, 应用那边退文本框, 不让请求死在这
     payload.reason = `building the model catalog failed: ${error?.message ?? error}`
   }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -2609,6 +2595,89 @@ const TOOLS = [
     },
   }),
 
+  // 这一版认得哪些手机直连动作, 每条走哪条路、要什么权限、失败时说什么 (B3-c ⑧)
+  //
+  // 它是"选通道前先看一眼"的那一条: 动作表与路由都只有应用那一侧一份, 这里只把答案念出来,
+  // 不另存一张表 —— 否则模型读到的能力与真正执行的那条路迟早会漂开
+  defineTool({
+    name: 'lw_capabilities',
+    description:
+      'List the device actions this build knows and how each one is reached, before choosing a route:'
+      + ' every action says its name, its preferred route (native, intent or deep link,'
+      + ' accessibility, virtual screen), the permission it needs, its risk, and the sentence it'
+      + ' gives when every route fails. The answer also says whether each one looks usable right'
+      + ' now - calendar access granted, notification access on, the accessibility service running,'
+      + ' something answering ACTION_VIEW / ACTION_DIAL / ACTION_SET_ALARM, and whether a quick app'
+      + ' runtime answers on this device. **This is a reading, not an action**: it opens nothing and'
+      + ' creates no virtual screen. When an action comes back unsupported, say so instead of'
+      + ' creating a virtual screen to try it another way.',
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute() {
+      return formatCapabilities(await call('capabilities'))
+    },
+  }),
+
+  // 快应用: 先 probe 再 open (B3-c ⑨⑩)
+  defineTool({
+    name: 'lw_quickapp',
+    description:
+      'Probe for, or open, a quick app (快应用). op=probe asks whether a quick app runtime is'
+      + ' registered on this device and which one answers the standard hap://app/<package> link;'
+      + ' it opens nothing. op=open hands a deep link to that runtime, naming the quick app either'
+      + ' by package (com.example.app) or by a full link (hap://app/com.example.app/page?key=value,'
+      + ' or https://hapjs.org/app/...). It opens on the phone\'s own screen, the way the device'
+      + ' itself opens it. **No virtual screen is involved and none is created**: a quick app is'
+      + ' not an activity this app can place on a screen of its own, so when nothing answers the'
+      + ' link the answer is plainly unsupported - report that, and do not fall back to a virtual'
+      + ' screen.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'probe to ask, open to start one',
+        enum: ['probe', 'open'],
+      },
+      package: {
+        type: 'string',
+        description: 'The quick app package, for open, for example com.example.app - use either'
+          + ' this or uri, not both',
+      },
+      uri: {
+        type: 'string',
+        description: 'A full quick app link, for open: hap://app/<package>/[path][?key=value] or'
+          + ' https://hapjs.org/app/<package>/[path][?key=value]',
+      },
+      path: {
+        type: 'string',
+        description: 'The page inside the quick app, for open with package. The first page by'
+          + ' default',
+      },
+      query: {
+        type: 'string',
+        description: 'key=value pairs to pass to the quick app page, for open with package',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = args?.op === 'open' ? 'open' : 'probe'
+      const answer = await call('quickapp', {
+        op,
+        package: args?.package,
+        uri: args?.uri,
+        path: args?.path,
+        query: args?.query,
+      })
+      return op === 'open' ? formatQuickOpened(answer) : formatQuickProbe(answer)
+    },
+  }),
+
   defineTool({
     name: 'lw_launch',
     description:
@@ -2626,7 +2695,10 @@ const TOOLS = [
       + 'lw_screen_create takes a width and a height - because an app that declares an orientation '
       + 'of its own keeps it and sits in a band in the middle of a screen shaped the other way. Use '
       + 'this rather than a shell: the am command refuses an app uid on this device, so a launch '
-      + 'attempted from a shell fails. Call lw_ui or lw_screenshot after it to see the result.',
+      + 'attempted from a shell fails. **On the phone\'s own screen (displayId 0) the app is started '
+      + 'through the package manager in Luwi\'s own process**, so no privileged channel and no '
+      + 'virtual screen are involved; only a virtual screen needs the privileged am. Call lw_ui or '
+      + 'lw_screenshot after it to see the result.',
     parameters: {
       displayId: DISPLAY_ID,
       package: {
@@ -3160,8 +3232,10 @@ const TOOLS = [
       + ' when the user named something more specific: a mail composer (android.intent.action.SENDTO'
       + ' with a mailto: address), a settings page of another app, a specific class. The screen is'
       + ' named the same way every other acting tool names one, and the activity lands on it.'
-      + ' Nothing here is a shell: the one command this reaches is `am start`, with an action, a'
-      + ' piece of data, a component and a display.',
+      + ' On the phone\'s own screen (displayId 0) the intent is handed to Android from Luwi\'s own'
+      + ' process, so no privileged channel and no virtual screen are involved; on a virtual screen'
+      + ' it reaches the privileged `am start`, with an action, a piece of data, a component and a'
+      + ' display.',
     parameters: {
       op: {
         type: 'string',
@@ -5310,14 +5384,22 @@ function formatLaunched(result, note) {
   const target = result.package || result.component
   const whose = result.user > 0 ? ` as user ${result.user}` : ''
   const from = result.asked ? ` (from ${JSON.stringify(result.asked)})` : ''
+  // 走的哪半边: 手机自己的屏是应用进程里的 PackageManager, 虚拟屏才是特权 am (B3-b ⑤⑦)
+  const via = result.via ? ` via ${result.via}` : ''
   const lines = result.started === true
-    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"`]
+    ? [`launched ${target}${from}${whose} on displayId ${result.displayId} "${result.label}"${via}`]
     : [
       `the launch of ${target}${from}${whose} on displayId ${result.displayId} did not report`
-      + ` success (am exited ${result.code}); what it said follows`,
+      + ` success (${result.route === 'native' ? 'the package manager refused it' : `am exited ${result.code}`});`
+      + ' what it said follows',
     ]
   const output = (result.output ?? '').trim()
   if (output) lines.push(output)
+  // 没起成时下面那段"读回屏幕"没有意义: 没有新窗口可读, 原因已经在上面
+  if (result.started !== true) {
+    if (result.windowNote) lines.push(result.windowNote)
+    return said(lines.join('\n'), note)
+  }
   // 起完的自查: `am start` 报成功不等于窗口落在这块屏上, 而"没有窗口"这件事以前只有模型自己去发现
   // (windowOnDisplay 为 null 表示这次查不了: 无障碍没开, 窗口列表读不到)
   if (result.windowOnDisplay === false || result.windowOnDisplay === null) {
@@ -5349,6 +5431,78 @@ function formatApps(result) {
   for (const app of apps) lines.push(`  ${app.label} - ${app.package}`)
   lines.push('Start one with lw_launch(package="..."), which takes the package or that name.')
   return lines.join('\n')
+}
+
+/**
+ * What the device says it can do, action by action
+ *
+ * 一条动作一行, 第二行是失败原因: 那正是模型最需要提前知道的一句 —— 撞上"日历没给权限"或
+ * "这台设备没有快应用 runtime"之后再去猜, 往往就去建一块屏了
+ */
+function formatCapabilities(result) {
+  const actions = Array.isArray(result.actions) ? result.actions : []
+  if (actions.length === 0) {
+    return 'the device reported no actions, which means it answered nothing rather than that it'
+      + ' cannot do anything: check that the app is the one this plugin belongs to'
+  }
+  const lines = [
+    `${actions.length} device actions are known on the phone's own screen (displayId 0):`,
+  ]
+  for (const action of actions) {
+    const permission = action.permission === 'none' ? 'no permission' : `permission ${action.permission}`
+    const note = action.note ? ` - ${action.note}` : ''
+    lines.push(
+      `- ${action.name} (${action.title}): via ${action.via}, ${permission}, risk ${action.risk},`
+      + ` ${action.state}${note}`,
+    )
+    lines.push(`    when it fails: ${action.failureReason}`)
+  }
+  const quick = result.quickApp ?? {}
+  lines.push(
+    quick.ready === true
+      ? `quick apps: supported - ${quick.handlerComponent || quick.handlerPackage} answers`
+        + ` ${quick.link}`
+      : `quick apps: unsupported - ${quick.reason || 'no quick app runtime answers'}`,
+  )
+  lines.push(
+    'An unsupported action is a plain answer: do not create a virtual screen to try it another way.',
+  )
+  return lines.join('\n')
+}
+
+/** What asking about a quick app runtime found */
+function formatQuickProbe(result) {
+  if (result.ready === true) {
+    return [
+      `quick apps: supported - ${result.handlerComponent || result.handlerPackage} answers`
+      + ` ${result.link} (${result.scheme})`,
+      'Open one with lw_quickapp op=open, naming it by package (com.example.app) or by its full'
+      + ' hap://app/... link. It opens on the phone\'s own screen through that deep link; no'
+      + ' virtual screen is created.',
+    ].join('\n')
+  }
+  return [
+    `quick apps: unsupported - ${result.reason || 'no quick app runtime answers'}`,
+    'Nothing on this device opens quick app links, and a virtual screen cannot change that: say'
+    + ' that this is unsupported instead of creating one.',
+  ].join('\n')
+}
+
+/** What handing a quick app deep link to its runtime did */
+function formatQuickOpened(result) {
+  if (result.started === true) {
+    return [
+      `opened ${result.uri} (${result.scheme} deep link) through`
+      + ` ${result.handlerComponent || result.handlerPackage} on the phone's own screen.`,
+      'No virtual screen was created. Read the screen back with lw_ui or lw_screenshot to see what'
+      + ' the quick app shows.',
+    ].join('\n')
+  }
+  return [
+    `unsupported: ${result.reason || 'the quick app could not be opened'}`,
+    'No virtual screen was created, and creating one would not make a quick app open on this'
+    + ' device: report that it is unsupported.',
+  ].join('\n')
 }
 
 /** What pressing by name did, which is the one call that can be ambiguous */
@@ -6861,7 +7015,7 @@ async function voiceReadingsWrite(ctx) {
   }
   try {
     await mkdir(dirname(path), { recursive: true })
-    const temporary = temporaryName(path)
+    const temporary = `${path}.tmp`
     await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`)
     await rename(temporary, path)
   } catch (error) {
@@ -7734,7 +7888,7 @@ async function writeDesktopChat(who, text) {
   if (last?.who === who && last?.text === line) return
   const kept = [...lines, { who, text: line, at: Date.now() }].slice(-DESKTOP_CHAT_LINES)
   const payload = { v: 1, at: Date.now(), lines: kept }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -7915,7 +8069,7 @@ async function writeBallPhase() {
   // `last` 是**可选**键: 没有结束记录时整条不写, 版本号于是还是 1 —— 旧应用忽略这个键, 新应用
   // 容忍它缺席 (两边本来都不校验 v)
   if (ballEnded !== null) payload.last = ballEnded
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -8348,7 +8502,7 @@ async function exploreTaskWrite(text) {
   const path = exploreTaskPath()
   if (path === null) return { path: '', chars: 0, error: 'this host has no DSH_HOME' }
   const body = String(text ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${body}\n`)
@@ -8425,7 +8579,7 @@ async function exploreStateWriteNow() {
       powerSaveUnknown: exploreState.powerSaveUnknown,
     },
   }
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(temporary, `${JSON.stringify(payload)}\n`)
@@ -9606,7 +9760,7 @@ async function refreshBalance(ctx, request = null) {
   payload.networkMs = Date.now() - startedAt
   // `at` 是这份数**读出来**的那一刻 (不是请求写下来的那一刻): 应用按它算"多旧"
   payload.at = Date.now()
-  const temporary = temporaryName(path)
+  const temporary = `${path}.tmp`
   try {
     // 落盘那一段量两次: 先把那一份写进 `.tmp`, 量完把 `writeMs` 填回去再写一次同一个 `.tmp`,
     // 最后只 rename 一次 —— 这样文件里那个 `writeMs` 是这一次真的花了多久, 不是占位的 0
