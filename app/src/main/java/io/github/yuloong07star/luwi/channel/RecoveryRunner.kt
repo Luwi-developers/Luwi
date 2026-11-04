@@ -56,6 +56,8 @@ internal object RecoveryRunner {
 
         onStep(RecoveryStep.SCREEN)
         repairScreen(context)
+        // 五道门里最值得记的一道: 到这儿的人曾经掉过, 并且自己爬回来了
+        Funnel.mark(context, Funnel.Gate.RECOVERED)
         return RecoveryOutcome.Done
     }
 

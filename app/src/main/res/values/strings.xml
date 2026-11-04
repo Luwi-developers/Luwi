@@ -42,6 +42,8 @@
 
     <string name="settings_menu_feedback">Luwi feedback</string>
     <string name="settings_menu_feedback_summary">Report a problem, or say something privately</string>
+    <string name="settings_menu_funnel">Startup record</string>
+    <string name="settings_menu_funnel_summary">When each of the five checks first passed, copied to the clipboard</string>
     <string name="settings_menu_update">Check for updates</string>
     <string name="settings_menu_account">Account</string>
     <string name="settings_menu_account_summary">Opens the website account page: service days, check in or buy tavern days</string>
