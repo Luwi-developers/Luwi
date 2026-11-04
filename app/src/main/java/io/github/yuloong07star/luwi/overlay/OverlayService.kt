@@ -1384,14 +1384,20 @@ class OverlayService : Service() {
                     // 只有"真的要开麦"那几支排队, 其余 (召出 / 收麦 / 掐播报 / 只记召出) 当场做掉。
                     // "正在想"那一档原来就在等 [BallFeel.thinkingTapMs] (要晚过双击与防连击两条线),
                     // 现在与其余几支走同一个待办, 只是那个数由 [BallCommit] 按状态词挑
-                    val wait = BallCommit.deferMs(
-                        act = currentAct(),
-                        word = lastWord,
-                        summonFresh = BallMinutes.summonIsFresh(now, summonedAt),
-                        replyBox = OverlayState.replyTarget() != null,
-                        canRest = ballCanRest(),
-                        feel = feel,
-                    )
+                    // **「点击语音输入」关着时不必等确认窗** (落实表 #33): 确认窗是为了"开麦之前留一下
+                    // 反悔的余地", 而这一下根本不会开麦 —— 再压他 1.5 s 就成了"点了一下球没反应"
+                    val wait = if (!BallSpot.tapVoice(this@OverlayService)) {
+                        0L
+                    } else {
+                        BallCommit.deferMs(
+                            act = currentAct(),
+                            word = lastWord,
+                            summonFresh = BallMinutes.summonIsFresh(now, summonedAt),
+                            replyBox = OverlayState.replyTarget() != null,
+                            canRest = ballCanRest(),
+                            feel = feel,
+                        )
+                    }
                     if (wait <= 0L) {
                         tapAction(now)
                     } else {
@@ -1524,7 +1530,13 @@ class OverlayService : Service() {
             //
             // 「失败」那一档同理: 球上有字就一直是全露着的, 而人点它就是想说句话
             BallAct.LISTEN ->
-                if (
+                // **「点击语音输入」关着时点球不开口** (落实表 #33, 主人 2026-11-04: "关掉后点球不再进
+                // 语音会话, 只当普通点击"): 这一下只当"碰了一下球" —— 半藏着的滑回来, 麦克风一个字节都
+                // 不碰。长按那一路不在这里 (走 `onLongPress`), 菜单照旧弹
+                if (!BallSpot.tapVoice(this)) {
+                    unpeek()
+                    note("tap-to-voice is off: this tap does not open the mic")
+                } else if (
                     lastWord == BallWord.THINKING ||
                     lastWord == BallWord.FAILED ||
                     BallTouch.opensVoiceNow(
