@@ -39,6 +39,8 @@ function check(name, got, want) {
 const host = await read('host-plugin/index.mjs')
 const preset = await read('presets/proactive/cordis.patch.yml')
 const schedule = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveSchedule.kt')
+const gateKotlin = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveGate.kt')
+const engine = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationEngine.kt')
 const exploreSchedule = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ExploreSchedule.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
 const service = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
@@ -104,6 +106,54 @@ check('应用这一侧一条建屏的路都不走', [
   /VirtualScreen/u.test(schedule),
   /screen_create/u.test(schedule),
 ], [false, false, false])
+
+/* ── 一·五、B4-b: 30 分钟闸与静默时段 ─────────────────────────────────── */
+
+check('30 分钟闸是一笔单独的账 (proactive-gate.json)', [
+  /const val GAP_MINUTES = 30/u.test(gateKotlin),
+  /const val GAP_MS = GAP_MINUTES \* 60_000L/u.test(gateKotlin),
+  /const val FILE = "proactive-gate\.json"/u.test(gateKotlin),
+  /fun open\(lastAt: Long, now: Long\): Boolean/u.test(gateKotlin),
+], [true, true, true, true])
+
+check('闸跨两个来源: 自动指令与主动排期走同一个投递口', [
+  /ProactiveGate\.deliver\(context, now, VoiceInbox\.SOURCE_AUTOMATION\)/u.test(engine),
+  /ProactiveGate\.deliver\(context, System\.currentTimeMillis\(\), VoiceInbox\.SOURCE_PROACTIVE\)/u.test(schedule),
+], [true, true])
+
+check('只有真的投进收件箱才记账 (写不进去不算开口)', [
+  gateKotlin.indexOf('val seq = append()') > 0,
+  gateKotlin.indexOf('Outcome.Failed') > gateKotlin.indexOf('val seq = append()'),
+  gateKotlin.indexOf('write(context, now, source)') > gateKotlin.indexOf('Outcome.Failed'),
+], [true, true, true])
+
+check('手动「立刻跑一次」不查也不占这笔账 (B4-b ⑦)', [
+  /fun fireNow\(context: Context, name: String\): String/u.test(engine),
+  !/ProactiveGate/u.test(
+    engine.slice(
+      engine.indexOf('fun fireNow(context: Context, name: String): String'),
+      engine.indexOf('\n    }', engine.indexOf('fun fireNow(context: Context, name: String): String')),
+    ),
+  ),
+], [true, true])
+
+check('静默时段保留在排期那一侧, 到点先看它再看宿主 (B4-b ⑨)', [
+  /val quiet = quietWhy\(context, now\)/u.test(schedule),
+  /save\(context, current\.copy\(last = Last\(now, "skipped", quiet\)\)\)/u.test(schedule),
+  schedule.indexOf('val quiet = quietWhy') < schedule.indexOf('ExploreSchedule.wakeHost(context)'),
+], [true, true, true])
+
+check('静默窗口读的是自动指令那一份设置 (缺省 23:00-07:00, 同一个解析器)', [
+  /AutomationStore\.settings\(context\)/u.test(schedule),
+  /PowerWindow\.parse\(it\)/u.test(schedule),
+  /PowerWindow\.inside\(PowerWindow\.minutesOfDay\(now, zone\), parsed\)/u.test(schedule),
+], [true, true, true])
+
+check('30 分钟闸挡住时也记 skipped 与那一句读数', [
+  /ProactiveGate\.blockedReason\(lastSpoken, now\)/u.test(schedule),
+  /is ProactiveGate\.Outcome\.Blocked ->/u.test(schedule),
+  /上一条主动投递才/.test(gateKotlin),
+], [true, true, true])
 
 /* ── 二、来源记号与分支 ───────────────────────────────────────────────── */
 

@@ -681,7 +681,7 @@ fun SettingsScreen() {
                 }
 
                 // 探索 (2.7.8 批次 8): 主人 2026-10-17 的口径是"只定时开始, 没有手动入口", 所以这一段
-                // 只有开不开 / 每天几点 / 下一场那张任务卡 / 每天最多主动说几次, 外加两行读数
+                // 只有开不开 / 每天几点 / 下一场那张任务卡, 外加两行读数
                 settingsSection(
                     key = "explore",
                     title = R.string.settings_section_explore,
@@ -3149,8 +3149,8 @@ private fun clockStamp(at: Long): String =
  * 「探索」那一段 (2.7.8 批次 8)
  *
  * 主人 2026-10-17: "探索应该是定时的由用户决定开始时间，不要手动开始探索" —— 所以这里**一个手动
- * 入口都没有**: 开不开 / 每天几点 / 下一场那张任务卡 (可手改) / 每天最多主动说几次, 外加两行读数
- * (下一次与上一次那趟的结果)
+ * 入口都没有**: 开不开 / 每天几点 / 下一场那张任务卡 (可手改), 外加两行读数
+ * (下一次与上一次那趟的结果)。每日总次数上限 2.8.0 起取消 (B4-b), 这里不再有那一栏
  *
  * 卡不在这里改写; 它在每次探索收尾时由宿主按 `nextTask` 覆盖 (见 [ExploreTask])
  */
@@ -3168,8 +3168,6 @@ private fun ExploreItems() {
     val cardText = remember(revision) { ExploreTask.read(context) }
     val cardSummary = remember(revision) { ExploreTask.summary(context) }
     val running = remember(revision) { ExploreTask.running(context) }
-    val settings = remember(revision) { LwAutomation.settings(context) }
-    val saidToday = remember(revision) { LwAutomation.saidToday(context) }
     val nextAt = remember(revision) { ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) }
 
     fun save(next: ExploreSchedule.Plan) {
@@ -3284,16 +3282,6 @@ private fun ExploreItems() {
         onClick = {
             haptic.contextClick()
             editingCard = true
-        },
-    )
-    OverlayDropdownPreference(
-        title = stringResource(R.string.settings_explore_said_title),
-        summary = stringResource(R.string.settings_explore_said_summary, saidToday, settings.saidLimit),
-        items = (1..10).map { context.getString(R.string.settings_explore_said_times, it) },
-        selectedIndex = (settings.saidLimit - 1).coerceIn(0, 9),
-        onSelectedIndexChange = { index ->
-            LwAutomation.saveSettings(context, settings.copy(saidLimit = index + 1))
-            revision += 1
         },
     )
     plan.last?.let { last ->

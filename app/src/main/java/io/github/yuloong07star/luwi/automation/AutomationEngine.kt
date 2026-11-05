@@ -6,6 +6,7 @@ import android.util.Log
 import io.github.yuloong07star.luwi.channel.LwAccessibility
 import io.github.yuloong07star.luwi.channel.LwNotificationListener
 import io.github.yuloong07star.luwi.tool.LwWakeWord
+import io.github.yuloong07star.luwi.tool.ProactiveGate
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.wake.PowerWindow
 import kotlinx.serialization.json.JsonArray
@@ -28,7 +29,8 @@ import java.util.concurrent.TimeUnit
  * 三层里的中间那一层 (条件在 [AutomationMonitors], 动作在这里收口), 它管四件事:
  *
  * 1. **判定**: 十一条条件各自的"现在算不算命中", 加上光感那条的迟滞与"持续多少秒"
- * 2. **防骚扰**: 静默时段 / 冷却 / 每日上限 / "允许它自己动手"那道总闸
+ * 2. **防骚扰**: 静默时段 / 每条的冷却与每日上限 / 与主动排期共用的 30 分钟闸 /
+ *    "允许它自己动手"那道总闸
  * 3. **记账**: 每一次真的决定要不要动都落一行到 `history.jsonl` —— 主人问"它为什么没响"时, 唯一
  *    答得出来的就是那一份
  * 4. **该起来谁**: 六个监测器不是常驻的, `requiredMonitors()` 说此刻该注册哪几个, 省电时把轮询那
@@ -925,21 +927,18 @@ internal object AutomationEngine {
         return null
     }
 
-    /** 命中了: 先过五道闸, 再决定投不投 */
+    /** 命中了: 先过四道闸, 再决定投不投 */
     private fun act(context: Context, rule: AutomationRule.Rule, now: Long, reason: String) {
         val on = settings ?: return
         val cooldownMs = rule.cooldownMinutes * 60_000L
         val last = lastFired[rule.name] ?: 0L
         val today = firedToday[rule.name] ?: 0
         val window = if (on.quietEnabled && rule.quietHours) quietWindow() else null
-        // 每日主动说 (D17): 只数 `task` 那一类, 手动「立刻跑一次」不算 (见 AutomationStore.saidToday)
-        val saidToday = if (rule.thenKind == "task") AutomationStore.saidToday(context, now) else 0
         val blocked = when {
             window != null && PowerWindow.inside(PowerWindow.minutesOfDay(now), window) -> "quiet"
             last + cooldownMs > now -> "cooldown"
             today >= rule.dailyLimit -> "limit"
             rule.thenKind == "task" && !on.allowActing -> "no_acting"
-            rule.thenKind == "task" && saidToday >= on.saidLimit -> "said"
             else -> null
         }
         if (blocked != null) {
@@ -947,7 +946,6 @@ internal object AutomationEngine {
                 "quiet" -> "现在是静默时段 (${PowerWindow.describe(window!!)})"
                 "cooldown" -> "上一条才 ${(now - last) / 60_000} 分钟, 冷却 ${rule.cooldownMinutes} 分钟"
                 "limit" -> "今天已经 $today 次, 上限 ${rule.dailyLimit} 次"
-                "said" -> "今天已经主动说了 $saidToday 次, 上限 ${on.saidLimit} 次 (设置 → 探索)"
                 else -> "这条规则要动手, 而「允许它自己动手」关着"
             }
             noteBlocked(context, rule, blocked, said, now)
@@ -958,7 +956,18 @@ internal object AutomationEngine {
             return
         }
         val line = prompt(rule, reason)
-        val seq = VoiceInbox.append(context, line, source = VoiceInbox.SOURCE_AUTOMATION)
+        // 30 分钟闸 (2.8.0 B4-b ⑥): 与主动排期共用同一笔账, 查账 / 投递 / 记账在闸里一次做完;
+        // 主人自己点的那一下 (fireNow) 不走这里, 所以手动运行既不被它拦, 也不占这一笔
+        val sent = ProactiveGate.deliver(context, now, VoiceInbox.SOURCE_AUTOMATION) {
+            VoiceInbox.append(context, line, source = VoiceInbox.SOURCE_AUTOMATION)
+        }
+        if (sent is ProactiveGate.Outcome.Blocked) {
+            noteBlocked(context, rule, "throttle", ProactiveGate.blockedReason(sent.lastAt, now), now)
+            clearFresh(rule)
+            retireOnce(context, rule)
+            return
+        }
+        val seq = (sent as? ProactiveGate.Outcome.Delivered)?.seq
         // 账只在 record 那一处记一次: 这里再记一遍会让"今天几次"翻倍 (2026-10-08 实测到的就是它)
         lastBlock.remove(rule.name)
         record(
@@ -1323,9 +1332,8 @@ internal object AutomationEngine {
 
             else -> "没什么拦着它"
         }
-        val saidToday = AutomationStore.saidToday(context)
         return "规则 $enabled 条 (共 ${rules.size} 条) · 今天响了 $fired 次" +
-            " · 今天主动说了 $saidToday/${on.saidLimit} 次 · 上一次 $said · $blocked"
+            " · 上一次 $said · $blocked"
     }
 
     /** 现在是不是静默时段 (给 `status` 与设置页那一行) */
@@ -1345,9 +1353,6 @@ internal object AutomationEngine {
 
     /** 今天这条动了几次 */
     fun firedTodayCount(rule: String): Int = firedToday[rule] ?: 0
-
-    /** 今天主动说了几次 (设置页「探索」段那一行读数) */
-    fun saidToday(context: Context): Int = AutomationStore.saidToday(context)
 
     /**
      * 一条组合规则每个子条件最近一次为真是什么时候 (0 = 还没有)
@@ -1378,6 +1383,9 @@ internal object AutomationEngine {
      * 设置页那个「立刻跑一次」: 不走条件, 也不走冷却与静默 —— 主人自己点的那一下就是"现在做"
      *
      * 只留一道闸: `task` 那一种仍要「允许它自己动手」开着 (它与"点一下看看"不是一回事, 会真的动手机)
+     *
+     * **30 分钟闸也不拦它, 而且它不占那笔账** (2.8.0 B4-b ⑦): 这是主人当面点的, 不是系统自己找话说;
+     * 记进历史的 `manual = true` 让读数分得清这一条, 下一句主动投递照旧按上一次自动开口算 30 分钟
      */
     fun fireNow(context: Context, name: String): String {
         val application = context.applicationContext

@@ -68,11 +68,10 @@ const section = host.slice(start, end)
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
-    + ' exploreDayKey, EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
-    + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SAID_DEFAULT, EXPLORE_SUMMARY_CHARS,'
+    + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
+    + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
-    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE,'
-    + ' proactiveSaidCount }',
+    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
 )(() => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {}, async () => {})
 
 /* ── 一、预设那一段 ────────────────────────────────────────────────────── */
@@ -165,11 +164,10 @@ check('工具说明里写清摘要不许用别的工具写', toolFace.includes('
 
 /* ── 三、预算常数与那张真值表 ─────────────────────────────────────────── */
 
-check('缺省 30 分钟 / 60 步 / 每天 3 次', [
+check('缺省 30 分钟 / 60 步', [
   api.EXPLORE_MINUTES_DEFAULT,
   api.EXPLORE_STEPS_DEFAULT,
-  api.EXPLORE_SAID_DEFAULT,
-], [30, 60, 3])
+], [30, 60])
 check('两个范围就是 1..180 与 1..1000', [api.EXPLORE_MINUTES_RANGE, api.EXPLORE_STEPS_RANGE], [[1, 180], [1, 1000]])
 check('摘要 8000 字 / 留 30 份', [
   api.EXPLORE_SUMMARY_CHARS,
@@ -478,34 +476,26 @@ check('宿主起来时两个 ensure 都调', [
   /ExploreSchedule\.ensure\(this\)/.test(service),
 ], [true, true])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 上限 / 读数, 没有手动开始', [
+check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限', [
   /settingsSection\(\s*key = "explore"/u.test(screen),
   screen.includes('R.string.settings_explore_toggle'),
   screen.includes('R.string.settings_explore_at'),
   screen.includes('R.string.settings_explore_card'),
-  screen.includes('R.string.settings_explore_said_title'),
   screen.includes('ExploreSchedule.save('),
   screen.includes('ExploreTask.write('),
   !screen.includes('settings_explore_start'),
-], [true, true, true, true, true, true, true, true])
+  !screen.includes('settings_explore_said_title'),
+  !screen.includes('saidLimit'),
+], [true, true, true, true, true, true, true, true, true])
 
 check('构建把初始卡拷进 assets', (await read('app/build.gradle.kts')).includes('projectDirectory.file("explore-card.md")'), true)
 
-check('宿主那本"主动说"的账: 只数 task / 非手动 / 投出去的 / 同一天', api.proactiveSaidCount([
-  '{"hit":true,"action":"task","delivered":true,"at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":true,"manual":true,"at":1792230000000}',
-  '{"hit":true,"action":"remind","delivered":true,"at":1792230000000}',
-  '{"hit":true,"action":"task","blocked":"quiet","at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":false,"at":1792230000000}',
-  '{"hit":false,"action":"task","at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":true,"at":0}',
-], api.exploreDayKey(1792230000000)), 1)
-
-check('status 那两行读数换了账本 (不再写"下一批")', [
-  section.includes('task rules only; a manual run does not count'),
+check('status 那两行读数换了账本 (每日总上限 2.8.0 起取消, 不再有那一行)', [
   section.includes('next task card:'),
+  !section.includes('said today:'),
+  !section.includes('saidLimit'),
   !section.includes('the daily limit lands in the next batch'),
-], [true, true, true])
+], [true, true, true, true])
 
 /* ── 十三、预算透传 (2.7.9 第 8 条 T4) ─────────────────────────────────── */
 

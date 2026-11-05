@@ -149,20 +149,6 @@ internal object AutomationRule {
     const val MAX_RADIUS_METERS = 5000
 
     /**
-     * 「每天最多主动说几次」(D17, 2.7.8 批次 8)
-     *
-     * 数的是 `then.kind = "task"` 的投递 (打开一场会话说起来的那一类), 手动「立刻跑一次」不算;
-     * 那本账从 `history.jsonl` 现算 (见 `AutomationStore.saidToday`), 上限存在
-     * `automations/settings.json` 的 `saidLimit`
-     */
-    const val SAID_LIMIT_DEFAULT = 3
-    const val SAID_LIMIT_MIN = 1
-    const val SAID_LIMIT_MAX = 10
-
-    /** 把上限收进 1..10 (设置页那颗下拉与读文件都走它) */
-    fun coerceSaidLimit(value: Int): Int = value.coerceIn(SAID_LIMIT_MIN, SAID_LIMIT_MAX)
-
-    /**
      * 设置页给主人挑的那几档冷却 (分钟)
      *
      * 0 = 不冷却, 30 是缺省, 1440 = 一天最多一次。**这张表只是给人挑的档位**, 真正落盘的仍然是

@@ -185,4 +185,95 @@ class ProactiveScheduleTest {
                 .startsWith("没跑"),
         )
     }
+
+    /* ── 30 分钟闸 (B4-b ⑥) ─────────────────────────────────────────────── */
+
+    @Test
+    fun theFirstConversationEverIsAllowed() {
+        assertTrue(ProactiveGate.open(0L, moment("2026-11-05T10:00:00+08:00")))
+    }
+
+    @Test
+    fun twentyNineFiftyNineAfterTheLastOneIsRefused() {
+        val last = moment("2026-11-05T10:00:00+08:00")
+
+        assertEquals(false, ProactiveGate.open(last, last + 29 * 60_000L + 59_000L))
+    }
+
+    @Test
+    fun thirtyMinutesAfterTheLastOneIsAllowed() {
+        val last = moment("2026-11-05T10:00:00+08:00")
+
+        assertTrue(ProactiveGate.open(last, last + ProactiveGate.GAP_MS))
+        assertEquals(30, ProactiveGate.GAP_MINUTES)
+    }
+
+    @Test
+    fun aClockThatJumpedBackwardsDoesNotOpenTheGate() {
+        val last = moment("2026-11-05T10:00:00+08:00")
+
+        assertEquals(false, ProactiveGate.open(last, last - 60_000L))
+    }
+
+    @Test
+    fun theBlockedSentenceSaysHowLongAgoAndHowLongToWait() {
+        val last = moment("2026-11-05T10:00:00+08:00")
+
+        assertEquals(
+            "上一条主动投递才 12 分钟, 30 分钟内不开口",
+            ProactiveGate.blockedReason(last, last + 12 * 60_000L),
+        )
+    }
+
+    /* ── 静默时段 (B4-b ⑨) ─────────────────────────────────────────────── */
+
+    @Test
+    fun quietHoursKeepTheProactiveConversationClosed() {
+        val why = ProactiveSchedule.quietWhy(
+            enabled = true,
+            window = "23:00-07:00",
+            now = moment("2026-11-05T23:30:00+08:00"),
+            zone = zone,
+        )
+
+        assertTrue(why != null)
+        assertTrue(why!!.startsWith("静默时段"))
+        assertTrue(why.contains("23:00 - 07:00"))
+    }
+
+    @Test
+    fun theQuietWindowIsLeftClosedRightOpen() {
+        fun quietAt(text: String): Boolean = ProactiveSchedule.quietWhy(
+            enabled = true,
+            window = "23:00-07:00",
+            now = moment(text),
+            zone = zone,
+        ) != null
+
+        assertEquals(false, quietAt("2026-11-05T22:59:00+08:00"))
+        assertEquals(true, quietAt("2026-11-05T23:00:00+08:00"))
+        assertEquals(true, quietAt("2026-11-06T06:59:00+08:00"))
+        assertEquals(false, quietAt("2026-11-06T07:00:00+08:00"))
+    }
+
+    @Test
+    fun turningQuietHoursOffLetsItSpeak() {
+        assertNull(
+            ProactiveSchedule.quietWhy(
+                enabled = false,
+                window = "23:00-07:00",
+                now = moment("2026-11-05T03:00:00+08:00"),
+                zone = zone,
+            ),
+        )
+    }
+
+    @Test
+    fun aBrokenOrEmptyQuietWindowIsNotQuiet() {
+        val now = moment("2026-11-05T03:00:00+08:00")
+
+        assertNull(ProactiveSchedule.quietWhy(true, "半夜到早上", now, zone))
+        assertNull(ProactiveSchedule.quietWhy(true, "23:00-23:00", now, zone))
+        assertNull(ProactiveSchedule.quietWhy(true, null, now, zone))
+    }
 }

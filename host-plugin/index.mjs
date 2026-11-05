@@ -3795,8 +3795,9 @@ const TOOLS = [
     + ' user names a cooldown, write that exact number into cooldownMinutes instead of 30** - the'
     + ' settings page lets them set it themselves too, and 0 means no cooldown at all;'
     + ' at most one rule with the same name exists,'
-    + ' so op=write overwrites. A "task" rule also counts toward the user\'s daily proactive limit'
-    + ' (Settings -> 探索); a manual run from that page does not count. op=list shows the rules, op=read one, op=status says which of the twelve'
+    + ' so op=write overwrites. Every rule that speaks shares a 30-minute gate with the proactive'
+    + ' schedule, so the two do not talk over each other; a manual run from the settings page is'
+    + ' allowed right away and does not count. op=list shows the rules, op=read one, op=status says which of the twelve'
     + ' watches can run right now, what is holding a rule back (no notification access,'
     + ' accessibility off, no exact alarms, power save, quiet hours) and, for every combination,'
     + ' the last time each sub-condition held (that line is how you answer "why did it not fire"), op=history says what was'
@@ -8442,9 +8443,6 @@ const EXPLORE_MINUTES_RANGE = [1, 180]
 const EXPLORE_STEPS_DEFAULT = 60
 const EXPLORE_STEPS_RANGE = [1, 1000]
 
-/** 每日主动说的上限 (D17; 应用那一侧按这个缺省, 实际值在 automations/settings.json 的 saidLimit) */
-const EXPLORE_SAID_DEFAULT = 3
-
 /** 那几份文件的文件名 (与应用那一侧同一个约定, 谁都不许单边改) */
 const EXPLORE_TASK_FILE = 'explore-card.md'
 const EXPLORE_TASK_CHARS = 8000
@@ -8495,13 +8493,6 @@ function exploreSummaryName(startedAt) {
   const pad = (value) => String(value).padStart(2, '0')
   return `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}`
     + `-${pad(at.getHours())}${pad(at.getMinutes())}`
-}
-
-/** 应用那一侧记"今天说过几次"用的日期键, 与 `$DSH_HOME/lw/explore.json` 里 `said.date` 同一个形状 */
-function exploreDayKey(now = Date.now()) {
-  const at = new Date(now)
-  const pad = (value) => String(value).padStart(2, '0')
-  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
 }
 
 /**
@@ -8771,8 +8762,7 @@ const exploreState = {
 /**
  * `$DSH_HOME/lw/explore.json` 那个文件
  *
- * **合并式原子写**: 先读, 只改自己的键 (`run`), `.tmp` + rename, 未知键一律保留 —— 批次 8 要往同一个
- * 文件写 `said` (每日主动说的那本账), 那时这一侧一个字节都不用改
+ * **合并式原子写**: 先读, 只改自己的键 (`run`), `.tmp` + rename, 未知键一律保留
  */
 function exploreStatePath() {
   const home = process.env.DSH_HOME
@@ -9361,62 +9351,12 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
   }
 }
 
-/**
- * 今天主动说了几次 (D17 的读数)
- *
- * 与 `AutomationStore.saidToday` 同一套过滤: **真的投出去的 `task`** (hit / 无 blocked /
- * delivered 不是 false / 不是手动 / action 是 task / 同一日期键), `remind` 与手动跑都不算。
- * 上限读 `automations/settings.json` 的 `saidLimit` (缺省 3, 夹 1..10)
- */
-function proactiveSaidCount(lines, day) {
-  let count = 0
-  for (const line of lines) {
-    if (typeof line !== 'string' || line.trim() === '') continue
-    let one = null
-    try {
-      one = JSON.parse(line)
-    } catch {
-      continue
-    }
-    if (one?.hit !== true) continue
-    if (one?.blocked !== undefined) continue
-    if (one?.delivered === false) continue
-    if (one?.manual === true) continue
-    if (one?.action !== 'task') continue
-    if (exploreDayKey(Number(one?.at)) !== day) continue
-    count += 1
-  }
-  return count
-}
-
-async function proactiveSaid(now = Date.now()) {
-  const home = process.env.DSH_HOME
-  const answer = { today: 0, limit: EXPLORE_SAID_DEFAULT }
-  if (!home) return answer
-  const day = exploreDayKey(now)
-  try {
-    const raw = await readFile(join(home, 'automations', 'settings.json'), 'utf8')
-    const asked = Number(JSON.parse(raw)?.saidLimit)
-    if (Number.isFinite(asked)) answer.limit = Math.min(10, Math.max(1, Math.round(asked)))
-  } catch {
-    // 没有这一份就是缺省, 不是错
-  }
-  try {
-    const raw = await readFile(join(home, 'automations', 'history.jsonl'), 'utf8')
-    answer.today = proactiveSaidCount(raw.split('\n'), day)
-  } catch {
-    // 还没有历史
-  }
-  return answer
-}
-
 /** 这一档现在什么样 (给 `lw_explore op=status`) */
 async function exploreStatus(ctx) {
   const budget = exploreBudget(exploreRun)
   const latest = await exploreLatestSummary()
   const readings = await voiceWorkspaceReadings(ctx, exploreRun.session ?? '', exploreWorkspaceState)
   const power = await explorePowerSave()
-  const said = await proactiveSaid()
   const task = await exploreTaskInfo()
   return {
     running: exploreRun.session !== null && exploreRun.over !== true,
@@ -9442,10 +9382,6 @@ async function exploreStatus(ctx) {
     powerSaveKnown: power.known,
     powerSaveWhy: power.why,
     summary: latest,
-    said: said.today,
-    saidToday: said.today,
-    saidLimit: said.limit,
-    saidDefault: EXPLORE_SAID_DEFAULT,
     nextTask: task,
     screens: exploreScreens,
     unreleasedScreens: exploreScreens.filter((one) => one.released !== true).length,
@@ -9485,7 +9421,6 @@ async function exploreStatusText(ctx) {
     `power save: ${readings.powerSaveKnown ? String(readings.powerSave) : `unknown (${readings.powerSaveWhy})`}`
       + `${readings.powerSaveUnknown ? ', the probe failed once this run' : ''}`,
     `latest summary: ${readings.summary || '(none yet)'}`,
-    `said today: ${readings.saidToday} of ${readings.saidLimit} (task rules only; a manual run does not count)`,
     `next task card: ${readings.nextTask.path || '(none yet)'} (${readings.nextTask.chars} chars)`,
     `screens: ${pendingScreens.length} unreleased of ${readings.screens.length} on the ledger`
       + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,

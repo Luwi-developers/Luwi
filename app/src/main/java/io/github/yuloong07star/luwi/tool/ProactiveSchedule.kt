@@ -7,9 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import io.github.yuloong07star.luwi.automation.AutomationRule
+import io.github.yuloong07star.luwi.automation.AutomationStore
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.voice.VoiceInbox
+import io.github.yuloong07star.luwi.wake.PowerWindow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -39,15 +41,23 @@ import java.util.concurrent.atomic.AtomicBoolean
  * `explore.json`)。**排期这一段是共用的** (闹钟 / 先拉宿主 / 等就绪 / 允许锁屏解锁), 所以那几步
  * 走 [ExploreSchedule] 里现成的那两条 ([ExploreSchedule.wakeHost] / [ExploreSchedule.unlockAtSchedule])
  *
- * 这一档只做 B4-a 的骨架, 不做那三道产品闸 (30 分钟间隔 / 静默时段 / 每日次数) —— 它们归 B4-b,
- * 设置页归 B4-c。这里要成立的是两件事:
+ * B4-a 只做骨架; B4-b 把三道产品闸接上 (设置页归 B4-c):
+ *
+ * 1. **30 分钟闸** ([ProactiveGate]): 与自动指令**共用同一笔账**, 任何一边刚说过, 另一边在 30
+ *    分钟内都不开口; 手动「立刻跑一次」不查也不记这笔账
+ * 2. **静默时段** ([quietWhy]): 到点落在 `automations/settings.json` 的静默窗口里就跳过, 也不为了
+ *    这一场把宿主叫起来
+ * 3. **没有每日总次数上限**: 2.8.0 起取消 `saidLimit`, 一天能说几次只受这两道闸与排期时刻约束
+ *
+ * 这里要成立的是两件事:
  *
  * 1. **排期能起**: 文件里开着, 宿主服务起来就排上; 到点先拉宿主, 再往收件箱投一行
  *    `source:"proactive"` (正文是 `proactive-card.md`, 没有就投缺省那一句)
  * 2. **主动场不建虚拟屏**: 应用这一侧一条建屏的路都不走; 宿主那一侧 `startProactive` 只开会话,
  *    而且 `proactive` 预设的场里屏幕类工具一律被 [host-plugin] 的 guard 拒掉
  *
- * 配置与读数都落 `$DSH_HOME/lw/proactive-schedule.json` (应用单写者); 到点之后宿主那一场记在
+ * 配置与读数都落 `$DSH_HOME/lw/proactive-schedule.json` (应用单写者); 30 分钟闸那笔账落在
+ * `$DSH_HOME/lw/proactive-gate.json` ([ProactiveGate], 应用单写者); 到点之后宿主那一场记在
  * `$DSH_HOME/lw/proactive.json` (宿主单写者, 应用只读)
  */
 internal object ProactiveSchedule {
@@ -199,6 +209,35 @@ internal object ProactiveSchedule {
         cardFile(context).takeIf { it.isFile }?.readText().orEmpty()
     }.getOrDefault("").trim().take(MAX_CHARS)
 
+    /**
+     * 静默时段 (B4-b ⑨): 落在里面就回那一句, 不在就 null
+     *
+     * 窗口与自动指令是同一份 (`automations/settings.json` 的 `quiet.enabled` / `quiet.window`, 缺省
+     * 23:00-07:00) —— 主动排期没有"这条规则要不要静默"的那一栏, 所以只看总开关
+     */
+    fun quietWhy(context: Context, now: Long, zone: ZoneId = ZoneId.systemDefault()): String? {
+        val on = AutomationStore.settings(context)
+        return quietWhy(on.quietEnabled, on.quietWindow, now, zone)
+    }
+
+    /**
+     * 纯函数那一半 (单测钉着): 开关关着 / 窗口认不出来 / 空窗都不算静默
+     *
+     * 到点那一刻落在窗口里就是"不开口", 与到点那一刻有没有东西可说无关 —— 静默时段挡的是"发出
+     * 声音"这件事本身
+     */
+    fun quietWhy(
+        enabled: Boolean,
+        window: String?,
+        now: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): String? {
+        if (!enabled) return null
+        val parsed = window?.let { PowerWindow.parse(it) }?.takeIf { !it.empty } ?: return null
+        if (!PowerWindow.inside(PowerWindow.minutesOfDay(now, zone), parsed)) return null
+        return "静默时段 (${PowerWindow.describe(parsed)})"
+    }
+
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
     fun ensure(context: Context) {
         arm(context)
@@ -252,15 +291,32 @@ internal object ProactiveSchedule {
     }
 
     /**
-     * 到点那一趟: 宿主不在就先拉起来, 然后往收件箱投一行 `source:"proactive"`
+     * 到点那一趟: 先看静默时段与 30 分钟闸, 宿主不在就先拉起来, 然后往收件箱投一行 `source:"proactive"`
      *
-     * **这里不判上一场在不在跑**: 主动场固定新开 (B4-a ⑤), 而"多久才准开下一场"那道 30 分钟闸
-     * 归 B4-b —— 这一版只保证"到点能起", 不在应用这一侧多一道没有主人的闸
+     * **这里不判上一场在不在跑**: 主动场固定新开 (B4-a ⑤); 30 分钟闸 (B4-b ⑥) 查的是
+     * [ProactiveGate] 那笔与自动指令共用的账: 到点这一刻就查一次 (闸关着就不必把宿主叫起来), 真正
+     * 投递时再在 [ProactiveGate.deliver] 里查一次 —— 等宿主 / 解屏那一两分钟里自动指令可能刚说过
      */
     private fun fire(context: Context, now: Long, release: () -> Unit) {
         val current = plan(context)
         if (!current.enabled) return
-        Log.i(TAG, "the proactive schedule fired (${current.times.joinToString("/")})")
+        val at = current.times.joinToString("/")
+        // 静默时段 (B4-b ⑨): 到点也不开口, 更不为了这一场去把宿主叫起来
+        val quiet = quietWhy(context, now)
+        if (quiet != null) {
+            Log.i(TAG, "the scheduled proactive conversation at $at was skipped: $quiet")
+            save(context, current.copy(last = Last(now, "skipped", quiet)))
+            return
+        }
+        // 30 分钟闸 (B4-b ⑥): 自动指令刚说过 / 上一次排期才过 20 分钟, 这一场就不开口
+        val lastSpoken = ProactiveGate.lastAt(context)
+        if (!ProactiveGate.open(lastSpoken, now)) {
+            val why = ProactiveGate.blockedReason(lastSpoken, now)
+            Log.i(TAG, "the scheduled proactive conversation at $at was skipped: $why")
+            save(context, current.copy(last = Last(now, "skipped", why)))
+            return
+        }
+        Log.i(TAG, "the proactive schedule fired ($at)")
         if (DshHost.status !is HostStatus.Running) {
             // 与 2.8.0 #9 探索那条同一个形态: 闹钟把进程叫醒了, 而宿主那半可能是死的
             Log.i(TAG, "the host was not running, starting it for the proactive conversation")
@@ -280,18 +336,31 @@ internal object ProactiveSchedule {
         }
         val card = readCard(context)
         val text = card.ifEmpty { FALLBACK_TEXT }
-        val seq = VoiceInbox.append(context, text, source = VoiceInbox.SOURCE_PROACTIVE)
-        if (seq == null) {
-            Log.w(TAG, "the scheduled proactive conversation could not be queued")
-            save(context, current.copy(last = Last(now, "failed", "收件箱写不进去")))
-            return
+        // 查账 / 投递 / 记账在同一把锁里: 等宿主与解屏可能过了一两分钟, 这一刻才是真正的开口时刻
+        val sent = ProactiveGate.deliver(context, System.currentTimeMillis(), VoiceInbox.SOURCE_PROACTIVE) {
+            VoiceInbox.append(context, text, source = VoiceInbox.SOURCE_PROACTIVE)
         }
-        val why = listOfNotNull(
-            if (card.isEmpty()) "卡是空的, 按缺省那一段投的" else null,
-            unlockNote,
-        ).joinToString("; ").ifEmpty { null }
-        Log.i(TAG, "the proactive conversation was queued as line #$seq (card ${card.length} chars)")
-        save(context, current.copy(last = Last(now, "started", why)))
+        when (sent) {
+            is ProactiveGate.Outcome.Blocked -> {
+                val why = ProactiveGate.blockedReason(sent.lastAt, System.currentTimeMillis())
+                Log.i(TAG, "the scheduled proactive conversation was skipped: $why")
+                save(context, current.copy(last = Last(now, "skipped", why)))
+            }
+
+            ProactiveGate.Outcome.Failed -> {
+                Log.w(TAG, "the scheduled proactive conversation could not be queued")
+                save(context, current.copy(last = Last(now, "failed", "收件箱写不进去")))
+            }
+
+            is ProactiveGate.Outcome.Delivered -> {
+                val why = listOfNotNull(
+                    if (card.isEmpty()) "卡是空的, 按缺省那一段投的" else null,
+                    unlockNote,
+                ).joinToString("; ").ifEmpty { null }
+                Log.i(TAG, "the proactive conversation was queued as line #${sent.seq} (card ${card.length} chars)")
+                save(context, current.copy(last = Last(now, "started", why)))
+            }
+        }
     }
 
     /** 设置页那一行读数用: `started` / `skipped` / `failed` -> 一句中文 (B4-c 接) */
