@@ -11,7 +11,7 @@
  * usage: node tools/pack-host.mjs --dsh <checkout> --out <dir> [--install] [--skip-build] [--tavern-root <dir>]
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -162,6 +162,10 @@ function pnpmEnvironment() {
   if (found !== null) console.log(`pack-host: pnpm is ${found}`)
   pnpmEnv = {
     ...process.env,
+    PATH: sanitizedPath(),
+    // 本机 %LOCALAPPDATA%\npm-cache 对子进程会拒写 (npm install 的 mkdtemp 报 EPERM, 2026-11-06 实测);
+    // Gradle 那一侧会显式传进来, 手工跑这一份时退到工作区的 .lwtmp 下
+    npm_config_cache: process.env.npm_config_cache ?? ensureNpmCache(join(process.cwd(), '.lwtmp', 'npm-cache')),
     ...(process.env.npm_execpath ? {} : { npm_execpath: found }),
     // dsh 的 `postinstall` 会去装 lefthook 的 git 钩子, 而这一仓的 submodule 是 linked worktree:
     // 它的 `core.worktree` 写在 common config 里, 于是那一步必然失败
@@ -171,11 +175,73 @@ function pnpmEnvironment() {
     // `install-lefthook.mjs` 第一行就是 `if (process.env.CI === 'true' || GITHUB_ACTIONS === 'true') return`
     GITHUB_ACTIONS: process.env.GITHUB_ACTIONS ?? 'true',
   }
+  verifyTar(pnpmEnv)
   return pnpmEnv
 }
 
 /** 上面那份环境只算一次, 之后 install 与 build 共用 */
 let pnpmEnv = null
+
+/**
+ * 确保 npm 的 cache 目录存在并返回它
+ *
+ * 本机 `%LOCALAPPDATA%\npm-cache` 从 Gradle/node 子进程里写不动 (npm install 的 mkdtemp 报 EPERM),
+ * 所以 cache 一律放在工作区里 (由 Gradle 显式传 `npm_config_cache`, 手工跑时退到 `.lwtmp/npm-cache`)
+ */
+function ensureNpmCache(directory) {
+  mkdirSync(directory, { recursive: true })
+  return directory
+}
+
+/**
+ * PATH 里把 DSH 自带的 MSYS 目录摘掉, 并让 System32 排最前
+ *
+ * **为什么** (2026-11-06 定位, 11-04 / 11-05 两轮出包都栽在这): DSH 的 bash 运行时把
+ * `<...>\@dsh-ops\bash-win32-x64\ucrt64\bin` 与 `...\usr\bin` 排在 PATH 最前, 里面那份
+ * `tar.exe` 是 MSYS 程序 —— 从 node 子进程里一跑就是 0xC0000022:
+ *
+ * ```
+ * tar: *** fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
+ * Error: tar -tzf deepseek-ai-dsh-brand-….tgz exited with 3221225794
+ * ```
+ *
+ * dsh 的 `scripts/release/pack.ts` 校验 tarball 时正是 `capture('tar', ...)`, 所以自动化会话里
+ * `dev.ps1 build` 的 packHostTree 必挂。Windows 自带的 `C:\Windows\System32\tar.exe` (bsdtar)
+ * 能正常读 tgz, 所以这里把 MSYS 目录剔除并让 System32 排最前; env.ps1 在 shell 层做了同一件事,
+ * 这里是给"不经过 env.ps1 的调用方"(Gradle Exec / CI / 手工 node)兜底
+ */
+function sanitizedPath() {
+  if (process.platform !== 'win32') return process.env.PATH ?? ''
+  const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const keep = (process.env.PATH ?? '')
+    .split(';')
+    .filter((entry) => entry !== '')
+    .filter((entry) => !/\\@dsh-ops\\/iu.test(entry))
+    .filter((entry) => !/\\(?:usr|ucrt64)\\bin\\?$/iu.test(entry))
+    .filter((entry) => entry.toLowerCase() !== system32.toLowerCase())
+  return [system32, ...keep].join(';')
+}
+
+/**
+ * 出包前先确认 tar 能跑, 并且把用的是哪一份打出来
+ *
+ * 栽过的样子是 4 分钟后才由 dsh 深处抛一句 `exited with 3221225794`, 看不出是 PATH 的锅。
+ * 这里提前 50 ms 判定, 报清楚"解析到哪一份 tar", 让现场一眼能改
+ */
+function verifyTar(env) {
+  const probe = spawnSync('tar', ['--version'], { env, encoding: 'utf8' })
+  const first = (probe.stdout ?? '').split('\n')[0].trim()
+  if (probe.status !== 0) {
+    const derived = (env.PATH ?? '').split(';').find((entry) => existsSync(join(entry, 'tar.exe')))
+    throw new Error(
+      `tar is unusable (status ${String(probe.status)}), resolved to ${derived ?? 'nothing on PATH'}.`
+        + ' Windows 需要 System32 里那份 bsdtar; PATH 前面的 MSYS/@dsh-ops usr\\bin 会以'
+        + ' 0xC0000022 (3221225794) 退出, 出包链 pack.ts 就是这么挂的'
+        + ' (先 gradlew --stop 让守护进程重建, 再从 PATH 去掉那些目录)',
+    )
+  }
+  console.log(`pack-host: tar is ${first}`)
+}
 
 /** pnpm 在哪: 环境变量 -> PATH 上的可执行 -> npm 的全局目录 -> 工作区自带的那份 .mjs */
 function findPnpm() {

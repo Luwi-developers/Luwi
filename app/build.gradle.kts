@@ -128,10 +128,47 @@ val dshPin: Provider<String> = providers.exec {
     isIgnoreExitValue = true
 }.standardOutput.asText.map { it.trim().ifEmpty { "unknown" } }
 
+/**
+ * 传给 packHostTree 的 PATH (2026-11-06)
+ *
+ * Gradle 守护进程沿用**首次启动**时的环境变量, 而 DSH 的自动化 shell 把 MSYS 目录
+ * (`@dsh-ops\...\ucrt64\bin`、`...\usr\bin`, 里面有会报 0xC0000022 的 tar.exe) 排在最前。
+ * dsh 的 scripts/release/pack.ts 校验 tarball 时 spawn('tar', ...), 于是 packHostTree 必挂:
+ * `Error: tar -tzf ....tgz exited with 3221225794`。env.ps1 已在 shell 层清洗, 但守护进程里的
+ * 旧 PATH 不会跟着变 —— 这里在构建脚本侧再清洗一遍并显式交给 Exec, 与调用方是谁无关。
+ * 口径与 tools/pack-host.mjs 的 sanitizedPath() 一致
+ */
+val sanitizedExecPath: String = run {
+    val sep = System.getProperty("path.separator")
+    val fs = System.getProperty("file.separator")
+    val systemRoot = System.getenv("SystemRoot") ?: "C:\\Windows"
+    val system32 = systemRoot + fs + "System32"
+    val msys = Regex("(?i)\\\\(?:usr|ucrt64)\\\\bin\\\\?$")
+    val keep = (System.getenv("PATH") ?: "")
+        .split(sep)
+        .filter { it.isNotBlank() }
+        .filterNot { it.contains("@dsh-ops", ignoreCase = true) }
+        .filterNot { msys.containsMatchIn(it) }
+        .filterNot { it.equals(system32, ignoreCase = true) }
+    (listOf(system32) + keep).joinToString(sep)
+}
+
 val packHostTree = tasks.register<Exec>("packHostTree") {
     group = "luwi"
     description = "Rebuild dsh at the pinned commit and install the flat host tree the APK ships"
     workingDir = rootProject.projectDir
+    environment("PATH", sanitizedExecPath)
+    // npm 的 cache 与临时目录同样显式交给这一步: 本机 `%LOCALAPPDATA%\npm-cache` 对 Gradle 子进程会
+    // EPERM (mkdtemp 直接失败), 而守护进程的环境变量不会跟着命令行变, 只靠 shell 里 export 不可靠
+    val packTmp = layout.buildDirectory.dir("tmp/pack-host").get().asFile
+    val npmCache = layout.buildDirectory.dir("tmp/npm-cache").get().asFile
+    doFirst {
+        packTmp.mkdirs()
+        npmCache.mkdirs()
+    }
+    environment("TEMP", packTmp.absolutePath)
+    environment("TMP", packTmp.absolutePath)
+    environment("npm_config_cache", npmCache.absolutePath)
     // `--install` 是必须的: 子模块的 node_modules 里只有 workspace 链接, 各包自己的依赖没装, 而
     // dsh root 的 `pnpm run check` 要 tsc / tsdown —— 少了它构建会死在"某个包缺 typescript"上。
     // pnpm 那一份由 tools/pack-host.mjs 自己找 (并把 npm_execpath 补齐, 见那个文件里的长注释)

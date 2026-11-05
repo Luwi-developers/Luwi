@@ -31,6 +31,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 2026-11-05: 从 bash/cron 这类非控制台宿主调用（stdout 被管道接走）时，[Console]::OutputEncoding
+# 不是 UTF-8 而是 OEM 码页，gh 吐出的 UTF-8 中文标题会被按 ANSI 再解一遍，ConvertFrom-Json 当场报
+# "unexpected character ... Path '[0].title'"（中文标题被拆成非法字节）。交互式控制台里一直是好的，
+# 所以之前那次「修中文解码」看着是通的。这里进程级钉死 UTF-8，两种宿主都成立。
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 $tmp = 'D:\apk\.lwtmp\pr'
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $jsonFile = Join-Path $tmp 'body.json'
