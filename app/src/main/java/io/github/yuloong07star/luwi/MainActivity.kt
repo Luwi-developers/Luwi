@@ -11,6 +11,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.lifecycleScope
+import io.github.yuloong07star.luwi.channel.Funnel
 import io.github.yuloong07star.luwi.channel.LwApps
 import io.github.yuloong07star.luwi.channel.LwOcr
 import io.github.yuloong07star.luwi.channel.PreviewControl
@@ -76,6 +77,8 @@ class MainActivity : ComponentActivity() {
         // 点亮屏幕 —— 前提正是这个标志。它只在真的起了这一页时生效, 而且**不解锁** (要看内容仍然要
         // 解锁), 所以它是兜底而不是主路
         setTurnScreenOn(true)
+        // 五道门的第一道: 应用被打开过。记账自己判重, 这里不必管是第几次
+        Funnel.mark(this, Funnel.Gate.OPEN)
         // 外观设置要在第一帧之前读出来, 否则会先闪一下默认主题
         ThemeStore.initialize(this)
         // 同理: 预览能不能当触摸板, 默认是关, 得在画画面之前就知道

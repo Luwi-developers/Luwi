@@ -42,6 +42,8 @@
 
     <string name="settings_menu_feedback">Luwi反馈</string>
     <string name="settings_menu_feedback_summary">报一个问题, 或者私密说一句</string>
+    <string name="settings_menu_funnel">启动记录</string>
+    <string name="settings_menu_funnel_summary">五项各自第一次通过的时间, 复制到剪贴板</string>
     <string name="settings_menu_update">检测更新</string>
     <string name="settings_menu_account">账号</string>
     <string name="settings_menu_account_summary">在浏览器里看账号与服务时长, 签到或购买酒馆时长</string>
