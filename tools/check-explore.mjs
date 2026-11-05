@@ -304,7 +304,7 @@ check('那份任务卡的名字与上限 (宿主与应用同一个约定)', [
 ], ['explore-card.md', 8000, true])
 check('宿主收尾写卡: 原子写 + nextTask 只收非空', [
   /async function exploreTaskWrite\(text\)/u.test(section),
-  /const temporary = `\$\{path\}\.tmp`/u.test(section),
+  /const temporary = temporaryName\(path\)/u.test(section),
   /nextTask: args\?\.nextTask/u.test(host),
   /exploreTaskWrite\(askedNext\)/u.test(section),
 ], [true, true, true, true])
@@ -317,7 +317,7 @@ check('摘要目录就在 lw 底下 (候选目录 2026-10-18 已删)', [
 ], [true, true])
 check('探索状态是合并式原子写 (未知键留着, .tmp + rename)', [
   /\.\.\.base,/u.test(section),
-  /const temporary = `\$\{path\}\.tmp`/u.test(section),
+  /const temporary = temporaryName\(path\)/u.test(section),
   /await rename\(temporary, path\)/u.test(section),
 ], [true, true, true])
 check('宿主起来时若 run 还在就重挂预算', [
@@ -339,8 +339,8 @@ check(
 const pack = await read('tools/pack-host.mjs')
 const custom = await read('app/src/main/java/io/github/yuloong07star/luwi/host/CustomPresets.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
-check('pack-host 摆的就是探索那一份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore'\]/u.test(pack), true)
-check('Kotlin 那张 PRESET_ROWS 是三对', /ROW_EXPLORE to "explore",/u.test(custom), true)
+check('pack-host 摆的就是探索与主动对话那两份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore', 'proactive'\]/u.test(pack), true)
+check('Kotlin 那张 PRESET_ROWS 里有探索那一对', /ROW_EXPLORE to "explore",/u.test(custom), true)
 const exploreBranch = host.slice(
   host.indexOf("if (line.source === 'explore')"),
   host.indexOf('const automated = line.source'),
@@ -643,12 +643,13 @@ check('到点先解屏再投那一行 (否则模型第一眼看到的是锁屏)'
   schedule.indexOf('unlockForExplore(context)') < schedule.indexOf('VoiceInbox.append('),
 ], [true, true])
 check('解屏走「锁屏」那一段: 点亮 / 没录过不放 / 失败太多次不放', [
-  /fun unlockForExplore\(context: Context\): String\?/.test(schedule),
+  /fun unlockForExplore\(context: Context\): String\? =\s*unlockAtSchedule\(context, "the scheduled exploration"\)/.test(schedule),
+  /fun unlockAtSchedule\(context: Context, tag: String\): String\?/.test(schedule),
   /LockReplay\.wakeScreen\(context, allowConnecting = true\)/.test(schedule),
-  /LockReplay\.replayNow\(context, "the scheduled exploration"\)/.test(schedule),
+  /LockReplay\.replayNow\(context, tag\)/.test(schedule),
   /if \(!LockSetting\.unlockable\(context\)\)/.test(schedule),
   /if \(LockTries\.exhausted\(LockSetting\.tries\(context\)\)\)/.test(schedule),
-], [true, true, true, true, true])
+], [true, true, true, true, true, true])
 check('"有没有可放的东西"只有一处 (两条开关问同一句)', [
   /fun unlockable\(context: Context\): Boolean/.test(lockSettings),
   /if \(on && !unlockable\(context\)\)/.test(lockSettings),
@@ -706,6 +707,7 @@ const releaseCalls = []
 let releaseAnswer = (displayId) => ({ released: true, displayId })
 const screensApi = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'call', 'shortSession',
+  'temporaryName',
   `${section}\nreturn { getScreens: () => exploreScreens,`
     + ' setScreens: (next) => { exploreScreens = next; exploreScreensLoaded = true },'
     + ' resetScreens: () => { exploreScreens = []; exploreScreensLoaded = true },'
@@ -718,6 +720,9 @@ const screensApi = new Function(
     return releaseAnswer(params.displayId)
   },
   (id) => String(id).slice(0, 8),
+  // 主线的写盘已经改成唯一临时名 (2efab39), 而这一段源码是抽出来跑的 —— 临时名这一步给个
+  // 同形状的替身就行, 这个文件里判的是账怎么走, 不是 `.tmp` 叫什么
+  (path) => `${path}.check.tmp`,
 )
 
 const owned = (displayId, sessionId) => ({ displayId, sessionId, createdAt: 1, released: false })

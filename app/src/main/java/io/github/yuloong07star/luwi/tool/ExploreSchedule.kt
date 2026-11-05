@@ -400,7 +400,16 @@ internal object ExploreSchedule {
      * 三条边界都在这里: **没录过就不放**(只会白点亮一次屏), **失败太多次也不放**(那是 `LockTries`
      * 的闸, 别让排期把自动解锁的计数蹭光), 而**放不出去也不挡这一场** —— 探索照开, 只是停在锁屏
      */
-    private fun unlockForExplore(context: Context): String? {
+    private fun unlockForExplore(context: Context): String? =
+        unlockAtSchedule(context, "the scheduled exploration")
+
+    /**
+     * 上面那一段的共用版: 主动对话的排期 (2.8.0 B4-a) 也要在同一条路上放锁屏
+     *
+     * [tag] 只进 `LockReplay` 的日志, 用来说明是哪一个排期在放锁屏 —— 两条排期的三道边界
+     * (没录过 / 失败太多 / 放不出去) 完全一样, 所以只留这一份实现
+     */
+    internal fun unlockAtSchedule(context: Context, tag: String): String? {
         if (LockSetting.unlocked(context)) return null
         LockReplay.wakeScreen(context, allowConnecting = true)
         if (!LockSetting.screenOn(context)) return "屏幕没点亮 (这一场可能看不见东西)"
@@ -409,7 +418,7 @@ internal object ExploreSchedule {
         if (LockTries.exhausted(LockSetting.tries(context))) {
             return "屏还锁着, 解锁连着失败太多次已经停了"
         }
-        val report = LockReplay.replayNow(context, "the scheduled exploration")
+        val report = LockReplay.replayNow(context, tag)
         return if (report.ok) {
             "到点先把锁屏解开了"
         } else {

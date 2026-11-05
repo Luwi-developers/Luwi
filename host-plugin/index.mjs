@@ -188,6 +188,16 @@ export function apply(ctx) {
     warn(ctx, `the explore budget was not started: ${error?.message ?? error}`)
   }
 
+  // 主动对话那一场的屏幕闸 (2.8.0 B4-a 的 13-4): 那一场只提醒, 屏幕类工具一律拒 —— 主动场不建
+  // 虚拟屏这一条就不只靠提示词了; 名单外的工具一次都不碰会话身份
+  try {
+    ctx.tools.guard(proactiveScreenGate)
+  } catch (error) {
+    warn(ctx, `the proactive screen guard was not registered: ${error?.message ?? error}`)
+  }
+  // 重启之后把上一场主动对话的记号接回来: 那道闸在旧会话里继续生效 (读不到就当没有)
+  void proactiveStateRestore()
+
   // 语音输入是 dsh 里可选的一套 (voice-input bundle 带的那个客户端录音按钮): 服务在才注册
   // 本机的转写 provider, 不在就什么都不做 —— 一个可选能力不该让 lw_* 那堆工具跟着挂
   try {
@@ -7580,6 +7590,11 @@ async function voiceDeliver(ctx, line) {
       steps: line.steps,
     })
   }
+  // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
+  // 不查浮标那本 10 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
+  if (line.source === 'proactive') {
+    return startProactive(ctx, { text: line.text, via: 'inbox' })
+  }
   // 先看它是不是一句命令 (批次 4.5): 是的话走 applyMode, 不进会话 —— 所以这一句既不插正在跑的那
   // 一轮, 也不开新对话, 更不理会 `line.wake`。命令是"对这台手机说的", 不是"对助手说的一句话"
   //
@@ -8126,6 +8141,276 @@ function startBallPhase(ctx) {
   // **起来先写一次空表**: 宿主刚起来时账上一定是空的, 这一下顺手把应用里可能残留的旧字清掉
   // (应用重启时它自己也会读一次, 所以两份都对得上)
   void writeBallPhase()
+}
+
+/* ── 主动对话 (2.8.0 B4-a, 排期骨架) ────────────────────────────────────────
+ *
+ * 到点那一场与浮标 / 探索都不一样: **固定新开一场**, 开场就用 `proactive` 预设, 默认只提醒
+ *
+ * 三件事的边界:
+ *  - **固定新开** (B4-a ⑤): 每一行 `source:"proactive"` 都走 `controller.create`, 不查浮标那本
+ *    10 分钟的账, 也不接主人此刻正看着的那一场
+ *  - **主动场不建虚拟屏** (13-4): `startProactive` 一条建屏的路都不走 (`lw_screen_create` 也不在
+ *    它手里), 而且这一场的屏幕类工具由 [proactiveScreenGate] 一律拒 —— 那是提示词层之外的一层
+ *    硬闸. 权限里另外三条 (shell / 文件写 / App 控制) 仍在提示词层 (D9 的口径)
+ *  - **账分开记**: `$DSH_HOME/lw/proactive.json` 给设置页 (B4-c) 读; 30 分钟闸与静默时段归 B4-b
+ *
+ * 判据在 `tools/check-proactive.mjs`: 它用 `new Function` 把下面那几段纯函数抽出来真跑
+ */
+
+/** 那一档的预设 id: 与 `presets/proactive/cordis.patch.yml` 里的 `config.id` 是同一个字面量 */
+const PROACTIVE_PRESET = 'proactive'
+
+/** 主动对话落在哪个工作区 (与探索同一个 `Luwi`, 但读数分开记) */
+const PROACTIVE_WORKSPACE_NAME = 'Luwi'
+
+/** 那一场的账: `$DSH_HOME/lw/proactive.json` (宿主单写者, 应用只读) */
+const PROACTIVE_STATE_FILE = 'proactive.json'
+
+/**
+ * 这一场主动对话的账 (内存里这一份是活的, `proactive.json` 是它的镜子)
+ *
+ * 它在第一句投进去**之前**就写好 —— [proactiveScreenGate] 认的正是这一场, 晚一步那些屏幕类工具
+ * 就可能在开场第一轮被放进来
+ */
+const proactiveRun = { session: null, workspace: '', startedAt: 0, preset: null, presetWhy: null }
+
+/** 这次进程里开过几场 (读数) */
+let proactiveStarts = 0
+
+/**
+ * 主动场里一律拒的屏幕类工具
+ *
+ * 名单是"屏幕这一类"的黑名单, 与视频模式那一张同一个形状: 管理屏 (建 / 改 / 转 / 放) + 读屏
+ * (截图 / 树 / OCR / 等字) + 在屏上动手 (点 / 滑 / 打 / 键 / 手势 / 滚). **以后新加的屏幕类工具,
+ * 谁加谁负责把它补进这张表** —— 13-4 要的是"主动场一条虚拟屏都不建", 漏一个就是一条绕过去的路
+ */
+const PROACTIVE_SCREEN_DENIED = new Set([
+  // 管理屏: 建虚拟屏那一条是 13-4 的正面
+  'lw_screen', 'lw_screen_create', 'lw_screen_resize', 'lw_screen_rotate', 'lw_screen_release',
+  // 读屏
+  'lw_screenshot', 'lw_ui', 'lw_ui_dump', 'lw_ocr', 'lw_wait_text',
+  'lw_events_subscribe', 'lw_events_wait', 'lw_wait_for',
+  // 在屏上动手
+  'lw_tap', 'lw_swipe', 'lw_type', 'lw_key', 'lw_key_combo', 'lw_gesture', 'lw_pinch', 'lw_scroll',
+])
+
+/** 主动场里碰到屏幕类工具的回执: 说清"这一档只提醒", 出口是让主人自己动手 */
+function proactiveScreenRefusal(name) {
+  return `refused: ${name} needs a screen, and a proactive conversation never creates a virtual`
+    + ' screen and never drives one. It only reads summaries and speaks: say what needs doing and'
+    + ' let the owner do it.'
+}
+
+/**
+ * 这一次调用是不是在主动场里 (纯函数)
+ *
+ * 两条判据都认: 会话头里的预设是 `proactive` (重启之后也成立), 或者它正是 [proactiveRun] 记的
+ * 那一场 (刚 create 出来、头里的预设还没读到的那一瞬)
+ */
+function proactiveSessionOf(exec) {
+  const session = exec?.agent?.session
+  const preset = session?.meta?.agentPreset ?? session?.agentPreset
+  if (preset === PROACTIVE_PRESET) return true
+  const id = exec?.agent?.id
+  return id !== undefined && id !== null && String(id) === proactiveRun.session
+}
+
+/**
+ * 主动场的屏幕闸 (B4-a 的 13-4)
+ *
+ * 与视频模式那道闸同一个挂法 (`ctx.tools.guard`): 名字不在名单里就一次都不碰会话身份, 在名单里
+ * 才问"这是不是主动场". 回一句理由就把这次调用拒掉.
+ */
+function proactiveScreenGate(exec) {
+  const name = typeof exec?.name === 'string' ? exec.name : ''
+  if (!PROACTIVE_SCREEN_DENIED.has(name)) return undefined
+  if (!proactiveSessionOf(exec)) return undefined
+  return proactiveScreenRefusal(name)
+}
+
+/**
+ * 主动对话的开场正文 (纯函数)
+ *
+ * 应用投进来的那一行是 `proactive-card.md` 的正文 (没有就投缺省那句); 这里再补上这四件:
+ * **启动顺序 / 上一份探索摘要在哪 / 这一档的权限 / 可以沉默**. 理由与探索那条一样 —— 模型没有
+ * 别的办法知道最新那份摘要在哪, 而"没有值得说的"必须是一个被允许的答案
+ */
+function proactiveStartLine(text, summaryPath) {
+  const asked = String(text ?? '').trim()
+    || '最新探索摘要 -> 记忆搜索 -> 今天的日历 -> 通知摘要, 再决定要不要开口'
+  return [
+    '这是到点自己开的一场主动对话, 不是主人刚说的话.',
+    '',
+    asked,
+    '',
+    '启动顺序: 最新探索摘要 -> 记忆搜索 -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
+    `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
+    '默认只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.',
+    '没有值得说的就保持沉默, 一条话都不要写.',
+  ].join('\n')
+}
+
+/** 那份状态文件在哪: `$DSH_HOME/lw/proactive.json`, 没设 DSH_HOME 就是 null */
+function proactiveStatePath() {
+  return homePath('lw', PROACTIVE_STATE_FILE)
+}
+
+/** 同一份文件只有一个写者: 与探索那份 `exploreStateQueue` 同一个写法 */
+let proactiveStateQueue = Promise.resolve()
+
+function proactiveStateWrite() {
+  proactiveStateQueue = proactiveStateQueue.then(
+    () => proactiveStateWriteNow(),
+    () => proactiveStateWriteNow(),
+  )
+  return proactiveStateQueue
+}
+
+async function proactiveStateWriteNow() {
+  const path = proactiveStatePath()
+  if (path === null) return
+  const record = {
+    v: 1,
+    updatedAt: Date.now(),
+    starts: proactiveStarts,
+    run: proactiveRun.session === null ? null : { ...proactiveRun },
+  }
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    const tmp = `${path}.tmp`
+    await writeFile(tmp, `${JSON.stringify(record)}\n`, 'utf8')
+    await rename(tmp, path)
+  } catch (error) {
+    console.warn(`luwi-channel: the proactive state file was not written: ${error?.message ?? error}`)
+  }
+}
+
+/**
+ * 宿主重启之后把这一场的记号接回来
+ *
+ * 只是为了让 [proactiveScreenGate] 在旧会话里继续生效: 预设那一栏本来也认 (`session.meta.agentPreset`),
+ * 但刚 create 出来、头还没落盘的那一瞬只有这一个记号. 读不到 / 没有 run 就当没有, 不写任何东西
+ */
+async function proactiveStateRestore() {
+  const path = proactiveStatePath()
+  if (path === null) return false
+  let record
+  try {
+    record = JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return false
+  }
+  const run = record?.run
+  if (run === null || typeof run !== 'object') return false
+  if (typeof run.session !== 'string' || run.session === '') return false
+  proactiveRun.session = run.session
+  proactiveRun.workspace = typeof run.workspace === 'string' ? run.workspace : ''
+  proactiveRun.startedAt = Number(run.startedAt) || 0
+  proactiveRun.preset = typeof run.preset === 'string' ? run.preset : null
+  proactiveRun.presetWhy = typeof run.presetWhy === 'string' ? run.presetWhy : null
+  console.log(`luwi-channel: the proactive conversation ${String(run.session).slice(0, 8)} came back after the restart`)
+  return true
+}
+
+/** 主动对话那条工作区的读数 */
+const proactiveWorkspaceState = { path: null, id: null, registered: null, why: null }
+
+/** 目录 `Luwi` (与探索同一条路, 读数各记各的) */
+async function ensureProactiveWorkspace(ctx) {
+  return ensureChannelWorkspace(ctx, PROACTIVE_WORKSPACE_NAME, proactiveWorkspaceState)
+}
+
+/**
+ * 这一档用哪个预设: **解析不了就退 `standard` 并把原因记进读数** (照 [chooseExplorePreset] 的
+ * why 形状)
+ *
+ * 与探索那一条同一种取舍: 主动对话的 persona 与工具面是绑在一起的 (那条"只提醒、不建屏"就写在
+ * `proactive` 那一份里), 换到别的预设上去跑就不是这一档了 —— 宁可退 standard 并如实说
+ */
+async function chooseProactivePreset(ctx) {
+  const presets = ctx?.get?.('agentPresets')
+  if (!presets || typeof presets.resolve !== 'function') {
+    return { id: undefined, why: 'this profile has no preset registry, so the create picks for itself' }
+  }
+  try {
+    const resolved = await presets.resolve(PROACTIVE_PRESET)
+    return { id: resolved.id, why: `the proactive preset (${resolved.id})` }
+  } catch (error) {
+    return { id: 'standard', why: `${describePresetFailure(error)}; fell back to standard` }
+  }
+}
+
+/**
+ * 开一场主动对话 (收件箱那条 `source:"proactive"` 走它)
+ *
+ * **固定新开** (B4-a ⑤): 不扫会话表, 不挑浮标那一场, 每一行都 `controller.create`.
+ *
+ * **不建虚拟屏** (13-4): 这里没有一条建屏 / 选屏的路; 会话起来之后那一场的屏幕类工具由
+ * [proactiveScreenGate] 拒. 所以这一场从头到尾碰不到虚拟屏
+ */
+async function startProactive(ctx, options = {}) {
+  const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'inbox'
+  const controller = ctx?.get?.('sessionController')
+  if (!controller) {
+    throw new Error('this profile has no session controller, so a proactive conversation has nowhere to go')
+  }
+  const workspace = await ensureProactiveWorkspace(ctx)
+  const preset = await chooseProactivePreset(ctx)
+  const startedAt = Date.now()
+  const summaryPath = await exploreLatestSummary()
+  const request = {
+    ...ballCreatePlace(workspace),
+    ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
+  }
+  let created = null
+  let presetId = preset.id
+  let presetWhy = preset.why
+  try {
+    created = await controller.create(request)
+  } catch (error) {
+    if (preset.id === undefined || preset.id === 'standard') throw error
+    created = await controller.create({ ...ballCreatePlace(workspace), agentPreset: 'standard' })
+    presetId = 'standard'
+    presetWhy = `${preset.why}; the create failed (${describePresetFailure(error)}),`
+      + ' so standard was used instead'
+  }
+  const sessionId = String(created.sessionId)
+  // **先记这一场再投第一句**: guard 在模型开场第一轮就要认得出这是主动场 (见 [proactiveRun])
+  proactiveRun.session = sessionId
+  proactiveRun.workspace = workspace?.path ?? ''
+  proactiveRun.startedAt = startedAt
+  proactiveRun.preset = presetId ?? null
+  proactiveRun.presetWhy = presetWhy
+  proactiveStarts += 1
+  await proactiveStateWrite()
+  try {
+    await deliverToBall(
+      ctx,
+      controller,
+      sessionId,
+      { text: proactiveStartLine(options?.text, summaryPath) },
+      { images: [] },
+    )
+  } catch (error) {
+    proactiveRun.session = null
+    await proactiveStateWrite()
+    throw error
+  }
+  console.log(
+    `luwi-channel: proactive conversation ${sessionId} started in ${proactiveRun.workspace}`
+      + ` (via ${via}, preset ${presetId ?? 'the registry default'}, no virtual screen)`,
+  )
+  return {
+    started: true,
+    session: sessionId,
+    workspace: proactiveRun.workspace,
+    preset: presetId ?? null,
+    presetWhy,
+    summary: summaryPath,
+    via,
+    screen: false,
+  }
 }
 
 /* ── 探索 (2.7.8 批次 7, 需求第 6 条) ────────────────────────────────────────

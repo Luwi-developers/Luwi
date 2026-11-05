@@ -947,10 +947,13 @@ console.log(`pack-host: installed dsh-custom-mode from ${customMode}`)
  * **2026-10-27 起多一份 `tavern`** (酒馆接 DSH 会话): 它的 persona 是酒馆协议, `config.plugins` 里
  * 那一行 `luwi-tavern/preset/tavern-tools.mjs` 要靠 profile 的 link 才解析得到 (见
  * `host/CustomPresets.kt` 的 `PROFILE_PACKAGES`)
+ *
+ * **2026-11-05 起多一份 `proactive`** (2.8.0 B4-a 主动对话): 到点自己开的那一场用它, persona 与
+ * 插件表都是"只提醒"那一档 (`host-plugin/index.mjs` 的 `startProactive` 按这个 id 解析)
  */
 const presetSeed = join(out, 'lw-presets')
 mkdirSync(presetSeed, { recursive: true })
-const presets = ['explore']
+const presets = ['explore', 'proactive']
 if (withTavern) presets.push('tavern')
 for (const name of presets) {
   const source = name === 'tavern'

@@ -24,6 +24,7 @@ import io.github.yuloong07star.luwi.plugin.PluginManager
 import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwWakeWord
+import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 
 /**
  * Keeps the host process alive while the app is not in front
@@ -60,6 +61,9 @@ class DshHostService : Service() {
         // 排期按主人设的那个时刻排上 (关着就撤) —— 它与宿主的存活无关, 但到点那一下要宿主在跑
         ExploreTask.ensure(this)
         ExploreSchedule.ensure(this)
+        // 主动对话的排期 (2.8.0 B4-a): 与探索那一句并排 —— 宿主起来就按主人定的几个时刻排上
+        // (关着就撤), 到点先拉宿主再投 `source:"proactive"` 那一行
+        ProactiveSchedule.ensure(this)
         // **唤醒词自愈** (2026-10-10 主人: "让它自愈"): 那个开关开着、又不在省电模式, 就把监听拉起来
         //
         // 原来只有设置页那几处会 `LwWakeWord.listen` —— 于是**重装 APK / 进程被杀之后没人再拉它**,

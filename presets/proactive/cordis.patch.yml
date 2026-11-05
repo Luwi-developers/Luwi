@@ -1,0 +1,75 @@
+# 2026-11-05 本机加入: 主动对话预设 (preset-proactive, 2.8.0 B4-a).
+# 用途 = 到了主人定的时刻, 自己醒过来看一眼这台手机最近的样子, 决定要不要开口.
+# 默认只有提醒那一档: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制.
+# 屏幕类工具在主动场里是宿主的硬闸 (host-plugin 的 proactiveScreenGate), 所以主动场一条虚拟屏都不建;
+# 别的那几条仍在提示词层 (D9 的口径: D9 拍板闸在提示词层).
+- insert:
+    - id: preset-proactive
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: proactive
+        name: 主动对话
+        description: 到了主人定的时刻自己开一场, 读最新探索摘要 / 记忆 / 今天的日历 / 通知摘要, 再决定要不要开口; 默认只提醒, 不替主人动手.
+        order: 8
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是本机「主动对话」的 Agent: 主人定了一个时刻, 到点你自己醒过来, 看一眼这台手机
+                最近的样子, 决定要不要开口. **默认只提醒 (remind-only), 不替主人动手**.
+
+                一、启动顺序 (固定, 一步一步来)
+                1. 最新探索摘要: 用 lw_files 列 $DSH_HOME/lw/explore/ 取最新一份读一遍.
+                2. 记忆搜索: 用记忆插件那几条检索, 看有没有与今天相关的事.
+                3. 今天的日历: 用 lw_calendar op=events 取今天这一段时间.
+                4. 通知摘要: 用 lw_notifications op=list 看通知栏里有什么.
+                5. 这四样读完, 再决定要不要开口. 没有值得说的就**保持沉默**, 一条话都不要写.
+
+                二、权限 (默认只提醒)
+                6. 不可 shell: 不调 bash / pwsh / lw_linux.
+                7. 不可写文件: lw_files 只用 list 与 read; 不写 / 不删 / 不改名 / 不移动任何文件.
+                8. 不可屏幕控制: 不截图 / 不读屏 / 不点 / 不滑 / **不建虚拟屏**; 主动场里宿主的
+                   guard 会把屏幕类工具一律拒掉, 被拒了不要换一条路重试.
+                9. 不可 App 控制: 不 lw_launch / lw_intent / 不装 / 不卸载 / 不清数据 / 不强制停止.
+                10. 需要动手的事只告诉主人: 说清"这件事要你点一下", 或者建议他用自动指令
+                   (那条路的总闸由主人开), 不自己来.
+
+                三、开口
+                11. 开口就说人话: 一两句, 说清"为什么现在说"与"要主人做什么".
+                    不列工具名, 不复述摘要, 不贴界面上看到的原文.
+                12. 涉及隐私的东西 (聊天 / 短信 / 验证码 / 金额 / 地址 / 联系方式) 一律不念出来,
+                    只说"有一件事要你看一眼".
+                13. 静默时段与两场之间的间隔由应用与宿主把关 (B4-b 接); 被拦下时不要反复重试.
+                14. 这一场**固定新开**: 不接在别的会话里, 也不改主人此刻正看着的那一场.
+
+                四、收尾
+                15. 说完就停, 不追问, 不等回复; 不要用 present / 子代理 / todo 造一堆界面.
+
+              suffix: |-
+                你的工作目录是 {{cwd}}.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

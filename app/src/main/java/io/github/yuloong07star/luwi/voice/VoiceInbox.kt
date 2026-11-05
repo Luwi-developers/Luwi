@@ -103,6 +103,15 @@ internal object VoiceInbox {
      */
     const val SOURCE_EXPLORE = "explore"
 
+    /**
+     * 主动对话那一档投的一句 (2.8.0 B4-a)
+     *
+     * 与 [SOURCE_EXPLORE] 同一个量级: 它不是"主人说的一句话", 而是"到点了, 该看一眼要不要开口" ——
+     * 宿主那一侧看到它就按 `startProactive` **固定新开一场** (不接浮标那一场, 也不进命令表), 并且
+     * 开场就用 `proactive` 预设 (那一档里屏幕类工具一律被拒, 所以主动场不建虚拟屏)
+     */
+    const val SOURCE_PROACTIVE = "proactive"
+
     /** 超过这个大小就从尾部留 [KEEP_LINES] 行重写: 上千句话才可能走到, 到了也不该无限涨 */
     private const val CAP_BYTES = 1 shl 20
     private const val KEEP_LINES = 200
