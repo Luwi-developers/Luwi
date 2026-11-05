@@ -110,6 +110,9 @@ object PrivilegedBridge {
     private var server: ServerSocket? = null
     private var worker: Thread? = null
 
+    /** 直连路由: `lw_launch` / `lw_intent` 该走应用进程还是特权 am, 由它一处回答 */
+    private val actions = DeviceActionBroker()
+
     @Volatile
     private var running = false
 
