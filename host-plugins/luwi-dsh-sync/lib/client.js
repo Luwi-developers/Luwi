@@ -77,8 +77,10 @@ window.__ModuleLoader__.load({
 			'输入命令, 回车执行': 'Type a command, Enter to run',
 			'运行': 'Run',
 			'运行中': 'Running',
-			'可用: help 看这句 · clear 清屏 · 其余命令还没接后端': 'Available: help · clear · anything else is not wired to the backend yet',
-			'还没接后端: 这一步只验形态, 接上后这里显示真实输出': 'Backend not wired yet: this step only checks the shape; real output lands here once it is connected',
+			'可用: help 看这句 · clear 清屏 · 其余命令交给手机的沙盒': 'Available: help · clear · anything else runs in the phone sandbox',
+			'面板这条通道没开: 宿主没给出应答': 'The panel route is not open: the host gave no answer',
+			'跑完了, 没有输出': 'Finished with no output',
+			'没跑成, 也没给出原因': 'It did not run, and gave no reason',
 			'写下这段配置': 'write this into the sync config',
 			'改了要重启 host 才生效': 'restart the host for this to take effect',
 			'领先': 'ahead',
@@ -1391,15 +1393,32 @@ window.__ModuleLoader__.load({
 				if (command === 'clear') { setLines([]); return; }
 				append([{ kind: 'cmd', text: command }]);
 				if (command === 'help') {
-					append([{ kind: 'dim', text: t('可用: help 看这句 · clear 清屏 · 其余命令还没接后端') }]);
+					append([{ kind: 'dim', text: t('可用: help 看这句 · clear 清屏 · 其余命令交给手机的沙盒') }]);
 					return;
 				}
 				setBusy(true);
-				try {
-					append([{ kind: 'dim', text: t('还没接后端: 这一步只验形态, 接上后这里显示真实输出') }]);
-				} finally {
-					setBusy(false);
-				}
+				api('/term', { method: 'POST', body: JSON.stringify({ command }) })
+					.then((answer) => {
+						const body = answer.body;
+						if (body === null) {
+							append([{ kind: 'dim', text: t('面板这条通道没开: 宿主没给出应答') }]);
+							return;
+						}
+						if (body.ok === true) {
+							const out = typeof body.text === 'string' ? body.text : '';
+							if (out.trim() === '') {
+								append([{ kind: 'dim', text: t('跑完了, 没有输出') }]);
+							} else {
+								append([{ kind: 'out', text: out.replace(/\s+$/, '') }]);
+							}
+							return;
+						}
+						append([{ kind: 'dim', text: typeof body.error === 'string' ? body.error : t('没跑成, 也没给出原因') }]);
+					})
+					.catch((error) => {
+						append([{ kind: 'dim', text: String((error && error.message) || error) }]);
+					})
+					.finally(() => setBusy(false));
 			}
 
 			return h('div', { className: 'luwi-sync-panel' },
