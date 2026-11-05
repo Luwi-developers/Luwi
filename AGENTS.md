@@ -117,7 +117,7 @@
 
 ## dsh 工具
 
-- 全在 `host-plugin/index.mjs`, 现 66 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` …), 每个一次桥调用
+- 全在 `host-plugin/index.mjs`, 现 68 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` / `lw_capabilities` / `lw_quickapp` …), 每个一次桥调用
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入一律写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 特权侧写死白名单 `LwSystemCommandTable.kt`
