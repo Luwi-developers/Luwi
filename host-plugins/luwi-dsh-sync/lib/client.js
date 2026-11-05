@@ -1405,7 +1405,10 @@ window.__ModuleLoader__.load({
 							return;
 						}
 						if (body.ok === true) {
-							const out = typeof body.text === 'string' ? body.text : '';
+							const nested = body.result !== null && typeof body.result === 'object' ? body.result : null;
+							const out = typeof body.text === 'string'
+								? body.text
+								: (nested !== null && typeof nested.text === 'string' ? nested.text : '');
 							if (out.trim() === '') {
 								append([{ kind: 'dim', text: t('跑完了, 没有输出') }]);
 							} else {

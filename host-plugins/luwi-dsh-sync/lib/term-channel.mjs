@@ -145,11 +145,13 @@ export function createTermChannel(env = process.env) {
       if (parsed === null || typeof parsed !== 'object') {
         return { ok: false, error: 'the app answered with an empty payload' }
       }
-      if (typeof parsed.text === 'string') return { ok: true, text: parsed.text }
+      // 应答有时把内容包在 result 里 (宿主那边 answerOf 就是这么取的), 先剥一层。
+      const answer = parsed.result !== null && typeof parsed.result === 'object' ? parsed.result : parsed
+      if (typeof answer.text === 'string') return { ok: true, text: answer.text }
       if (parsed.ok === false) {
         return { ok: false, error: typeof parsed.error === 'string' ? parsed.error : 'the sandbox refused that command' }
       }
-      return { ok: true, text: JSON.stringify(parsed) }
+      return { ok: true, text: JSON.stringify(answer) }
     },
   }
 }
