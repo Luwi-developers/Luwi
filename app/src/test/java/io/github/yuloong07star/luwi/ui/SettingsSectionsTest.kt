@@ -19,10 +19,10 @@ class SettingsSectionsTest {
     /** D1 拍板的那六段: 省电那一段 + 「常用」一级分组下那五段 (导航那一段 2026-10-17 撤了) */
     private val common = listOf("power", "appearance", "channel", "ball", "wake", "speak")
 
-    /** 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末) */
+    /** 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 定时对话 2.8.0 #22 加在探索后面) */
     private val abilities = listOf(
         "notifications", "screenshot", "look", "lock",
-        "explore", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+        "explore", "proactive", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
     )
 
     @Test
@@ -39,7 +39,7 @@ class SettingsSectionsTest {
     fun abilitySectionsAreCollapsed() {
         val collapsed = defaultCollapsed(SettingsSectionKeys)
 
-        assertEquals("缺省收起来的就是能力那 14 段", abilities.toSet(), collapsed)
+        assertEquals("缺省收起来的就是能力那 15 段", abilities.toSet(), collapsed)
         abilities.forEach { key ->
             assertTrue("$key 在能力组, 缺省应当收着", key in collapsed)
         }
@@ -71,7 +71,7 @@ class SettingsSectionsTest {
     @Test
     fun reenteringKeepsWhatTheUserToggled() {
         assertEquals(
-            "冷启动 (进程里还没有那一份): 缺省那 14 段收着",
+            "冷启动 (进程里还没有那一份): 缺省那 15 段收着",
             defaultCollapsed(SettingsSectionKeys),
             initialCollapsed(null),
         )
@@ -85,11 +85,11 @@ class SettingsSectionsTest {
         assertFalse("那一段真的不在收起的名单里", "notifications" in initialCollapsed(toggled))
     }
 
-    /** 20 段一份名单, 各自只出现一次 —— 重复了的话 `collapsed` 那份集合会把两段看成一段 */
+    /** 21 段一份名单, 各自只出现一次 —— 重复了的话 `collapsed` 那份集合会把两段看成一段 */
     @Test
     fun sectionKeysAreUnique() {
         assertEquals("段名不能重复", SettingsSectionKeys.size, SettingsSectionKeys.toSet().size)
-        assertEquals("现在页面上是 20 段", 20, SettingsSectionKeys.size)
-        assertEquals("常用六段 + 能力十四段", SettingsSectionKeys.size, common.size + abilities.size)
+        assertEquals("现在页面上是 21 段", 21, SettingsSectionKeys.size)
+        assertEquals("常用六段 + 能力十五段", SettingsSectionKeys.size, common.size + abilities.size)
     }
 }

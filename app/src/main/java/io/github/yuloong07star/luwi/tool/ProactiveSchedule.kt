@@ -92,12 +92,21 @@ internal object ProactiveSchedule {
     /** 上一次排期的那一趟 (给 B4-c 的设置页用) */
     data class Last(val at: Long, val outcome: String, val why: String?)
 
-    /** 排期配置: 开没开 / 一天那几个时刻 / 到点允不允许解屏 / 上一趟 */
+    /**
+     * 最近一次被拦的那一趟 (B4-c ⑪ "最近 blocked reason")
+     *
+     * 单独记一份而不是只看 [Last]: 被拦之后又成功开过一场时, `last` 已经是"开了一场", 但那句
+     * "为什么上次没开口"仍是主人要看的读数 —— 所以它跟着 [Plan] 一起落盘
+     */
+    data class Blocked(val at: Long, val why: String)
+
+    /** 排期配置: 开没开 / 一天那几个时刻 / 到点允不允许解屏 / 上一趟 / 最近一次被拦 */
     data class Plan(
         val enabled: Boolean,
         val times: List<String>,
         val last: Last?,
         val unlock: Boolean = false,
+        val blocked: Blocked? = null,
     )
 
     fun file(context: Context): File = File(File(context.filesDir, DshHost.HOME_DIR), "$DIRECTORY/$FILE")
@@ -133,7 +142,14 @@ internal object ProactiveSchedule {
             )
         }
         val unlock = root["unlock"]?.jsonPrimitive?.booleanOrNull ?: false
-        return Plan(enabled, times, last, unlock)
+        // B4-c: 最近一次被拦 (旧文件没有这个键, 那就是"最近没被拦过")
+        val blocked = (root["blocked"] as? JsonObject)?.let { one ->
+            Blocked(
+                at = one["at"]?.jsonPrimitive?.longOrNull ?: 0L,
+                why = one["why"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+        }?.takeIf { it.why.isNotBlank() }
+        return Plan(enabled, times, last, unlock, blocked)
     }
 
     /**
@@ -153,6 +169,23 @@ internal object ProactiveSchedule {
         return asked.ifEmpty { listOf(DEFAULT_AT) }
     }
 
+    /**
+     * 设置页那个编辑框 -> 一天里认得的几个时刻 (纯函数, B4-c)
+     *
+     * 与 [timesOf] 同一套规范化 (`9:30` 与 `09:30` 是同一个时刻, 去重排序), 只是输入是主人手打的
+     * 一段文字而不是 JSON。**有一个认不出来就整段拒**: 静默地丢掉坏的那个, 主人会以为它排上了
+     */
+    fun parseTimes(text: String): List<String>? {
+        val parts = text.split(',', '，', ';', '；', '、', '/', '\n', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        val minutes = parts.mapNotNull { AutomationRule.minutesOf(it) }
+        if (minutes.size != parts.size) return null
+        return minutes.distinct().sorted()
+            .map { minute -> String.format(Locale.ROOT, "%02d:%02d", minute / 60, minute % 60) }
+    }
+
     /** 写配置 + 重排闹钟 (单写者, 原子写) */
     fun save(context: Context, plan: Plan) = synchronized(lock) {
         val target = file(context)
@@ -169,6 +202,13 @@ internal object ProactiveSchedule {
                     put("at", last.at)
                     put("outcome", last.outcome)
                     last.why?.let { put("why", it) }
+                })
+            }
+            // 最近一次被拦 (B4-c ⑪): 它比 `last` 活得久, 成功开过一场之后也不清掉
+            plan.blocked?.let { blocked ->
+                put("blocked", buildJsonObject {
+                    put("at", blocked.at)
+                    put("why", blocked.why)
                 })
             }
         }
@@ -305,7 +345,7 @@ internal object ProactiveSchedule {
         val quiet = quietWhy(context, now)
         if (quiet != null) {
             Log.i(TAG, "the scheduled proactive conversation at $at was skipped: $quiet")
-            save(context, current.copy(last = Last(now, "skipped", quiet)))
+            save(context, current.copy(last = Last(now, "skipped", quiet), blocked = Blocked(now, quiet)))
             return
         }
         // 30 分钟闸 (B4-b ⑥): 自动指令刚说过 / 上一次排期才过 20 分钟, 这一场就不开口
@@ -313,7 +353,7 @@ internal object ProactiveSchedule {
         if (!ProactiveGate.open(lastSpoken, now)) {
             val why = ProactiveGate.blockedReason(lastSpoken, now)
             Log.i(TAG, "the scheduled proactive conversation at $at was skipped: $why")
-            save(context, current.copy(last = Last(now, "skipped", why)))
+            save(context, current.copy(last = Last(now, "skipped", why), blocked = Blocked(now, why)))
             return
         }
         Log.i(TAG, "the proactive schedule fired ($at)")

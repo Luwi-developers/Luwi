@@ -139,7 +139,7 @@ check('手动「立刻跑一次」不查也不占这笔账 (B4-b ⑦)', [
 
 check('静默时段保留在排期那一侧, 到点先看它再看宿主 (B4-b ⑨)', [
   /val quiet = quietWhy\(context, now\)/u.test(schedule),
-  /save\(context, current\.copy\(last = Last\(now, "skipped", quiet\)\)\)/u.test(schedule),
+  /save\(context, current\.copy\(last = Last\(now, "skipped", quiet\)/u.test(schedule),
   schedule.indexOf('val quiet = quietWhy') < schedule.indexOf('ExploreSchedule.wakeHost(context)'),
 ], [true, true, true])
 

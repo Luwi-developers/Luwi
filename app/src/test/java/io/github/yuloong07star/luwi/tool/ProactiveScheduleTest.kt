@@ -119,6 +119,28 @@ class ProactiveScheduleTest {
         )
     }
 
+    /* ── 设置页那个编辑框 (B4-c) ─────────────────────────────────────────── */
+
+    @Test
+    fun theTimesTextFromTheEditorIsCanonicalised() {
+        assertEquals(
+            listOf("07:05", "09:30", "18:00"),
+            ProactiveSchedule.parseTimes(" 18:00, 9:30 / 07:05 / 09:30 "),
+        )
+        assertEquals(
+            listOf("09:30", "18:00"),
+            ProactiveSchedule.parseTimes("09:30，18:00"),
+        )
+    }
+
+    @Test
+    fun oneBadTimeRefusesTheWholeEditorText() {
+        // 静默地丢掉坏的那个会让主人以为它排上了, 所以整段拒
+        assertNull(ProactiveSchedule.parseTimes("09:30, 明天"))
+        assertNull(ProactiveSchedule.parseTimes("09:30, 25:00"))
+        assertNull(ProactiveSchedule.parseTimes("   "))
+    }
+
     /* ── 配置 ───────────────────────────────────────────────────────────── */
 
     @Test
@@ -136,7 +158,8 @@ class ProactiveScheduleTest {
         val plan = ProactiveSchedule.planOf(
             json.parseToJsonElement(
                 """{"v":1,"enabled":true,"times":["18:00","09:30"],"unlock":true,
-                   "last":{"at":123,"outcome":"skipped","why":"宿主起不来"}}""",
+                   "last":{"at":123,"outcome":"skipped","why":"宿主起不来"},
+                   "blocked":{"at":122,"why":"静默时段 (23:00 - 07:00)"}}""",
             ) as JsonObject,
         )
 
@@ -146,6 +169,18 @@ class ProactiveScheduleTest {
         assertEquals(123L, plan.last?.at)
         assertEquals("skipped", plan.last?.outcome)
         assertEquals("宿主起不来", plan.last?.why)
+        assertEquals(122L, plan.blocked?.at)
+        assertEquals("静默时段 (23:00 - 07:00)", plan.blocked?.why)
+    }
+
+    @Test
+    fun aBlankOrMissingBlockedReasonIsNotShown() {
+        assertNull(ProactiveSchedule.planOf(JsonObject(emptyMap())).blocked)
+        assertNull(
+            ProactiveSchedule.planOf(
+                json.parseToJsonElement("""{"blocked":{"at":1,"why":"  "}}""") as JsonObject,
+            ).blocked,
+        )
     }
 
     @Test
