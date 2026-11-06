@@ -118,6 +118,33 @@ check(
   [],
 )
 
+/* ── 四之二、自动指令的目录: 文档与 AutomationStore 对得上 (2.8.0 #25) ───── */
+
+const automations = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationStore.kt')
+const hostPlugin = await read('host-plugin/index.mjs')
+const rulesDir = /const val RULES_DIRECTORY = "([^"]+)"/.exec(automations)?.[1] ?? ''
+const rejectedDir = /const val REJECTED_DIRECTORY = "([^"]+)"/.exec(automations)?.[1] ?? ''
+check(
+  '自动指令文档写的新写目录与坏规则目录, 就是 AutomationStore 里那两份',
+  [rulesDir, rejectedDir, doc.includes(`automations/${rulesDir}/`), doc.includes(`automations/${rejectedDir}/`)],
+  ['rules', 'rejected', true, true],
+)
+check(
+  '自动指令文档写清旧目录只读一版, 坏规则带 .error.txt 且设置页能删',
+  [
+    doc.includes('只读兼容这一版'),
+    doc.includes('.error.txt'),
+    doc.includes('点坏规则那一行就能删'),
+    automations.includes('REJECTED_ERROR_SUFFIX'),
+  ],
+  [true, true, true, true],
+)
+check(
+  'lw_automation 的说明也点到 rules/ 与 rejected/ (模型照这一段写)',
+  [hostPlugin.includes('automations/rules'), hostPlugin.includes('automations/rejected')],
+  [true, true],
+)
+
 /* ── 五、API 朗读那几样: 文档里有占位符, 注入那一处也要有 ────────────────── */
 
 const PLACEHOLDERS = ['{{API_URL}}', '{{API_ENDPOINT}}', '{{API_KEY_STATE}}', '{{API_MODEL}}', '{{API_VOICE}}']

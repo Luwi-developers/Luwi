@@ -2,6 +2,7 @@ package io.github.yuloong07star.luwi.automation
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -10,6 +11,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.time.Instant
 import java.time.LocalDate
@@ -32,7 +34,7 @@ import java.time.temporal.ChronoUnit
 internal object AutomationRule {
 
     /**
-     * 八条**叶子条件** (2.7.8 批次 9 加了 `unlock` / `activity`)
+     * 十一条**叶子条件** (2.7.8 批次 9 加了 `unlock` / `activity`, 2.8.0 B5-b 加了三个数据源)
      *
      * 它们是"能算出来此刻真不真"的那一类, 也是 `all` / `any` 里唯一允许出现的子条件 (组合**不许嵌套**,
      * 见 [validateWhen])。`once` 不在这张表里: 它是一次性的绝对时刻, 自己被 [Rule.nextFireAt] 排进闹钟
@@ -40,10 +42,11 @@ internal object AutomationRule {
      */
     val LEAF_KINDS = listOf(
         "notice", "foreground", "light", "time", "place", "weather", "unlock", "activity",
+        "calendarSoon", "battery", "noticeDigest",
     )
 
     /**
-     * 九条"监测源": 八条叶子加上 `once`
+     * 十二条"监测源": 十一条叶子加上 `once`
      *
      * 这是设置页那张监视器名单, 也是 `settings.json` 里 `monitors` 那张开关表的键。`all` / `any` 不在
      * 这里: 组合自己没有监测源, 它由子条件的开关管 (子条件关掉, 整个组合就不评估)
@@ -92,6 +95,17 @@ internal object AutomationRule {
     /** `activity` 那条缺省看最近多少分钟 (主人可以写 `withinMinutes` 覆盖) */
     const val ACTIVITY_DEFAULT_MINUTES = 10
     const val ACTIVITY_MAX_MINUTES = 1440
+
+    /** `calendarSoon` 最多提前看多少分钟 (再长就不是"临近"了) */
+    const val MAX_CALENDAR_MINUTES = 1440
+
+    /** `calendarSoon` 不给窗口时按多少分钟算 */
+    const val DEFAULT_CALENDAR_MINUTES = 20
+
+    /** `noticeDigest` 的窗口与条数边界 */
+    const val MAX_DIGEST_MINUTES = 1440
+    const val MAX_DIGEST_COUNT = 200
+    const val DEFAULT_DIGEST_MINUTES = 30
 
     /** 一条子条件的新鲜窗口 (秒): 先看它自己写的 `within`, 否则按 kind 取缺省 */
     fun windowSeconds(kind: String, params: JsonObject): Int {
@@ -439,12 +453,7 @@ internal object AutomationRule {
         problems += validateWindow(when_)
         when (kind) {
             "notice" -> {
-                when_["packages"]?.let { value ->
-                    val list = value as? JsonArray
-                    if (list == null || list.any { it.jsonPrimitive.contentOrNull.isNullOrBlank() }) {
-                        problems += "when.packages has to be a list of package names"
-                    }
-                }
+                problems += validatePackages(when_)
                 problems += textOrNull(when_, "contains")
                 problems += textOrNull(when_, "titleContains")
             }
@@ -536,6 +545,52 @@ internal object AutomationRule {
                         problems += "when.withinMinutes has to be 1..$ACTIVITY_MAX_MINUTES"
                     }
                 }
+            }
+
+            "calendarSoon" -> {
+                val minutes = when_["withinMinutes"]?.jsonPrimitive?.intOrNull
+                if (minutes == null || minutes < 1 || minutes > MAX_CALENDAR_MINUTES) {
+                    problems += "when.withinMinutes has to be 1..$MAX_CALENDAR_MINUTES"
+                }
+                problems += textOrNull(when_, "titleContains")
+                when_["calendarIds"]?.let { value ->
+                    val list = value as? JsonArray
+                    if (list == null || list.any { it.jsonPrimitive.longOrNull == null }) {
+                        problems += "when.calendarIds has to be a list of calendar ids (numbers)"
+                    }
+                }
+            }
+
+            "battery" -> {
+                val below = when_["below"]?.jsonPrimitive?.doubleOrNull
+                val above = when_["above"]?.jsonPrimitive?.doubleOrNull
+                val charging = when_["charging"]?.jsonPrimitive?.booleanOrNull
+                if (below == null && above == null && charging == null) {
+                    problems += "when needs below, above or charging (the battery level in percent)"
+                }
+                for ((key, value) in listOf("below" to below, "above" to above)) {
+                    if (when_.containsKey(key) && (value == null || value < 0 || value > 100)) {
+                        problems += "when.$key has to be 0..100"
+                    }
+                }
+                if (below != null && above != null && above >= below) {
+                    problems += "when.above has to be lower than when.below"
+                }
+                if (when_.containsKey("charging") && charging == null) {
+                    problems += "when.charging has to be true or false"
+                }
+            }
+
+            "noticeDigest" -> {
+                val minutes = when_["withinMinutes"]?.jsonPrimitive?.intOrNull
+                if (minutes == null || minutes < 1 || minutes > MAX_DIGEST_MINUTES) {
+                    problems += "when.withinMinutes has to be 1..$MAX_DIGEST_MINUTES"
+                }
+                val count = when_["minCount"]?.jsonPrimitive?.intOrNull
+                if (count == null || count < 1 || count > MAX_DIGEST_COUNT) {
+                    problems += "when.minCount has to be 1..$MAX_DIGEST_COUNT"
+                }
+                problems += validatePackages(when_)
             }
         }
         return problems
@@ -643,6 +698,45 @@ internal object AutomationRule {
 
             "activity" -> "最近 ${i("withinMinutes") ?: ACTIVITY_DEFAULT_MINUTES} 分钟在动"
 
+            "calendarSoon" -> {
+                val minutes = i("withinMinutes") ?: DEFAULT_CALENDAR_MINUTES
+                val title = s("titleContains")
+                if (title != null) {
+                    "$minutes 分钟内标题里有「$title」的日程开始时"
+                } else {
+                    "$minutes 分钟内日程开始时"
+                }
+            }
+
+            "battery" -> {
+                val said = buildList {
+                    n("below")?.let { add("电量低于 ${trim(it)}%") }
+                    n("above")?.let { add("电量高于 ${trim(it)}%") }
+                    when (params["charging"]?.jsonPrimitive?.booleanOrNull) {
+                        true -> add("在充电")
+                        false -> add("没在充电")
+                        null -> Unit
+                    }
+                }
+                if (said.isEmpty()) {
+                    "电量变化时"
+                } else {
+                    // 一条时说「电量低于 20% 时」, 两条时说「电量低于 20% 且在充电时」
+                    val joined = said.joinToString(" 且")
+                    if (said.size == 1 && said[0].startsWith("电量")) "$joined 时" else "${joined}时"
+                }
+            }
+
+            "noticeDigest" -> {
+                val minutes = i("withinMinutes") ?: DEFAULT_DIGEST_MINUTES
+                val count = i("minCount") ?: 1
+                val packages = (params["packages"] as? JsonArray)
+                    ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                    .orEmpty()
+                "$minutes 分钟内收到至少 $count 条通知" +
+                    (if (packages.isEmpty()) "" else " (只看 ${packages.joinToString(", ")} 发的)")
+            }
+
             "once" -> {
                 val at = s("at")
                 "只响一次 · " + (at?.let(::momentOf)?.let { formatMoment(it, zone) } ?: at.orEmpty())
@@ -700,8 +794,20 @@ internal object AutomationRule {
 
     private fun textOrNull(when_: JsonObject, key: String): List<String> {
         val value = when_[key] ?: return emptyList()
-        return if (value.jsonPrimitive.contentOrNull == null) {
+        val text = value as? JsonPrimitive
+        return if (text == null || !text.isString) {
             listOf("when.$key has to be text")
+        } else {
+            emptyList()
+        }
+    }
+
+    /** `packages` 那一张表: 要么没有, 要么是一串非空的包名 */
+    private fun validatePackages(when_: JsonObject): List<String> {
+        val value = when_["packages"] ?: return emptyList()
+        val list = value as? JsonArray
+        return if (list == null || list.any { it.jsonPrimitive.contentOrNull.isNullOrBlank() }) {
+            listOf("when.packages has to be a list of package names")
         } else {
             emptyList()
         }
@@ -758,6 +864,10 @@ internal object AutomationRule {
     /** 一串整数, 收成 Int 表 */
     fun ints(value: kotlinx.serialization.json.JsonElement?): List<Int> =
         (value as? JsonArray)?.mapNotNull { it.jsonPrimitive.intOrNull }.orEmpty()
+
+    /** 一串整数, 收成 Long 表 (日历 id 比 Int 宽) */
+    fun longs(value: kotlinx.serialization.json.JsonElement?): List<Long> =
+        (value as? JsonArray)?.mapNotNull { it.jsonPrimitive.longOrNull }.orEmpty()
 
     /** 一个子对象, 不是对象就是空 */
     fun objectOrEmpty(value: kotlinx.serialization.json.JsonElement?): JsonObject =

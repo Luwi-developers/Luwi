@@ -572,11 +572,12 @@
     <string name="settings_automation_sent">Handed over: every firing opens a conversation of its own, and the wording of a reminder is written then</string>
     <string name="settings_automation_send_failed">It could not be handed over (the queue file is not writable)</string>
     <string name="settings_automation_broken">This one cannot be read: %1$s</string>
+    <string name="settings_automation_broken_delete_summary">This one cannot be read. Deleting it removes both the original file and the copy kept in rejected/: %1$s</string>
     <string name="settings_automation_rule_state">%1$d of %2$d today</string>
     <string name="settings_automation_last">last %1$s</string>
     <string name="settings_automation_rule_cooldown">cooldown %1$d min</string>
     <string name="settings_automation_rule_no_cooldown">no cooldown</string>
-    <string name="settings_automation_monitors">The nine watches: nothing is registered while no enabled rule needs it (that is the low-power promise)</string>
+    <string name="settings_automation_monitors">The twelve watches: nothing is registered while no enabled rule needs it (that is the low-power promise)</string>
     <string name="settings_automation_monitor_notice">Notifications</string>
     <string name="settings_automation_monitor_foreground">Foreground app</string>
     <string name="settings_automation_monitor_light">Light</string>
@@ -585,6 +586,9 @@
     <string name="settings_automation_monitor_weather">Weather</string>
     <string name="settings_automation_monitor_unlock">Unlock</string>
     <string name="settings_automation_monitor_activity">Activity</string>
+    <string name="settings_automation_monitor_calendar">Calendar</string>
+    <string name="settings_automation_monitor_battery">Battery</string>
+    <string name="settings_automation_monitor_notice_digest">Notification digest</string>
     <string name="settings_automation_monitor_once">One-shot</string>
     <string name="settings_automation_every_minutes">Every %1$d minutes</string>
     <string name="settings_automation_every_meters">Only after %1$d metres</string>

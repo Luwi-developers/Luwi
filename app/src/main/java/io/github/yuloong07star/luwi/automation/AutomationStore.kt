@@ -46,7 +46,9 @@ internal object AutomationJson {
  *
  * | 文件 | 写者 | 读者 |
  * | :-- | :-- | :-- |
- * | `<名字>.json` | 模型 (`write`) 与设置页那个开关 | 引擎 / 设置页 / `list` |
+ * | `rules/<名字>.json` | 模型 (`write`) 与设置页那个开关 | 引擎 / 设置页 / `list` |
+ * | `<名字>.json` (根目录) | **只读兼容一版** (2.8.0 之前的旧位置) | 引擎 / 设置页 / `list` |
+ * | `rejected/<名字>.json` + `<名字>.error.txt` | 读到坏规则时复制 | 人排查 / 设置页可删 |
  * | `settings.json` | 设置页 | 引擎 / `status` |
  * | `history.jsonl` | 引擎 | 设置页 / `history` / 冷却与上限那两笔账 |
  * | `places.json` | 引擎 | 地点与天气两条条件 |
@@ -55,6 +57,15 @@ internal object AutomationStore {
 
     /** 目录名: 与设置页、创建提示词、工具说明里说的都是它 */
     const val DIRECTORY = "automations"
+
+    /** 新写只落这个子目录 (2.8.0 #25); 根目录那份是旧位置, 只读兼容一版 */
+    const val RULES_DIRECTORY = "rules"
+
+    /** 坏规则的诊断副本 (规则原文 + 一份错误说明) */
+    const val REJECTED_DIRECTORY = "rejected"
+
+    /** 坏规则旁边那份错误说明的后缀 */
+    const val REJECTED_ERROR_SUFFIX = ".error.txt"
 
     const val SETTINGS_FILE = "settings.json"
     const val HISTORY_FILE = "history.jsonl"
@@ -71,7 +82,7 @@ internal object AutomationStore {
     /** 一次最多读回多少条历史 */
     const val MAX_HISTORY = 200
 
-    /** 九个监测器 + 频率档 + 静默时段 + "允许它自己动手" + 每天最多主动说几次 */
+    /** 十二个监测器 + 频率档 + 静默时段 + "允许它自己动手" + 每天最多主动说几次 */
     data class Settings(
         val monitors: Map<String, Boolean>,
         val weatherMinutes: Int,
@@ -103,11 +114,39 @@ internal object AutomationStore {
     /** 一条规则在磁盘上的样子: 读得出来就是 [rule], 读不出来就是 [problem] */
     data class Entry(val name: String, val rule: AutomationRule.Rule?, val problem: String?, val modified: Long)
 
-    /** 一条规则的绝对位置 */
+    /** 这一份家的根: `settings.json` / `history.jsonl` / `places.json` 都在这 */
     fun directory(context: Context): File = File(File(context.filesDir, DshHost.HOME_DIR), DIRECTORY)
 
-    fun file(context: Context, name: String): File =
-        File(directory(context), "${normalizeArtifactName(name, "an automatic command", ".json")}.json")
+    /** 新写的规则只落这里 (2.8.0 #25) */
+    fun rulesDirectory(context: Context): File = File(directory(context), RULES_DIRECTORY)
+
+    /** 读不出来的规则会复制一份到这里 */
+    fun rejectedDirectory(context: Context): File = File(directory(context), REJECTED_DIRECTORY)
+
+    /** 规则文件的规范名字 (不带目录) */
+    fun fileName(name: String): String =
+        "${normalizeArtifactName(name, "an automatic command", ".json")}.json"
+
+    /** 新写的那一份: 2.8.0 起一律在 `rules/` */
+    fun file(context: Context, name: String): File = File(rulesDirectory(context), fileName(name))
+
+    /** 2.8.0 之前的旧位置: 只读兼容, 不再往这里写 */
+    fun legacyFile(context: Context, name: String): File = File(directory(context), fileName(name))
+
+    /** 现在该读哪一份: 新目录优先, 旧目录兜底 */
+    fun existingFile(context: Context, name: String): File? {
+        val fileName = tolerantFileName(name)
+        return File(rulesDirectory(context), fileName).takeIf { it.isFile }
+            ?: File(directory(context), fileName).takeIf { it.isFile }
+    }
+
+    /** 名字不合规时也删得掉 / 也改得动 (坏规则或手写出来的文件名可能就是这样) */
+    private fun tolerantFileName(name: String): String =
+        runCatching { fileName(name) }.getOrElse { "$name.json" }
+
+    /** 改一条现有规则时落盘的位置 (2.8.0 起一律 `rules/`) */
+    private fun writeTarget(context: Context, name: String): File =
+        File(rulesDirectory(context), tolerantFileName(name))
 
     /**
      * 这个文件是不是一条规则
@@ -119,52 +158,100 @@ internal object AutomationStore {
     fun isRuleFile(name: String): Boolean =
         name.endsWith(".json") && name != SETTINGS_FILE && name != PLACES_FILE
 
-    /** 现在的名字 (去掉 `.json`), 排序之后 */
-    fun names(context: Context): List<String> =
-        (directory(context).listFiles { file -> file.isFile && isRuleFile(file.name) } ?: emptyArray())
+    /** 一个目录里属于规则的那几个文件, 按名字排序 */
+    fun ruleFiles(root: File): List<File> =
+        (root.listFiles { file -> file.isFile && isRuleFile(file.name) } ?: emptyArray())
             .sortedBy { it.name }
             .take(MAX_LISTED)
-            .map { it.name.removeSuffix(".json") }
+
+    /** 一个目录里的规则名 (去掉 `.json`), 排序之后 */
+    fun namesIn(root: File): List<String> = ruleFiles(root).map { it.name.removeSuffix(".json") }
+
+    /** 两个目录合起来: `rules/` 优先, 旧根目录兜底 */
+    fun mergedNames(primary: File, legacy: File): List<String> =
+        (namesIn(primary) + namesIn(legacy)).distinct().sorted().take(MAX_LISTED)
+
+    /** 现在的名字 (去掉 `.json`), 新 `rules/` 优先, 旧根目录也读 */
+    fun names(context: Context): List<String> =
+        mergedNames(rulesDirectory(context), directory(context))
 
     /**
-     * 全部规则, 一条一行 (读不出来的也留着 —— 界面上要说得出"这一条坏了, 坏在哪")
+     * 一个目录里的全部规则, 一条一行 (读不出来的也留着 —— 界面上要说得出"这一条坏了, 坏在哪")
      *
-     * 每个文件都单独试: 一条坏的规则不该把整页变成空的
+     * 每个文件都单独试: 一条坏的规则不该把整页变成空的。读不出来的那一份会被复制到 [rejected],
+     * 原件不动 (主人还要能看到它、删掉它): 见 [copyRejected]
      */
+    fun entriesIn(root: File, rejected: File? = null): List<Entry> =
+        ruleFiles(root).map { file -> entryOf(file, rejected) }
+
+    private fun entryOf(file: File, rejected: File?): Entry {
+        val name = file.name.removeSuffix(".json")
+        val raw = runCatching { file.readText() }.getOrNull()
+            ?: return Entry(name, null, "the file could not be read", file.lastModified())
+        return try {
+            Entry(name, AutomationRule.parse(name, raw), null, file.lastModified())
+        } catch (unreadable: Throwable) {
+            val problem = unreadable.message ?: "unreadable"
+            if (rejected != null) runCatching { copyRejected(rejected, name, raw, problem, file) }
+            Entry(name, null, problem, file.lastModified())
+        }
+    }
+
+    /** 两个目录合起来: 旧根目录先放, `rules/` 后放, 同名时新目录那一份说了算 */
+    fun mergedEntries(rules: File, legacy: File, rejected: File? = null): List<Entry> {
+        val merged = LinkedHashMap<String, Entry>()
+        for (entry in entriesIn(legacy, rejected)) merged[entry.name] = entry
+        for (entry in entriesIn(rules, rejected)) merged[entry.name] = entry
+        return merged.values.sortedBy { it.name }.take(MAX_LISTED)
+    }
+
+    /** 全部规则: `rules/` 与旧根目录都在里面 (读不出来的也留着) */
     fun entries(context: Context): List<Entry> =
-        (directory(context).listFiles { file -> file.isFile && isRuleFile(file.name) } ?: emptyArray())
-            .sortedBy { it.name }
-            .take(MAX_LISTED)
-            .map { file ->
-                val name = file.name.removeSuffix(".json")
-                var rule: AutomationRule.Rule? = null
-                var problem: String? = null
-                try {
-                    rule = AutomationRule.parse(name, file.readText())
-                } catch (unreadable: Throwable) {
-                    problem = unreadable.message ?: "unreadable"
-                }
-                Entry(name = name, rule = rule, problem = problem, modified = file.lastModified())
-            }
+        mergedEntries(rulesDirectory(context), directory(context), rejectedDirectory(context))
+
+    /**
+     * 把读不出来的规则复制到 `rejected/`, 旁边再写一份 `.error.txt`
+     *
+     * 只复制不搬走: 原件还要在设置页里列着, 主人点一下才删。内容没变就不重写, 否则每次列规则
+     * 都在改磁盘时间, 目录戳一直变, 引擎会跟着白重读
+     */
+    fun copyRejected(rejected: File, name: String, raw: String, problem: String, source: File? = null): File {
+        rejected.mkdirs()
+        val copy = File(rejected, "$name.json")
+        if (!copy.isFile || copy.readText() != raw) copy.writeText(raw)
+        val error = File(rejected, "$name$REJECTED_ERROR_SUFFIX")
+        val message = (source?.absolutePath ?: "$name.json") + ": " +
+            problem.trim().ifEmpty { "unreadable" } + "\n"
+        if (!error.isFile || error.readText() != message) error.writeText(message)
+        return copy
+    }
+
+    /** `rejected/` 里攒了几条坏规则 (设置页与 `status` 的读数) */
+    fun rejectedCount(context: Context): Int =
+        (rejectedDirectory(context).listFiles { file -> file.isFile && file.name.endsWith(".json") }
+            ?: emptyArray()).size
 
     /** 能用的那些规则 (读不出来的不算) */
     fun rules(context: Context): List<AutomationRule.Rule> = entries(context).mapNotNull { it.rule }
 
-    /** 一条按名字读 */
+    /** 一条按名字读 (新目录优先, 旧根目录兜底) */
     fun rule(context: Context, name: String): AutomationRule.Rule? {
-        val file = file(context, name)
-        if (!file.isFile) return null
+        val file = existingFile(context, name) ?: return null
         return AutomationRule.parse(name, file.readText())
     }
 
     /**
-     * 写一条 (新建或覆盖)
+     * 写一条 (新建或覆盖), 只写 `rules/`
      *
      * 写之前**先校验**: 校验不过的规则落下去只会在界面上变成"它从来没响过", 所以宁可当场拒
      */
-    fun write(context: Context, name: String, json: String): Pair<File, List<String>> {
+    fun write(context: Context, name: String, json: String): Pair<File, List<String>> =
+        writeTo(rulesDirectory(context), name, json)
+
+    /** [write] 的那一段, 目标目录由调用方给 (测试拿临时目录, 不碰 Context) */
+    fun writeTo(root: File, name: String, json: String): Pair<File, List<String>> {
         val rule = AutomationRule.parse(name, json)
-        val file = file(context, name)
+        val file = File(root, fileName(name))
         file.parentFile?.mkdirs()
         file.writeText(AutomationJson.writer.encodeToString(JsonObject.serializer(), rule.toJson()) + "\n")
         val warnings = AutomationRule.unknownKeys(AutomationJson.parse(json))
@@ -172,10 +259,11 @@ internal object AutomationStore {
         return file to warnings
     }
 
-    /** 设置页那个开关: 只改 `enabled`, 其余原样写回 */
+    /** 设置页那个开关: 只改 `enabled`, 其余原样写回 (旧根目录那一份会在这里落到 `rules/`) */
     fun setEnabled(context: Context, name: String, enabled: Boolean): Boolean {
         val rule = rule(context, name) ?: return false
-        val file = file(context, name)
+        val file = writeTarget(context, name)
+        file.parentFile?.mkdirs()
         file.writeText(
             AutomationJson.writer.encodeToString(
                 JsonObject.serializer(),
@@ -192,23 +280,59 @@ internal object AutomationStore {
      * JSON —— 模型万一没照写, 主人按的那个数就不算数。所以除了新建时把数写进提示词, 这里再给一条
      * **不经过模型**的路: 读出现有那份 JSON, 只替换冷却这一个键, 过一遍与 `write` 同一道校验闸, 再
      * 原样落盘 (未知键也留着, 以后的版本加的键不会被这一条吃掉)
+     *
+     * 旧根目录读到的那一份也在 `rules/` 里写一份 (新写只写 `rules/`)
      */
     fun setCooldown(context: Context, name: String, minutes: Int): Boolean {
-        val source = file(context, name)
-        if (!source.isFile) return false
+        val source = existingFile(context, name) ?: return false
         return runCatching {
             val root = AutomationJson.parse(source.readText())
             val next = AutomationRule.withCooldown(root, minutes)
             val text = AutomationJson.writer.encodeToString(JsonObject.serializer(), next)
             // 与模型那条 `write` 同一道闸: 一条已经坏了的规则不许被这一条"改成"另一条坏的
             AutomationRule.parse(name, text)
-            source.writeText(text + "\n")
+            val target = writeTarget(context, name)
+            target.parentFile?.mkdirs()
+            target.writeText(text + "\n")
             true
         }.getOrDefault(false)
     }
 
+    /**
+     * 删一条: 原件 (新旧两处)、`rejected/` 里的副本与 `.error.txt` 一起删
+     *
+     * 返回 true 只说"确实删掉了东西, 而且一处都没剩下"; 名字不合规的坏规则也删得掉
+     */
+    fun deleteIn(rules: File, legacy: File, rejected: File, name: String): Boolean {
+        val fileName = tolerantFileName(name)
+        val stem = fileName.removeSuffix(".json")
+        val files = listOf(
+            File(rules, fileName),
+            File(legacy, fileName),
+            File(rejected, fileName),
+            File(rejected, "$stem$REJECTED_ERROR_SUFFIX"),
+        )
+        val existed = files.any { it.isFile }
+        files.forEach { runCatching { it.delete() } }
+        return existed && files.none { it.exists() }
+    }
+
     fun delete(context: Context, name: String): Boolean =
-        runCatching { file(context, name).delete() }.getOrDefault(false)
+        deleteIn(rulesDirectory(context), directory(context), rejectedDirectory(context), name)
+
+    /**
+     * 目录戳: 根目录 (settings / history / places) 或 `rules/` 变一下都要重读
+     *
+     * 只盯根目录会在迁移后失灵: 新写都进了 `rules/`, 根目录的时间不再变, 引擎就永远读旧规则
+     */
+    fun stamp(context: Context): Long {
+        val root = directory(context)
+        val rules = rulesDirectory(context)
+        return maxOf(
+            if (root.isDirectory) root.lastModified() else 0L,
+            if (rules.isDirectory) rules.lastModified() else 0L,
+        )
+    }
 
     /** 设置那一份, 缺键按默认值 */
     fun settings(context: Context): Settings {

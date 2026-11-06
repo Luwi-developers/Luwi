@@ -1,5 +1,6 @@
 package io.github.yuloong07star.luwi.automation
 
+import android.Manifest
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -13,11 +14,13 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Looper
 import android.util.Log
 import io.github.yuloong07star.luwi.channel.LwAccessibility
 import io.github.yuloong07star.luwi.channel.LwNotificationListener
+import io.github.yuloong07star.luwi.util.Capability
 import io.github.yuloong07star.luwi.util.PermissionCatalog
 import io.github.yuloong07star.luwi.util.PermissionGate
 import java.text.SimpleDateFormat
@@ -25,17 +28,18 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 九个监测器: 该起来的起来, 不该起来的**一个都不留**
+ * 十二个监测器: 该起来的起来, 不该起来的**一个都不留**
  *
  * 低功耗那句口径落在这一层, 形状是三条:
  *
  * 1. **按需注册**: [AutomationEngine] 每拍算出"此刻有哪几类启用的规则", 只有那几类被挂上; 规则删掉
  *    或关掉, 下一拍就摘掉 —— 一条规则都没有时, 进程里没有 sensor / location / alarm / 接收器注册
- * 2. **事件优先**: 通知与前台应用是系统推过来的 (一个钩子, 零轮询); 光感是一条 `SENSOR_DELAY_NORMAL`
- *    的监听 (最省的那一档); 解锁与"动过"各一条: 前者是系统广播, 后者挂在既有窗口事件链上; 时间与
- *    一次性**共用一个**闹钟 —— 所有 `time` / `once` 规则里最近的那一个
- * 3. **轮询只剩两条**: 天气按设置页那个分钟档问一次 Open-Meteo, 位置用 `NETWORK_PROVIDER` (balanced:
- *    极少 GPS) 加"至少隔多久 / 至少移动多远"两个数; 省电生效时这两条整个不注册
+ * 2. **事件优先**: 通知与前台应用是系统推过来的 (一个钩子, 零轮询); 电量是一条粘性广播; 光感是一条
+ *    `SENSOR_DELAY_NORMAL` 的监听 (最省的那一档); 解锁与"动过"各一条: 前者是系统广播, 后者挂在既有
+ *    窗口事件链上; 时间与一次性**共用一个**闹钟 —— 所有 `time` / `once` 规则里最近的那一个
+ * 3. **轮询只剩三条**: 天气按设置页那个分钟档问一次 Open-Meteo, 位置用 `NETWORK_PROVIDER` (balanced:
+ *    极少 GPS) 加"至少隔多久 / 至少移动多远"两个数, 日程每一拍查一次本机 ContentResolver; 省电生效时
+ *    前两条整个不注册 (日程那条是本机查询, 不花流量也不唤醒 radio)
  *
  * 各条各自的可用性 (权限 / 无障碍 / 有没有光感) 都在 [describe] 里说, 设置页与 `status` 读的是同一份
  */
@@ -47,6 +51,14 @@ internal object AutomationMonitors {
     private val locationCapability
         get() = PermissionCatalog.runtime.firstOrNull { it.name == "位置" }
 
+    /** 日程那条要的那条能力: 与 `LwCalendar` / `lw_permissions` 里那一份同名 */
+    private val calendarCapability
+        get() = Capability(
+            name = "日历",
+            why = "自动指令的「日程临近」",
+            permissions = listOf(Manifest.permission.READ_CALENDAR),
+        )
+
     private var notice: AutoCloseable? = null
     private var foreground: AutoCloseable? = null
     private var light: SensorEventListener? = null
@@ -54,6 +66,13 @@ internal object AutomationMonitors {
 
     /** 解锁那条: 一条动态注册的接收器 (`ACTION_USER_PRESENT` 不需要任何权限) */
     private var unlock: BroadcastReceiver? = null
+
+    /**
+     * 电量那条: 一条粘性广播
+     *
+     * `ACTION_BATTERY_CHANGED` 注册那一刻就会送当前电量, 所以既不用先读一次快照, 也不轮询
+     */
+    private var battery: BroadcastReceiver? = null
 
     /** "动过"那条: 既有的窗口事件链 (无障碍), 与 [foreground] 同一条来源, 各挂各的回调 */
     private var activity: AutoCloseable? = null
@@ -80,7 +99,8 @@ internal object AutomationMonitors {
         this.wanted = wanted
         host = context.applicationContext
         // 通知: 一条钩子, 零成本; 没有这一类规则时摘掉, 免得白白收一整天
-        if ("notice" in wanted) {
+        // `noticeDigest` 与 `notice` 共用这一条钩子: 前者数"最近几条", 后者看"这一条"
+        if ("notice" in wanted || "noticeDigest" in wanted) {
             if (notice == null) {
                 notice = LwNotificationListener.watch { posted -> AutomationEngine.onNotification(context, posted) }
             }
@@ -132,6 +152,37 @@ internal object AutomationMonitors {
         } else {
             unlock?.let { receiver -> runCatching { context.unregisterReceiver(receiver) } }
             unlock = null
+        }
+        // 电量: 粘性广播, 注册那一刻就送一条当前读数 (所以既不用先读一次快照, 也不轮询)
+        if ("battery" in wanted) {
+            if (battery == null) {
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(from: Context, intent: Intent?) {
+                        val level = batteryPercent(intent) ?: return
+                        AutomationEngine.onBattery(context, level, batteryCharging(intent))
+                    }
+                }
+                val sticky = runCatching {
+                    context.registerReceiver(
+                        receiver,
+                        IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+                        Context.RECEIVER_EXPORTED,
+                    )
+                }
+                if (sticky.isSuccess) {
+                    battery = receiver
+                    sticky.getOrNull()?.let { intent ->
+                        batteryPercent(intent)?.let { level ->
+                            AutomationEngine.onBattery(context, level, batteryCharging(intent))
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "could not register the battery receiver")
+                }
+            }
+        } else {
+            battery?.let { receiver -> runCatching { context.unregisterReceiver(receiver) } }
+            battery = null
         }
         // "动过": 窗口事件那条链 (无障碍开着时才有事件), 解锁那一路在引擎里另外记一笔
         if ("activity" in wanted && LwAccessibility.running) {
@@ -270,6 +321,8 @@ internal object AutomationMonitors {
         foreground = null
         unlock?.let { receiver -> host?.let { runCatching { it.unregisterReceiver(receiver) } } }
         unlock = null
+        battery?.let { receiver -> host?.let { runCatching { it.unregisterReceiver(receiver) } } }
+        battery = null
         activity?.close()
         activity = null
         light = null
@@ -280,25 +333,50 @@ internal object AutomationMonitors {
 
     /** 此刻真的在跑的几类 (引擎算状态时读它) */
     fun running(): Set<String> = buildSet {
-        if (notice != null) add("notice")
+        if ("notice" in wanted && notice != null) add("notice")
+        if ("noticeDigest" in wanted && notice != null) add("noticeDigest")
         if (foreground != null) add("foreground")
         if (light != null) add("light")
         if (location != null) add("place")
         if (unlock != null) add("unlock")
+        if (battery != null) add("battery")
         if (activity != null) add("activity")
         // 时间与一次性共用一个闹钟: 谁在这一刻的 wanted 里就报谁
         if (alarmAt != 0L) {
             if ("time" in wanted) add("time")
             if ("once" in wanted) add("once")
         }
-        // 天气没有"注册"这回事: 它由引擎的心跳按时问一次, 所以只要它还想要就算在跑
+        // 天气与日程没有"注册"这回事: 它们由引擎的心跳按时查, 所以只要它还想要就算在跑
         if ("weather" in wanted) add("weather")
+        if ("calendarSoon" in wanted) add("calendarSoon")
+    }
+
+    /** 电量广播里那个百分比: 读不出来就是 null (不猜 0) */
+    private fun batteryPercent(intent: Intent?): Int? {
+        if (intent == null) return null
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return null
+        return (level * 100.0 / scale).toInt().coerceIn(0, 100)
+    }
+
+    /** 在不在充电: 系统状态说充电 / 已充满都算 */
+    private fun batteryCharging(intent: Intent?): Boolean {
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
     }
 
     /** 一条监测器现在的样子, 给设置页与 `status` 用 */
     fun describe(context: Context, kind: String): String = when (kind) {
         "notice" -> if (LwNotificationListener.running) {
             "通知使用权开着, 来一条就判一次"
+        } else {
+            "缺通知使用权: 设置页「通知」那一段拨一下, 或 tools/lw-install.ps1 -Perms"
+        }
+
+        "noticeDigest" -> if (LwNotificationListener.running) {
+            "通知使用权开着, 按最近的通知缓存计数 (按 key 与内容去重, 最多 ${AutomationDigest.MAX_ENTRIES} 条)"
         } else {
             "缺通知使用权: 设置页「通知」那一段拨一下, 或 tools/lw-install.ps1 -Perms"
         }
@@ -319,6 +397,17 @@ internal object AutomationMonitors {
             activity != null -> "窗口事件链在听 (解锁也记一笔)"
             !LwAccessibility.running -> "不可用: 无障碍关着 (解锁那一路仍算)"
             else -> "窗口事件链没挂上 (解锁那一路仍算)"
+        }
+
+        "battery" -> "电量广播在听 (注册那一刻就有当前值, 只在跨过阈值时响一次)"
+
+        "calendarSoon" -> {
+            val refusal = PermissionGate.refusal(context, calendarCapability)
+            if (refusal != null) {
+                "缺日历权限: $refusal"
+            } else {
+                "每一拍查一次本机日程 (CalendarContract.Instances)"
+            }
         }
 
         "light" -> {
