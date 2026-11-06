@@ -3769,7 +3769,7 @@ const TOOLS = [
     + ' and **they do not nest** (putting an all or an any inside a combination is refused, so'
     + ' "A and B, or C and D" is not writable yet). A combination judges on **freshness**: each'
     + ' sub-condition remembers the last time it held, and it counts as true while that moment is'
-    + ' inside its window (defaults: time 1800 s; notice, foreground and unlock 120 s; the rest 300 s;'
+    + ' inside its window (defaults: time 1800 s; notice, foreground, unlock and battery 120 s; the rest 300 s;'
     + ' a sub-condition may write within to override it). That is why'
     + ' "23:45 之后半小时内切到微信" is {kind:"all",conds:[{kind:"time",at:"23:45"},{kind:"foreground",'
     + ' package:"com.tencent.mm",within:120}]}. The old single-kind shape is unchanged:'
