@@ -229,7 +229,9 @@ export async function measureTree(root, maxEntries = COST_MAX_ENTRIES) {
  * @param {() => Promise<object>} deps.collectDoctor 只读自检 (runDoctor 的装配)。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pConfirm] Luwi 加 (P2P T6)：确认换机。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pRevoke] Luwi 加 (P2P T6)：吊销对端。
- * @param {(command: string, timeoutMs?: number) => Promise<{ok: boolean, text?: string, error?: string}>} [deps.runTerm] Luwi 加 (2026-11-05)：终端面板跑的沙盒命令 (缺省 = 这台宿主没有通道, 回 ok:false)。
+ * @param {(command: string, timeoutMs?: number) => Promise<{ok: boolean, text?: string, interrupted?: boolean, error?: string}>} [deps.runTerm] Luwi 加 (2026-11-05)：终端面板跑的沙盒命令 (缺省 = 这台宿主没有通道, 回 ok:false)。
+ * @param {() => Promise<{ok: boolean, installed: boolean, version?: string, error?: string}>} [deps.termStatus] Luwi 加 (2026-11-06)：沙盒装没装 (终端入口置灰与「先装 Linux 沙盒」那句)。
+ * @param {() => Promise<{ok: boolean, interrupted?: boolean, error?: string}>} [deps.termInterrupt] Luwi 加 (2026-11-06)：Ctrl-C 中断正在跑的那一条。
  * @param {object} deps.info - 启动面读数 { plugin, version, runner, disabledReason, mounted, config }。
  * @param {object} [deps.logger] - 宿主 logger (可选)。
  * @param {number} [deps.now] - 取当前时间的钩子 (测试用)。
@@ -705,7 +707,45 @@ export function createPanel(deps) {
           sendJson(res, 200, {
             ok: false,
             action: PANEL_OPS.TERM,
+            installed: false,
             error: 'this host was not started by Luwi, so there is no sandbox to run in',
+          })
+          return
+        }
+        // 2026-11-06 (2.8.0 #32): 老面板发的是裸命令 (没有 op), 按 run 算
+        const op = typeof body.op === 'string' && body.op !== '' ? body.op : 'run'
+        if (op === 'status') {
+          try {
+            const answer = typeof deps.termStatus === 'function'
+              ? await deps.termStatus()
+              : { ok: false, installed: false, error: 'this host cannot read the sandbox state' }
+            sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
+          } catch (thrown) {
+            sendJson(res, 200, {
+              ok: false,
+              installed: false,
+              action: PANEL_OPS.TERM,
+              error: messageOf(thrown),
+            })
+          }
+          return
+        }
+        if (op === 'interrupt') {
+          try {
+            const answer = typeof deps.termInterrupt === 'function'
+              ? await deps.termInterrupt()
+              : { ok: false, error: 'this host cannot interrupt a running command' }
+            sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
+          } catch (thrown) {
+            sendJson(res, 200, { ok: false, action: PANEL_OPS.TERM, error: messageOf(thrown) })
+          }
+          return
+        }
+        if (op !== 'run') {
+          sendJson(res, 400, {
+            ok: false,
+            action: PANEL_OPS.TERM,
+            error: `unknown term op ${JSON.stringify(op)} (expected run|status|interrupt)`,
           })
           return
         }

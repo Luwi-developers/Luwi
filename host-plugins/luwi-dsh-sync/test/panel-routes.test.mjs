@@ -19,6 +19,7 @@ import {
   measureTree,
   PanelBadRequest,
   PANEL_HANDSHAKE,
+  PANEL_OPS,
   PANEL_PREFIX,
   readJsonBody,
   sendJson,
@@ -88,6 +89,10 @@ function makePanel(opts = {}) {
     logout: opts.logout,
     refreshLicense: opts.refreshLicense,
     collectDoctor: opts.collectDoctor ?? (async () => ({ status: 'PASS', mount: { mounted: true, runner: 'subprocess' }, peers: [], problems: [], warnings: [], notes: [] })),
+    // Luwi 加 (2026-11-05/06): 终端面板三档 (run / status / interrupt)
+    runTerm: opts.runTerm,
+    termStatus: opts.termStatus,
+    termInterrupt: opts.termInterrupt,
     info: {
       plugin: 'luwi-dsh-sync',
       version: '0.2.24',
@@ -410,6 +415,40 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   await panelRoute.handler(fakeRequest(null, { method: 'GET' }), snap)
   assert.equal(snap.statusCode, 200)
   assert.equal(JSON.parse(snap.body).handshake, PANEL_HANDSHAKE)
+})
+
+test('routes: /term 的 status / run / interrupt 三档 (2.8.0 #32)', async () => {
+  const calls = []
+  const { panel } = makePanel({
+    termStatus: async () => ({ ok: true, installed: false, version: '' }),
+    runTerm: async (command, timeoutMs) => {
+      calls.push({ command, timeoutMs })
+      return { ok: true, text: 'hi\n' }
+    },
+    termInterrupt: async () => ({ ok: true, interrupted: true }),
+  })
+  const term = panel.routes().find(route => route.path === `${PANEL_PREFIX}/term`)
+
+  const status = fakeResponse()
+  await term.handler(fakeRequest('{"op":"status"}'), status)
+  assert.equal(status.statusCode, 200)
+  assert.deepEqual(JSON.parse(status.body), { ok: true, installed: false, version: '', action: PANEL_OPS.TERM })
+
+  // 老面板不带 op 也按 run 算 (2026-11-05 那条通道的兼容面)
+  const legacy = fakeResponse()
+  await term.handler(fakeRequest('{"command":"echo hi"}'), legacy)
+  assert.equal(JSON.parse(legacy.body).ok, true)
+  assert.equal(JSON.parse(legacy.body).text, 'hi\n')
+  assert.deepEqual(calls, [{ command: 'echo hi', timeoutMs: undefined }])
+
+  const interrupt = fakeResponse()
+  await term.handler(fakeRequest('{"op":"interrupt"}'), interrupt)
+  assert.deepEqual(JSON.parse(interrupt.body), { ok: true, interrupted: true, action: PANEL_OPS.TERM })
+
+  const unknown = fakeResponse()
+  await term.handler(fakeRequest('{"op":"nope"}'), unknown)
+  assert.equal(unknown.statusCode, 400)
+  assert.match(JSON.parse(unknown.body).error, /unknown term op/)
 })
 
 test('routes: dispose 清掉成本缓存 (下一次快照重新量)', async () => {
