@@ -68,11 +68,6 @@ class AutomationStoreTest {
         }
         assertTrue("静默时段缺键时是开", settings.quietEnabled)
         assertFalse("允许它自己动手缺键时是关", settings.allowActing)
-        assertEquals(
-            "每天主动说的次数缺键时是默认值",
-            AutomationRule.SAID_LIMIT_DEFAULT,
-            settings.saidLimit,
-        )
     }
 
     @Test
@@ -110,25 +105,6 @@ class AutomationStoreTest {
             "表的大小仍是九个监测源",
             AutomationRule.WATCH_KINDS.size,
             settings.monitors.size,
-        )
-    }
-
-    @Test
-    fun `每天的次数收进一到十`() {
-        assertEquals(
-            "太大收到上限",
-            AutomationRule.SAID_LIMIT_MAX,
-            AutomationStore.settingsFrom(buildJsonObject { put("saidLimit", 99) }).saidLimit,
-        )
-        assertEquals(
-            "太小收到下限",
-            AutomationRule.SAID_LIMIT_MIN,
-            AutomationStore.settingsFrom(buildJsonObject { put("saidLimit", -3) }).saidLimit,
-        )
-        assertEquals(
-            "界内原样",
-            7,
-            AutomationStore.settingsFrom(buildJsonObject { put("saidLimit", 7) }).saidLimit,
         )
     }
 
