@@ -220,7 +220,7 @@ internal object LwAutomation {
         val monitors = AutomationEngine.monitorStates(context)
         val text = buildString {
             append(table(rows))
-            append("\nthe twelve watches:\n")
+            append("\nthe ${AutomationRule.WATCH_KINDS.size} watches:\n")
             append(monitors.joinToString("\n") { "  ${it.first}: ${it.second}" })
             if (rules.isNotEmpty()) {
                 append("\nthe rules:\n")

@@ -723,7 +723,7 @@ internal object AutomationRule {
                 } else {
                     // 一条时说「电量低于 20% 时」, 两条时说「电量低于 20% 且在充电时」
                     val joined = said.joinToString(" 且")
-                    if (said.size == 1) "$joined 时" else "${joined}时"
+                    if (said.size == 1 && said[0].startsWith("电量")) "$joined 时" else "${joined}时"
                 }
             }
 
