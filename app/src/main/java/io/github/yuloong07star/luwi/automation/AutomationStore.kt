@@ -71,7 +71,7 @@ internal object AutomationStore {
     /** 一次最多读回多少条历史 */
     const val MAX_HISTORY = 200
 
-    /** 九个监测器 + 频率档 + 静默时段 + "允许它自己动手" + 每天最多主动说几次 */
+    /** 十二个监测器 + 频率档 + 静默时段 + "允许它自己动手" + 每天最多主动说几次 */
     data class Settings(
         val monitors: Map<String, Boolean>,
         val weatherMinutes: Int,

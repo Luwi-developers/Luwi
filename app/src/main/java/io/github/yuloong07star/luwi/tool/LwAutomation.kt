@@ -16,7 +16,7 @@ import java.util.Locale
  *
  * - 这里的正文是**一份 JSON**, 所以 `write` 先校验再落盘 —— 写坏了的规则在界面上就是"它从来没响过",
  *   而那种错没人查得出来
- * - 多两条只读的: `status` (九个监测器此刻的可用性 + 为什么现在不可能响) 与 `history` (最近几次判定
+ * - 多两条只读的: `status` (十二个监测器此刻的可用性 + 为什么现在不可能响) 与 `history` (最近几次判定
  *   与原因)。主人问"它怎么没响"时, 答案在这两条里
  *
  * 六条 op 里 `delete` **只在桥上有** (设置页那个删除按钮用它), 给模型的是 [MODEL_OPERATIONS] 那五条
@@ -99,7 +99,7 @@ internal object LwAutomation {
     /** 设置页那个「立刻跑一次」 */
     fun fireNow(context: Context, name: String): String = AutomationEngine.fireNow(context, name)
 
-    /** 九个监测器此刻的状态 (设置页逐行显示) */
+    /** 十二个监测器此刻的状态 (设置页逐行显示) */
     fun monitorStates(context: Context): List<Pair<String, String>> =
         AutomationEngine.monitorStates(context)
 
@@ -185,7 +185,7 @@ internal object LwAutomation {
         )
     }
 
-    /** 九个监测器此刻能不能用, 以及此刻为什么可能不响 */
+    /** 十二个监测器此刻能不能用, 以及此刻为什么可能不响 */
     private fun status(context: Context): JsonObject {
         val rules = AutomationEngine.rules()
         val settings = AutomationEngine.settings()
@@ -220,7 +220,7 @@ internal object LwAutomation {
         val monitors = AutomationEngine.monitorStates(context)
         val text = buildString {
             append(table(rows))
-            append("\nthe nine watches:\n")
+            append("\nthe twelve watches:\n")
             append(monitors.joinToString("\n") { "  ${it.first}: ${it.second}" })
             if (rules.isNotEmpty()) {
                 append("\nthe rules:\n")

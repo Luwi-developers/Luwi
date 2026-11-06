@@ -110,7 +110,7 @@ check(
   [true, true],
 )
 
-/* ── 二、八个叶子 kind / 两种组合 / 两种 then.kind 在说明里都念到了 ──────── */
+/* ── 二、十一个叶子 kind / 两种组合 / 两种 then.kind 在说明里都念到了 ────── */
 
 const automation = pluginBody('lw_automation')
 const leaf = kotlinList(rule, 'LEAF_KINDS')
@@ -119,19 +119,20 @@ const watch = [...leaf, 'once']
 const kinds = [...watch, ...combo]
 const thenKinds = kotlinList(rule, 'THEN_KINDS')
 
-check('八个叶子条件是那八个 (批次 9 加了 unlock / activity)', leaf, [
+check('十一个叶子条件是那十一个 (批次 9 加了 unlock / activity, B5-b 加了三个数据源)', leaf, [
   'notice', 'foreground', 'light', 'time', 'place', 'weather', 'unlock', 'activity',
+  'calendarSoon', 'battery', 'noticeDigest',
 ])
 
 check('两种组合是 all 与 any', combo, ['all', 'any'])
 
-check('九个监测源 = 叶子 + once, 十一个 kind = 监测源 + 组合', [
+check('十二个监测源 = 叶子 + once, 十三个 kind = 监测源 + 组合', [
   /val WATCH_KINDS = LEAF_KINDS \+ "once"/.test(rule),
   /val WHEN_KINDS = WATCH_KINDS \+ COMBO_KINDS/.test(rule),
 ], [true, true])
 
 check(
-  '十一个 kind 在插件说明里逐个念到 (写成 `notice {` 这样)',
+  '十三个 kind 在插件说明里逐个念到 (写成 `notice {` 这样)',
   kinds.map((kind) => automation.includes(`${kind} {`)),
   kinds.map(() => true),
 )
@@ -259,7 +260,7 @@ check(
 
 /* ── 七、一次性 once (2.7.8 批次 8) ─────────────────────────────────────── */
 
-check('once 在监测源名单里, 而且组合不爱收它 (组合只收八个叶子)', [
+check('once 在监测源名单里, 而且组合不爱收它 (组合只收十一个叶子)', [
   watch.at(-1),
   /sub !in LEAF_KINDS/.test(rule),
 ], ['once', true])
@@ -364,7 +365,7 @@ check('60 秒 tick: 只在有组合时跑, 熄屏不跑, 只重算状态类', [
   /private fun tickCombos\(context: Context, now: Long\)/.test(engine),
   /PowerManager::class\.java/.test(engine),
   /isInteractive == false\) return/.test(engine),
-  /STATE_KINDS = setOf\("time", "light", "place", "weather", "activity"\)/.test(engine),
+  /STATE_KINDS = setOf\("time", "light", "place", "weather", "activity", "battery", "calendarSoon"\)/.test(engine),
   /tickCombos\(context, now\)/.test(engine),
 ], [true, true, true, true, true])
 
@@ -413,7 +414,7 @@ check('firstOfDay 与"最近 N 分钟在动"都能算', [
 
 const titleBlock = (screen.match(/private val AutomationMonitorTitles = linkedMapOf\(([\s\S]*?)\n\)/) ?? [])[1] ?? ''
 const titleKinds = [...titleBlock.matchAll(/"(\w+)" to R\.string\./g)].map((one) => one[1])
-check('设置页监视器名单与九个监测源对齐', titleKinds, watch)
+check('设置页监视器名单与十二个监测源对齐', titleKinds, watch)
 
 check('两份 strings 都有解锁与动手那两条', [
   zh.includes('name="settings_automation_monitor_unlock"'),
@@ -433,13 +434,49 @@ check('status 多给"每个子条件最近一次为真"与 tick 两条读数', [
   /combo tick/.test(tool),
 ], [true, true, true, true])
 
-check('插件说明念清组合的三件事 (八档 / 不许嵌套 / 老形状不动)', [
-  automation.includes('The eight condition kinds'),
+check('插件说明念清组合的三件事 (十一档 / 不许嵌套 / 老形状不动)', [
+  automation.includes('The eleven condition kinds'),
   automation.includes('they do not nest'),
   automation.includes('The old single-kind shape is unchanged'),
   automation.includes('judges on **freshness**'),
   automation.includes('within:120'),
 ], [true, true, true, true, true])
+
+/* ── 十、三个数据源 (2.8.0 #24 / B5-b) ─────────────────────────────────── */
+
+const sources = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationSources.kt')
+
+check('三个数据源各自接上 (日历实例 / 电量广播 / 通知摘要缓存)', [
+  /CalendarContract\.Instances\.CONTENT_URI/.test(sources),
+  /ACTION_BATTERY_CHANGED/.test(monitors),
+  /AutomationDigest\.remember\(digest, AutomationDigest\.entryOf\(posted\)\)/.test(engine),
+], [true, true, true])
+
+check('电量阈值只在跨过那一次命中 (叶子), 组合里的子条件一直算成立', [
+  /fun shouldHit\(inside: Boolean, was: Boolean, asSub: Boolean\): Boolean/.test(sources),
+  /AutomationBattery\.shouldHit\(inside, was, asSub\)/.test(engine),
+  /batteryInside\[key\]/.test(engine),
+], [true, true, true])
+
+check('摘要缓存按 key 与内容去重, 有上限, 按窗口计数', [
+  /fun remember\(cache: MutableMap<String, Entry>, entry: Entry\)/.test(sources),
+  /it\.sameContent\(entry\)/.test(sources),
+  /const val MAX_ENTRIES = 200/.test(sources),
+  /fun recent\(/.test(sources),
+], [true, true, true, true])
+
+check('日程按实例读 (重复日程与 20 分钟后都能算), 同一个实例只命中一次', [
+  /CalendarContract\.Instances\.CONTENT_URI/.test(sources),
+  /DEFAULT_CALENDAR_MINUTES = 20/.test(rule),
+  /calendarFired\[key\] == nearest\.begin/.test(engine),
+  /it\.begin - now in 0\.\.within \* 60_000L/.test(engine),
+], [true, true, true, true])
+
+check('触发消息把这一次的事件证据带出去', [
+  /private fun prompt\(rule: AutomationRule\.Rule, evidence: String\? = null\): String/.test(engine),
+  /prompt\(rule, reason\)/.test(engine),
+  /这次的条件/.test(engine),
+], [true, true, true])
 
 console.log(`\n${checks - failures} / ${checks} 条通过`)
 if (failures > 0) process.exit(1)

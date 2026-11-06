@@ -114,7 +114,7 @@ class AutomationCombineTest {
     @Test
     fun anUnknownSubKindIsRefused() {
         assertTrue(
-            problemOf("""{"kind":"all","conds":[{"kind":"battery"},{"kind":"time","at":"07:30"}]}""")
+            problemOf("""{"kind":"all","conds":[{"kind":"batteryLevel"},{"kind":"time","at":"07:30"}]}""")
                 .contains("conds[0].kind"),
         )
     }
@@ -209,7 +209,10 @@ class AutomationCombineTest {
     @Test
     fun everyKindNameIsStable() {
         assertEquals(
-            listOf("notice", "foreground", "light", "time", "place", "weather", "unlock", "activity"),
+            listOf(
+                "notice", "foreground", "light", "time", "place", "weather", "unlock", "activity",
+                "calendarSoon", "battery", "noticeDigest",
+            ),
             AutomationRule.LEAF_KINDS,
         )
         assertEquals(

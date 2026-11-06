@@ -136,8 +136,9 @@ description: 一句话说清什么时候该用这个技能
 
 `$DSH_HOME/automations/<名字>.json`，**由模型经 `lw_automation` 写**（别手搓，格式有闸）。
 规则形状：`{"kind":"all"|"any","conds":[{"kind":"…"},…]}`，叶子 2~5 个、**不许嵌套**；
-叶子 `kind` 有 `notice` / `foreground` / `light` / `time` / `place` / `weather` / `unlock` / `activity`，
-动作 `kind` 有 `remind` / `task`。同一目录下还有 `settings.json`（九个监测器开关）、
+叶子 `kind` 有 `notice` / `foreground` / `light` / `time` / `place` / `weather` / `unlock` / `activity` /
+`calendarSoon` / `battery` / `noticeDigest`，
+动作 `kind` 有 `remind` / `task`。同一目录下还有 `settings.json`（十二个监测器开关）、
 `history.jsonl`（一次判定一行，冷却与上限都从它算）、`places.json`。
 
 ## 8. 探索卡

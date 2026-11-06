@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  *
  * 三层里的中间那一层 (条件在 [AutomationMonitors], 动作在这里收口), 它管四件事:
  *
- * 1. **判定**: 六条条件各自的"现在算不算命中", 加上光感那条的迟滞与"持续多少秒"
+ * 1. **判定**: 十一条条件各自的"现在算不算命中", 加上光感那条的迟滞与"持续多少秒"
  * 2. **防骚扰**: 静默时段 / 冷却 / 每日上限 / "允许它自己动手"那道总闸
  * 3. **记账**: 每一次真的决定要不要动都落一行到 `history.jsonl` —— 主人问"它为什么没响"时, 唯一
  *    答得出来的就是那一份
@@ -52,7 +52,7 @@ internal object AutomationEngine {
     private const val TICK = "tick"
 
     /** 每轮都能重算的那几类子条件 (tick 只碰它们) */
-    private val STATE_KINDS = setOf("time", "light", "place", "weather", "activity")
+    private val STATE_KINDS = setOf("time", "light", "place", "weather", "activity", "battery", "calendarSoon")
 
     /** 事件型条件不成立时, 每多少条合并成一行历史 (不合并的话通知一来一整天全是它) */
     private const val MISS_MERGE = 20
@@ -146,9 +146,47 @@ internal object AutomationEngine {
 
     private var lastWeatherAt = 0L
 
+    /**
+     * 最近一条电量广播
+     *
+     * 只在收到 `ACTION_BATTERY_CHANGED` 时更新; 组合的 tick 与"别的条件送来时"都拿它重算, 不另外轮询
+     */
+    @Volatile
+    private var lastBattery: BatteryReading? = null
+
+    /** 电量读数: 百分比 + 在不在充电 */
+    private class BatteryReading(val level: Int, val charging: Boolean)
+
+    /**
+     * 电量阈值"跨过"那笔账: `key -> 上一次算的时候在不在阈值内`
+     *
+     * 广播一来就是一条判定的触发, 但"一直低于 20%"不该每条广播都响一次 —— 只有从外到内那一次算命中,
+     * 这就是验收里"电量阈值只触发一次"的落点
+     */
+    private val batteryInside = HashMap<String, Boolean>()
+
+    /** 通知摘要缓存 (只在 worker 那条线程上读写) */
+    private val digest = LinkedHashMap<String, AutomationDigest.Entry>()
+
+    /**
+     * 摘要阈值那笔账: 到了阈值只投一次, 掉回阈值以下才重新"上膛"
+     *
+     * 与电量那条同一个形状: 30 分钟内来了 5 条, 不该每来一条新通知就把同一份摘要再投一次
+     */
+    private val digestArmed = HashMap<String, Boolean>()
+
+    /** 最近一次日程查询的结果 (组合 tick 与 `status` 读它) */
+    private var calendar: List<AutomationCalendar.Occurrence>? = null
+
+    /** 每条规则/子条件上一次为哪个日程实例响过 (用实例的开始时刻去重, 重复日程每场各算一次) */
+    private val calendarFired = HashMap<String, Long>()
+
+    /** 上一次日程读不到的原因: 同一句只记一行历史, 不每一拍刷一遍 */
+    private var calendarRefusal: String? = null
+
     private val weatherLock = Any()
 
-    /** 触发这一次判定的是什么 —— 六条条件各自带自己的那点数据 */
+    /** 触发这一次判定的是什么 —— 几条条件各自带自己的那点数据 */
     private class Trigger(
         val kind: String,
         val packageName: String? = null,
@@ -158,6 +196,7 @@ internal object AutomationEngine {
         val latitude: Double? = null,
         val longitude: Double? = null,
         val readings: Map<String, WeatherNow> = emptyMap(),
+        val calendar: List<AutomationCalendar.Occurrence>? = null,
     )
 
     /** 一次实况里的三个数 */
@@ -205,6 +244,13 @@ internal object AutomationEngine {
             beat?.cancel(false)
             beat = null
         }
+        digest.clear()
+        digestArmed.clear()
+        batteryInside.clear()
+        calendarFired.clear()
+        lastBattery = null
+        calendar = null
+        calendarRefusal = null
         AutomationMonitors.stopAll()
     }
 
@@ -258,7 +304,7 @@ internal object AutomationEngine {
         return wanted
     }
 
-    /** 六条里哪两条是轮询的 (省电时停的就是它们) */
+    /** 十一条里哪两条是轮询的 (省电时停的就是它们) */
     private val POLLING_KINDS = setOf("weather", "place")
 
     /**
@@ -354,6 +400,10 @@ internal object AutomationEngine {
         }
         retireMissedOnce(context, now)
         pollWeather(context, now)
+        // 通知摘要缓存按窗口清旧条目 (不轮询通知栏, 只清自己那一份)
+        AutomationDigest.prune(digest, now)
+        pollCalendar(context, now)
+        pollDigest(context)
         // 组合那条 60 秒 tick: 只在有组合规则时跑, 熄屏不跑 (风险 17)
         tickCombos(context, now)
     }
@@ -367,11 +417,32 @@ internal object AutomationEngine {
         val application = context.applicationContext
         worker.execute {
             runCatching {
+                // 摘要那条先记账, 再判: "这一条"也算在"最近 N 分钟来了几条"里
+                AutomationDigest.remember(digest, AutomationDigest.entryOf(posted))
                 evaluate(
                     application,
                     Trigger("notice", packageName = posted.packageName, title = posted.title, text = posted.text),
                 )
+                evaluate(
+                    application,
+                    Trigger("noticeDigest", packageName = posted.packageName, title = posted.title, text = posted.text),
+                )
             }.onFailure { warn("notice", it) }
+        }
+    }
+
+    /**
+     * 一条电量广播 (`ACTION_BATTERY_CHANGED` 是粘性的, 注册那一刻也会送一条)
+     *
+     * 这里只记读数; "在不在阈值内、是不是刚跨过"由 [holdsOne] 按每一条规则自己的 key 算, 于是
+     * 一条广播能让多条电量规则各自判一次, 而每一条都只在跨过那一次命中
+     */
+    fun onBattery(context: Context, level: Int, charging: Boolean) {
+        lastBattery = BatteryReading(level, charging)
+        val application = context.applicationContext
+        if (rules.none { it.enabled && it.involves("battery") }) return
+        worker.execute {
+            runCatching { evaluate(application, Trigger("battery")) }.onFailure { warn("battery", it) }
         }
     }
 
@@ -557,7 +628,7 @@ internal object AutomationEngine {
     data class SubFreshness(val index: Int, val kind: String, val at: Long)
 
     /**
-     * 一条**叶子**规则此刻算不算命中 —— 六条各一段, 没有共享的算术
+     * 一条**叶子**规则此刻算不算命中 —— 十一条各一段, 没有共享的算术
      *
      * [key] 是这条规则 (或这个子条件) 在几本账里的名字: 光感的迟滞与"持续多少秒"按它记, 组合里的
      * 子条件之间互不干扰
@@ -753,6 +824,79 @@ internal object AutomationEngine {
                 }
             }
 
+            // 日程临近 (CalendarContract.Instances): 在 withinMinutes 内开始的下一个匹配事件
+            "calendarSoon" -> {
+                val within = (i("withinMinutes") ?: AutomationRule.DEFAULT_CALENDAR_MINUTES)
+                    .coerceIn(1, AutomationRule.MAX_CALENDAR_MINUTES)
+                val events = trigger.calendar ?: calendar
+                    ?: return Outcome.Unavailable("日程还没有读 (等下一次心跳)")
+                val titleContains = s("titleContains")
+                val ids = AutomationRule.longs(params["calendarIds"])
+                val nearest = events.asSequence()
+                    .filter { ids.isEmpty() || it.calendarId in ids }
+                    .filter { titleContains == null || it.title.contains(titleContains, ignoreCase = true) }
+                    .filter { it.begin - now in 0..within * 60_000L }
+                    .minByOrNull { it.begin }
+                    ?: return Outcome.Miss("$within 分钟内没有要提醒的日程")
+                // 同一个实例只命中一次: 每拍都看得到它, 不能每拍都投一遍
+                if (!asSub && calendarFired[key] == nearest.begin) {
+                    return Outcome.Miss("「${nearest.title}」这一场已经提醒过")
+                }
+                if (!asSub) calendarFired[key] = nearest.begin
+                val minutes = ((nearest.begin - now) / 60_000L).coerceAtLeast(0)
+                Outcome.Hit(
+                    "「${nearest.title}」${if (minutes <= 0) "马上" else "$minutes 分钟后"}开始" +
+                        " (${AutomationRule.formatMoment(nearest.begin, timeZone())})",
+                )
+            }
+
+            // 电量阈值 (ACTION_BATTERY_CHANGED): 只在从阈值外跨进来的那一次命中
+            "battery" -> {
+                val reading = lastBattery ?: return Outcome.Unavailable("还没有收到电量广播")
+                val below = n("below")
+                val above = n("above")
+                val chargingWanted = params["charging"]?.jsonPrimitive?.booleanOrNull
+                val inside = AutomationBattery.inside(
+                    reading.level,
+                    reading.charging,
+                    below,
+                    above,
+                    chargingWanted,
+                )
+                val was = batteryInside[key] ?: false
+                batteryInside[key] = inside
+                val said = "电量 ${reading.level}%" + (if (reading.charging) ", 在充电" else "")
+                if (!inside) return Outcome.Miss("现在是 $said")
+                // 组合里的子条件要"还在阈值内"就一直算成立 (靠新鲜窗口), 叶子那条只报跨过那一次
+                if (!AutomationBattery.shouldHit(inside, was, asSub)) {
+                    return Outcome.Miss("$said, 已经报过这一档")
+                }
+                Outcome.Hit(said)
+            }
+
+            // 通知摘要 (通知监听送进来的那一份缓存): 窗口内去重后的条数够不够
+            "noticeDigest" -> {
+                val minutes = (i("withinMinutes") ?: AutomationRule.DEFAULT_DIGEST_MINUTES)
+                    .coerceIn(1, AutomationRule.MAX_DIGEST_MINUTES)
+                val minCount = (i("minCount") ?: 1).coerceIn(1, AutomationRule.MAX_DIGEST_COUNT)
+                val packages = AutomationRule.strings(params["packages"])
+                val recent = AutomationDigest.recent(digest, now, minutes, packages)
+                if (recent.size < minCount) {
+                    digestArmed[key] = true
+                    return Outcome.Miss("$minutes 分钟内收到 ${recent.size} 条通知, 还差 ${minCount - recent.size} 条")
+                }
+                if (!asSub && digestArmed[key] == false) {
+                    return Outcome.Miss("$minutes 分钟内 ${recent.size} 条, 这一次已经报过")
+                }
+                digestArmed[key] = false
+                val titles = recent.take(3)
+                    .mapNotNull { it.title.takeIf { title -> title.isNotBlank() } }
+                Outcome.Hit(
+                    "$minutes 分钟内收到 ${recent.size} 条通知" +
+                        (if (titles.isEmpty()) "" else ": " + titles.joinToString("、")),
+                )
+            }
+
             else -> Outcome.Miss("不认识的 condition")
         }
     }
@@ -814,7 +958,7 @@ internal object AutomationEngine {
             retireOnce(context, rule)
             return
         }
-        val line = prompt(rule)
+        val line = prompt(rule, reason)
         val seq = VoiceInbox.append(context, line, source = VoiceInbox.SOURCE_AUTOMATION)
         // 账只在 record 那一处记一次: 这里再记一遍会让"今天几次"翻倍 (2026-10-08 实测到的就是它)
         lastBlock.remove(rule.name)
@@ -936,13 +1080,19 @@ internal object AutomationEngine {
         }
     }
 
-    /** 投给会话的那一句话 */
-    private fun prompt(rule: AutomationRule.Rule): String {
+    /**
+     * 投给会话的那一句话
+     *
+     * [evidence] 是这一次为什么算成立 (日程标题与开始时刻 / 电量读数 / 摘要里的几条通知) —— 只写
+     * "提醒你一下"模型还得自己猜发生了什么, 而这几句正是判定那一刻手上真有的东西
+     */
+    private fun prompt(rule: AutomationRule.Rule, evidence: String? = null): String {
         val head = "【自动指令】${rule.name}: ${rule.thenText}"
+        val why = evidence?.takeIf { it.isNotBlank() }?.let { " (这次的条件: $it)" } ?: ""
         return if (rule.thenKind == "task") {
-            "$head —— 现在按这件事做, 做完用一句汉语说清做了什么。"
+            "$head$why —— 现在按这件事做, 做完用一句汉语说清做了什么。"
         } else {
-            "$head —— 现在这件事到了。写一句给主人看的话 (40 字以内), 用 lw_notify 发一条通知" +
+            "$head$why —— 现在这件事到了。写一句给主人看的话 (40 字以内), 用 lw_notify 发一条通知" +
                 " (title 用这条规则的名字, body 用你写的那句), 然后把同一句话作为回答。不要做别的事, 不要动手机。"
         }
     }
@@ -977,6 +1127,79 @@ internal object AutomationEngine {
         if (fired.hit && fired.blocked == null && fired.delivered != false) {
             lastFired[fired.rule] = fired.at
             firedToday[fired.rule] = (firedToday[fired.rule] ?: 0) + 1
+        }
+    }
+
+    /* ── 日程临近 (CalendarContract) ─────────────────────────────────────── */
+
+    /**
+     * 每一拍读一次日程: 只在有启用的 `calendarSoon` 规则 (或组合里有它) 时才查
+     *
+     * 这是这一批里唯一一条新的"定时看"来源, 但代价只有一次 `ContentResolver` 查询 (不唤醒 radio,
+     * 不读传感器)。电量那条按计划走广播, 通知摘要那条跟着通知事件走, 都不轮询
+     */
+    private fun pollCalendar(context: Context, now: Long) {
+        val on = settings ?: return
+        val due = rules.filter { it.enabled && it.involves("calendarSoon") && on.monitor("calendarSoon") }
+        if (due.isEmpty()) return
+        val within = due.maxOf { calendarWindowMinutes(it) }
+        val named = due.flatMap { calendarIdsOf(it) }.distinct()
+        // 有一条规则没点名日历, 就得查全部 —— 只查别的规则点名的那几本会把它饿死
+        val ids = if (due.any { calendarIdsOf(it).isEmpty() }) emptyList() else named
+        val reading = AutomationCalendar.read(context, now, now + within * 60_000L, ids)
+        if (reading.refusal != null) {
+            // 同一句原因只落一行历史 (缺权限是"一直缺", 不用每分钟记一次)
+            if (reading.refusal != calendarRefusal) {
+                calendarRefusal = reading.refusal
+                due.forEach { rule ->
+                    record(context, fired(rule, now, hit = false, blocked = "unavailable", reason = reading.refusal))
+                }
+            }
+            return
+        }
+        calendarRefusal = null
+        val occurrences = reading.occurrences.orEmpty()
+        calendar = occurrences
+        val application = context.applicationContext
+        worker.execute {
+            runCatching { evaluate(application, Trigger("calendarSoon", calendar = occurrences)) }
+                .onFailure { warn("calendar", it) }
+        }
+    }
+
+    /** 一条规则里 `calendarSoon` 要看多远的窗口 (叶子就是自己, 组合取子条件里最大的那个) */
+    private fun calendarWindowMinutes(rule: AutomationRule.Rule): Int {
+        val params = if (rule.whenKind == "calendarSoon") {
+            listOf(rule.whenParams)
+        } else {
+            rule.conds.filter { it["kind"]?.jsonPrimitive?.contentOrNull == "calendarSoon" }
+        }
+        return params.mapNotNull { one ->
+            one["withinMinutes"]?.jsonPrimitive?.intOrNull
+        }.maxOrNull()?.coerceIn(1, AutomationRule.MAX_CALENDAR_MINUTES)
+            ?: AutomationRule.DEFAULT_CALENDAR_MINUTES
+    }
+
+    /** 一条规则里 `calendarSoon` 点名的那几本日历 (空 = 全部) */
+    private fun calendarIdsOf(rule: AutomationRule.Rule): List<Long> {
+        val params = if (rule.whenKind == "calendarSoon") {
+            listOf(rule.whenParams)
+        } else {
+            rule.conds.filter { it["kind"]?.jsonPrimitive?.contentOrNull == "calendarSoon" }
+        }
+        return params.flatMap { AutomationRule.longs(it["calendarIds"]) }.distinct()
+    }
+
+    /* ── 通知摘要 (缓存) ─────────────────────────────────────────────────── */
+
+    /** 有启用的摘要规则 (或组合里有它) 时, 心跳也判一次: 规则刚写好时缓存里已经有几条也能马上投 */
+    private fun pollDigest(context: Context) {
+        val on = settings ?: return
+        val due = rules.filter { it.enabled && it.involves("noticeDigest") && on.monitor("noticeDigest") }
+        if (due.isEmpty()) return
+        val application = context.applicationContext
+        worker.execute {
+            runCatching { evaluate(application, Trigger("noticeDigest")) }.onFailure { warn("digest", it) }
         }
     }
 
@@ -1062,7 +1285,7 @@ internal object AutomationEngine {
 
     /* ── 给 `status` 与设置页读的几件事 ─────────────────────────────────── */
 
-    /** 九个监测器此刻的状态 (一行一句) */
+    /** 十二个监测器此刻的状态 (一行一句) */
     fun monitorStates(context: Context): List<Pair<String, String>> {
         val on = settings
         // 有启用的规则、却没能挂上: 那一句要说**为什么** (缺权限 / 无障碍关着 / 网络定位关着), 而不是
