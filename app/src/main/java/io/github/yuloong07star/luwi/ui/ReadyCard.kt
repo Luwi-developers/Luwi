@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.ChannelSetting
+import io.github.yuloong07star.luwi.channel.Funnel
 import io.github.yuloong07star.luwi.channel.RecoveryOutcome
 import io.github.yuloong07star.luwi.channel.RecoveryRunner
 import io.github.yuloong07star.luwi.channel.RecoveryStep
@@ -136,6 +137,9 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
         ),
     )
 
+    // 三项和「五道门」里那三道一一对应, 顺序同上 —— 过门记录拿它按位对上
+    val gates = listOf(Funnel.Gate.CHANNEL, Funnel.Gate.ACCESSIBILITY, Funnel.Gate.SCREEN)
+
     val missing = steps.count { !it.done }
 
     // 这张卡以「缺东西」的身份出现, 而这台机器以前全绿过: 那它说的是「需要恢复一下」
@@ -170,6 +174,11 @@ internal fun ReadyCard(modifier: Modifier = Modifier) {
         if (missing == 0) {
             RecoveryStore.markReady(context)
             everReady = true
+        }
+        // 过门记录: 这张卡是唯一同时看得见三项的地方, 埋点跟着它走就不必再挂别的 watcher。
+        // 只记第一次, 所以这里每跑一次都不会重复写盘
+        steps.forEachIndexed { index, step ->
+            if (step.done) Funnel.mark(context, gates[index])
         }
     }
 

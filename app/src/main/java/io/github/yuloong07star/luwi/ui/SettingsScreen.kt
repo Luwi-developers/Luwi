@@ -1,6 +1,8 @@
 package io.github.yuloong07star.luwi.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -64,6 +66,7 @@ import io.github.yuloong07star.luwi.automation.AutomationStore
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.CameraOwner
 import io.github.yuloong07star.luwi.channel.ChannelSetting
+import io.github.yuloong07star.luwi.channel.Funnel
 import io.github.yuloong07star.luwi.channel.LwOcr
 import io.github.yuloong07star.luwi.channel.NotificationSetting
 import io.github.yuloong07star.luwi.channel.RemoteBackend
@@ -429,6 +432,25 @@ fun SettingsScreen() {
                                     text = stringResource(R.string.settings_menu_feedback),
                                     summary = stringResource(R.string.settings_menu_feedback_summary),
                                     onClick = { about = AboutPage.FEEDBACK },
+                                ),
+                                DropdownItem(
+                                    text = stringResource(R.string.settings_menu_funnel),
+                                    summary = stringResource(R.string.settings_menu_funnel_summary),
+                                    // 只复制, 不上报: 这是给人回答"我到底卡在哪一步"用的那张表
+                                    onClick = {
+                                        context.getSystemService(ClipboardManager::class.java)
+                                            ?.setPrimaryClip(
+                                                ClipData.newPlainText(
+                                                    "Luwi funnel",
+                                                    Funnel.report(context),
+                                                ),
+                                            )
+                                        Toast.makeText(
+                                            context,
+                                            R.string.settings_api_copied,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    },
                                 ),
                                 DropdownItem(
                                     text = stringResource(R.string.settings_menu_update),
