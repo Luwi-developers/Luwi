@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
 		const PANEL_BASE = '/luwi-sync';
 		const PANEL_HANDSHAKE = 'luwi-dsh-sync/panel';
 		const LEFT_PANEL_ID = 'luwi-sync';
+		const TERM_PANEL_ID = 'luwi-term';
 		const RIGHT_TAB_ID = `${PLUGIN_NAME}/panel`;
 		const RIGHT_TAB_KIND = 'luwi-sync';
 		const CSS_TAG_ID = 'luwi-dsh-sync-panel';
@@ -68,6 +69,16 @@ window.__ModuleLoader__.load({
 			'保存': 'Save',
 			'同步: 开': 'sync: on',
 			'同步: 关': 'sync: off',
+			// Luwi 加 (2026-11-05): 侧边栏终端那几句
+			'终端': 'Terminal',
+			'实验': 'experimental',
+			'在手机的沙盒里跑一条命令。一个回车一条, 输出接在这条命令下面。': 'Run one command in the phone sandbox. One line per Enter; output follows the command.',
+			'还没有输入。试试 help': 'Nothing yet. Try help.',
+			'输入命令, 回车执行': 'Type a command, Enter to run',
+			'运行': 'Run',
+			'运行中': 'Running',
+			'可用: help 看这句 · clear 清屏 · 其余命令还没接后端': 'Available: help · clear · anything else is not wired to the backend yet',
+			'还没接后端: 这一步只验形态, 接上后这里显示真实输出': 'Backend not wired yet: this step only checks the shape; real output lands here once it is connected',
 			'写下这段配置': 'write this into the sync config',
 			'改了要重启 host 才生效': 'restart the host for this to take effect',
 			'领先': 'ahead',
@@ -440,6 +451,19 @@ window.__ModuleLoader__.load({
 .luwi-sync-pair img { border-radius: 8px; background: #fff; padding: 4px; }
 .luwi-sync-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 6px; }
 .luwi-sync-icon { display: block; }
+/* Luwi 加 (2026-11-05): 侧边栏「终端」面板 (issue #14 表内 #32, 这一版只做形态) */
+.luwi-term-out { flex: 1 1 auto; min-height: 140px; overflow-y: auto; border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.12));
+  background: var(--dsw-alias-bg-layer-1, #1e1f26); padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+.luwi-term-line { white-space: pre-wrap; word-break: break-all; }
+.luwi-term-line[data-kind="cmd"] { color: var(--dsw-alias-brand-primary, #4c8dff); }
+.luwi-term-line[data-kind="dim"] { color: var(--dsw-alias-label-secondary, #9aa0a6); }
+.luwi-term-send { display: flex; gap: 6px; align-items: center; }
+.luwi-term-send .luwi-term-input { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.2)); background: transparent;
+  color: inherit; font: inherit; }
+.luwi-term-send .luwi-sync-btn { flex: none; }
 `;
 
 		/**
@@ -488,6 +512,30 @@ window.__ModuleLoader__.load({
 			h('path', { key: 'c', d: 'M9.6 5.4h3.1V3.2' }),
 			h('path', { key: 'd', d: 'M6.4 10.6H3.3v2.2' }),
 			h('path', { key: 'e', d: 'M12.7 5.4a5 5 0 0 1-8.2 1.4' }));
+		}
+
+		/**
+		 * 「终端」图标: 一个大于号加一条下划线。
+		 * @param {{size?: number, active?: boolean}} props - owner props (size / active)。
+		 * @returns {object} React 元素。
+		 */
+		function TermIcon(props) {
+			const size = Number(props && props.size) || 16;
+			return h('svg', {
+				className: 'luwi-sync-icon',
+				viewBox: '0 0 16 16',
+				width: size,
+				height: size,
+				fill: 'none',
+				stroke: 'currentColor',
+				strokeWidth: '1.3',
+				strokeLinecap: 'round',
+				strokeLinejoin: 'round',
+				'aria-hidden': 'true',
+				focusable: 'false',
+			},
+			h('path', { key: 'a', d: 'M2.4 3.6 6.2 8 2.4 12.4' }),
+			h('path', { key: 'b', d: 'M8.8 12.4h5' }));
 		}
 
 		// ── 面板 ───────────────────────────────────────────────────────────────────
@@ -1292,6 +1340,108 @@ window.__ModuleLoader__.load({
 
 		}
 
+		// ── 终端面板 ───────────────────────────────────────────────────────────────
+
+		/** 输出区最多留多少行 (再往后丢最老的, 免得手机上一路滚上去卡住)。 */
+		const TERM_MAX_LINES = 400;
+
+		/**
+		 * 终端面板本体 (左栏全局入口那个座位)。
+		 *
+		 * 这一版只有形态: 输入一行、回车、输出区追加一行。`help` 与 `clear` 是真的,
+		 * 其它命令如实说"后端还没接" —— 接上 lw_linux 那一步是 S2, 走宿主路由而不是
+		 * 从这里直接摸通道。
+		 * @returns {object} React 元素。
+		 */
+		function TermPanel() {
+			useLocaleTick();
+			const [lines, setLines] = React.useState([]);
+			const [text, setText] = React.useState('');
+			const [busy, setBusy] = React.useState(false);
+			const endRef = React.useRef(null);
+
+			React.useEffect(() => {
+				const node = endRef.current;
+				if (node && typeof node.scrollIntoView === 'function') {
+					try { node.scrollIntoView({ block: 'nearest' }); } catch { /* 老 WebView 不支持就算了 */ }
+				}
+			}, [lines]);
+
+			/**
+			 * 往输出区追加几行, 超长时从头部丢。
+			 * @param {Array<{kind: string, text: string}>} next - 要追加的行。
+			 * @returns {void}
+			 */
+			function append(next) {
+				setLines((prev) => {
+					const merged = prev.concat(next);
+					return merged.length > TERM_MAX_LINES ? merged.slice(merged.length - TERM_MAX_LINES) : merged;
+				});
+			}
+
+			/**
+			 * 跑一行输入。
+			 * @param {string} raw - 输入框里的原文。
+			 * @returns {void}
+			 */
+			function run(raw) {
+				const command = raw.trim();
+				if (command === '' || busy) return;
+				setText('');
+				if (command === 'clear') { setLines([]); return; }
+				append([{ kind: 'cmd', text: command }]);
+				if (command === 'help') {
+					append([{ kind: 'dim', text: t('可用: help 看这句 · clear 清屏 · 其余命令还没接后端') }]);
+					return;
+				}
+				setBusy(true);
+				try {
+					append([{ kind: 'dim', text: t('还没接后端: 这一步只验形态, 接上后这里显示真实输出') }]);
+				} finally {
+					setBusy(false);
+				}
+			}
+
+			return h('div', { className: 'luwi-sync-panel' },
+				h('div', { className: 'luwi-sync-card', key: 'head' },
+					h('div', { className: 'luwi-sync-card-title' },
+						h('span', { className: 'luwi-sync-strong' }, t('终端')),
+						h('span', { className: 'luwi-sync-badge' }, t('实验'))),
+					h('div', { className: 'luwi-sync-dim' }, t('在手机的沙盒里跑一条命令。一个回车一条, 输出接在这条命令下面。'))),
+				h('div', { className: 'luwi-term-out', key: 'out' },
+					lines.length === 0
+						? h('div', { className: 'luwi-sync-dim' }, t('还没有输入。试试 help'))
+						: lines.map((line, index) => h('div', {
+							key: `l${index}`,
+							className: 'luwi-term-line',
+							'data-kind': line.kind,
+						}, line.kind === 'cmd' ? `$ ${line.text}` : line.text)),
+					h('div', { key: 'end', ref: endRef })),
+				h('div', { className: 'luwi-term-send', key: 'send' },
+					h('input', {
+						className: 'luwi-term-input',
+						value: text,
+						placeholder: t('输入命令, 回车执行'),
+						spellCheck: false,
+						autoCapitalize: 'off',
+						autoCorrect: 'off',
+						disabled: busy,
+						onChange: (event) => setText(event.target.value),
+						onKeyDown: (event) => {
+							if (event.key !== 'Enter') return;
+							event.preventDefault();
+							run(text);
+						},
+					}),
+					h('button', {
+						type: 'button',
+						className: 'luwi-sync-btn',
+						'data-primary': '1',
+						disabled: busy || text.trim() === '',
+						onClick: () => run(text),
+					}, busy ? t('运行中') : t('运行'))));
+		}
+
 		// ── 座位 ───────────────────────────────────────────────────────────────────
 
 		/**
@@ -1308,7 +1458,19 @@ window.__ModuleLoader__.load({
 				{ name: 'main', key: LEFT_PANEL_ID },
 				() => h(SyncPanel, { seat: 'main' }),
 			);
+			// 2026-11-05: 左栏第二枚入口 —— 终端 (issue #14 表内 #32)。挂在同一个插件里,
+			// 只是为了不引入第二个客户端 bundle; 两个座位互不相干, 摘一个不影响另一个。
+			const termIcon = ctx.slots.register(
+				{ name: 'sidebar.panellist', id: TERM_PANEL_ID, order: 41, label: () => t('终端') },
+				(props) => h(TermIcon, { size: props.size, active: props.active }),
+			);
+			const termBody = ctx.slots.register(
+				{ name: 'main', key: TERM_PANEL_ID },
+				() => h(TermPanel, {}),
+			);
 			return () => {
+				try { termBody(); } catch { /* 已经摘掉 */ }
+				try { termIcon(); } catch { /* 已经摘掉 */ }
 				try { body(); } catch { /* 已经摘掉 */ }
 				try { icon(); } catch { /* 已经摘掉 */ }
 			};

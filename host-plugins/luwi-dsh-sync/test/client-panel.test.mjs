@@ -149,10 +149,14 @@ test('座位齐 (both): 左栏图标 + main 整页 + 右侧栏 tab 两段式', a
     assert.deepEqual(specs, [
       { name: 'sidebar.panellist', id: 'luwi-sync', order: 40, label: specs[0].label },
       { name: 'main', key: 'luwi-sync' },
+      // Luwi 加 (2026-11-05): 终端面板 —— 同一个 panellist 槽里的第二个条目, 排在「同步」后面
+      { name: 'sidebar.panellist', id: 'luwi-term', order: 41, label: specs[2].label },
+      { name: 'main', key: 'luwi-term' },
       { name: 'sidebar.right.pane.tab', key: 'luwi-dsh-sync/panel' },
     ])
     assert.equal(typeof specs[0].label, 'function')
     assert.equal(specs[0].label(), '同步')
+    assert.equal(specs[2].label(), '终端')
     assert.deepEqual(state.injects, ['sidebar.right.pane.tab'])
     assert.equal(services.tabs.registrations.length, 1)
     const tab = services.tabs.registrations[0]
@@ -163,10 +167,10 @@ test('座位齐 (both): 左栏图标 + main 整页 + 右侧栏 tab 两段式', a
     assert.equal(tab.guide.length, 1)
     assert.equal(tab.guide[0].id, 'sync')
 
-    // 卸载: 三处注册全被摘掉
+    // 卸载: 五处注册全被摘掉 (同步的两处 + 终端的两处 + 右侧栏 tab)
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     for (const off of state.injectedCleanups) off()
-    assert.equal(state.removed.length, 3)
+    assert.equal(state.removed.length, 5)
   } finally {
     restoreFetch()
     restore()
@@ -182,7 +186,7 @@ test('宿主说 left: 右侧栏一条注册都不发生', async () => {
     const { ctx, state } = makeCtx(services)
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
     assert.equal(state.injects.length, 0)
     assert.equal(services.tabs.registrations.length, 0)
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
@@ -219,7 +223,7 @@ test('探针失败 (通道没开): 退回 both —— 入口要看得见, 面板
     const { ctx, state } = makeCtx(services)
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.right.pane.tab'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main', 'sidebar.right.pane.tab'])
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     for (const off of state.injectedCleanups) off()
   } finally {
@@ -236,14 +240,14 @@ test('右侧栏可选服务缺失: 只装左栏那条, 不抛, 卸载时把轮�
     const { ctx, state } = makeCtx({})
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
     // 座位回调跑过 (能力门过了), 只是服务没就绪 → 一圈轮询排着
     assert.deepEqual(state.injects, ['sidebar.right.pane.tab'])
     for (const off of state.injectedCleanups) off()
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     // 卸载之后再等几拍: 没有迟到的注册
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
   } finally {
     restoreFetch()
     restore()
