@@ -40,6 +40,7 @@
 | `check-docx-preview.mjs` | Office 预览那一包 (2.7.9 第 6 条 T8/T9) 的判据表: 包形状 / 装载 id 与包名一字不差 / `extension` 档与那两条**末尾不能带 `$`** 的模式 / 读字节走 `remote.workspaceFiles` / 渲染进 `sandbox` iframe / 10 MB 闸与三种失败 / `lib/client.js` 是打包产物 / 两张覆盖层表各一行且不在 `PluginRows` |
 | `check-phone-actions.mjs` | 手机直连那一条的判据表 (2.8.0 B3-c): 快应用能力只在 `QuickAppCapability.kt` 里 / 标准链接三种写法 / 包名不像包名就拒 / 快应用这一条不许调建屏 / 不可用明确 unsupported / `quick_app` 只走 deep link 且路由里没有虚拟屏 / 桥上有 capabilities 与 quickapp 两档 / 插件的两条工具参数与说明 / phone.md 的固定优先级 (native -> intent -> 无障碍 -> 虚拟屏 -> unsupported) |
 | `check-tools.mjs` | 扫本目录自己: 命名 / 用法段 / 根目录落位 (就是本文那三条约定) |
+| `check-device-evidence.mjs` | 提交前置闸 (2.8.0 #30): 一份证据 Markdown (每个 `## <项名>` 一簇) 逐项核对测试环境四档与实测结果, 缺真机 / 模拟器读数就退出 3 并点名缺项, 齐了退出 0 报读数条数; 不带文件时跑两份夹具自测 (应分别给出 3 / 0), `lw-release-check.ps1` 的汇总里也调它 |
 | `gen-keycodes.mjs` | 从 Android 自己的头文件重新生成 `channel/KeyCodes.kt` 那张名字表 |
 
 ## 二、设备脚本 (要 adb, 一律收 `-Serial`)
@@ -126,6 +127,7 @@ node tools/check-explore.mjs
 node tools/check-host-persistence.mjs
 node tools/check-phone-actions.mjs
 node tools/check-web-compat.mjs
+node tools/check-device-evidence.mjs
 python tools/check-bare-percent.py
 node tools/check-tools.mjs
 ```
