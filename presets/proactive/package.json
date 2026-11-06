@@ -1,0 +1,13 @@
+{
+  "name": "@local/dsh-preset-proactive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Luwi local preset: a remind-only agent that wakes at the times the owner set, reads the latest exploration summary, memory, today's calendar and the notification shade, then decides whether to speak. It never creates a virtual screen.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

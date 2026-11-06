@@ -289,6 +289,13 @@
             android:name=".tool.ExploreAlarmReceiver"
             android:exported="false" />
 
+        <!-- 主动对话的排期 (2.8.0 B4-a): 一天几个时刻, 到点读 proactive-card.md 写一行收件箱。
+             与上面两个闹钟分开一个 requestCode (43 对 41 / 42), 三个互不覆盖; exported=false 的
+             理由与上一条相同 -->
+        <receiver
+            android:name=".tool.ProactiveAlarmReceiver"
+            android:exported="false" />
+
         <!-- 桌面组件那两个槽 (插件方案 v2 的 3.1): 组件由**主 APK**声明, 插件只往里填内容 ——
              于是"往桌面加一只鲸鱼娘"不再需要第二个 APK。同槽互斥, 一个槽同一时刻只挂一只插件 -->
         <receiver

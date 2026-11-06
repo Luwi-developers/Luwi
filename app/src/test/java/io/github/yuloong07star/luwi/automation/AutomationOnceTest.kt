@@ -9,10 +9,9 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 
 /**
- * 「只响一次」那条 (2.7.8 批次 8) 与每日主动说的记账
+ * 「只响一次」那条 (2.7.8 批次 8)
  *
- * 这一批最容易漂的是两处: `once` 的 `at` 到底认不认"没带时区的本机时刻" (不认), 以及
- * `saidToday` 数的是不是只有"真的投出去的 task" (remind / 手动 / 被拦 / 没投出去都不算)
+ * 这一批最容易漂的是 `once` 的 `at` 到底认不认"没带时区的本机时刻" (不认)
  */
 class AutomationOnceTest {
 
@@ -25,26 +24,6 @@ class AutomationOnceTest {
     )
 
     private fun moment(text: String): Long = OffsetDateTime.parse(text).toInstant().toEpochMilli()
-
-    private fun fired(
-        hour: Int,
-        action: String = "task",
-        hit: Boolean = true,
-        blocked: String? = null,
-        delivered: Boolean? = true,
-        manual: Boolean = false,
-    ) = AutomationStore.Fired(
-        at = moment("2026-10-18T${hour.toString().padStart(2, '0')}:00:00+08:00"),
-        rule = "r$hour",
-        kind = "time",
-        hit = hit,
-        blocked = blocked,
-        reason = "test",
-        action = action,
-        delivered = delivered,
-        count = 1,
-        manual = manual,
-    )
 
     @Test
     fun aOnceRuleIsReadAndScheduled() {
@@ -100,48 +79,5 @@ class AutomationOnceTest {
         val next = one.nextFireAt(from, zone)
 
         assertEquals("2026-10-18T07:30+08:00", OffsetDateTime.ofInstant(Instant.ofEpochMilli(next!!), zone).toString())
-    }
-
-    @Test
-    fun theSaidLimitIsClamped() {
-        assertEquals(1, AutomationRule.coerceSaidLimit(0))
-        assertEquals(1, AutomationRule.coerceSaidLimit(-5))
-        assertEquals(10, AutomationRule.coerceSaidLimit(99))
-        assertEquals(3, AutomationRule.coerceSaidLimit(3))
-    }
-
-    @Test
-    fun saidTodayCountsOnlyDeliveredTaskRuns() {
-        val rows = listOf(
-            fired(hour = 8),
-            fired(hour = 9, manual = true),
-            fired(hour = 10, action = "remind"),
-            fired(hour = 11, blocked = "quiet"),
-            fired(hour = 12, delivered = false),
-            fired(hour = 13, hit = false),
-            fired(hour = 14, blocked = "said"),
-        )
-
-        assertEquals("只有 08:00 那一条算", 1, AutomationStore.saidToday(rows, "2026-10-18", zone))
-    }
-
-    @Test
-    fun saidTodayOnlyCountsTheGivenDay() {
-        val rows = listOf(
-            fired(hour = 8),
-            AutomationStore.Fired(
-                at = moment("2026-10-17T08:00:00+08:00"),
-                rule = "yesterday",
-                kind = "time",
-                hit = true,
-                blocked = null,
-                reason = "test",
-                action = "task",
-                delivered = true,
-                count = 1,
-            ),
-        )
-
-        assertEquals(1, AutomationStore.saidToday(rows, "2026-10-18", zone))
     }
 }

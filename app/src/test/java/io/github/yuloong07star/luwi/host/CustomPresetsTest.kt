@@ -16,11 +16,15 @@ import org.junit.Test
  */
 class CustomPresetsTest {
 
-    /** 那张行 id 表: 探索与酒馆那两份 (2026-10-18 手机/视频两条预设下线; 2026-10-27 加回酒馆) */
+    /** 那张行 id 表: 探索 / 主动对话 / 酒馆 (2026-10-18 手机/视频两条预设下线; 2026-10-27 加回酒馆; 2.8.0 B4-a 加主动对话) */
     @Test
-    fun `随包发的模式预设是探索与酒馆`() {
+    fun `随包发的模式预设是探索主动对话与酒馆`() {
         assertEquals(
-            listOf("preset-explore" to "explore", "preset-tavern" to "tavern"),
+            listOf(
+                "preset-explore" to "explore",
+                "preset-proactive" to "proactive",
+                "preset-tavern" to "tavern",
+            ),
             CustomPresets.PRESET_ROWS,
         )
     }

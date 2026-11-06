@@ -324,37 +324,49 @@ check('监测器那一行也进设置页 (两份 strings 都有)', [
   en.includes('name="settings_automation_monitor_once"'),
 ], [true, true])
 
-/* ── 八、每天最多主动说几次 (D17) ─────────────────────────────────────── */
+/* ── 八、每日总上限取消 + 与主动排期共用的 30 分钟闸 (2.8.0 B4-b) ─────── */
 
-check('上限那三个数: 3 / 1 / 10', [
-  kotlinNumber(rule, 'SAID_LIMIT_DEFAULT'),
-  kotlinNumber(rule, 'SAID_LIMIT_MIN'),
-  kotlinNumber(rule, 'SAID_LIMIT_MAX'),
-], [3, 1, 10])
+const gate = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveGate.kt')
+const proactive = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveSchedule.kt')
 
-check('上限落在 settings.json 的 saidLimit, 读时夹进 1..10', [
-  /put\("saidLimit", settings\.saidLimit\)/.test(store),
-  /root\["saidLimit"\]/.test(store),
-  /coerceSaidLimit/.test(store),
-], [true, true, true])
+check('每日总次数上限取消了: saidLimit 不再出现在规则 / 设置 / 引擎 / 设置页 / 工具', [
+  rule.includes('saidLimit'),
+  store.includes('saidLimit'),
+  engine.includes('saidLimit'),
+  screen.includes('saidLimit'),
+  tool.includes('saidLimit'),
+], [false, false, false, false, false])
 
-check('引擎那条闸: task 且已达上限就 blocked = said', [
-  /saidToday >= on\.saidLimit -> "said"/.test(engine),
-  /"said" -> "今天已经主动说了/.test(engine),
-], [true, true])
+check('那本上限账也从设置与历史里删掉了', [
+  store.includes('fun saidToday('),
+  store.includes('SAID_LIMIT'),
+  rule.includes('SAID_LIMIT'),
+], [false, false, false])
 
-check('手动「立刻跑一次」不算进那一本账', [
-  /manual = true,/.test(engine),
-  /put\("manual", true\)/.test(store),
-  /manual = root\["manual"\]/.test(store),
-], [true, true, true])
-
-check('那本账从 history.jsonl 现算 (只数 task / 投出去的 / 非手动)', [
-  /one\.action == "task"/.test(store),
-  /!one\.manual/.test(store),
-  /one\.delivered != false/.test(store),
-  /fun saidToday\(/.test(store),
+check('自动指令投递走共享闸, 排期那一侧也走同一个口', [
+  /ProactiveGate\.deliver\(context, now, VoiceInbox\.SOURCE_AUTOMATION\)/.test(engine),
+  /ProactiveGate\.deliver\(context, System\.currentTimeMillis\(\), VoiceInbox\.SOURCE_PROACTIVE\)/.test(proactive),
+  /const val GAP_MINUTES = 30/u.test(gate),
+  /fun open\(lastAt: Long, now: Long\): Boolean/u.test(gate),
 ], [true, true, true, true])
+
+/** 手动「立刻跑一次」那一段 (函数体到下一个 4 空格的收尾括号) */
+const fireNowStart = engine.indexOf('fun fireNow(context: Context, name: String): String')
+const fireNow = fireNowStart < 0
+  ? ''
+  : engine.slice(fireNowStart, engine.indexOf('\n    }', fireNowStart) + 6)
+
+check('手动「立刻跑一次」不查也不占那笔闸账', [
+  fireNow.includes('VoiceInbox.append'),
+  fireNow.includes('ProactiveGate'),
+  /manual = true,/.test(fireNow),
+], [true, false, true])
+
+check('静默时段那条闸还在 (B4-b ⑨ 保留)', [
+  /PowerWindow\.inside\(PowerWindow\.minutesOfDay\(now\), window\) -> "quiet"/.test(engine),
+  engine.includes('现在是静默时段'),
+  /\.quietEnabled/.test(engine),
+], [true, true, true])
 
 /* ── 九、「且」与「或」那一批 (2.7.8 批次 9) ─────────────────────────────── */
 

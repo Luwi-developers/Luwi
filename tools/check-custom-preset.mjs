@@ -119,6 +119,7 @@ function insertBlock(source) {
 
 for (const [file, row] of [
   ['presets/explore/cordis.patch.yml', 'preset-explore'],
+  ['presets/proactive/cordis.patch.yml', 'preset-proactive'],
 ]) {
   const block = insertBlock(await read(file))
   check(`${file} 有那段 insert`, block !== null, true)
@@ -135,15 +136,16 @@ check(
   'Kotlin 那一侧认的行 id 与随包那几份一致',
   [
     kotlin.includes('ROW_EXPLORE = "preset-explore"'),
+    kotlin.includes('ROW_PROACTIVE = "preset-proactive"'),
     kotlin.includes('ROW_MOBILE = "preset-mobile-use"') === false,
     kotlin.includes('ROW_VIDEO = "preset-video"') === false,
   ],
-  [true, true, true],
+  [true, true, true, true],
 )
 
 check(
-  'Kotlin 那张 PRESET_ROWS 只剩探索那一对 (补声明与报缺哪一份读同一张表)',
-  /val PRESET_ROWS: List<Pair<String, String>> = listOf\(\s*ROW_EXPLORE to "explore",\s*\)/.test(kotlin),
+  'Kotlin 那张 PRESET_ROWS 有探索与主动对话那两对 (补声明与报缺哪一份读同一张表)',
+  /val PRESET_ROWS: List<Pair<String, String>> = listOf\(\s*ROW_EXPLORE to "explore",\s*ROW_PROACTIVE to "proactive",\s*\)/.test(kotlin),
   true,
 )
 
@@ -175,8 +177,8 @@ check(
   true,
 )
 check(
-  'pack-host 只摆探索那一份声明到 lw-presets/ 下',
-  /\['explore'\]/.test(pack) && /lw-presets/.test(pack),
+  'pack-host 摆探索与主动对话那两份声明到 lw-presets/ 下',
+  /const presets = \['explore', 'proactive'\]/.test(pack) && /lw-presets/.test(pack),
   true,
 )
 check(

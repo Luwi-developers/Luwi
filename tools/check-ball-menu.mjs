@@ -223,13 +223,16 @@ check(
   [true, true, true, true],
 )
 check(
-  '宿主侧原子写 ( .tmp + rename), 失败如实不编 0',
+  '宿主侧原子写 (唯一临时名 + rename), 失败如实不编 0',
   [
     /async function refreshBalance[\s\S]{0,80}/.test(plugin),
-    plugin.includes("const temporary = `${path}.tmp`"),
+    // 临时名自 2026-11-02 起是唯一的 (`${path}.<pid>.<n>.tmp`): 固定 `.tmp` 会让同一个文件的
+    // 两个写者在 rename 上撞车 —— 先到的把临时文件搬走, 后到的报 ENOENT, 两边都以为自己成功了
+    plugin.includes('const temporary = temporaryName(path)'),
+    plugin.includes('await rename(temporary, path)'),
     plugin.includes("payload.reason = 'the DeepSeek account is not signed in on this host'"),
   ],
-  [true, true, true],
+  [true, true, true, true],
 )
 
 /* ── 四、外观候选只有一份口径 ─────────────────────────────────────────── */

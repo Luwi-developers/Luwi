@@ -73,6 +73,9 @@ internal object CustomPresets {
     /** 声明各自那个 loader 行 id: 幂等判据就是"patch 里有没有这一行" */
     private const val ROW_EXPLORE = "preset-explore"
 
+    /** 主动对话那一份 (2.8.0 B4-a): 到点自己开一场, 默认只提醒 */
+    private const val ROW_PROACTIVE = "preset-proactive"
+
     /** 酒馆那一份 (2026-10-27): persona 写酒馆协议, 发言走 `tavern_say` */
     private const val ROW_TAVERN = "preset-tavern"
 
@@ -86,6 +89,7 @@ internal object CustomPresets {
      */
     val PRESET_ROWS: List<Pair<String, String>> = listOf(
         ROW_EXPLORE to "explore",
+        ROW_PROACTIVE to "proactive",
     ) + if (LuwiTavern.enabled) listOf(ROW_TAVERN to "tavern") else emptyList()
 
     /**

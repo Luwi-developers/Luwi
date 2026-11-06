@@ -9,7 +9,7 @@
  *      "新加的段就收着"相反), 而且 `SettingsSectionsTest` 也看不出来 (那份测的是纯函数,
  *      不知道页面上真有几段)
  *
- * 所以这份脚本把**页面上那 20 个 `settingsSection(key = …)` 的实况**与名单逐个对齐 (顺序也管),
+ * 所以这份脚本把**页面上那 21 个 `settingsSection(key = …)` 的实况**与名单逐个对齐 (顺序也管),
  * 与 `check-automations.mjs` / `check-mode-model.mjs` 那种"两处名单必须一致"同一个道理
  *
  * 跑法: node tools/check-settings-sections.mjs   (不需要设备)
@@ -62,12 +62,12 @@ check('白名单就是 D1 那六段 (省电 + 常用五段; 导航那一段 2026
   'power', 'appearance', 'channel', 'ball', 'wake', 'speak',
 ])
 
-check('能力那一组 14 段 (接口 2026-10-25 加在最末)', ability, [
+check('能力那一组 15 段 (接口 2026-10-25 加在最末, 定时对话 2.8.0 #22)', ability, [
   'notifications', 'screenshot', 'look', 'lock',
-  'explore', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'tavern', 'permissions', 'api',
+  'explore', 'proactive', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'tavern', 'permissions', 'api',
 ])
 
-check('页面上真是 20 段', page.length, 20)
+check('页面上真是 21 段', page.length, 21)
 
 check('两份名单拼起来与页面逐个对齐 (顺序也管)', [...(open ?? []), ...(ability ?? [])], page)
 

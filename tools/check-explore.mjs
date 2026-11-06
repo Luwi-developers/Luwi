@@ -68,11 +68,10 @@ const section = host.slice(start, end)
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
-    + ' exploreDayKey, EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
-    + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SAID_DEFAULT, EXPLORE_SUMMARY_CHARS,'
+    + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
+    + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
-    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE,'
-    + ' proactiveSaidCount }',
+    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
 )(() => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {}, async () => {})
 
 /* ── 一、预设那一段 ────────────────────────────────────────────────────── */
@@ -165,11 +164,10 @@ check('工具说明里写清摘要不许用别的工具写', toolFace.includes('
 
 /* ── 三、预算常数与那张真值表 ─────────────────────────────────────────── */
 
-check('缺省 30 分钟 / 60 步 / 每天 3 次', [
+check('缺省 30 分钟 / 60 步', [
   api.EXPLORE_MINUTES_DEFAULT,
   api.EXPLORE_STEPS_DEFAULT,
-  api.EXPLORE_SAID_DEFAULT,
-], [30, 60, 3])
+], [30, 60])
 check('两个范围就是 1..180 与 1..1000', [api.EXPLORE_MINUTES_RANGE, api.EXPLORE_STEPS_RANGE], [[1, 180], [1, 1000]])
 check('摘要 8000 字 / 留 30 份', [
   api.EXPLORE_SUMMARY_CHARS,
@@ -304,7 +302,7 @@ check('那份任务卡的名字与上限 (宿主与应用同一个约定)', [
 ], ['explore-card.md', 8000, true])
 check('宿主收尾写卡: 原子写 + nextTask 只收非空', [
   /async function exploreTaskWrite\(text\)/u.test(section),
-  /const temporary = `\$\{path\}\.tmp`/u.test(section),
+  /const temporary = temporaryName\(path\)/u.test(section),
   /nextTask: args\?\.nextTask/u.test(host),
   /exploreTaskWrite\(askedNext\)/u.test(section),
 ], [true, true, true, true])
@@ -317,7 +315,7 @@ check('摘要目录就在 lw 底下 (候选目录 2026-10-18 已删)', [
 ], [true, true])
 check('探索状态是合并式原子写 (未知键留着, .tmp + rename)', [
   /\.\.\.base,/u.test(section),
-  /const temporary = `\$\{path\}\.tmp`/u.test(section),
+  /const temporary = temporaryName\(path\)/u.test(section),
   /await rename\(temporary, path\)/u.test(section),
 ], [true, true, true])
 check('宿主起来时若 run 还在就重挂预算', [
@@ -339,8 +337,8 @@ check(
 const pack = await read('tools/pack-host.mjs')
 const custom = await read('app/src/main/java/io/github/yuloong07star/luwi/host/CustomPresets.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
-check('pack-host 摆的就是探索那一份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore'\]/u.test(pack), true)
-check('Kotlin 那张 PRESET_ROWS 是三对', /ROW_EXPLORE to "explore",/u.test(custom), true)
+check('pack-host 摆的就是探索与主动对话那两份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore', 'proactive'\]/u.test(pack), true)
+check('Kotlin 那张 PRESET_ROWS 里有探索那一对', /ROW_EXPLORE to "explore",/u.test(custom), true)
 const exploreBranch = host.slice(
   host.indexOf("if (line.source === 'explore')"),
   host.indexOf('const automated = line.source'),
@@ -478,34 +476,26 @@ check('宿主起来时两个 ensure 都调', [
   /ExploreSchedule\.ensure\(this\)/.test(service),
 ], [true, true])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 上限 / 读数, 没有手动开始', [
+check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限', [
   /settingsSection\(\s*key = "explore"/u.test(screen),
   screen.includes('R.string.settings_explore_toggle'),
   screen.includes('R.string.settings_explore_at'),
   screen.includes('R.string.settings_explore_card'),
-  screen.includes('R.string.settings_explore_said_title'),
   screen.includes('ExploreSchedule.save('),
   screen.includes('ExploreTask.write('),
   !screen.includes('settings_explore_start'),
-], [true, true, true, true, true, true, true, true])
+  !screen.includes('settings_explore_said_title'),
+  !screen.includes('saidLimit'),
+], [true, true, true, true, true, true, true, true, true])
 
 check('构建把初始卡拷进 assets', (await read('app/build.gradle.kts')).includes('projectDirectory.file("explore-card.md")'), true)
 
-check('宿主那本"主动说"的账: 只数 task / 非手动 / 投出去的 / 同一天', api.proactiveSaidCount([
-  '{"hit":true,"action":"task","delivered":true,"at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":true,"manual":true,"at":1792230000000}',
-  '{"hit":true,"action":"remind","delivered":true,"at":1792230000000}',
-  '{"hit":true,"action":"task","blocked":"quiet","at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":false,"at":1792230000000}',
-  '{"hit":false,"action":"task","at":1792230000000}',
-  '{"hit":true,"action":"task","delivered":true,"at":0}',
-], api.exploreDayKey(1792230000000)), 1)
-
-check('status 那两行读数换了账本 (不再写"下一批")', [
-  section.includes('task rules only; a manual run does not count'),
+check('status 那两行读数换了账本 (每日总上限 2.8.0 起取消, 不再有那一行)', [
   section.includes('next task card:'),
+  !section.includes('said today:'),
+  !section.includes('saidLimit'),
   !section.includes('the daily limit lands in the next batch'),
-], [true, true, true])
+], [true, true, true, true])
 
 /* ── 十三、预算透传 (2.7.9 第 8 条 T4) ─────────────────────────────────── */
 
@@ -643,12 +633,13 @@ check('到点先解屏再投那一行 (否则模型第一眼看到的是锁屏)'
   schedule.indexOf('unlockForExplore(context)') < schedule.indexOf('VoiceInbox.append('),
 ], [true, true])
 check('解屏走「锁屏」那一段: 点亮 / 没录过不放 / 失败太多次不放', [
-  /fun unlockForExplore\(context: Context\): String\?/.test(schedule),
+  /fun unlockForExplore\(context: Context\): String\? =\s*unlockAtSchedule\(context, "the scheduled exploration"\)/.test(schedule),
+  /fun unlockAtSchedule\(context: Context, tag: String\): String\?/.test(schedule),
   /LockReplay\.wakeScreen\(context, allowConnecting = true\)/.test(schedule),
-  /LockReplay\.replayNow\(context, "the scheduled exploration"\)/.test(schedule),
+  /LockReplay\.replayNow\(context, tag\)/.test(schedule),
   /if \(!LockSetting\.unlockable\(context\)\)/.test(schedule),
   /if \(LockTries\.exhausted\(LockSetting\.tries\(context\)\)\)/.test(schedule),
-], [true, true, true, true, true])
+], [true, true, true, true, true, true])
 check('"有没有可放的东西"只有一处 (两条开关问同一句)', [
   /fun unlockable\(context: Context\): Boolean/.test(lockSettings),
   /if \(on && !unlockable\(context\)\)/.test(lockSettings),
@@ -706,6 +697,7 @@ const releaseCalls = []
 let releaseAnswer = (displayId) => ({ released: true, displayId })
 const screensApi = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'call', 'shortSession',
+  'temporaryName',
   `${section}\nreturn { getScreens: () => exploreScreens,`
     + ' setScreens: (next) => { exploreScreens = next; exploreScreensLoaded = true },'
     + ' resetScreens: () => { exploreScreens = []; exploreScreensLoaded = true },'
@@ -718,6 +710,9 @@ const screensApi = new Function(
     return releaseAnswer(params.displayId)
   },
   (id) => String(id).slice(0, 8),
+  // 主线的写盘已经改成唯一临时名 (2efab39), 而这一段源码是抽出来跑的 —— 临时名这一步给个
+  // 同形状的替身就行, 这个文件里判的是账怎么走, 不是 `.tmp` 叫什么
+  (path) => `${path}.check.tmp`,
 )
 
 const owned = (displayId, sessionId) => ({ displayId, sessionId, createdAt: 1, released: false })
