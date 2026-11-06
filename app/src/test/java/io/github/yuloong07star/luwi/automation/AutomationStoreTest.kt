@@ -165,4 +165,133 @@ class AutomationStoreTest {
             settings.placeMeters in AutomationStore.PLACE_METER_CHOICES,
         )
     }
+
+    // ---- 目录迁移 (2.8.0 #25) ----
+
+    private fun ruleJson(name: String, cooldown: Int = 30): String =
+        """
+        {"name":"$name","enabled":true,"when":{"kind":"time","at":"07:30"},
+         "then":{"kind":"remind","text":"提醒带伞"},"cooldownMinutes":$cooldown}
+        """.trimIndent()
+
+    @Test
+    fun `新写只落 rules 子目录`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-write").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY)
+            val (file, warnings) = AutomationStore.writeTo(rules, "带伞", ruleJson("带伞"))
+            assertEquals(
+                "新写落在 rules/ 下",
+                java.io.File(rules, "带伞.json"),
+                file,
+            )
+            assertFalse("根目录不再出新规则", java.io.File(root, "带伞.json").exists())
+            assertTrue("这份规则写得进去", file.isFile)
+            assertTrue("没有未知键就没有提醒", warnings.isEmpty())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `根目录旧规则读得出来, 同名时 rules 那一份说了算`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-legacy").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY).apply { mkdirs() }
+            val old = java.io.File(root, "旧规则.json")
+            old.writeText(ruleJson("旧规则", cooldown = 60))
+            java.io.File(rules, "旧规则.json").writeText(ruleJson("旧规则", cooldown = 5))
+
+            val both = AutomationStore.mergedEntries(rules, root)
+            assertEquals("同名只算一条", 1, both.size)
+            assertEquals("rules/ 那一份说了算", 5, both.single().rule?.cooldownMinutes)
+
+            java.io.File(rules, "旧规则.json").delete()
+            val legacy = AutomationStore.mergedEntries(rules, root)
+            assertEquals("旧根目录那一份仍读得出来", 1, legacy.size)
+            assertEquals("旧规则", legacy.single().name)
+            assertTrue("读得出来就不是坏规则", legacy.single().problem == null)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `目录里的设置与地点不会被当成规则`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-filter").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY).apply { mkdirs() }
+            java.io.File(root, AutomationStore.SETTINGS_FILE).writeText("{}")
+            java.io.File(root, AutomationStore.PLACES_FILE).writeText("{}")
+            java.io.File(rules, AutomationStore.SETTINGS_FILE).writeText("{}")
+            java.io.File(rules, AutomationStore.PLACES_FILE).writeText("{}")
+
+            assertEquals("根目录只剩设置与地点时一条规则都没有", emptyList<String>(), AutomationStore.namesIn(root))
+            assertEquals("rules/ 里也一样", emptyList<String>(), AutomationStore.namesIn(rules))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `读不出来的规则复制到 rejected, 原件不动`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-rejected").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY).apply { mkdirs() }
+            val rejected = java.io.File(root, AutomationStore.REJECTED_DIRECTORY)
+            val broken = java.io.File(rules, "坏规则.json")
+            broken.writeText("{ this is not json")
+
+            val entries = AutomationStore.mergedEntries(rules, root, rejected)
+            assertEquals("坏规则也要列出来", 1, entries.size)
+            val problem = entries.single().problem
+            assertTrue("读不出来要带原因", problem != null && problem.contains("not valid JSON"))
+            assertTrue("原件留给主人看与删", broken.isFile)
+            assertEquals(
+                "副本逐字节是原件",
+                "{ this is not json",
+                java.io.File(rejected, "坏规则.json").readText(),
+            )
+            val error = java.io.File(rejected, "坏规则.error.txt").readText()
+            assertTrue("错误说明非空", error.isNotBlank())
+            assertTrue("错误说明点名原因", error.contains("not valid JSON"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `删坏规则时原件与 rejected 副本一起删`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-delete").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY).apply { mkdirs() }
+            val rejected = java.io.File(root, AutomationStore.REJECTED_DIRECTORY)
+            val broken = java.io.File(rules, "坏规则.json")
+            broken.writeText("{ this is not json")
+            AutomationStore.mergedEntries(rules, root, rejected)
+            assertTrue("先有副本", java.io.File(rejected, "坏规则.json").isFile)
+
+            assertTrue(AutomationStore.deleteIn(rules, root, rejected, "坏规则"))
+            assertFalse("原件删掉", broken.exists())
+            assertFalse("rejected/ 副本删掉", java.io.File(rejected, "坏规则.json").exists())
+            assertFalse("错误说明也删掉", java.io.File(rejected, "坏规则.error.txt").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `删旧根目录的规则也认`() {
+        val root = kotlin.io.path.createTempDirectory("lw-rules-delete-legacy").toFile()
+        try {
+            val rules = java.io.File(root, AutomationStore.RULES_DIRECTORY).apply { mkdirs() }
+            val rejected = java.io.File(root, AutomationStore.REJECTED_DIRECTORY)
+            val old = java.io.File(root, "旧规则.json")
+            old.writeText(ruleJson("旧规则"))
+            assertTrue(AutomationStore.deleteIn(rules, root, rejected, "旧规则"))
+            assertFalse("旧位置那一份也删掉", old.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

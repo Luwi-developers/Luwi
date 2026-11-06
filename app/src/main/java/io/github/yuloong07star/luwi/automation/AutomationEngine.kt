@@ -313,8 +313,7 @@ internal object AutomationEngine {
      * @param force 目录戳没变也重读 (刚写完一条规则时用)
      */
     private fun refresh(context: Context, force: Boolean) {
-        val directory = AutomationStore.directory(context)
-        val current = if (directory.isDirectory) directory.lastModified() else 0L
+        val current = AutomationStore.stamp(context)
         if (!force && current == stamp) return
         stamp = current
         rules = runCatching { AutomationStore.rules(context) }.getOrDefault(emptyList())

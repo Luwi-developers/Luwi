@@ -51,8 +51,14 @@ internal object LwAutomation {
         )
     }
 
-    /** 目录在哪 (设置页与创建提示词都用它) */
+    /** 那一份家在哪 (settings / history / places 都在这) */
     fun directory(context: Context) = AutomationStore.directory(context)
+
+    /** 新写的规则在哪 (2.8.0 起一律是 `automations/rules/`) */
+    fun rulesDirectory(context: Context) = AutomationStore.rulesDirectory(context)
+
+    /** `rejected/` 里攒了几条坏规则 */
+    fun rejectedCount(context: Context): Int = AutomationStore.rejectedCount(context)
 
     /** 现在有哪些规则, 读不出来的也在里面 (界面要说得出"这一条坏了") */
     fun entries(context: Context): List<AutomationStore.Entry> = AutomationStore.entries(context)
@@ -112,7 +118,7 @@ internal object LwAutomation {
         val entries = entries(context)
         if (entries.isEmpty()) {
             return text(
-                "there are no automatic commands yet (${directory(context)}). Write one with" +
+                "there are no automatic commands yet (${rulesDirectory(context)}). Write one with" +
                     " op=write: a name and a JSON object shaped like" +
                     " {\"name\",\"enabled\",\"when\":{\"kind\",...},\"then\":{\"kind\":\"remind\"|\"task\"," +
                     "\"text\"},\"cooldownMinutes\",\"dailyLimit\",\"quietHours\"}; the kinds are" +
@@ -132,13 +138,13 @@ internal object LwAutomation {
             }.orEmpty()
             "  ${entry.name}  [$state]  $what$last"
         }
-        return text("${entries.size} automatic command(s) in ${directory(context)}:\n$rows")
+        return text("${entries.size} automatic command(s) in ${rulesDirectory(context)}:\n$rows")
     }
 
     private fun read(context: Context, request: JsonObject): JsonObject {
         val name = normalizeName(request.string("name"))
-        val file = AutomationStore.file(context, name)
-        if (!file.isFile) {
+        val file = AutomationStore.existingFile(context, name)
+        if (file == null) {
             return text(
                 "there is no automatic command called \"$name\". What is there: " +
                     (AutomationStore.names(context).joinToString(", ").ifEmpty { "nothing yet" }),
@@ -155,7 +161,7 @@ internal object LwAutomation {
     private fun write(context: Context, request: JsonObject): JsonObject {
         val name = normalizeName(request.string("name"))
         val json = request.string("json")
-        val existed = AutomationStore.file(context, name).isFile
+        val existed = AutomationStore.existingFile(context, name) != null
         val (file, warnings) = try {
             AutomationStore.write(context, name, json)
         } catch (problem: Throwable) {
@@ -176,8 +182,8 @@ internal object LwAutomation {
 
     private fun delete(context: Context, request: JsonObject): JsonObject {
         val name = normalizeName(request.string("name"))
-        val file = AutomationStore.file(context, name)
-        if (!file.isFile) return text("there is no automatic command called \"$name\", so nothing was deleted")
+        val file = AutomationStore.existingFile(context, name)
+        if (file == null) return text("there is no automatic command called \"$name\", so nothing was deleted")
         val removed = AutomationStore.delete(context, name)
         if (removed) AutomationEngine.invalidate()
         return text(
@@ -192,6 +198,8 @@ internal object LwAutomation {
         val rows = mutableListOf<Pair<String, String>>()
         rows += "rules" to "${rules.size} (${rules.count { it.enabled }} on)"
         rows += "directory" to directory(context).absolutePath
+        rows += "rules directory" to rulesDirectory(context).absolutePath
+        rows += "rejected" to "${rejectedCount(context)} unreadable rule(s) kept aside"
         rows += "quiet hours" to when {
             settings == null -> "unknown"
             !settings.quietEnabled -> "off"

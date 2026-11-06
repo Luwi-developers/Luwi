@@ -572,6 +572,7 @@
     <string name="settings_automation_sent">Handed over: every firing opens a conversation of its own, and the wording of a reminder is written then</string>
     <string name="settings_automation_send_failed">It could not be handed over (the queue file is not writable)</string>
     <string name="settings_automation_broken">This one cannot be read: %1$s</string>
+    <string name="settings_automation_broken_delete_summary">This one cannot be read. Deleting it removes both the original file and the copy kept in rejected/: %1$s</string>
     <string name="settings_automation_rule_state">%1$d of %2$d today</string>
     <string name="settings_automation_last">last %1$s</string>
     <string name="settings_automation_rule_cooldown">cooldown %1$d min</string>

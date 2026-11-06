@@ -571,6 +571,7 @@
     <string name="settings_automation_sent">已经投出去了: 每次触发都新开一场会话, 提醒的措辞由模型现写</string>
     <string name="settings_automation_send_failed">没能投出去 (队列文件写不进去)</string>
     <string name="settings_automation_broken">这一条读不出来: %1$s</string>
+    <string name="settings_automation_broken_delete_summary">这一条读不出来, 删掉会把原件与 rejected/ 里的副本一起删掉: %1$s</string>
     <string name="settings_automation_rule_state">今天 %1$d/%2$d 次</string>
     <string name="settings_automation_last">上次 %1$s</string>
     <string name="settings_automation_rule_cooldown">冷却 %1$d 分钟</string>

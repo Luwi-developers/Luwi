@@ -215,6 +215,41 @@ check(
   [true, true, true, true, true],
 )
 
+/* ── 五之二、目录迁移 (2.8.0 #25) ──────────────────────────────────────── */
+
+check('新写只落 rules/, 根目录旧规则只读兼容, 坏规则进 rejected/', [
+  /const val RULES_DIRECTORY = "rules"/.test(store),
+  /const val REJECTED_DIRECTORY = "rejected"/.test(store),
+  /fun legacyFile\(context: Context, name: String\)/.test(store),
+  /File\(rulesDirectory\(context\), fileName\(name\)\)/.test(store),
+  /mergedEntries\(rulesDirectory\(context\), directory\(context\), rejectedDirectory\(context\)\)/.test(store),
+  /fun existingFile\(context: Context, name: String\)/.test(store),
+], [true, true, true, true, true, true])
+
+check('坏规则复制到 rejected/, 旁边再写一份 .error.txt', [
+  /const val REJECTED_ERROR_SUFFIX = "\.error\.txt"/.test(store),
+  /fun copyRejected\(/.test(store),
+  /copyRejected\(rejected, name, raw, problem, file\)/.test(store),
+], [true, true, true])
+
+check('坏规则在设置页能删 (点了把原件与 rejected/ 副本一起删)', [
+  /if \(rule == null\)[\s\S]{0,400}broken = entry.name/.test(screen),
+  screen.includes('AutomationBrokenDialog('),
+  /AutomationBrokenDialog\([\s\S]{0,700}LwAutomation\.delete\(context, name\)/.test(screen),
+  zh.includes('name="settings_automation_broken_delete_summary"'),
+  en.includes('name="settings_automation_broken_delete_summary"'),
+], [true, true, true, true, true])
+
+check('设置页的空态指向新写目录 (rules/)', [
+  /settings_automation_empty,[\s\S]{0,120}LwAutomation\.rulesDirectory\(context\)/.test(screen),
+], [true])
+
+check('插件说明写清新写目录与坏规则的去处', [
+  automation.includes('DSH_HOME/automations/rules'),
+  automation.includes('DSH_HOME/automations/rejected'),
+  automation.includes('read-only'),
+], [true, true, true])
+
 /* ── 六、主人自己定的冷却 (2026-10-09) ─────────────────────────────────── */
 
 check(

@@ -19,7 +19,7 @@
 | 语音状态 | `lw/voice-live.json` | **应用写（只读）** | idle / listening / thinking / speaking |
 | 快捷指令 | `quick-commands/<名字>.md` | agent / 人 | 设置页里点一下，把正文投给会话 |
 | 技能 | `skills/<名字>/SKILL.md` | agent / 人 | dsh 按 frontmatter 的 name / description 认 |
-| 自动指令 | `automations/<名字>.json` | 模型（经 `lw_automation`） | 满足条件就投一句话 |
+| 自动指令 | `automations/rules/<名字>.json`（旧:`automations/<名字>.json`） | 模型（经 `lw_automation`） | 满足条件就投一句话 |
 | 探索卡 | `lw/explore-card.md` | 模型（经 `lw_explore op=finish`） | 下一场探索做什么 |
 | API 朗读与音色库 | 第 9 节 + `lw/tts-voices.json` | 配置：应用写 / 音色库：应用代写（`lw_speak op=voice`） | 设计出来的音色登记在这里，设置页「说话 → API」读它 |
 
@@ -134,12 +134,18 @@ description: 一句话说清什么时候该用这个技能
 
 ## 7. 自动指令
 
-`$DSH_HOME/automations/<名字>.json`，**由模型经 `lw_automation` 写**（别手搓，格式有闸）。
+`$DSH_HOME/automations/rules/<名字>.json`，**由模型经 `lw_automation` 写**（别手搓，格式有闸）。
+2.8.0 之前的旧位置是 `$DSH_HOME/automations/<名字>.json`，**只读兼容这一版**：还读得出来、还会响，
+但新写一律进 `rules/`（设置页改开关或冷却时，旧规则会在 `rules/` 落一份新的）。
 规则形状：`{"kind":"all"|"any","conds":[{"kind":"…"},…]}`，叶子 2~5 个、**不许嵌套**；
 叶子 `kind` 有 `notice` / `foreground` / `light` / `time` / `place` / `weather` / `unlock` / `activity` /
 `calendarSoon` / `battery` / `noticeDigest`，
-动作 `kind` 有 `remind` / `task`。同一目录下还有 `settings.json`（十二个监测器开关）、
+动作 `kind` 有 `remind` / `task`。同一目录（`automations/` 根）下还有 `settings.json`（十二个监测器开关）、
 `history.jsonl`（一次判定一行，冷却与上限都从它算）、`places.json`。
+
+**坏规则**（读不出来的 JSON）会复制一份到 `$DSH_HOME/automations/rejected/<名字>.json`，旁边再写一份
+`<名字>.error.txt` 说明哪里读不出来；设置页「自动指令」里点坏规则那一行就能删，
+原件与 `rejected/` 里的副本一起删。
 
 ## 8. 探索卡
 

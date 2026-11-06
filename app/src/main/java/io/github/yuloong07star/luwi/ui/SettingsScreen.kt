@@ -3527,6 +3527,8 @@ private fun AutomationItems() {
     var editing by remember { mutableStateOf<String?>(null) }
     // 那条"直接改冷却"的路 (2026-10-09 主人: 由用户决定冷却闸多少时间)
     var cooling by remember { mutableStateOf<String?>(null) }
+    // 一条读不出来的规则: 点一下能删 (2.8.0 #25, 原件与 rejected/ 里的副本一起删)
+    var broken by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
 
     // 这一页上的每一次改动都让 revision 变一下, 上面那几份读出来时自然就重读了
@@ -3548,15 +3550,21 @@ private fun AutomationItems() {
         PlaceholderItems(
             stringResource(
                 R.string.settings_automation_empty,
-                LwAutomation.directory(context).absolutePath,
+                LwAutomation.rulesDirectory(context).absolutePath,
             ),
         )
     } else {
         entries.forEach { entry ->
             val rule = entry.rule
             if (rule == null) {
-                PlaceholderItems(
-                    stringResource(R.string.settings_automation_broken, entry.problem.orEmpty()),
+                // 坏规则不藏: 名字与原因都摆在页上, 点一下就能删 (原件 + rejected/ 里的副本)
+                ArrowPreference(
+                    title = entry.name,
+                    summary = stringResource(R.string.settings_automation_broken, entry.problem.orEmpty()),
+                    onClick = {
+                        haptic.contextClick()
+                        broken = entry.name
+                    },
                 )
             } else {
                 val parts = mutableListOf(rule.summary())
@@ -3729,6 +3737,23 @@ private fun AutomationItems() {
             },
             onDelete = {
                 acting = null
+                message = if (LwAutomation.delete(context, name)) {
+                    context.getString(R.string.settings_automation_deleted, name)
+                } else {
+                    context.getString(R.string.settings_automation_delete_failed, name)
+                }
+                revision += 1
+            },
+        )
+    }
+
+    broken?.let { name ->
+        AutomationBrokenDialog(
+            name = name,
+            problem = entries.firstOrNull { it.name == name }?.problem.orEmpty(),
+            onDismiss = { broken = null },
+            onDelete = {
+                broken = null
                 message = if (LwAutomation.delete(context, name)) {
                     context.getString(R.string.settings_automation_deleted, name)
                 } else {
@@ -3945,6 +3970,46 @@ private fun AutomationActionDialog(
             },
             modifier = Modifier.fillMaxWidth(),
         )
+        TextButton(
+            text = stringResource(R.string.settings_automation_delete),
+            onClick = {
+                haptic.confirm()
+                onDelete()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        TextButton(
+            text = stringResource(R.string.button_cancel),
+            onClick = {
+                haptic.contextClick()
+                onDismiss()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * 一条读不出来的规则: 原因 + 删掉那一条
+ *
+ * 坏规则在页上是**能点的一行**而不是一句说明 (2.8.0 #25): `rejected/` 里的副本与原件一起删,
+ * 否则原件留在那, 这一行永远删不掉
+ */
+@Composable
+private fun AutomationBrokenDialog(
+    name: String,
+    problem: String,
+    onDismiss: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    OverlayDialog(
+        show = true,
+        title = name,
+        summary = stringResource(R.string.settings_automation_broken_delete_summary, problem),
+        defaultWindowInsetsPadding = false,
+        onDismissRequest = onDismiss,
+    ) {
         TextButton(
             text = stringResource(R.string.settings_automation_delete),
             onClick = {

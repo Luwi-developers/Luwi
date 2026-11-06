@@ -3742,7 +3742,9 @@ const TOOLS = [
   simpleTool(
     'lw_automation',
     'The automatic commands on this phone: the rules that fire by themselves, one JSON file each in'
-    + ' DSH_HOME/automations, listed on the app\'s Settings -> 自动指令 page. **Reach for op=write'
+    + ' DSH_HOME/automations/rules (op=write always puts new rules there; rules left in the old'
+    + ' DSH_HOME/automations root are still read this version, read-only), listed on the app\'s Settings'
+    + ' -> 自动指令 page. **Reach for op=write'
     + ' when the user says something like "每天八点提醒我带伞", "到了公司提醒我", "收到微信就告诉我",'
     + ' "打开王者时别吵我"** - sitting on the rule and remembering it only in your head loses it. A'
     + ' rule is {"name","enabled","when":{"kind",...},"then":{"kind","text"},"cooldownMinutes",'
@@ -3789,7 +3791,8 @@ const TOOLS = [
     + ' accessibility off, no exact alarms, power save, quiet hours) and, for every combination,'
     + ' the last time each sub-condition held (that line is how you answer "why did it not fire"), op=history says what was'
     + ' decided recently and why it did not fire. Deleting is not available here: that is a button on'
-    + ' the settings page.',
+    + ' the settings page. A rule that cannot be read is copied to DSH_HOME/automations/rejected as'
+    + ' <name>.json plus <name>.error.txt, and the settings page can delete both at once.',
     'automation',
     {
       op: {
