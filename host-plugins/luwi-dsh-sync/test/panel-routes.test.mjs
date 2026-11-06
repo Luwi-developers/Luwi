@@ -363,7 +363,7 @@ test('runOp: doctor / peers 自己抛错时回 ok:false 而不是 5xx', async ()
 
 // ── routes ─────────────────────────────────────────────────────────────────
 
-test('routes: 四条精确路由, 前缀命中, /op 只收 POST', async () => {
+test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', async () => {
   const { panel } = makePanel()
   const routes = panel.routes()
   assert.deepEqual(routes.map(r => r.path), [
@@ -371,6 +371,7 @@ test('routes: 四条精确路由, 前缀命中, /op 只收 POST', async () => {
     `${PANEL_PREFIX}/doctor`,
     `${PANEL_PREFIX}/peers`,
     `${PANEL_PREFIX}/op`,
+    `${PANEL_PREFIX}/term`,
   ])
   assert.equal(routes.every(r => r.kind === 'exact'), true)
 
@@ -391,6 +392,18 @@ test('routes: 四条精确路由, 前缀命中, /op 只收 POST', async () => {
   await op.handler(fakeRequest('{"op":"push","target":"sessions","confirm":true}'), ok)
   assert.equal(ok.statusCode, 200)
   assert.equal(JSON.parse(ok.body).ok, true)
+
+  // Luwi 加 (2026-11-05): 终端面板那条路由 —— 只收 POST, 宿主没有通道时如实说没有
+  const term = routes[4]
+  assert.equal(term.path, `${PANEL_PREFIX}/term`)
+  const termGet = fakeResponse()
+  await term.handler(fakeRequest(null, { method: 'GET' }), termGet)
+  assert.equal(termGet.statusCode, 405)
+  const termNoChannel = fakeResponse()
+  await term.handler(fakeRequest('{"command":"echo hello"}'), termNoChannel)
+  assert.equal(termNoChannel.statusCode, 200)
+  assert.equal(JSON.parse(termNoChannel.body).ok, false)
+  assert.match(JSON.parse(termNoChannel.body).error, /not started by Luwi/)
 
   const panelRoute = routes[0]
   const snap = fakeResponse()

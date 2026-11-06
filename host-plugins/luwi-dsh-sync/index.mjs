@@ -132,6 +132,8 @@ import { confirmPeer, readTrust, revokePeer, writeTrust } from './lib/p2p-trust.
 import { resolveP2pConfig } from './lib/p2p-config.mjs'
 // Luwi 加 (G1 面板): 官方侧边栏那块操作面板的宿主半 (同源 HTTP 数据通道)
 import { createPanel, describeRemote, PANEL_PREFIX, PANEL_TARGETS } from './lib/panel-routes.mjs'
+// Luwi 加 (2026-11-05): 终端面板 —— 借 App 交给宿主的特权通道, 在手机的沙盒里跑一条命令
+import { createTermChannel } from './lib/term-channel.mjs'
 // Luwi 加 (2026-10-23): 账号登录与权益 (本地验签 + 7 天宽限 + 到期闸)
 import {
   accountBaseOf,
@@ -4375,6 +4377,10 @@ function applyInner(ctx, config = {}) {
     }
   }
 
+  // Luwi 加 (2026-11-05): 终端面板的命令通道 —— 读的是 App 交给整个宿主进程的那两个环境变量,
+  // 所以这里不需要新配置项, 也不碰 App 侧的协议常量
+  const termChannel = createTermChannel()
+
   const panel = createPanel({
     // Luwi 改 (2026-10-20): 一个仓库一根镜像 (会话 + 工作区同一次 commit); 老客户端的
     // target=workspace 会落到这一根上 (panel-routes 里折过来)
@@ -4388,6 +4394,9 @@ function applyInner(ctx, config = {}) {
         mirrorDir: MIRROR_DIR,
       },
     ],
+    // Luwi 加 (2026-11-05): 终端面板的命令通道。宿主不是 Luwi 起的 (没有那两个环境变量) 时
+    // createTermChannel().run() 会如实回 ok:false, 面板显示"没有沙盒可跑", 不假装跑过
+    runTerm: (command, timeoutMs) => termChannel.run(command, timeoutMs),
     readMetaFor,
     readPeers: () => readPeerCards(repoDir),
     // Luwi 加 (G1-2): 快照多一块 peer (通道开关 / 对端地址与可达性 / 队列与计数 / 令牌只出打码),

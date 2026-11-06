@@ -7,6 +7,7 @@
 //   GET  /luwi-sync/doctor  只读自检 (runDoctor, 不触网不写盘)
 //   GET  /luwi-sync/peers   镜像里的名片 (readPeerCards)
 //   POST /luwi-sync/op      {op, target, confirm} 跑一个动作
+//   POST /luwi-sync/term    {command, timeoutMs} 在手机的沙盒里跑一条命令 (侧边栏的终端面板)
 //
 // 纪律 (与 docs/Luwi-dsh-sync-设计.md §11.3 / §11.4 逐条对上):
 //   · 应答一律 JSON, 非 2xx 也是 —— 面板永远解析得动, 不靠状态码分支
@@ -61,6 +62,8 @@ export const PANEL_OPS = Object.freeze({
   LOGIN_POLL: 'login-poll',
   LOGOUT: 'logout',
   LICENSE_REFRESH: 'license-refresh',
+  // Luwi 加 (2026-11-05): 终端面板 —— 在手机的沙盒里跑一条命令 (不是同步语义, 借这张面用同一套纪律)
+  TERM: 'term',
 })
 
 /** 会改远端/本地工作树/配置的那几个: 要 confirm, 要单飞。 */
@@ -226,6 +229,7 @@ export async function measureTree(root, maxEntries = COST_MAX_ENTRIES) {
  * @param {() => Promise<object>} deps.collectDoctor 只读自检 (runDoctor 的装配)。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pConfirm] Luwi 加 (P2P T6)：确认换机。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pRevoke] Luwi 加 (P2P T6)：吊销对端。
+ * @param {(command: string, timeoutMs?: number) => Promise<{ok: boolean, text?: string, error?: string}>} [deps.runTerm] Luwi 加 (2026-11-05)：终端面板跑的沙盒命令 (缺省 = 这台宿主没有通道, 回 ok:false)。
  * @param {object} deps.info - 启动面读数 { plugin, version, runner, disabledReason, mounted, config }。
  * @param {object} [deps.logger] - 宿主 logger (可选)。
  * @param {number} [deps.now] - 取当前时间的钩子 (测试用)。
@@ -678,6 +682,38 @@ export function createPanel(deps) {
           sendJson(res, status, answer)
         } catch (thrown) {
           sendJson(res, 500, { ok: false, error: messageOf(thrown) })
+        }
+      },
+    })
+    table.push({
+      kind: 'exact',
+      path: `${PANEL_PREFIX}/term`,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: `${PANEL_PREFIX}/term is POST-only` })
+          return
+        }
+        let body
+        try {
+          body = await readJsonBody(req)
+        } catch (thrown) {
+          sendJson(res, 400, { ok: false, error: messageOf(thrown) })
+          return
+        }
+        // 这台宿主没被 Luwi 拉起时没有沙盒可跑 —— 如实说没有, 不假装跑过
+        if (typeof deps.runTerm !== 'function') {
+          sendJson(res, 200, {
+            ok: false,
+            action: PANEL_OPS.TERM,
+            error: 'this host was not started by Luwi, so there is no sandbox to run in',
+          })
+          return
+        }
+        try {
+          const answer = await deps.runTerm(body.command, body.timeoutMs)
+          sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
+        } catch (thrown) {
+          sendJson(res, 200, { ok: false, action: PANEL_OPS.TERM, error: messageOf(thrown) })
         }
       },
     })
