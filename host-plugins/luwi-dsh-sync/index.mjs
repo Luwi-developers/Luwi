@@ -4397,6 +4397,9 @@ function applyInner(ctx, config = {}) {
     // Luwi 加 (2026-11-05): 终端面板的命令通道。宿主不是 Luwi 起的 (没有那两个环境变量) 时
     // createTermChannel().run() 会如实回 ok:false, 面板显示"没有沙盒可跑", 不假装跑过
     runTerm: (command, timeoutMs) => termChannel.run(command, timeoutMs),
+    // Luwi 加 (2026-11-06): 终端入口的置灰状态与 Ctrl-C 中断 (2.8.0 #32 ③④)
+    termStatus: () => termChannel.status(),
+    termInterrupt: () => termChannel.interrupt(),
     readMetaFor,
     readPeers: () => readPeerCards(repoDir),
     // Luwi 加 (G1-2): 快照多一块 peer (通道开关 / 对端地址与可达性 / 队列与计数 / 令牌只出打码),

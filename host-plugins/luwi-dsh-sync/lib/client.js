@@ -78,9 +78,23 @@ window.__ModuleLoader__.load({
 			'运行': 'Run',
 			'运行中': 'Running',
 			'可用: help 看这句 · clear 清屏 · 其余命令交给手机的沙盒': 'Available: help · clear · anything else runs in the phone sandbox',
+			'可用: help 看这句 · clear 清屏 · Ctrl-C 中断 · cd 会记住目录 · 其余命令交给手机的沙盒': 'Available: help · clear · Ctrl-C to interrupt · cd is remembered · anything else runs in the phone sandbox',
 			'面板这条通道没开: 宿主没给出应答': 'The panel route is not open: the host gave no answer',
 			'跑完了, 没有输出': 'Finished with no output',
 			'没跑成, 也没给出原因': 'It did not run, and gave no reason',
+			// Luwi 加 (2026-11-06): 2.8.0 #32 ③④ —— 置灰 / 安装提示 / Ctrl-C
+			'先装 Linux 沙盒': 'Install the Linux sandbox first',
+			'设置 → Linux 沙盒 → 安装, 装好回来点「重新检测」': 'Settings → Linux sandbox → Install, then come back and press "Check again"',
+			'重新检测': 'Check again',
+			'正在读取沙盒状态…': 'Reading the sandbox state…',
+			'沙盒已装': 'sandbox installed',
+			'沙盒没装': 'sandbox not installed',
+			'沙盒状态读不到': 'the sandbox state is unavailable',
+			'运行中, 按 Ctrl-C 可中断': 'Running; Ctrl-C interrupts it',
+			'Ctrl-C 中断': 'Ctrl-C',
+			'中断中': 'Interrupting',
+			'^C 已中断': '^C interrupted',
+			'中断没送出去': 'the interrupt did not get through',
 			'写下这段配置': 'write this into the sync config',
 			'改了要重启 host 才生效': 'restart the host for this to take effect',
 			'领先': 'ahead',
@@ -260,6 +274,58 @@ window.__ModuleLoader__.load({
 		function useLocaleTick() {
 			const [, bump] = React.useState(0);
 			React.useEffect(() => onLocale(() => bump(n => n + 1)), []);
+		}
+
+		// ── 沙盒状态 (终端入口置灰与「先装 Linux 沙盒」那句) ─────────────────────────
+
+		/**
+		 * 最近一次读到的沙盒状态。`known` 为 false = 还没读到 (或这条通道没开), 这时不置灰,
+		 * 让面板照常画出来再用那条命令自己的错误说话。
+		 */
+		let termStatus = { tried: false, known: false, installed: false, version: '', error: '' };
+		const termStatusListeners = new Set();
+
+		/** 广播一次状态变化 (与语言那条同一个写法)。 */
+		function emitTermStatus() {
+			for (const listener of Array.from(termStatusListeners)) {
+				try { listener(); } catch { /* 一个订阅者炸了不影响别的 */ }
+			}
+		}
+
+		/**
+		 * 组件里的沙盒状态订阅。
+		 * @returns {{known: boolean, installed: boolean, version: string, error: string}} 当前状态。
+		 */
+		function useTermStatus() {
+			const [, bump] = React.useState(0);
+			React.useEffect(() => {
+				const listener = () => bump(n => n + 1);
+				termStatusListeners.add(listener);
+				return () => { termStatusListeners.delete(listener); };
+			}, []);
+			return termStatus;
+		}
+
+		/**
+		 * 问一次宿主: 沙盒装没装。
+		 * 不抛 (api 不抛); 读不到就保持 unknown, 不把入口误置灰。
+		 * @returns {Promise<void>}
+		 */
+		async function refreshTermStatus() {
+			const { body } = await api('/term', { method: 'POST', body: JSON.stringify({ op: 'status' }) });
+			if (body === null || typeof body.installed !== 'boolean') {
+				termStatus = { ...termStatus, tried: true, error: 'no answer from the panel route' };
+				emitTermStatus();
+				return;
+			}
+			termStatus = {
+				tried: true,
+				known: true,
+				installed: body.installed === true,
+				version: typeof body.version === 'string' ? body.version : '',
+				error: typeof body.error === 'string' ? body.error : '',
+			};
+			emitTermStatus();
 		}
 
 		// ── HTTP ───────────────────────────────────────────────────────────────────
@@ -466,6 +532,13 @@ window.__ModuleLoader__.load({
   border: 1px solid var(--dsw-alias-border-l2, rgba(255,255,255,.2)); background: transparent;
   color: inherit; font: inherit; }
 .luwi-term-send .luwi-sync-btn { flex: none; }
+/* 2026-11-06 (2.8.0 #32): 沙盒没装时入口压暗; 中断提示与安装提示各一块 */
+.luwi-sync-icon[data-off="1"] { opacity: .38; }
+.luwi-term-line[data-kind="signal"] { color: var(--dsw-alias-state-warn-primary, #d8a300); }
+.luwi-term-missing { display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255,255,255,.12)); border-radius: 10px; }
+.luwi-term-missing .luwi-sync-btn { align-self: flex-start; }
+.luwi-term-state { display: flex; align-items: center; gap: 6px; }
 `;
 
 		/**
@@ -518,13 +591,20 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 「终端」图标: 一个大于号加一条下划线。
+		 *
+		 * 2026-11-06 (2.8.0 #32 ①): 沙盒没装时压暗 (data-off), 点击仍然进面板 ——
+		 * 面板里给的是「先装 Linux 沙盒」那句, 而不是一个点不动的东西。
 		 * @param {{size?: number, active?: boolean}} props - owner props (size / active)。
 		 * @returns {object} React 元素。
 		 */
 		function TermIcon(props) {
 			const size = Number(props && props.size) || 16;
+			const status = useTermStatus();
+			const off = status.known && !status.installed;
 			return h('svg', {
 				className: 'luwi-sync-icon',
+				'data-off': off ? '1' : undefined,
+				'aria-label': off ? t('先装 Linux 沙盒') : undefined,
 				viewBox: '0 0 16 16',
 				width: size,
 				height: size,
@@ -533,7 +613,7 @@ window.__ModuleLoader__.load({
 				strokeWidth: '1.3',
 				strokeLinecap: 'round',
 				strokeLinejoin: 'round',
-				'aria-hidden': 'true',
+				'aria-hidden': off ? undefined : 'true',
 				focusable: 'false',
 			},
 			h('path', { key: 'a', d: 'M2.4 3.6 6.2 8 2.4 12.4' }),
@@ -1350,17 +1430,25 @@ window.__ModuleLoader__.load({
 		/**
 		 * 终端面板本体 (左栏全局入口那个座位)。
 		 *
-		 * 这一版只有形态: 输入一行、回车、输出区追加一行。`help` 与 `clear` 是真的,
-		 * 其它命令如实说"后端还没接" —— 接上 lw_linux 那一步是 S2, 走宿主路由而不是
-		 * 从这里直接摸通道。
+		 * 2026-11-06 (2.8.0 #32): 沙盒没装时只给「先装 Linux 沙盒」那块; 跑起来之后 Ctrl-C
+		 * 发 `POST /term {op:'interrupt'}` (宿主写一个 cancel 文件, guest 壳里的看门狗把整棵
+		 * 进程树收掉), 客户端这边同时断开那条 fetch —— 提示符立刻回来, 不用等沙盒退干净。
+		 * `cd` 记住目录是宿主那层壳办的, 面板只负责把命令一条一条送过去。
 		 * @returns {object} React 元素。
 		 */
 		function TermPanel() {
 			useLocaleTick();
+			const status = useTermStatus();
 			const [lines, setLines] = React.useState([]);
 			const [text, setText] = React.useState('');
 			const [busy, setBusy] = React.useState(false);
+			const [interrupting, setInterrupting] = React.useState(false);
 			const endRef = React.useRef(null);
+			const seqRef = React.useRef(0);
+			const abortRef = React.useRef(null);
+
+			// 每次打开面板都问一次 (在设置里装完沙盒回来时, installLeftSeat 的可见性回调也会问)
+			React.useEffect(() => { refreshTermStatus(); }, []);
 
 			React.useEffect(() => {
 				const node = endRef.current;
@@ -1393,15 +1481,33 @@ window.__ModuleLoader__.load({
 				if (command === 'clear') { setLines([]); return; }
 				append([{ kind: 'cmd', text: command }]);
 				if (command === 'help') {
-					append([{ kind: 'dim', text: t('可用: help 看这句 · clear 清屏 · 其余命令交给手机的沙盒') }]);
+					append([{ kind: 'dim', text: t('可用: help 看这句 · clear 清屏 · Ctrl-C 中断 · cd 会记住目录 · 其余命令交给手机的沙盒') }]);
 					return;
 				}
+				const seq = seqRef.current + 1;
+				seqRef.current = seq;
 				setBusy(true);
-				api('/term', { method: 'POST', body: JSON.stringify({ command }) })
+				setInterrupting(false);
+				const controller = typeof AbortController === 'function' ? new AbortController() : null;
+				abortRef.current = controller;
+				api('/term', {
+					method: 'POST',
+					body: JSON.stringify({ op: 'run', command }),
+					...(controller === null ? {} : { signal: controller.signal }),
+				})
 					.then((answer) => {
+						if (seq !== seqRef.current) return;
+						if (controller !== null && controller.signal.aborted) return;
 						const body = answer.body;
 						if (body === null) {
 							append([{ kind: 'dim', text: t('面板这条通道没开: 宿主没给出应答') }]);
+							return;
+						}
+						if (body.interrupted === true) {
+							append([{ kind: 'signal', text: t('^C 已中断') }]);
+							if (typeof body.text === 'string' && body.text.trim() !== '') {
+								append([{ kind: 'out', text: body.text.replace(/\s+$/, '') }]);
+							}
 							return;
 						}
 						if (body.ok === true) {
@@ -1419,49 +1525,124 @@ window.__ModuleLoader__.load({
 						append([{ kind: 'dim', text: typeof body.error === 'string' ? body.error : t('没跑成, 也没给出原因') }]);
 					})
 					.catch((error) => {
+						if (seq !== seqRef.current) return;
+						if (controller !== null && controller.signal.aborted) return;
 						append([{ kind: 'dim', text: String((error && error.message) || error) }]);
 					})
-					.finally(() => setBusy(false));
+					.finally(() => {
+						if (seq !== seqRef.current) return;
+						if (abortRef.current === controller) abortRef.current = null;
+						setBusy(false);
+						setInterrupting(false);
+					});
 			}
+
+			/**
+			 * Ctrl-C: 先把提示符还回来, 再让宿主去收进程树。
+			 * 宿主那边同一个会话是排队跑的, 所以立刻敲下一条也不会和这一条抢。
+			 * @returns {void}
+			 */
+			function interrupt() {
+				if (!busy || interrupting) return;
+				append([{ kind: 'signal', text: t('^C 已中断') }]);
+				setInterrupting(true);
+				// 这一条的回答不再上屏: seq 一抬, 旧那条的 then / finally 都变成空转
+				seqRef.current += 1;
+				const controller = abortRef.current;
+				abortRef.current = null;
+				if (controller !== null) {
+					try { controller.abort(); } catch { /* 老 WebView 没有 abort 也不影响下面的 POST */ }
+				}
+				setBusy(false);
+				api('/term', { method: 'POST', body: JSON.stringify({ op: 'interrupt' }) })
+					.then((answer) => {
+						const body = answer.body;
+						if (body !== null && body.ok === false) {
+							append([{ kind: 'dim', text: `${t('中断没送出去')}: ${typeof body.error === 'string' ? body.error : t('没跑成, 也没给出原因')}` }]);
+						}
+					})
+					.catch((error) => {
+						append([{ kind: 'dim', text: `${t('中断没送出去')}: ${String((error && error.message) || error)}` }]);
+					})
+					.finally(() => setInterrupting(false));
+			}
+
+			const missing = status.tried && status.known && !status.installed;
 
 			return h('div', { className: 'luwi-sync-panel' },
 				h('div', { className: 'luwi-sync-card', key: 'head' },
 					h('div', { className: 'luwi-sync-card-title' },
 						h('span', { className: 'luwi-sync-strong' }, t('终端')),
 						h('span', { className: 'luwi-sync-badge' }, t('实验'))),
-					h('div', { className: 'luwi-sync-dim' }, t('在手机的沙盒里跑一条命令。一个回车一条, 输出接在这条命令下面。'))),
-				h('div', { className: 'luwi-term-out', key: 'out' },
-					lines.length === 0
-						? h('div', { className: 'luwi-sync-dim' }, t('还没有输入。试试 help'))
-						: lines.map((line, index) => h('div', {
-							key: `l${index}`,
-							className: 'luwi-term-line',
-							'data-kind': line.kind,
-						}, line.kind === 'cmd' ? `$ ${line.text}` : line.text)),
-					h('div', { key: 'end', ref: endRef })),
-				h('div', { className: 'luwi-term-send', key: 'send' },
-					h('input', {
-						className: 'luwi-term-input',
-						value: text,
-						placeholder: t('输入命令, 回车执行'),
-						spellCheck: false,
-						autoCapitalize: 'off',
-						autoCorrect: 'off',
-						disabled: busy,
-						onChange: (event) => setText(event.target.value),
-						onKeyDown: (event) => {
-							if (event.key !== 'Enter') return;
-							event.preventDefault();
-							run(text);
-						},
-					}),
-					h('button', {
-						type: 'button',
-						className: 'luwi-sync-btn',
-						'data-primary': '1',
-						disabled: busy || text.trim() === '',
-						onClick: () => run(text),
-					}, busy ? t('运行中') : t('运行'))));
+					h('div', { className: 'luwi-sync-dim' }, t('在手机的沙盒里跑一条命令。一个回车一条, 输出接在这条命令下面。')),
+					h('div', { className: 'luwi-term-state' },
+						status.known
+							? h('span', { className: status.installed ? 'luwi-sync-good' : 'luwi-sync-dim' },
+								status.installed
+									? `${t('沙盒已装')}${status.version === '' ? '' : ` (${status.version})`}`
+									: t('沙盒没装'))
+							: h('span', { className: 'luwi-sync-dim' }, status.tried ? t('沙盒状态读不到') : t('正在读取沙盒状态…')))),
+				missing
+					? h('div', { className: 'luwi-term-missing', key: 'missing' },
+						h('div', { className: 'luwi-sync-strong' }, t('先装 Linux 沙盒')),
+						h('div', { className: 'luwi-sync-dim' }, t('设置 → Linux 沙盒 → 安装, 装好回来点「重新检测」')),
+						h('button', {
+							type: 'button',
+							className: 'luwi-sync-btn',
+							onClick: () => { refreshTermStatus(); },
+						}, t('重新检测')))
+					: [
+						h('div', { className: 'luwi-term-out', key: 'out' },
+							lines.length === 0
+								? h('div', { className: 'luwi-sync-dim' }, t('还没有输入。试试 help'))
+								: lines.map((line, index) => h('div', {
+									key: `l${index}`,
+									className: 'luwi-term-line',
+									'data-kind': line.kind,
+								}, line.kind === 'cmd' ? `$ ${line.text}` : line.text)),
+							h('div', { key: 'end', ref: endRef })),
+						busy
+							? h('div', { className: 'luwi-sync-dim', key: 'hint' }, t('运行中, 按 Ctrl-C 可中断'))
+							: null,
+						h('div', { className: 'luwi-term-send', key: 'send' },
+							h('input', {
+								className: 'luwi-term-input',
+								value: text,
+								placeholder: t('输入命令, 回车执行'),
+								spellCheck: false,
+								autoCapitalize: 'off',
+								autoCorrect: 'off',
+								onChange: (event) => setText(event.target.value),
+								onKeyDown: (event) => {
+									// 手机键盘一般没有 Ctrl, 但外接键盘与 WebView 里的 Ctrl-C 都接住
+									if (event.ctrlKey && (event.key === 'c' || event.key === 'C')) {
+										if (busy) {
+											event.preventDefault();
+											interrupt();
+										}
+										return;
+									}
+									if (event.key !== 'Enter') return;
+									event.preventDefault();
+									if (!busy) run(text);
+								},
+							}),
+							busy
+								? h('button', {
+									type: 'button',
+									className: 'luwi-sync-btn',
+									'data-danger': '1',
+									disabled: interrupting,
+									onClick: () => interrupt(),
+								}, interrupting ? t('中断中') : t('Ctrl-C 中断'))
+								: h('button', {
+									type: 'button',
+									className: 'luwi-sync-btn',
+									'data-primary': '1',
+									disabled: text.trim() === '',
+									onClick: () => run(text),
+								}, t('运行'))),
+					]);
 		}
 
 		// ── 座位 ───────────────────────────────────────────────────────────────────
@@ -1490,7 +1671,20 @@ window.__ModuleLoader__.load({
 				{ name: 'main', key: TERM_PANEL_ID },
 				() => h(TermPanel, {}),
 			);
+			// 2026-11-06 (2.8.0 #32 ①): 入口置灰要知道沙盒装没装 —— 装一次问一次, 再从设置
+			// 页装完回到 WebView 时 (visibilitychange) 再问一次, 不用轮询
+			refreshTermStatus();
+			let onVisible = null;
+			if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+				onVisible = () => {
+					if (document.visibilityState === 'visible') refreshTermStatus();
+				};
+				document.addEventListener('visibilitychange', onVisible);
+			}
 			return () => {
+				if (onVisible !== null) {
+					try { document.removeEventListener('visibilitychange', onVisible); } catch { /* ignore */ }
+				}
 				try { termBody(); } catch { /* 已经摘掉 */ }
 				try { termIcon(); } catch { /* 已经摘掉 */ }
 				try { body(); } catch { /* 已经摘掉 */ }
