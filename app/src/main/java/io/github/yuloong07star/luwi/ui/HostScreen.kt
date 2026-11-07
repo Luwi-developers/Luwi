@@ -1936,15 +1936,8 @@ private fun HostBootPanel(
                 }
             }
         }
-        // 还差步骤时, 底部摆一张「开始使用」: 第一次装完的人就停在这一屏, 这里是他唯一
-        // 能同时看到"还差什么"和"点哪里办掉"的地方 ([ReadyCard] 自己判断该不该画)
-        ReadyCard(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = if (splash.credit.isNotBlank()) 52.dp else 20.dp),
-        )
+        // 「开始使用」那张体检表**不再挂在启动页底部** (2026-11-04 主人 #2: 不要放底部): 它现在是
+        // 一个居中对话框, 首启由 [ReadyPrompt] 弹一次, 之后走设置页那一行「检查所需依赖」
         if (splash.credit.isNotBlank()) {
             Text(
                 text = splash.credit,
