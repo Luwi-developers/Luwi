@@ -11,6 +11,8 @@
 - 只发 debug 包, 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定); **换 key = 所有人卸载重装**
 - 发版前干净构建 + `python tools/apk-bytes.py <apk>` 验无归属区间 (最大那条只应几 KB); 体积突变先查旧包还在不在
 - 公告口径: 对外只叫 `Luwi`, 不写 DSH / LW; 未上真机的项不进公告
+- **`tools/lw-release-check.ps1` 有一道「分支漂移」**: 发版 tag 之后新起的 agent 分支, tip 还没进 main 的必须在 `tools/branch-drift-allow.json` 里写 why, 否则发版闸直接红; `flow tasks` 也带同一条 warning (表管不到"没进表就丢在分支上"的活)
+- **agent 分支做完就要闭环**: 开 PR, 或写进落实表, 两样都不做等于这一支不存在。2026-11-07 就是这么漏掉 `agent/2.8.0-ready-models` 的 (引导卡四件 + 两个模型下载 + 撤掉虚拟屏那一版): 11-04 做完推了远端, 没开 PR、表里也没这条, 收口按 PR 与表核对, 整支漏在外面, 真机装机才看见还是旧界面
 
 ## 仓库形态
 

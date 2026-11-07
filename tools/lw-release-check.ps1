@@ -50,6 +50,28 @@ $script:toolchainBroken = $false
 $script:evidenceMissing = @()
 $script:evidenceReasons = @()
 
+# 0. 分支漂移: 这次发版周期里新起的 agent 分支, tip 还没进 main 的都必须登记过
+#
+# 2026-11-07 的教训: agent/2.8.0-ready-models 那三提交 (引导卡四件 + 两个模型下载 + 撤掉虚拟屏)
+# 11-04 就做完并推了远端, 但没开 PR、落实表也没这一条, 收口按 PR 与表核对就把整支漏在外面 ——
+# 真机上看到的还是旧的三件内嵌卡, 一直到装机才暴露。判据与理由见 tools/check-branch-drift.mjs
+$driftScript = Join-Path $PSScriptRoot 'check-branch-drift.mjs'
+if (-not (Test-Path -LiteralPath $driftScript)) {
+    Add-Check '分支漂移' 'FAIL' "找不到检查器 $driftScript"
+} elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Add-Check '分支漂移' 'FAIL' 'PATH 里找不到 node, 跑不了分支检查'
+} else {
+    $driftOut = & node $driftScript 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+        Add-Check '分支漂移' 'PASS' '这一版新起的分支都进 main 了'
+    } else {
+        $names = ($driftOut -split "`r?`n" |
+            Where-Object { $_ -match '^FAIL ' } |
+            ForEach-Object { ($_ -split '\s+')[1] }) -join ', '
+        Add-Check '分支漂移' 'FAIL' "这些分支没进 main 也没登记: $names (合进去, 或在 tools/branch-drift-allow.json 写一条 why)"
+    }
+}
+
 # 1. 设备读数: 缺真机 / 模拟器读数就不许发
 $evidenceScript = Join-Path $PSScriptRoot 'check-device-evidence.mjs'
 $node = Get-Command node -ErrorAction SilentlyContinue

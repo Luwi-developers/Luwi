@@ -1,0 +1,219 @@
+{
+  "branches": [
+    {
+      "name": "agent/sa-950a18dd98b944973866dcadbf56498b",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-26",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-d327cf466113c878f9586508feaaf6f5",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-707795c395b0c176aadc62a33ad04e73",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-2c7264c55e9095421ebfdd1d8e0a899d",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-tools",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-24c",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-9aa2fcdb5d43275ed9d3dcc71ed9a6c5",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-7cfbf0340026fce711c8514b2a2548a0",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-091de8da603deaca4b85988f3fe2835a",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-20-21",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-ecb07e8d0183916c357d58d98d9593f0",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-c2af5e9bfcbd1222458182ccd58265a0",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-ready-models",
+      "why": "2026-11-07 按文件精搬进 main: ReadyCard 四件 (通道/无障碍/唤醒模型/语音模型) + 居中对话框 + 两个模型下载按钮 + 撤掉虚拟屏与启动页底部那张卡; 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-main-sync",
+      "why": "同步用的临时分支 (把 main 的改动带回来用, 用完即弃)",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-33-ready",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-33",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-19b",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-19-build",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-19",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-18",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-da64879108dd6d67790366b9a03f9a33",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-bal",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-18-pub",
+      "why": "公开树导出 (只读镜像, 内容随 PR 走, 本身不进 main)",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-ee9fae9c729f8f3770c59aa0c8bc18ae",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-d51ccededc20a18bce3154892e81d70c",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-b20ebdbfb166e09b3b21b09484fc4c92",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-4a92dc7eb514c9784b53f0c9bd196490",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/sa-39badec4a6087c7ca4972f1dc5ba95d2",
+      "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-16",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-10",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-9",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "feat/2.8.0",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "split/tavern-private",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "release/2.0.0",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "backup/pre-rebase-video",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "feat/sidebar-terminal-run",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "feat/sidebar-terminal",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "feat/ready-funnel",
+      "why": "长期保留的分支名 (不是某个任务的 agent 分支), 不进 main",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "test/b5a-rules-kinds",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-33-r2",
+      "why": "公开树导出 (只读镜像, 内容随 PR 走, 本身不进 main)",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-19b-r2",
+      "why": "公开树导出 (只读镜像, 内容随 PR 走, 本身不进 main)",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "patch/scroll-and-shell",
+      "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
+      "since": "v2.7.10"
+    }
+  ]
+}
