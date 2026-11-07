@@ -976,5 +976,26 @@ console.log(
     + `(${String(beforeSlim.files)} -> ${String(afterSlim.files)} files)`,
 )
 
+/**
+ * node-pty 的 Android 预编译 (2026-11-07)
+ *
+ * 上游只发 win32 / darwin / linux 五套, 安卓那份要靠 NDK 自己编 (`tools/build-pty-android.ps1`,
+ * 产物落在 `jniLibs/arm64-v8a/liblwpty.so`)。node-pty 的 `loadNativeModule` 按
+ * `${process.platform}-${process.arch}` 找目录, 安卓解出来正好是 `android-arm64`, 所以只要把
+ * 文件改名字塞进 `prebuilds/android-arm64/pty.node`, 它一行 js 都不用改
+ *
+ * 放在 slim **之后**: slim 只按后缀与路径删, 这一步是往树里加东西, 顺序反了会被它当垃圾扫一遍
+ * (实测真机: dlopen 这个 .so 能过, forkpty 起 /system/bin/sh 有输出)
+ */
+const ptyAndroid = join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'src', 'main', 'jniLibs', 'arm64-v8a', 'liblwpty.so')
+if (existsSync(ptyAndroid)) {
+  const prebuild = join(out, 'node_modules', 'node-pty', 'prebuilds', 'android-arm64')
+  mkdirSync(prebuild, { recursive: true })
+  cpSync(ptyAndroid, join(prebuild, 'pty.node'))
+  console.log(`pack-host: staged the Android pty addon (${(statSync(ptyAndroid).size / 1024).toFixed(0)} KB) at node_modules/node-pty/prebuilds/android-arm64/pty.node`)
+} else {
+  console.log('pack-host: no Android pty addon under jniLibs/arm64-v8a, so the terminal stays unavailable on device')
+}
+
 const { files, bytes } = measure(join(out, 'node_modules'))
 console.log(`pack-host: ${String(packed.size)} tarball(s), ${String(files)} file(s), ${(bytes / 1024 / 1024).toFixed(1)} MB in ${out}`)
