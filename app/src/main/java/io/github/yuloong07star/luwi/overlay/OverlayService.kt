@@ -47,6 +47,7 @@ import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.ui.PickMediaActivity
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.voice.VoiceCommands
 import io.github.yuloong07star.luwi.voice.VoiceInbox
@@ -316,6 +317,23 @@ internal object OverlayState {
      */
     @Volatile
     var pendingNote: String? = null
+
+    /**
+     * 宿主推来、而通道还没开着的那一句**她自己想说的话** (2026-11-07: 球是门户)
+     *
+     * 与 [pendingReply] 分开的理由只有一个: 它**不是对某个问题的回答** —— 不带 session, 补画出来
+     * 之后也不改"下一刻把话投给谁"那笔账。通道张开时与回答一起补上 (回答在前, 它在后)
+     */
+    @Volatile
+    var pendingSay: String? = null
+
+    /**
+     * 宿主推来、而通道还没开着的那一张表情 (2026-11-07)
+     *
+     * 与 [pendingSay] 同一条路: 攒着, 通道张开时一起补上 —— 一张贴不上去的图不该说成"她没贴"
+     */
+    @Volatile
+    var pendingSticker: String? = null
 
     /** 球上现在画的那三个字, 空 = 空闲 */
     @Volatile
@@ -1026,6 +1044,24 @@ class OverlayService : Service() {
             // 宿主推来的一条提示 (不是回答): 比如"这句话没能送进会话" —— 与回答同一条路, 画成 ⚠ 那一行
             ACTION_NOTE -> {
                 deliverNote(intent.getStringExtra(EXTRA_TEXT).orEmpty())
+                return START_STICKY
+            }
+
+            // 她主动说的一句: 同一块只读区, 但不动"回给哪一场"那笔账
+            ACTION_SAY -> {
+                deliverSay(intent.getStringExtra(EXTRA_TEXT).orEmpty())
+                return START_STICKY
+            }
+
+            // 她贴的一张表情: 同一块框里、分隔线下面那张图
+            ACTION_STICKER -> {
+                deliverSticker(intent.getStringExtra(EXTRA_TEXT).orEmpty())
+                return START_STICKY
+            }
+
+            // 她连发几条: 一次交给队列, 一条一条放
+            ACTION_BURST -> {
+                deliverBurst(intent.getStringExtra(EXTRA_TEXT).orEmpty())
                 return START_STICKY
             }
 
@@ -2647,6 +2683,14 @@ class OverlayService : Service() {
             OverlayState.pendingNote = null
             appendNote(waiting)
         }
+        OverlayState.pendingSay?.let { waiting ->
+            OverlayState.pendingSay = null
+            appendSay(waiting)
+        }
+        OverlayState.pendingSticker?.let { waiting ->
+            OverlayState.pendingSticker = null
+            appendSticker(waiting)
+        }
         refresh(force = true)
     }
 
@@ -2677,6 +2721,11 @@ class OverlayService : Service() {
         OverlayState.replies = 0
         OverlayState.replySession = null
         OverlayState.inputSession = null
+        // **队列跟着框一起清** (2026-11-07): 框都没了, 还没轮到的那几句没有落脚处 —— 留着它们的话
+        // 下一次开框会把上一块框的话接着往下说
+        outbox.clear()
+        outboxBusy = false
+        outboxSession = ""
         lastBlankTapAt = 0L
         noteActivity()
         refresh(force = true)
@@ -2805,6 +2854,25 @@ class OverlayService : Service() {
             note("the channel was closed from its own button")
             runCatching { closeChannel() }
         }
+
+        /**
+         * 框上那个 `＋`: 挑一张图发给她 (2026-11-07)
+         *
+         * 选图那道闸只有 Activity 收得到结果, 所以这里只起那个透明的 [PickMediaActivity] —— 它选完
+         * 自己把图落进收件箱再 finish, 这边一行都不用等, 框也不动 (输入里的字照旧在)
+         */
+        override fun onPickImage() {
+            OverlayState.noteBoxActivity()
+            noteActivity()
+            runCatching {
+                startActivity(
+                    Intent(this@OverlayService, PickMediaActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                )
+            }.onFailure { problem ->
+                hint("打不开选图: ${problem.message ?: problem}")
+            }
+        }
     }
 
     /**
@@ -2864,10 +2932,69 @@ class OverlayService : Service() {
      * 通道没开着时那一句**不丢**: 记在 [OverlayState.pendingReply] 里 —— 而 [openChannel] 收尾那一步
      * 正好会把它补上, 所以这里两条路各自只画一次
      */
+    /** 输出队列 (2026-11-07): 她分几条说时一句一句放, 见 [BallOutbox] */
+    private val outbox = ArrayDeque<String>()
+
+    /** 正有一条在屏上等着收尾 (画完 + 停顿 + 念完) */
+    private var outboxBusy = false
+
+    /** 队列里这一批属于哪一场: 换了一场就说明是新一轮, 上一轮没播的条丢掉 */
+    private var outboxSession = ""
+
+    /**
+     * 一条回答到了: **先排队, 不直接画** (2026-11-07 主人: "分条发送时要等上一条消息结束")
+     *
+     * 排队这一层只管顺序与节奏, 一条都不碰输入框 —— 于是"下一条到达时用户正在打的字"从不参与
+     * 这件事, 也就不会被改写
+     */
     private fun deliverReply(text: String, session: String?) {
         val line = text.trim()
         if (line.isEmpty()) return
-        val from = session?.trim()?.takeIf { it.isNotEmpty() }
+        val from = session?.trim().orEmpty()
+        if (from != outboxSession) {
+            // 新一轮: 上一轮还没轮到的那几条不说了 —— 过时的话比不说更糟
+            outbox.clear()
+            outboxBusy = false
+            outboxSession = from
+        }
+        val merged = BallOutbox.offer(outbox.toList(), line)
+        outbox.clear()
+        outbox.addAll(merged)
+        drainOutbox()
+    }
+
+    /**
+     * 一条一条往框里放: 画完 -> 停 [BallOutbox.gapFor] 那一段 -> (开了朗读就等它念完) -> 放下一条
+     *
+     * 主线程上只用 `postDelayed` 排拍子, 不 sleep 也不起线程 (框是 UI 的东西)
+     */
+    private fun drainOutbox() {
+        if (outboxBusy || outbox.isEmpty()) return
+        val line = outbox.removeFirst()
+        outboxBusy = true
+        deliverReplyNow(line, outboxSession.takeIf { it.isNotEmpty() })
+        handler.postDelayed({
+            if (LwSpeak.talking(this)) {
+                // 还在念: 隔一拍再看 —— 两条话叠在一起念是最难听的那一种
+                handler.postDelayed({ finishOutboxOne() }, BallOutbox.SPEAK_POLL_MS)
+            } else {
+                finishOutboxOne()
+            }
+        }, BallOutbox.gapFor(line))
+    }
+
+    private fun finishOutboxOne() {
+        outboxBusy = false
+        drainOutbox()
+    }
+
+    /**
+     * 队列里那一条真的落到屏上 (原来 [deliverReply] 的全部动作)
+     *
+     * 它只碰 [OverlayState.pendingReply] 与那块只读区, **一条都不碰输入框**: 不 setText、不
+     * clear、不 setSelection、不 requestFocus
+     */
+    private fun deliverReplyNow(line: String, from: String?) {
         OverlayState.pendingReply = line
         OverlayState.pendingReplySession = from
         if (boxOnScreen) appendReply(line, from) else openChannel(focus = false)
@@ -2884,6 +3011,74 @@ class OverlayService : Service() {
         if (line.isEmpty()) return
         OverlayState.pendingNote = line
         if (boxOnScreen) appendNote(line) else openChannel(focus = false)
+    }
+
+    /**
+     * 她主动说的一句 (2026-11-07: 球是门户)
+     *
+     * 画的地方与回答一模一样 (同一块只读区, 见 [appendSay]), 差别全在那几笔账上: 不写
+     * [OverlayState.pendingReply]、不带 session、`replySession` / `boxSession` 一个字都不动 ——
+     * 于是"从框里回过去的那句话投给哪一场"不因为她主动说了一句话而改变
+     */
+    private fun deliverSay(text: String) {
+        val line = text.trim()
+        if (line.isEmpty()) return
+        OverlayState.pendingSay = line
+        if (boxOnScreen) appendSay(line) else openChannel(focus = false)
+    }
+
+    /** 真画进框里那一句主动说的话: 与 [appendReply] 同一个落点, 只是不记账 */
+    private fun appendSay(text: String) {
+        val view = boxView
+        if (view == null || !OverlayState.channel) return
+        view.appendReply(text)
+        OverlayState.pendingSay = null
+    }
+
+    /**
+     * 她连发几条 (2026-11-07)
+     *
+     * 几条**一次交给队列**, 由 [drainOutbox] 一条一条放 —— 于是"上一条说完再说下一条"这件事在
+     * 分条与回答两条路上是**同一个实现**, 不是两套
+     *
+     * 分条不属于任何一场会话: 账按"没点名"处理 (不动 `pendingReplySession`), 也不清掉正在排队的东西
+     */
+    private fun deliverBurst(text: String) {
+        val lines = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return
+        outboxSession = ""
+        lines.forEach { line ->
+            val merged = BallOutbox.offer(outbox.toList(), line)
+            outbox.clear()
+            outbox.addAll(merged)
+        }
+        drainOutbox()
+    }
+
+    /**
+     * 她贴的一张表情 (2026-11-07)
+     *
+     * 读不动的图**如实说一句** (走 [deliverNote] 那一条 `⚠`): "贴了一张你没看见的图"是最难查的那种
+     * 故障 —— 宿主那边心跳一切正常, 屏幕上什么都没有
+     */
+    private fun deliverSticker(id: String) {
+        val name = id.trim()
+        if (name.isEmpty()) return
+        OverlayState.pendingSticker = name
+        if (boxOnScreen) appendSticker(name) else openChannel(focus = false)
+    }
+
+    private fun appendSticker(id: String) {
+        val view = boxView
+        if (view == null || !OverlayState.channel) return
+        val maxHeight = resources.displayMetrics.heightPixels * BallStickers.MAX_HEIGHT_PERCENT / 100
+        val bitmap = BallStickers.load(this, id, maxHeight)
+        OverlayState.pendingSticker = null
+        if (bitmap == null) {
+            note("贴不上那张图: $id")
+            return
+        }
+        view.appendSticker(bitmap)
     }
 
     /** 真画进框里: 通道开着才画 (没开就只留着那句话) */
@@ -3665,6 +3860,29 @@ class OverlayService : Service() {
          * 事在屏幕上本来一个字都没有, 而主人看到的只是"我说了话, 没有回音"
          */
         const val ACTION_NOTE = "io.github.yuloong07star.luwi.overlay.NOTE"
+
+        /**
+         * 她主动说的一句 (2026-11-07 球是门户)
+         *
+         * 与 [ACTION_REPLY] 同一条通道、同一块框, 但**不带 session**: 它不是对某个问题的回答, 所以
+         * 那一本"回给谁"的账一个字都不动 (来源见 host-plugin 的 `reportSay`)
+         */
+        const val ACTION_SAY = "io.github.yuloong07star.luwi.overlay.SAY"
+
+        /**
+         * 她贴的一张表情 (2026-11-07)
+         *
+         * 参数是文件名 (`EXTRA_TEXT` 里), 素材在 `$DSH_HOME/lw/stickers/`
+         */
+        const val ACTION_STICKER = "io.github.yuloong07star.luwi.overlay.STICKER"
+
+        /**
+         * 她连发几条 (2026-11-07)
+         *
+         * `EXTRA_TEXT` 里是几行 —— 应用这一侧按行拆进 [BallOutbox] 那个队列, 一条放完 (开了朗读就等
+         * 念完) 再放下一条。与 [ACTION_REPLY] 的差别只在"一次来几条", 排队的那套是同一个
+         */
+        const val ACTION_BURST = "io.github.yuloong07star.luwi.overlay.BURST"
 
         /**
          * 通知栏那个「关掉浮标」按钮用的记号

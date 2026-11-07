@@ -1,6 +1,7 @@
 package io.github.yuloong07star.luwi.overlay
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
@@ -18,6 +19,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import io.github.yuloong07star.luwi.R
@@ -237,6 +239,13 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
          * 全屏应用里不好找空白处, 而这个按钮一直在看得见的地方
          */
         fun onClose()
+
+        /**
+         * 输入框右上角那个 `＋` 被点了一下: 挑一张图发给她 (2026-11-07 主人: "球的文本框加个发图功能")
+         *
+         * View 自己起不了选图器 (那道闸只有 Activity 收得到结果), 所以这里只把"有人要发图"交出去
+         */
+        fun onPickImage()
     }
 
     /**
@@ -263,8 +272,9 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         gravity = Gravity.TOP or Gravity.START
         setHorizontallyScrolling(false)
         setLineSpacing(0f, BallBox.LINE_SPACING)
-        // 右边空出那一条给右上角的 `×`: 长句子折行时不会有一两个字压在按钮下面
-        setPadding(0, 0, dp(CLOSE_RESERVE_DP), 0)
+        // 右边空出那一条给右上角的 `×` 与它左边那个 `＋` (2026-11-07): 长句子折行时不会有一两个字
+        // 压在按钮下面
+        setPadding(0, 0, dp(CLOSE_RESERVE_DP * 2), 0)
         // **软键盘上那个键就是"发送"**: 多行框的 `imeOptions` 是 NONE, 于是键盘上画的是换行键 ——
         // 主人 2026-10-06 的口径是"换行代表提交", 所以这里把动作直接标成 `IME_ACTION_SEND`
         // (能听懂这个动作的输入法会把键画成"发送"; 听不懂的仍发一个回车, 而回车由 [VoiceInput]
@@ -353,6 +363,19 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
     }
 
     /**
+     * 她贴的那张图 (2026-11-07 主人: "能让 luwi 发表情包更具人味")
+     *
+     * 只留一张: 新的顶掉旧的 —— 这一格是"她刚才贴了个表情", 不是相册。放在分隔线下面、回复上面,
+     * 于是它读起来是"先贴图, 再说一句话", 而输入区永远在最上面不动
+     */
+    private val sticker = ImageView(context).apply {
+        adjustViewBounds = true
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        maxHeight = resources.displayMetrics.heightPixels * BallStickers.MAX_HEIGHT_PERCENT / 100
+        visibility = GONE
+    }
+
+    /**
      * 右上角那个 `×`: 点一下把框收掉
      *
      * 画的是那个字符而不是一张图 (项目里没有图标资源这一层, 而它是 12 sp 就能看清的一个符号), 位置与
@@ -370,6 +393,24 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         setOnClickListener { listener.onClose() }
     }
 
+    /**
+     * 右上角那个 `＋` (在 `×` 左边一格): 挑一张图发给她
+     *
+     * 画法与 [close] 一样是那个字符本身, 位置靠 [CLOSE_RESERVE_DP] 那个空档推开 —— 于是输入框的
+     * 右内边距翻了一倍, 长句子折行时不会压到两个按钮下面
+     */
+    private val pick = TextView(context).apply {
+        text = PICK_GLYPH
+        setTextColor(HINT)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, CLOSE_SP)
+        gravity = Gravity.CENTER
+        val padH = dp(CLOSE_PAD_H_DP)
+        val padV = dp(CLOSE_PAD_V_DP)
+        setPadding(padH, padV, padH, padV)
+        contentDescription = context.getString(R.string.ball_box_pick_image)
+        setOnClickListener { listener.onPickImage() }
+    }
+
     init {
         background = GradientDrawable().apply {
             cornerRadius = dp(BallBox.CORNER_DP).toFloat()
@@ -383,9 +424,16 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         val tall = LinearLayout.LayoutParams.WRAP_CONTENT
         column.addView(input, LinearLayout.LayoutParams(wide, tall))
         column.addView(divider, LinearLayout.LayoutParams(wide, dp(1)))
+        column.addView(sticker, LinearLayout.LayoutParams(wide, LinearLayout.LayoutParams.WRAP_CONTENT))
         column.addView(replies, LinearLayout.LayoutParams(wide, tall))
         addView(column, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(close, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END))
+        addView(
+            pick,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+                rightMargin = dp(CLOSE_RESERVE_DP)
+            },
+        )
         setOnTouchListener { _, _ ->
             listener.onTouch()
             false
@@ -551,6 +599,23 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         appendReply("${NOTE_MARK} $line")
     }
 
+    /**
+     * 贴一张图 (2026-11-07)
+     *
+     * 与 [appendReply] 一样是"画进这块框", 但它**不进 [kept] 那本账** —— 那本账数的是文字条数,
+     * 图只有一张: 新的直接顶掉旧的 (换掉位图之后旧的那张交给 GC)
+     *
+     * 图出现时把分隔线一起亮起来: 没有它, 图与输入框之间没有界线
+     */
+    fun appendSticker(bitmap: Bitmap) {
+        sticker.setImageBitmap(bitmap)
+        sticker.visibility = VISIBLE
+        divider.visibility = VISIBLE
+    }
+
+    /** 现在有没有贴着一张图 (判据用) */
+    fun hasSticker(): Boolean = sticker.visibility == VISIBLE
+
     /** 现在框里留着几条回复 (判据用) */
     fun replyCount(): Int = kept.size
 
@@ -564,6 +629,9 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
 
         /** 右上角那个关闭按钮: 字符 / 字号 / 内边距, 以及输入框右边给它留的那一条 (dp) */
         const val CLOSE_GLYPH = "×"
+
+        /** 发图那个字符: 与 [CLOSE_GLYPH] 同一档字号, 摆在它左边一格 */
+        const val PICK_GLYPH = "＋"
         const val CLOSE_SP = 15f
         const val CLOSE_PAD_H_DP = 8
         const val CLOSE_PAD_V_DP = 2

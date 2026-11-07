@@ -322,6 +322,7 @@
     <string name="overlay_refused">The system refused the floating window: %1$s</string>
     <string name="ball_box_hint">Say something, Enter sends it</string>
     <string name="ball_box_close">Close the text box</string>
+    <string name="ball_box_pick_image">Send her a picture</string>
     <string name="ball_channel_failed">The voice inbox is not writable, so that line was not sent</string>
     <string name="ball_back_failed">The app could not be brought to the front: %1$s</string>
     <string name="ball_state_listening">Listening</string>
@@ -474,8 +475,15 @@
     <string name="settings_lock_cleared">the recording is gone, and the encrypted password went with its Keystore key</string>
     <string name="settings_lock_note_none">Nothing has been tried yet. The recording keeps only the moves: the password goes into the encrypted slot, and the taps that typed it are dropped on purpose</string>
 
-    <string name="settings_section_explore">Exploration</string>
-    <string name="settings_section_explore_summary">One read-only exploration a day; she rewrites the next task herself</string>
+    <string name="settings_section_activity">Activity</string>
+    <string name="settings_section_activity_summary">She looks around this phone once a day, and speaks up when the moment is right</string>
+    <string name="settings_activity_daily">What she looks at on her own</string>
+    <string name="settings_activity_speak">When she speaks up</string>
+    <string name="settings_activity_knows">What she remembers about you</string>
+    <string name="settings_activity_knows_empty">Nothing kept yet — mention a date or a thing to do in a chat and she keeps it</string>
+    <string name="settings_activity_knows_count">%1$d kept · tap one to forget it</string>
+    <string name="settings_activity_knows_detail">due %1$s</string>
+    <string name="settings_activity_knows_detail_none">no date</string>
     <string name="settings_explore_off">Not scheduled yet</string>
     <string name="settings_explore_next">next %1$s</string>
     <string name="settings_explore_running">running now (until %1$s)</string>
@@ -517,9 +525,10 @@
     <string name="settings_explore_last_failed">Could not queue it at %1$s: %2$s</string>
     <string name="settings_explore_note">For her to open a conversation on her own, turn on 允许它自己动手 in Automatic commands; power save does not stop a run, and a run skipped because the host was down is recorded here</string>
 
-    <string name="settings_section_proactive">Scheduled conversation</string>
-    <string name="settings_section_proactive_summary">Opens one by itself at the set times; shares the 30-minute gate with automatic commands</string>
     <string name="settings_proactive_toggle">Open a conversation on a schedule</string>
+    <string name="settings_router_tick">She picks the moment herself</string>
+    <string name="settings_router_tick_summary">Looks every 25-55 minutes: a long game, something she remembers falling due, too long without a word - speaks only when it is worth it</string>
+    <string name="settings_router_tick_failed">It was not written (the file is not writable), so this did not take effect</string>
     <string name="settings_proactive_toggle_summary">She opens one by herself at those times, no tap needed; it shares the 30-minute gate with automatic commands</string>
     <string name="settings_proactive_times">Times of day</string>
     <string name="settings_proactive_times_summary">Every day at %1$s</string>

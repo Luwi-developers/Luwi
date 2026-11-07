@@ -321,6 +321,7 @@
     <string name="overlay_refused">系统拒绝了这块窗: %1$s</string>
     <string name="ball_box_hint">说点什么, 回车发送</string>
     <string name="ball_box_close">关闭文本框</string>
+    <string name="ball_box_pick_image">发一张图给她</string>
     <string name="ball_channel_failed">写不进去收件箱, 这句话没发出去</string>
     <string name="ball_back_failed">界面没能提到前面: %1$s</string>
     <string name="ball_state_listening">正在听</string>
@@ -473,8 +474,15 @@
     <string name="settings_lock_cleared">录制已经删掉, 加密的密码也连着那把 Keystore 密钥一起走了</string>
     <string name="settings_lock_note_none">还没试过。录制里只留动作: 密码进加密那一格, 而"敲密码那几个点击"是有意丢掉的</string>
 
-    <string name="settings_section_explore">探索</string>
-    <string name="settings_section_explore_summary">每天定时开一场只读探索, 下一场做什么由她自己改写</string>
+    <string name="settings_section_activity">活动</string>
+    <string name="settings_section_activity_summary">她每天自己看看这台手机, 也在你觉得合适的时候开口</string>
+    <string name="settings_activity_daily">她每天自己看看手机</string>
+    <string name="settings_activity_speak">她什么时候开口</string>
+    <string name="settings_activity_knows">她记着你哪些事</string>
+    <string name="settings_activity_knows_empty">还没记着什么事 · 你在聊天里提一句日期或要办的事, 她自己记</string>
+    <string name="settings_activity_knows_count">记着 %1$d 件 · 点一下忘掉</string>
+    <string name="settings_activity_knows_detail">到 %1$s</string>
+    <string name="settings_activity_knows_detail_none">没定期限</string>
     <string name="settings_explore_off">还没开</string>
     <string name="settings_explore_next">下一次 %1$s</string>
     <string name="settings_explore_running">现在在跑 (到 %1$s 结束)</string>
@@ -516,9 +524,10 @@
     <string name="settings_explore_last_failed">%1$s 没投出去: %2$s</string>
     <string name="settings_explore_note">要让她自己开一场主动对话, 「自动指令」里的「允许它自己动手」得开着; 省电不拦这一场, 宿主没在跑的那一次才会跳过并记在这里</string>
 
-    <string name="settings_section_proactive">定时对话</string>
-    <string name="settings_section_proactive_summary">到点自己开一场, 与自动指令共用 30 分钟闸</string>
     <string name="settings_proactive_toggle">按时间自己开一场对话</string>
+    <string name="settings_router_tick">她自己挑时机开口</string>
+    <string name="settings_router_tick_summary">每 25~55 分钟看一眼: 打游戏久了 / 记着的事到点 / 太久没说话, 值得说才开口</string>
+    <string name="settings_router_tick_failed">没写进去 (文件不可写), 这一下没生效</string>
     <string name="settings_proactive_toggle_summary">到点自己开口, 不用手动点; 与自动指令共用 30 分钟闸</string>
     <string name="settings_proactive_times">每天几点</string>
     <string name="settings_proactive_times_summary">每天 %1$s</string>

@@ -45,8 +45,14 @@ internal object LwOverlay {
         "reply" -> reply(context, request)
         // 同一条推送, 但这一条不是回答: 比如"这句话没能送进会话" (画出来带一个 ⚠)
         "note" -> note(context, request)
+        // 她主动说的一句 (2026-11-07 球是门户): 同一条通道, 应用那一侧画成一句主动说的话
+        "say" -> say(context, request)
+        // 她贴一张表情 (2026-11-07): 参数是文件名, 素材在 $DSH_HOME/lw/stickers/
+        "sticker" -> sticker(context, request)
+        // 她连发几条 (2026-11-07): 一段里按行拆开, 应用那一侧一条一条放
+        "burst" -> burst(context, request)
         else -> throw IllegalArgumentException(
-            "op has to be show, expand, collapse, hide, state, channel, reply or note, not \"$op\"",
+            "op has to be show, expand, collapse, hide, state, channel, reply, note or say, not \"$op\"",
         )
     }
 
@@ -202,6 +208,31 @@ internal object LwOverlay {
     private fun note(context: Context, request: JsonObject): JsonObject =
         push(context, OverlayService.ACTION_NOTE, request, "note")
 
+    /** 她主动说的一句: 与 [note] 同一个落点, 只是记号不同 (应用那一侧不改"回给哪一场"那笔账) */
+    private fun say(context: Context, request: JsonObject): JsonObject =
+        push(context, OverlayService.ACTION_SAY, request, "say")
+
+    /**
+     * 她贴一张表情 (2026-11-07)
+     *
+     * 参数是**文件名**而不是文本: 素材就在 `$DSH_HOME/lw/stickers/` 里, 应用那一侧按名字读
+     * ([io.github.yuloong07star.luwi.overlay.BallStickers]) —— 带路径分隔符的名字它不认
+     */
+    private fun sticker(context: Context, request: JsonObject): JsonObject {
+        val id = request.string("id").trim().ifEmpty { request.string("text").trim() }
+        if (id.isEmpty()) throw IllegalArgumentException("op=sticker needs the sticker file name in id")
+        return push(context, OverlayService.ACTION_STICKER, request, "sticker", id)
+    }
+
+    /**
+     * 她连发几条 (2026-11-07)
+     *
+     * `text` 里是几行: 应用那一侧按行拆进队列, 一条放完再放下一条 (见 `BallOutbox`)。最多六条 ——
+     * 再多不是"连发几条", 是一段话被切碎了
+     */
+    private fun burst(context: Context, request: JsonObject): JsonObject =
+        push(context, OverlayService.ACTION_BURST, request, "burst")
+
     /**
      * 两条推送的实际动作: **球没在跑时不许把服务拉起来** (2026-10-06)
      *
@@ -210,12 +241,20 @@ internal object LwOverlay {
      * 最难查的一半。通道本来就是"浮标的输入口", 浮标不在时这句话没有落脚处, 如实说一句就够了 (那一句
      * 也不会丢: 球再被叫出来时 [OverlayState.pendingReply] / [OverlayState.pendingNote] 那两条路照旧补上)
      */
-    private fun push(context: Context, action: String, request: JsonObject, what: String): JsonObject {
-        val text = request.string("text").trim()
+    private fun push(
+        context: Context,
+        action: String,
+        request: JsonObject,
+        what: String,
+        text: String = request.string("text").trim(),
+    ): JsonObject {
         if (text.isEmpty()) throw IllegalArgumentException("op=$what needs the text to show")
         // **哪一场发来的** (`op=reply` 才带, 2026-10-06 加): 回复框记住它, 之后从框里发出去的那句话
         // 就点名投回这一场。`op=note` 不带, 读出来是空串, 应用那一侧按"没点名"处理
-        val from = request.string("session").trim()
+        // **没带就是"没点名"** (2026-11-07): `op=note` / `op=say` / `op=sticker` 都是宿主推来的,
+        // 本来就没有"哪一场"这回事 —— 这一格按必填读的话它们一律抛
+        // `this call has to name session`, 而宿主那边只当一条 warning 记下来, 屏幕上一个字都不出
+        val from = request.stringOrNull("session")?.trim().orEmpty()
         if (!OverlayState.running) {
             return buildJsonObject {
                 put("delivered", 0)

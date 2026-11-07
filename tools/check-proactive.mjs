@@ -201,7 +201,7 @@ check('开场正文带四步启动顺序与"可以沉默"', (() => {
   const line = api.proactiveStartLine('看看今天', '/x/lw/explore/20261105-0300.md')
   return [
     line.includes('最新探索摘要'),
-    line.includes('记忆'),
+    line.includes('记着的事'),
     line.includes('今天的日历'),
     line.includes('通知摘要'),
     line.includes('决定要不要开口'),
@@ -304,7 +304,7 @@ const persona = proactiveBlock.slice(proactiveBlock.indexOf('prefix: |-'), proac
 const needed = (phrase) => check(`persona 里有「${phrase}」`, persona.includes(phrase), true)
 needed('启动顺序')
 needed('最新探索摘要')
-needed('记忆')
+needed('记着的事')
 needed('今天的日历')
 needed('通知摘要')
 needed('决定要不要开口')
