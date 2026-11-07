@@ -83,6 +83,13 @@ internal object ProactiveSchedule {
     /** 与自动指令 (41) / 探索 (42) 两个闹钟分开, 三个 requestCode 互不覆盖 */
     private const val REQUEST = 43
 
+    /**
+     * 投出去之后按多久会话锁 (2026-11-07)
+     *
+     * 主动对话是一句话 + 几轮推理, 不是长任务; 十五分钟够它把话说完并落账, 也不至于白耗一夜
+     */
+    private const val PROACTIVE_LOCK_MS = 15 * 60_000L
+
     private val json = Json { ignoreUnknownKeys = true }
     private val lock = Any()
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -360,9 +367,11 @@ internal object ProactiveSchedule {
         if (DshHost.status !is HostStatus.Running) {
             // 与 2.8.0 #9 探索那条同一个形态: 闹钟把进程叫醒了, 而宿主那半可能是死的
             Log.i(TAG, "the host was not running, starting it for the proactive conversation")
-            release()
-            if (!ExploreSchedule.wakeHost(context)) {
-                val why = "宿主起不来 (等了 ${ExploreSchedule.HOST_WAIT_MS / 1000} 秒)"
+            // 松手交给 wakeHost: 服务**真的开始启动**之后才 finish() 广播 (2026-11-07, 同探索那条)
+            val wake = ExploreSchedule.wakeHost(context, onStarted = release)
+            if (!wake.ok) {
+                val why = wake.why
+                    ?: "宿主起不来 (等了 ${ExploreSchedule.HOST_WAIT_MS / 1000} 秒)"
                 Log.w(TAG, "the scheduled proactive conversation was skipped: $why")
                 save(context, current.copy(last = Last(now, "skipped", why)))
                 return
@@ -393,9 +402,17 @@ internal object ProactiveSchedule {
             }
 
             is ProactiveGate.Outcome.Delivered -> {
+                // 会话锁 (2026-11-07): 主动对话没有"场时长"这个数 (它只说几句话), 给一个固定预算 ——
+                // 与探索那条同一把机制, 名字分开, 心跳那边各自 reconcile
+                val lockUntil = LwSessionLock.hold(
+                    context,
+                    LwSessionLock.TAG_PROACTIVE,
+                    PROACTIVE_LOCK_MS,
+                )
                 val why = listOfNotNull(
                     if (card.isEmpty()) "卡是空的, 按缺省那一段投的" else null,
                     unlockNote,
+                    if (lockUntil > 0L) LwSessionLock.describe(LwSessionLock.TAG_PROACTIVE) else null,
                 ).joinToString("; ").ifEmpty { null }
                 Log.i(TAG, "the proactive conversation was queued as line #${sent.seq} (card ${card.length} chars)")
                 save(context, current.copy(last = Last(now, "started", why)))

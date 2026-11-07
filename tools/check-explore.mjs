@@ -439,11 +439,18 @@ check('排期: 每天一个时刻 / 缺省 03:00 / requestCode 42', [
 check('宿主不在就叫醒它 (2.8.0 #9): 到点先拉宿主, 不再只记 skipped', [
   /enum class Due \{/.test(schedule),
   /WAKE_HOST,/.test(schedule),
-  /fun wakeHost\(context: Context, timeoutMs: Long = HOST_WAIT_MS\): Boolean/.test(schedule),
+  // 2026-11-07: 签名多了 onStarted —— 服务**真的开始启动**之后广播才松手, 返回的也不再是裸 boolean
+  /fun wakeHost\(\s*context: Context,\s*timeoutMs: Long = HOST_WAIT_MS,\s*onStarted: \(\(\) -> Unit\)\? = null,\s*\): HostWake \{/u.test(schedule),
   /DshHostService\.start\(context\)/.test(schedule),
   /if \(due == Due\.WAKE_HOST\) \{/.test(schedule),
   /const val HOST_WAIT_MS = 180_000L/.test(schedule),
 ], [true, true, true, true, true, true])
+
+check('广播松手排在 startForegroundService 之后 (2026-11-07: 后台起 FGS 的豁免挂在广播上)', (() => {
+  const start = schedule.indexOf('DshHostService.start(context)')
+  const lastHandOff = schedule.lastIndexOf('onStarted?.invoke()')
+  return start >= 0 && lastHandOff > start
+})(), true)
 
 check('探索不再被省电拦: 跳过只剩宿主与上一场, 省电只进读数', [
   !/fun dueOf\(enabled: Boolean, hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
@@ -466,6 +473,45 @@ check('排期配置文件: lw/explore-schedule.json + 三个读数键', [
   schedule.includes('put("outcome", last.outcome)'),
   schedule.includes('put("why", it)'),
 ], [true, true, true, true])
+
+/*
+ * 保活那三件 (2026-11-07): 到点叫醒了却跑不完 / 漏一次就永久停 / 看不出卡在哪一层
+ *
+ * 三件都不在设备上跑, 所以只能钉源码里那几个落点:
+ */
+const keepAlive = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwSessionLock.kt')
+const engine = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationEngine.kt')
+
+check('投出去之后按会话锁 (熄屏 CPU 不 suspend, 那一场才跑得完)', [
+  /fun hold\(context: Context, tag: String, timeoutMs: Long\): Long/.test(keepAlive),
+  // 一定带超时: 忘掉的锁不该变成电量黑洞
+  /acquire\(budget\)/.test(keepAlive),
+  /const val SLACK_MS = 10 \* 60_000L/.test(keepAlive),
+  /LwSessionLock\.hold\(/.test(schedule),
+  /current\.minutes \* 60_000L \+ LwSessionLock\.SLACK_MS/.test(schedule),
+], [true, true, true, true, true])
+
+check('心跳里自愈 + 收尾放锁 (闹钟丢了自己补排, 一场跑完就放手)', [
+  /fun ensureIfStale\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
+  /if \(armedAt == next\) return/.test(schedule),
+  /ExploreSchedule\.ensureIfStale\(context, now\)/.test(engine),
+  /LwSessionLock\.reconcile\(/.test(engine),
+], [true, true, true, true])
+
+check('错过那一场能补跑 (八小时窗口, last 之后没跑过才算漏)', [
+  /const val CATCH_UP_WINDOW_MS = 8 \* 60 \* 60_000L/.test(schedule),
+  /fun catchUpLateMs\(/.test(schedule),
+  /if \(lastAt >= dueAt\) return null/.test(schedule),
+  /lateMs\?\.let \{ "补跑/.test(schedule),
+  // 补跑挂在心跳上: 漏掉的那一次不会再有闹钟来叫 (只写在 fire 里等于永远轮不到)
+  /fun ensureCatchUp\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
+  /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
+], [true, true, true, true, true, true])
+
+check('宿主停掉时把会话锁放掉 (onTaskRemoved 顺手校一遍两个闹钟)', [
+  /LwSessionLock\.releaseAll\(\)/.test(service),
+  /override fun onTaskRemoved\(rootIntent: Intent\?\) \{/.test(service),
+], [true, true])
 
 check('接收器在清单里且 exported=false', [
   /<receiver\s+android:name="\.tool\.ExploreAlarmReceiver"\s+android:exported="false" \/>/u.test(manifest),

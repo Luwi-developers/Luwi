@@ -23,6 +23,7 @@ import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.plugin.PluginManager
 import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 
@@ -119,6 +120,21 @@ class DshHostService : Service() {
     }
 
     /**
+     * 主人从最近任务里划掉这个应用 (2026-11-07)
+     *
+     * 划掉不等于"别再定时": 42 / 43 两个闹钟还挂在系统上, 这里按现在的配置校一遍 —— 有些 ROM
+     * 清后台时连闹钟一起清, 这是最后一次机会。**不重启服务**: Android 12 起从后台启动前台服务
+     * 需要豁免, 划任务这一下没有
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        runCatching {
+            ExploreSchedule.ensure(this)
+            ProactiveSchedule.ensure(this)
+        }.onFailure { Log.w(TAG, "the schedules could not be re-armed after the task was removed", it) }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /**
      * 启用着的插件重新接上 (协议第 7 节的"状态恢复")
      *
      * 绑一个伴侣的 Service 是异步的, 而整个恢复过程要做完"绑上 → 对照 describe → attach → enable"
@@ -140,6 +156,8 @@ class DshHostService : Service() {
     }
 
     override fun onDestroy() {
+        // 会话锁先放: 它是这个进程按住的那一把, 进程要走了留着没人能放 (2026-11-07)
+        LwSessionLock.releaseAll()
         DshHost.stop()
         AutomationEngine.stop()
         PrivilegedBridge.stop()
