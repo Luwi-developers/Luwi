@@ -172,6 +172,13 @@
             </intent-filter>
         </activity>
 
+        <!-- 球那块框上的 ＋: 挑一张图发给她 (2026-11-07). 它没有界面, 一闪就过 —— 透明主题见
+             values/themes.xml 的 Theme.Luwi.Transparent -->
+        <activity
+            android:name=".ui.PickMediaActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Luwi.Transparent" />
+
         <!-- specialUse: the host is a long-running local server for an agent, which no other
              foreground service type describes -->
         <service
@@ -294,6 +301,12 @@
              理由与上一条相同 -->
         <receiver
             android:name=".tool.ProactiveAlarmReceiver"
+            android:exported="false" />
+
+        <!-- 判断层的敲钟 (2026-11-07): 25~55 分钟不定时投一行 source:"router", 说"该看一眼了"。
+             要不要开口由宿主那侧判 (见 host-plugin 的 judgeRouter), 缺省关着 -->
+        <receiver
+            android:name=".tool.RouterTickReceiver"
             android:exported="false" />
 
         <!-- 桌面组件那两个槽 (插件方案 v2 的 3.1): 组件由**主 APK**声明, 插件只往里填内容 ——

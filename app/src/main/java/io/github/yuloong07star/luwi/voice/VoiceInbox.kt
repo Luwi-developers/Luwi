@@ -112,6 +112,14 @@ internal object VoiceInbox {
      */
     const val SOURCE_PROACTIVE = "proactive"
 
+    /**
+     * 判断层敲的那一下 (2026-11-07)
+     *
+     * 它与 [SOURCE_PROACTIVE] 不是一回事: 那一条是"到点了, 开一场"; 这一条只是"该看一眼了" ——
+     * 要不要开口、说什么, 由宿主那侧的 `judgeRouter` 定 (见 host-plugin 的 `routerTick`)
+     */
+    const val SOURCE_ROUTER = "router"
+
     /** 超过这个大小就从尾部留 [KEEP_LINES] 行重写: 上千句话才可能走到, 到了也不该无限涨 */
     private const val CAP_BYTES = 1 shl 20
     private const val KEEP_LINES = 200
@@ -154,9 +162,13 @@ internal object VoiceInbox {
         to: String? = null,
         minutes: Int? = null,
         steps: Int? = null,
+        image: String? = null,
     ): Long? {
         val line = text.trim()
-        if (line.isEmpty()) return null
+        // **图也是一句话的内容** (2026-11-07 主人: 球的框里要能发图): 只有图没有字的时候这一行照样
+        // 要投出去, 于是判空看的是"字与图都空" —— 宿主那一侧读 `image` 自己去搬那个文件
+        val picture = image?.trim().orEmpty()
+        if (line.isEmpty() && picture.isEmpty()) return null
         val pointed = to?.trim().orEmpty()
         val exploring = source == SOURCE_EXPLORE
         val target = file(context)
@@ -171,6 +183,9 @@ internal object VoiceInbox {
                     put("at", System.currentTimeMillis())
                     put("text", line)
                     put("source", source)
+                    // 相对 `voice/inbox-media/` 的文件名: 宿主那一侧先把它搬进工作区, 再在正文里
+                    // 给一个会话读得到的相对路径 (会话的文件沙箱关在工作区里, 看不到 $DSH_HOME)
+                    if (picture.isNotEmpty()) put("image", picture)
                     if (fresh) put("wake", true)
                     if (pointed.isNotEmpty()) put("to", pointed)
                     if (exploring) {

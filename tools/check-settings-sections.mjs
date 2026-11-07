@@ -62,12 +62,12 @@ check('白名单就是 D1 那六段 (省电 + 常用五段; 导航那一段 2026
   'power', 'appearance', 'channel', 'ball', 'wake', 'speak',
 ])
 
-check('能力那一组 15 段 (接口 2026-10-25 加在最末, 定时对话 2.8.0 #22)', ability, [
+check('能力那一组 14 段 (接口 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成)', ability, [
   'notifications', 'screenshot', 'look', 'lock',
-  'explore', 'proactive', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'tavern', 'permissions', 'api',
+  'activity', 'automation', 'quick', 'plugin', 'skills', 'linux', 'sync', 'tavern', 'permissions', 'api',
 ])
 
-check('页面上真是 21 段', page.length, 21)
+check('页面上真是 20 段', page.length, 20)
 
 check('两份名单拼起来与页面逐个对齐 (顺序也管)', [...(open ?? []), ...(ability ?? [])], page)
 

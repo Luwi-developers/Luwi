@@ -2,4 +2,18 @@
 <resources>
 
     <style name="Theme.Luwi" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+        选图那一步用的透明主题 (2026-11-07)
+
+        它没有界面: 挂上去就拉起系统选择器, 选完 (或者取消) 立刻 finish —— 于是主人看到的只有
+        选择器本身, 中间不会闪一下黑屏或者白屏
+    -->
+    <style name="Theme.Luwi.Transparent">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>

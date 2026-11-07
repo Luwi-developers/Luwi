@@ -10,6 +10,7 @@ import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.ProactiveGate
+import io.github.yuloong07star.luwi.tool.UsageLedger
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.wake.PowerWindow
 import kotlinx.serialization.json.JsonArray
@@ -403,6 +404,11 @@ internal object AutomationEngine {
             firstUnlockTodayAt = 0L
         }
         retireMissedOnce(context, now)
+        // 「今天这台手机被怎么用了」是判断层的输入 (2026-11-07): 每一拍按 5 分钟节流重算一次,
+        // 于是"打游戏打太久了"这个读数总在最近 5 分钟之内 (熄屏那一拍它自己会跳过)
+        runCatching { UsageLedger.maybeRefresh(context, now) }
+        // "刚解锁"那条信号: 广播在 HyperOS 上没送到 (2026-11-07), 这一条按锁屏状态自己比出来
+        runCatching { UsageLedger.maybeSignalUnlock(context) }
         pollWeather(context, now)
         // 通知摘要缓存按窗口清旧条目 (不轮询通知栏, 只清自己那一份)
         AutomationDigest.prune(digest, now)
@@ -466,6 +472,8 @@ internal object AutomationEngine {
     fun onForeground(context: Context, packageName: String) {
         if (packageName.isBlank()) return
         val application = context.applicationContext
+        // 判断层要看"刚才前台换成了谁" (2026-11-07): 一行信号, 与下面那一支规则判定互不影响
+        UsageLedger.signal(application, "foreground", packageName)
         worker.execute {
             runCatching { evaluate(application, Trigger("foreground", packageName = packageName)) }
                 .onFailure { warn("foreground", it) }
@@ -508,6 +516,7 @@ internal object AutomationEngine {
         } else if (firstUnlockTodayAt == 0L) {
             firstUnlockTodayAt = now
         }
+        UsageLedger.signal(application, "unlock")
         Log.i(TAG, "screen unlocked: first=${AutomationRule.formatMoment(firstUnlockTodayAt, timeZone())}")
         if (rules.none { it.enabled && it.involves("unlock") }) return
         worker.execute {

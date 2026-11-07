@@ -21,6 +21,11 @@
 | 技能 | `skills/<名字>/SKILL.md` | agent / 人 | dsh 按 frontmatter 的 name / description 认 |
 | 自动指令 | `automations/rules/<名字>.json`（旧:`automations/<名字>.json`） | 模型（经 `lw_automation`） | 满足条件就投一句话 |
 | 探索卡 | `lw/explore-card.md` | 模型（经 `lw_explore op=finish`） | 下一场探索做什么 |
+| 今天用了多久 | `lw/usage.json` | **应用写（只读）** | 每个应用今天累计多久、现在前台是谁 |
+| 手机上的信号 | `lw/signals.jsonl` | **应用写（只读）** | 前台换了 / 解锁了，一行一件事 |
+| 记着的事 | `lw/wishes.json` | 宿主（`lw_wish`），设置页可删一条 | 考试 / 截止日 / 要买的东西 |
+| 判断层 | `lw/router.json` | 宿主（`lw_router`），`tick.enabled` 由设置页写 | 上一次判断说了什么、到点要不要敲钟 |
+| 她学到的词 | `lw/slang.json` + `lw/slang.md` | 宿主（`lw_slang`） | 候选词库，以及给会话读的那一份 |
 | API 朗读与音色库 | 第 9 节 + `lw/tts-voices.json` | 配置：应用写 / 音色库：应用代写（`lw_speak op=voice`） | 设计出来的音色登记在这里，设置页「说话 → API」读它 |
 
 `$DSH_HOME` 在这台机器上是：
@@ -217,6 +222,57 @@ api-voice:    {{API_VOICE}}
 3. 在设置页「说话 → API → 音色」里挑它；也可以**不改设置**，用
    `lw_speak op=speak text="…" voice=<标识或登记名>` 当场试听。
 4. 服务商没有设计 / 复刻能力时，这里没有可伪造的替代：**不要编一个 id** 登记进去，那只会让朗读报错。
+
+## 10. 判断层那几份账（2026-11-07）
+
+「她该不该开口」这件事读的全部是文件，没有一条走网络：
+
+```json
+// lw/usage.json —— **应用写**，每 5 分钟（且屏幕亮着）重算一次
+{"v":1,"at":1759600000000,"day":"2026-11-07","access":true,
+ "today":[{"pkg":"com.tencent.tmgp.sgame","label":"王者荣耀","ms":7080000,"game":true}],
+ "foreground":{"pkg":"com.tencent.tmgp.sgame","since":1759590000000}}
+```
+
+- `access` 是「使用情况访问」给没给：`false` 时 `today` 一定是空的 —— **"她不提醒"与"这条权限没开"要分得开**
+- 只有时长与包名，没有界面文本、没有聊天、没有搜索词
+
+```jsonl
+// lw/signals.jsonl —— **应用写**，一行一件事，超过 64 KB 留最近 150 行
+{"at":1759600000000,"kind":"foreground","pkg":"com.tencent.tmgp.sgame"}
+{"at":1759600000000,"kind":"unlock"}
+```
+
+```json
+// lw/wishes.json —— 宿主写（`lw_wish`），设置页「活动 → 她记着你哪些事」能看能删
+{"v":1,"at":1759600000000,"items":[
+  {"id":"w1abc","what":"考四级","due":"2026-12-14","hint":"晚上提醒背单词",
+   "said":["2026-11-05"],"snoozeUntil":0,"madeAt":1759500000000}
+]}
+```
+
+- `said` 记的是"哪几天提过了"（同一天不重复提），`snoozeUntil` 是"推迟到什么时候之前别提"
+
+```json
+// lw/router.json —— 宿主写；`tick.enabled` 由设置页那一行写
+{"v":1,"at":1759600000000,"lastSpokenAt":1759599000000,"rules":{"gameMinutes":100},
+ "last":{"say":true,"kind":"rest","brief":"王者荣耀 今天 118 分钟, 现在 21:40"}}
+```
+
+- **`tick.enabled` 缺省关着**：打开之后应用才会隔 25~55 分钟不定时投一行 `source:"router"`，
+  要不要开口由宿主那侧的 `judgeRouter` 定
+- `rules` 里能改的：`gameMinutes`（多久算久）/ `wishDays`（提前几天提）/ `cooldownMs` /
+  `chatChance` / `chatAfterMs`
+
+```json
+// lw/slang.json —— 宿主写（`lw_slang`）；lw/slang.md 是它渲染出来给会话读的那一份
+{"v":1,"at":1759600000000,"entries":[
+  {"id":"s1abc","content":"白给","meaning":"没意义、白费","example":"这波属于是白给",
+   "status":"confirmed","at":1759500000000}
+]}
+```
+
+- `status` 只有 `candidate` / `confirmed` / `rejected`；**只有 confirmed 会进 `slang.md`**（最多 20 条）
 
 ## 许可与回退
 

@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -83,6 +84,8 @@ import io.github.yuloong07star.luwi.tool.ExploreStatus
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.ProactiveGate
 import io.github.yuloong07star.luwi.tool.ProactiveSchedule
+import io.github.yuloong07star.luwi.tool.RouterTick
+import io.github.yuloong07star.luwi.tool.Wishes
 import io.github.yuloong07star.luwi.tool.SchedulePanel
 import io.github.yuloong07star.luwi.tool.LwApiVoices
 import io.github.yuloong07star.luwi.tool.LwCamera
@@ -250,14 +253,17 @@ internal val SettingsSectionsAlwaysOpenKeys = listOf(
 /** 白名单的集合形态, 给 [defaultCollapsed] 算差集用 */
 internal val SettingsSectionsAlwaysOpen: Set<String> = SettingsSectionsAlwaysOpenKeys.toSet()
 
-/** 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern; 定时对话那一段 2.8.0 #22 加在探索后面) */
+/**
+ * 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern;
+ * 活动那一段 2026-11-07 由「探索」与「定时对话」合成 —— 她的日程、她开口的时机都在同一个入口里)
+ */
 private val AbilitySectionKeys = listOf(
     "notifications", "screenshot", "look", "lock",
-    "explore", "proactive", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+    "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
 )
 
 /**
- * 页面上那 21 段的段名, **顺序就是从上到下**
+ * 页面上那 20 段的段名, **顺序就是从上到下**
  *
  * 它只为一件事存在: 算"缺省收起来的那几段" ([defaultCollapsed])。**新加一段时必须同时加到这里** ——
  * 漏掉它不会报错, 只是那一段会恰好展开着 (与 D2 那条"新加的段就收着"相反), 界面上一点异常都看不出来,
@@ -642,28 +648,21 @@ fun SettingsScreen() {
                 Card { LockItems() }
             }
 
-            // 探索 (2.7.8 批次 8): 主人 2026-10-17 的口径是"只定时开始, 没有手动入口", 所以这一段
-            // 只有开不开 / 每天几点 / 下一场那张任务卡, 外加两行读数
+            // 活动 (2026-11-07 主人): 原「探索」与「定时对话」合成一段 —— 她的日程、她开口的时机、
+            // 她记着的事都在同一个入口里, 不用在两段之间来回找。三段小标题分开, 各自的条目一行没改
             settingsSection(
-                key = "explore",
-                title = R.string.settings_section_explore,
-                summary = R.string.settings_section_explore_summary,
+                key = "activity",
+                title = R.string.settings_section_activity,
+                summary = R.string.settings_section_activity_summary,
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
+                SectionSmallTitle(stringResource(R.string.settings_activity_daily))
                 Card { ExploreItems() }
-            }
-
-            // 定时对话 (2.8.0 B4-c): 排期与自动指令摆在同一段里 —— 两路共用 30 分钟闸,
-            // 看"为什么没开口"要同时看这两笔账 (⑩ 同时看到排期与规则)
-            settingsSection(
-                key = "proactive",
-                title = R.string.settings_section_proactive,
-                summary = R.string.settings_section_proactive_summary,
-                collapsed = collapsed,
-                onToggle = toggleSection,
-            ) {
+                SectionSmallTitle(stringResource(R.string.settings_activity_speak))
                 Card { ProactiveItems() }
+                SectionSmallTitle(stringResource(R.string.settings_activity_knows))
+                Card { KnowsItems() }
             }
 
             settingsSection(
@@ -1457,6 +1456,44 @@ private fun SkillItems() {
 private fun PlaceholderItems(text: String) {
     Column(modifier = Modifier.fillMaxWidth().padding(UiSpacing.Large)) {
         Text(text = text, color = colorScheme.onSurfaceVariantActions)
+    }
+}
+
+/**
+ * 「她记着你哪些事」那一节 (2026-11-07, 球是门户)
+ *
+ * 只做两件事: 把 `wishes.json` 里那几条按**人话**列出来 (她记的是"考四级", 不是 `w4x1` —— 那串
+ * 只是它自己的记号), 点一下忘掉。**这里不新增** —— 新增是聊天里她自己记下来的 (见 host-plugin 的
+ * `lw_wish`), 这一页只负责"我记着的东西你看得见、也删得掉"
+ */
+@Composable
+private fun KnowsItems() {
+    val context = LocalContext.current
+    var items by remember { mutableStateOf(Wishes.list(context)) }
+    if (items.isEmpty()) {
+        PlaceholderItems(stringResource(R.string.settings_activity_knows_empty))
+        return
+    }
+    PlaceholderItems(stringResource(R.string.settings_activity_knows_count, items.size))
+    items.forEach { one ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    if (Wishes.remove(context, one.id)) items = Wishes.list(context)
+                }
+                .padding(UiSpacing.Large),
+        ) {
+            Text(text = one.what, color = colorScheme.onSurfaceVariantActions)
+            Text(
+                text = if (one.due.isEmpty()) {
+                    stringResource(R.string.settings_activity_knows_detail_none)
+                } else {
+                    stringResource(R.string.settings_activity_knows_detail, one.due)
+                },
+                color = colorScheme.onSurfaceVariantActions,
+            )
+        }
     }
 }
 
@@ -3483,6 +3520,8 @@ private fun ProactiveItems() {
     var revision by remember { mutableIntStateOf(0) }
     var editingTimes by rememberSaveable { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    // 她自己挑时机那一条 (2026-11-07): 缺省关着, 所以每次进这一页都现读一次 `router.json`
+    var tickOn by remember { mutableStateOf(RouterTick.enabled(context)) }
 
     val reading = remember(revision) { SchedulePanel.read(context) }
     val plan = reading.proactive
@@ -3508,6 +3547,21 @@ private fun ProactiveItems() {
         summary = stringResource(R.string.settings_proactive_toggle_summary),
         checked = plan.enabled,
         onCheckedChange = { save(plan.copy(enabled = it)) },
+    )
+    // 记住自己挑时机 (2026-11-07): 打开之后每 25~55 分钟看一眼"该不该开口" —— 说不说、说什么由
+    // 宿主那侧的判断层定 (打游戏久了 / 记着的事到点 / 太久没说话)。**缺省关着**: 一个"会自己开口"
+    // 的东西, 装上就开始说比装上不说话糟得多
+    SwitchPreference(
+        title = stringResource(R.string.settings_router_tick),
+        summary = stringResource(R.string.settings_router_tick_summary),
+        checked = tickOn,
+        onCheckedChange = { on ->
+            if (RouterTick.setEnabled(context, on)) {
+                tickOn = on
+            } else {
+                message = context.getString(R.string.settings_router_tick_failed)
+            }
+        },
     )
     ArrowPreference(
         title = stringResource(R.string.settings_proactive_times),

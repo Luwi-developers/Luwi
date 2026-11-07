@@ -20,7 +20,7 @@ import { connect } from 'node:net'
 import { readFileSync, watch } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -4418,6 +4418,269 @@ const TOOLS = [
     },
   }),
   defineTool({
+    name: 'lw_sticker',
+    description:
+      'The stickers she can put on the floating ball (her own little pictures). op=list shows the files '
+      + 'in $DSH_HOME/lw/stickers (png / gif / webp, at most 2 MB each); op=say puts one of them into the '
+      + "ball's text channel, above the reply. Use it sparingly - one picture, and when it lands, do not "
+      + 'write a sentence explaining the picture; no sticker is better than a forced one.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'list or say',
+      },
+      id: {
+        type: 'string',
+        description: 'For op=say: the sticker file name, exactly as op=list printed it',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'list').trim()
+      const home = process.env.DSH_HOME
+      if (!home) throw new Error('this profile has no DSH_HOME, so there are no stickers to read')
+      const folder = join(home, 'lw', 'stickers')
+      if (op === 'list') {
+        const names = await readdir(folder).then(
+          (list) => list.filter((one) => /\.(png|gif|webp|jpg|jpeg)$/i.test(one)).sort(),
+          () => [],
+        )
+        if (names.length === 0) return `no stickers yet: put png / gif / webp files into ${folder}`
+        return `${names.length} sticker(s) in ${folder}:\n${names.map((one) => `- ${one}`).join('\n')}`
+      }
+      if (op === 'say') {
+        const id = String(args?.id ?? '').trim()
+        if (!id) throw new Error('op=say needs id: the sticker file name')
+        if (id.includes('/') || id.includes('\\') || id.includes('..')) {
+          throw new Error(`that is not a sticker file name: ${id}`)
+        }
+        reportSticker(id)
+        return `the sticker ${id} is on its way to the ball (it shows above the reply, one at a time)`
+      }
+      throw new Error(`op has to be list or say, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_router',
+    description:
+      'The decision layer: whether she should speak up right now, and about what. op=judge runs the '
+      + 'judgement over the phone\'s own numbers (how long a game has been running today, the things '
+      + 'she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts one '
+      + 'sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
+      + 'It never opens a conversation by itself - op=judge only answers.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'judge, say or status',
+      },
+      text: {
+        type: 'string',
+        description: 'For op=say: the sentence to put on the ball',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'judge').trim()
+      if (op === 'judge') {
+        const inputs = await readRouterInputs()
+        if (inputs === null) throw new Error('this profile has no DSH_HOME, so there is nothing to judge')
+        return JSON.stringify(judgeRouter(inputs))
+      }
+      if (op === 'say') {
+        const text = String(args?.text ?? '').trim()
+        if (!text) throw new Error('op=say needs text')
+        reportSay(text)
+        return `said it on the ball: ${text}`
+      }
+      if (op === 'status') {
+        const state = (await readRouterJson(routerStatePath())) ?? {}
+        return JSON.stringify({
+          lastSpokenAt: Number(state.lastSpokenAt ?? 0) || 0,
+          last: state.last ?? null,
+          rules: state.rules ?? {},
+        })
+      }
+      throw new Error(`op has to be judge, say or status, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_wish',
+    description:
+      'The things she keeps for you: a exam date, a deadline, something to buy. op=add remembers one '
+      + '(what + due), op=list shows them, op=done closes one, op=snooze pushes one back. The router '
+      + 'reads this file to decide when to bring something up, so one item per promise, said in your '
+      + 'own words. Use it when the owner mentions a date or a thing he must not forget - do not ask '
+      + 'follow-up questions about it.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'add, list, done or snooze',
+      },
+      what: {
+        type: 'string',
+        description: 'For op=add: the thing to remember, one short line (考四级 / 交房租)',
+      },
+      due: {
+        type: 'string',
+        description: 'For op=add: the date it matters, YYYY-MM-DD (optional but it is what makes the reminder land)',
+      },
+      hint: {
+        type: 'string',
+        description: 'For op=add: how to bring it up, in your own words (optional)',
+      },
+      id: {
+        type: 'string',
+        description: 'For op=done and op=snooze: the id op=list printed',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'list').trim()
+      const items = await readWishes()
+      if (op === 'list') {
+        if (items.length === 0) return 'nothing is being kept yet'
+        return items
+          .map((one) => {
+            const due = one.due ? ` (due ${one.due})` : ''
+            const said = Array.isArray(one.said) && one.said.length > 0
+              ? `, brought up ${one.said.at(-1)}`
+              : ', never brought up'
+            return `- ${one.id}: ${one.what}${due}${said}`
+          })
+          .join('\n')
+      }
+      if (op === 'add') {
+        const what = String(args?.what ?? '').trim()
+        if (!what) throw new Error('op=add needs what: the thing to remember, one short line')
+        const due = String(args?.due ?? '').trim()
+        const hint = String(args?.hint ?? '').trim()
+        const id = `w${Date.now().toString(36)}`
+        const next = [...items, {
+          id,
+          what: what.slice(0, 80),
+          due,
+          hint: hint.slice(0, 200),
+          said: [],
+          snoozeUntil: 0,
+          madeAt: Date.now(),
+        }]
+        await writeWishes(next)
+        return `kept: ${what}${due ? ` (due ${due})` : ''} as ${id}`
+      }
+      if (op === 'done') {
+        const id = String(args?.id ?? '').trim()
+        if (!id) throw new Error('op=done needs id')
+        const next = items.filter((one) => String(one?.id ?? '') !== id)
+        if (next.length === items.length) throw new Error(`no such wish: ${id}`)
+        await writeWishes(next)
+        return `closed: ${id}`
+      }
+      if (op === 'snooze') {
+        const id = String(args?.id ?? '').trim()
+        if (!id) throw new Error('op=snooze needs id')
+        const until = Number(args?.until ?? 0)
+        const at = Number.isFinite(until) && until > Date.now() ? until : Date.now() + 24 * 60 * 60 * 1000
+        const next = items.map((one) => (
+          String(one?.id ?? '') === id ? { ...one, snoozeUntil: at } : one
+        ))
+        await writeWishes(next)
+        return `snoozed ${id} until ${new Date(at).toISOString()}`
+      }
+      throw new Error(`op has to be add, list, done or snooze, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_slang',
+    description:
+      'The words the owner actually uses. op=learn records one candidate (content = the word, meaning = '
+      + 'what it means here, example = how it was used); op=list shows everything with its status; '
+      + 'op=confirm / op=reject move one candidate; op=render rewrites $DSH_HOME/lw/slang.md, which is '
+      + 'the file she reads before talking. Learn from what is visible (notifications, screen text, the '
+      + 'owner\'s own messages) - never record anything that looks like a password, a code or a payment.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'learn, list, confirm, reject or render',
+      },
+      content: {
+        type: 'string',
+        description: 'For op=learn: the word or phrase itself',
+      },
+      meaning: {
+        type: 'string',
+        description: 'For op=learn: what it means when the owner says it',
+      },
+      example: {
+        type: 'string',
+        description: 'For op=learn: one short example of how it was used',
+      },
+      id: {
+        type: 'string',
+        description: 'For op=confirm and op=reject: the id op=list printed',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'list').trim()
+      const entries = await readSlang()
+      if (op === 'list') {
+        if (entries.length === 0) return 'no words yet'
+        return entries
+          .slice(-40)
+          .map((one) => `- ${one.id} [${one.status}] ${one.content}${one.meaning ? ` — ${one.meaning}` : ''}`)
+          .join('\n')
+      }
+      if (op === 'learn') {
+        const content = String(args?.content ?? '').trim().slice(0, 50)
+        if (!content) throw new Error('op=learn needs content: the word itself')
+        const meaning = String(args?.meaning ?? '').trim().slice(0, SLANG_FIELD_MAX)
+        const example = String(args?.example ?? '').trim().slice(0, SLANG_FIELD_MAX)
+        const id = `s${Date.now().toString(36)}`
+        // 同一个词只留一条: 再学一次就是把意思补上, 不是又记一遍
+        const kept = entries.filter((one) => one.content !== content)
+        await writeSlang([...kept, { id, content, meaning, example, status: 'candidate', at: Date.now() }])
+        return `learned a candidate: ${content} as ${id}`
+      }
+      if (op === 'confirm' || op === 'reject') {
+        const id = String(args?.id ?? '').trim()
+        if (!id) throw new Error(`op=${op} needs id`)
+        let touched = false
+        const next = entries.map((one) => {
+          if (String(one?.id ?? '') !== id) return one
+          touched = true
+          return { ...one, status: op === 'confirm' ? 'confirmed' : 'rejected', at: Date.now() }
+        })
+        if (!touched) throw new Error(`no such word: ${id}`)
+        await writeSlang(next)
+        const count = op === 'confirm' ? await renderSlang() : 0
+        return op === 'confirm'
+          ? `confirmed ${id}; ${count} word(s) are now in slang.md`
+          : `rejected ${id}`
+      }
+      if (op === 'render') {
+        const count = await renderSlang()
+        return `${count} word(s) written to slang.md`
+      }
+      throw new Error(`op has to be learn, list, confirm, reject or render, not "${op}"`)
+    },
+  }),
+  defineTool({
     name: 'lw_overlay',
     description:
       'Float a small ball over other apps, so this phone\'s assistant is one tap away from anywhere. '
@@ -4443,7 +4706,9 @@ const TOOLS = [
       + 'host pushing a finished reply into that channel and is not something the model calls (it '
       + 'does nothing while the ball is down, and it never brings the ball back); op=note is the same '
       + 'push without being an answer - it is how a spoken or typed line that could not be delivered '
-      + 'says so, in the ball\'s own box; op=hide takes the ball away - it removes the '
+      + 'says so, in the ball\'s own box; op=say is a short sentence she says on her own - it is a '
+      + 'bubble, not the reply box, so it never touches the session accounting and never brings the '
+      + 'ball back; op=hide takes the ball away - it removes the '
       + 'window itself, stops the service and clears the stored "keep it on screen" flag, and its '
       + 'answer carries a problem field when the window would not come off; op=state reports the '
       + 'permission, whether the ball is up and whether its service is running, where it '
@@ -4457,8 +4722,8 @@ const TOOLS = [
       op: {
         type: 'string',
         required: true,
-        description: 'show, expand, collapse, hide, state, channel, reply or note'
-          + ' (the last three are host-side pushes)',
+        description: 'show, expand, collapse, hide, state, channel, reply, note, say, sticker or burst'
+          + ' (except burst, the ones after channel are host-side pushes)',
       },
       expand: {
         type: 'boolean',
@@ -4466,7 +4731,14 @@ const TOOLS = [
       },
       text: {
         type: 'string',
-        description: 'For op=reply: the text to put into the floating channel',
+        description: 'For op=reply and op=burst: the text to put into the floating channel',
+      },
+      lines: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For op=burst: several sentences to say one after another (at most 6, one per entry).'
+          + ' The ball draws them one at a time, waiting for the previous one (and for the speech, when'
+          + ' it reads replies aloud) - so do not also call op=say for each of them',
       },
     },
     output: {
@@ -4477,6 +4749,15 @@ const TOOLS = [
       const request = { op: args.op }
       if (args.expand !== undefined) request.expand = args.expand
       if (args.text !== undefined) request.text = args.text
+      // 分条: 几条用换行拼一段交给应用那一侧 (它按行拆进队列, 见 `BallOutbox`) —— 多了就截到 6 条,
+      // 再多不是"她连发几条", 是一段话被切碎了
+      if (Array.isArray(args.lines)) {
+        request.text = args.lines
+          .map((one) => String(one ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 6)
+          .join('\n')
+      }
       const answer = await call('overlay', request)
       if (args.op === 'show' || args.op === 'expand') {
         return `the ball is up${answer.expanded ? ', with the keyboard strip open' : ''}:`
@@ -6355,6 +6636,269 @@ function readAloudText(markdown) {
   return text.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').replace(/^ | $/gm, '').trim()
 }
 
+/* ── 推给浮标的那一句 (2.8.0: 球是门户) ──────────────────────────────────── */
+
+/**
+ * 推给球的那一句最多多少字
+ *
+ * 那块框只有 650 px, 一次看得清的就是一句人话; 完整的回答还在会话里, 截了不丢信息
+ */
+const BALL_REPLY_MAX = 240
+
+/**
+ * 过程叙述的记号: 带这些词、又不是一句短话的时候, 那一句不是说给人听的
+ *
+ * 一轮里模型会写"我先看一下通知列表"这种话, 它是思考的痕迹, 不是回答的一部分
+ */
+const BALL_PROCESS_CUE = /(我先|我来看|让我(先|看看|确认|查一下)|现在(检查|读取|打开|运行)|已读取|已列出|接下来|下面我|工具返回|输出如下|执行完毕|查一下)/
+
+/**
+ * 一轮正文 -> 该说给人听的那一句 (空串 = 这一轮没有可说的一句话)
+ *
+ * 主人 2026-11-07: "ball 不再是只要有回复就发送, 否则会把思考内容给发出去"。一轮的正文里混着
+ * 三种东西: 过程叙述、工具流水、以及最后那句结论 —— 这里按四步挑:
+ *
+ * 1. 按空行分段, 丢掉标题行 (`## …`) 与代码块, 丢掉以"思考 / Thinking"开头的那一段
+ * 2. 段内按句末标点切句, 丢掉过程叙述那一句 (只有很短的一句才留, 比如"我先记一下")
+ * 3. 取最后一段 (结论通常在最后); 最后一段只有几个字时并上上一段
+ * 4. 超过 [BALL_REPLY_MAX] 就按句末标点截, 找不到句末才硬截
+ *
+ * 它**不做 markdown 洗稿** —— 那是 [readAloudText] 的活 (念出来才需要去掉 `**` 与表格),
+ * 这里只决定"哪一句算话"
+ */
+function stripThinking(text) {
+  const blocks = String(text ?? '')
+    .split(/\n{2,}/)
+    .map((one) => one.trim())
+    .filter(Boolean)
+  const kept = []
+  for (const block of blocks) {
+    if (/^#{1,6}\s/.test(block)) continue
+    if (block.startsWith('```')) continue
+    if (/^(思考|Thinking|Reasoning|reasoning)/.test(block)) continue
+    // 表格行 (`| a | b |` 与分隔行 `| --- |`) 不是话: 一整段都是表格时这一段就废了, 混着的话
+    // 只把表格那几行丢掉 —— 念出来的表格是一串竖线, 不是句子
+    const rows = block.split('\n').filter((row) => !row.includes('|'))
+    if (rows.length === 0) continue
+    const sentences = rows.join('\n')
+      .split(/(?<=[。！？!?])/)
+      .map((one) => one.trim())
+      .filter(Boolean)
+      // 短句仍然留: "我先记一下"是一句人话, "我先看一下通知列表再确认"才是过程
+      .filter((one) => one.length <= 12 || !BALL_PROCESS_CUE.test(one))
+    if (sentences.length === 0) continue
+    kept.push(sentences.join(''))
+  }
+  if (kept.length === 0) return ''
+  let line = kept.at(-1)
+  if (line.length < 8 && kept.length > 1) line = `${kept.at(-2)}${line}`
+  if (line.length <= BALL_REPLY_MAX) return line
+  const cut = line.slice(0, BALL_REPLY_MAX)
+  const stop = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('？'), cut.lastIndexOf('！'), cut.lastIndexOf('.'))
+  return stop > 40 ? cut.slice(0, stop + 1) : `${cut}…`
+}
+
+/** 跑完不推球的那几种会话: 它们的产出不是"对主人说的一句话" */
+const BALL_SILENT_PRESETS = new Set(['explore'])
+
+/* ── 判断层: 这一刻要不要开口 (2026-11-07, 球是门户) ─────────────────────── */
+
+/**
+ * 规则表的缺省值
+ *
+ * `lw/router.json` 里哪一项没写就用这里的 —— 于是"文件坏了"与"还没写过"都还能跑, 只是按缺省
+ */
+const ROUTER_DEFAULTS = Object.freeze({
+  gameMinutes: 100,
+  wishDays: 60,
+  cooldownMs: 30 * 60 * 1000,
+  chatChance: 0.35,
+  chatAfterMs: 4 * 60 * 60 * 1000,
+  /**
+   * 连着说了两次都没人理之后, 下一次开口要隔多久
+   *
+   * 这是"活人感"里最难做对的一条: 机器不会退让, 人会自动收敛 —— 主人 2026-11-07 的口径是
+   * "不理她她就别一直说". 一天一次, 而不是从此不开口
+   */
+  ignoredCooldownMs: 24 * 60 * 60 * 1000,
+})
+
+/**
+ * 兜底的游戏包名
+ *
+ * 真正的判据在应用那一侧 (`PackageManager` 的 `CATEGORY_GAME` 会写进 `usage.json` 的 `game`),
+ * 这里这一张表只是"应用还没升级 / 那一栏读不到"时的兜底 —— 少识别一个游戏不该让整件事失效
+ */
+const ROUTER_GAME_PACKAGES = new Set([
+  'com.tencent.tmgp.sgame',
+  'com.tencent.tmgp.pubgmhd',
+  'com.miHoYo.Yuanshen',
+  'com.miHoYo.hkrpg',
+  'com.netease.g78na.gb',
+  'com.netease.pes',
+  'com.hypergryph.arknights',
+])
+
+/** 那一天是哪一天 (本地时区, `2026-11-07`) */
+function routerDayKey(now) {
+  const date = new Date(now)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+/** 现在是一天里的第几分钟 */
+function routerMinutesOfDay(now) {
+  const date = new Date(now)
+  return date.getHours() * 60 + date.getMinutes()
+}
+
+/** 现在几点几分 (`21:40`) */
+function routerClockText(now) {
+  const date = new Date(now)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * 这一刻在不在静默窗口里 (纯函数)
+ *
+ * 窗口可以跨零点 (`23:00` -> `07:00`), 两端都认不出来就算"不在窗口里" —— 静默时段读坏了宁可多
+ * 说话, 也不该整天不开口
+ */
+function routerInsideQuiet(minutes, from, to) {
+  const parse = (text) => {
+    const [hour, minute] = String(text ?? '').split(':')
+    const h = Number(hour)
+    const m = Number(minute)
+    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) return null
+    return h * 60 + m
+  }
+  const start = parse(from)
+  const end = parse(to)
+  if (start === null || end === null || start === end) return false
+  return start < end ? (minutes >= start && minutes < end) : (minutes >= start || minutes < end)
+}
+
+/**
+ * 这一次要不要开口 (纯函数, 无 fs 无时钟无随机源)
+ *
+ * 主人这一批要的是"她自己挑时机": 打游戏久了提醒歇一会儿、记着的事到点提一句、太久没说话随口问
+ * 一声。这一层只回答**要不要说、说什么方向**, 说人话仍由那一场会话负责 —— 于是它便宜、可测、也
+ * 不会因为模型慢而错过时机
+ *
+ * 闸的顺序是刻意的: 静默 -> 冷却 -> 通话中 -> 打分, 任何一条过了就不再往下看
+ */
+function judgeRouter(input) {
+  const now = Number(input?.now ?? Date.now())
+  const rules = { ...ROUTER_DEFAULTS, ...(input?.rules ?? {}) }
+  const quiet = input?.quiet ?? {}
+  if (quiet.enabled === true && routerInsideQuiet(routerMinutesOfDay(now), quiet.from, quiet.to)) {
+    return { say: false, why: `quiet hours (${quiet.from}-${quiet.to})` }
+  }
+  const lastSpokenAt = Number(input?.lastSpokenAt ?? 0)
+  // **退让** (2026-11-07): 连着两次说完都没人理, 就把下一次开口推到 [ROUTER_DEFAULTS.ignoredCooldownMs]
+  // 之后 —— 人会自动收敛, 机器不会, 而"一直说"正是这类东西被关掉的头号原因
+  const ignored = Math.max(0, Number(input?.ignored ?? 0) || 0)
+  const backoff = ignored >= 2 ? Number(rules.ignoredCooldownMs) : 0
+  const cooldown = Math.max(Number(rules.cooldownMs), backoff)
+  if (lastSpokenAt > 0 && now - lastSpokenAt < cooldown) {
+    const minutes = Math.round((now - lastSpokenAt) / 60000)
+    return {
+      say: false,
+      why: backoff > 0 && cooldown === backoff
+        ? `stepped back after ${ignored} unanswered turns (${minutes} min ago)`
+        : `spoke ${minutes} min ago`,
+    }
+  }
+  const signals = Array.isArray(input?.signals) ? input.signals : []
+  const recent = signals.filter((one) => now - Number(one?.at ?? 0) <= 30 * 60 * 1000)
+  const callStarted = recent.some((one) => one?.kind === 'call' && one?.state === 'start')
+  const callEnded = recent.some((one) => one?.kind === 'call' && one?.state === 'end')
+  if (callStarted && !callEnded) return { say: false, why: 'a call is running' }
+
+  const candidates = []
+  const minuteMs = 60 * 1000
+  const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
+  for (const one of today) {
+    const pkg = String(one?.pkg ?? '')
+    const isGame = one?.game === true || ROUTER_GAME_PACKAGES.has(pkg)
+    if (!isGame) continue
+    const minutes = Math.floor(Number(one?.ms ?? 0) / minuteMs)
+    if (minutes < Number(rules.gameMinutes)) continue
+    candidates.push({
+      kind: 'rest',
+      score: 5,
+      to: 'ball',
+      brief: `${one?.label || pkg} 今天 ${minutes} 分钟, 现在 ${routerClockText(now)}`,
+    })
+  }
+  const todayKey = routerDayKey(now)
+  for (const one of Array.isArray(input?.wishes) ? input.wishes : []) {
+    const due = String(one?.due ?? '')
+    if (!due) continue
+    const dueAt = Date.parse(`${due}T00:00:00`)
+    if (!Number.isFinite(dueAt)) continue
+    const days = Math.ceil((dueAt - now) / (24 * 60 * 60 * 1000))
+    if (days < 0 || days > Number(rules.wishDays)) continue
+    if (Number(one?.snoozeUntil ?? 0) > now) continue
+    const said = Array.isArray(one?.said) ? one.said : []
+    if (said.includes(todayKey)) continue
+    candidates.push({
+      kind: 'wish',
+      score: 4,
+      to: 'ball',
+      id: String(one?.id ?? ''),
+      brief: `${one?.what ?? '那件事'}还有 ${days} 天, 今天还没提过`,
+    })
+  }
+  if (candidates.length === 0) {
+    const idleFor = lastSpokenAt > 0 ? now - lastSpokenAt : Number.POSITIVE_INFINITY
+    const roll = typeof input?.random === 'function' ? Number(input.random()) : Math.random()
+    // 退让期里**不主动找话题**: 这两次他都没接, 再"随口问一句"就是骚扰
+    if (ignored < 2 && idleFor > Number(rules.chatAfterMs) && roll < Number(rules.chatChance)) {
+      candidates.push({
+        kind: 'chat',
+        score: 2,
+        to: 'ball',
+        brief: lastSpokenAt > 0
+          ? `已经 ${Math.round(idleFor / minuteMs)} 分钟没说话了, 随口问一句`
+          : '今天还没说过话, 随口问一句',
+      })
+    }
+  }
+  if (candidates.length === 0) return { say: false, why: 'nothing worth saying' }
+  candidates.sort((a, b) => b.score - a.score)
+  const best = candidates[0]
+  // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到
+  return {
+    say: true,
+    kind: best.kind,
+    to: best.to,
+    ...(best.id ? { id: best.id } : {}),
+    brief: best.brief,
+    why: best.brief,
+  }
+}
+
+/**
+ * 这一轮的回答该不该推上球, 以及推哪一句
+ *
+ * 判据两层: **哪一场**(来源) -> **哪一句**(内容), 任何一层不过都不推也不念
+ *
+ * 来源这一层只排除一种: 探索场。它的产出是摘要 (经常上千字), 而球那块框是"看一眼回答"的地方,
+ * 摘要要看就去设置页那一段看 —— 剩下的场次 (球自己那场 / 主动场 / 界面里问的那场 / 自动指令
+ * 开的那场) 都照旧推, 主人的手感不因为这一批而变
+ */
+function ballReplyPolicy(session, text) {
+  const preset = String(session?.meta?.agentPreset ?? session?.agentPreset ?? '')
+  if (BALL_SILENT_PRESETS.has(preset)) {
+    return { speak: false, why: `the ${preset} conversation does not speak through the ball` }
+  }
+  const line = stripThinking(text)
+  if (!line) return { speak: false, why: 'nothing was left after the thinking was stripped' }
+  return { speak: true, text: line, why: 'ok' }
+}
+
 /**
  * **开口前先垫一句** (2.7.9 批次 9 T13 的用法): 该放哪一段预录填音, 不垫就回 null
  *
@@ -6627,7 +7171,11 @@ async function voiceReadNew(inbox) {
     }
     const seq = Number(record?.seq)
     const said = typeof record?.text === 'string' ? record.text.trim() : ''
-    if (!Number.isFinite(seq) || seq <= since || !said) continue
+    // **只有图没有字的那一行也要投进来** (2026-11-07): 球那块框上的 `＋` 发出的就是这种行 ——
+    // 这一条判据原来只看 `said`, 于是真机上量到的是"图落了盘、队列不前进、她什么都没看见"
+    const image = typeof record?.image === 'string' ? record.image.trim() : ''
+    if (!Number.isFinite(seq) || seq <= since) continue
+    if (!said && !image) continue
     // `wake` 是"这一句是唤醒之后的头一句"那个记号 (应用那侧只有头一句带它, 见 VoiceInbox.append) ——
     // **2026-10-06 起它只是记号, 不再是"另开一场"的判据**: 选哪一场由 [voiceCurrentSession] 那一笔
     // 账 (2026-10-07 起 20 分钟, 2026-10-11 起 10 分钟) 定, 见 [voiceTargetCandidates]。老版本写的行没有这个键, 读起来与
@@ -6639,6 +7187,9 @@ async function voiceReadNew(inbox) {
     fresh.push({
       seq,
       text: said,
+      // 收件箱里那张图的文件名 (`voice/inbox-media/<name>`): 投递之前 [stageInboxImage] 会把它
+      // 搬进工作区, 会话才读得到 —— 这个对象是逐键构造的, 漏了这一个键图就永远到不了模型那边
+      image,
       source: record.source ?? 'voice',
       at: Number(record.at) || 0,
       wake: record.wake === true,
@@ -7146,13 +7697,57 @@ function ballCreatePlace(workspace) {
  * **`resolveAgent` 是这条链上唯一的"这一场还在不在"判据** —— 它快 (真机实测 60 ms 上下), 于是
  * "要不要扫会话表"这件事整个不需要了 (见 [voiceTargetCandidates])
  */
+/** 收件箱里的图落到工作区哪个目录 (相对工作区根) */
+const INBOX_MEDIA_DIR = '.lw-inbox'
+
+/**
+ * 把收件箱里那张图搬进工作区 (2026-11-07)
+ *
+ * **这一步不能省**: 会话的 `read` 与看图都关在**工作区**沙箱里, 而收件箱落在 `$DSH_HOME` ——
+ * 不搬的话模型看见的只是一行不存在的路径, 它会先说"我看看"再报读不到, 而主人那边只看到
+ * "我发了图她没反应"
+ *
+ * 文件名只认收件箱自己的那一份: 那一行是**文件里的内容**, 不是可信输入, 所以带路径分隔符或 `..`
+ * 的一律不搬 (回空串, 正文里就不提图这件事)
+ *
+ * @returns 会话读得到的相对路径 (` .lw-inbox/<name>`), 搬不动就是空串
+ */
+async function stageInboxImage(line, workspacePath) {
+  const name = typeof line?.image === 'string' ? line.image.trim() : ''
+  if (!name || !workspacePath) return ''
+  if (name.includes('/') || name.includes('\\') || name.includes('..')) return ''
+  const home = process.env.DSH_HOME
+  if (!home) return ''
+  const from = join(home, 'voice', 'inbox-media', name)
+  const to = join(workspacePath, INBOX_MEDIA_DIR, name)
+  try {
+    await mkdir(dirname(to), { recursive: true })
+    await copyFile(from, to)
+    return `${INBOX_MEDIA_DIR}/${name}`
+  } catch (error) {
+    console.warn(`luwi-channel: the picture did not reach the workspace: ${error?.message ?? error}`)
+    return ''
+  }
+}
+
+/** 投给会话的那一段正文: 有图就在后面加一行路径 (只有图没有字时, 这一行就是全文) */
+function withInboxPicture(text, staged) {
+  const line = String(text ?? '')
+  if (!staged) return line
+  const note = `[主人发来一张图片: ${staged}]`
+  return line.trim() ? `${line}\n\n${note}` : note
+}
+
 async function deliverToBall(ctx, controller, sessionId, line, auto) {
   return ctx.agents.withoutInitiator(async () => {
     const resolved = await controller.resolveAgent(sessionId)
     if ('error' in resolved) throw resolved.error
     const { agent } = resolved
     const running = agent.status === 'running'
-    const message = await createVoiceMessage(line.text, auto.images)
+    // 主人发来的图先搬进工作区, 再拼正文 (见 [stageInboxImage])
+    const cwd = String(agent.session?.header?.cwd ?? '')
+    const staged = await stageInboxImage(line, cwd)
+    const message = await createVoiceMessage(withInboxPicture(line.text, staged), auto.images)
     if (running) agent.steer(message)
     else agent.followup(message)
     const flushed = await ctx.sessions.flush(agent.session)
@@ -7591,6 +8186,11 @@ async function voiceDeliver(ctx, line) {
       steps: line.steps,
     })
   }
+  // 判断层敲的那一下 (2026-11-07): 应用只说"该看一眼了", 说什么、要不要说是这里判的 ——
+  // 于是"她自己挑时机"与"她说人话"是两件分开的事
+  if (line.source === 'router') {
+    return routerTick(ctx)
+  }
   // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
   // 不查浮标那本 10 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
   if (line.source === 'proactive') {
@@ -7823,10 +8423,19 @@ function startReadAloud(ctx) {
     if (text === undefined || event.data.reason?.kind !== 'completed') return
     const spoken = readAloudText(text)
     if (!spoken) return
-    // **回复框与「自动朗读」是两件事** (2026-10-15 真机: 朗读关着时主人"完成了也没有回复框"):
+    // **推给球与「自动朗读」是两件事** (2026-10-15 真机: 朗读关着时主人"完成了也没有回复框"):
     // 把回答推回浮标那块框从来不是"念出来"的附属品 —— 问一句、看一眼回答, 与要不要出声无关,
     // 所以这一句排在开关前面, 开关只管念不念
-    reportReply(replyChannelText(spoken), session.id)
+    //
+    // **推之前先挑出"该说给人听的那一句"** (2026-11-07 主人: 否则会把思考内容给发出去): 一轮正文里
+    // 的过程叙述与工具流水不该糊上那块 650 px 的框, 也不该被念出来 —— 挑空了就整轮都不推
+    const policy = ballReplyPolicy(session, spoken)
+    if (policy.speak !== true) {
+      ctx.logger?.debug?.(`the reply was not pushed to the ball: ${policy.why}`)
+      return
+    }
+    const speakable = policy.text
+    reportReply(replyChannelText(speakable), session.id)
     // 设置页那个「自动朗读回答」关掉之后就不念 —— 开关在应用那一侧 (它与音色/语速放在一起),
     // 所以这里先问一句。**读不到设定时照念**: 桥出错不该让这个功能静默消失, 只记一行
     void call('speak', { op: 'status' })
@@ -7837,21 +8446,21 @@ function startReadAloud(ctx) {
           return null
         }
         voiceReading.count += 1
-        voiceReading.last = { at: Date.now(), characters: spoken.length, text: spoken }
+        voiceReading.last = { at: Date.now(), characters: speakable.length, text: speakable }
         voiceReading.error = null
         // **开口前先垫一句** (T13, 见 [padClipFor]): 先交一段预录填音, 再交合成 —— 两个都按顺序
         // 发出去、都不等结果。那一声几十毫秒就响, 而 Edge 那一趟合成长回答要好几秒, 中间那段
         // 没有声音的空白就是它填的; 短句不垫 (合成本来就快, 多一声反而多余)
-        const pad = padClipFor(spoken)
+        const pad = padClipFor(speakable)
         if (pad) {
-          voiceReading.pad = { at: Date.now(), clip: pad, characters: spoken.length }
+          voiceReading.pad = { at: Date.now(), clip: pad, characters: speakable.length }
           void call('speak', { op: 'clip', clip: pad }).catch((error) => {
             // 垫音失败不该挡着念: 记一行就继续
             ctx.logger?.warn?.(`the pad clip did not play: ${error?.message ?? error}`)
           })
         }
         // 不 await: 这是 emit 钩子, 念多久都不该把会话的事挡在后面
-        return call('speak', { op: 'speak', text: spoken })
+        return call('speak', { op: 'speak', text: speakable })
       })
       .then((answer) => {
         if (!answer || answer.spoken) return
@@ -7985,6 +8594,327 @@ function reportNote(ctx, text) {
   void call('overlay', { op: 'note', text: line }).catch((error) => {
     warn(ctx, `a note for the floating channel did not arrive: ${error?.message ?? error}`)
   })
+}
+
+/**
+ * 推一句"她自己想说的"到浮标 (2026-11-07: 球是门户)
+ *
+ * 与 [reportReply] 的差别只在应用那一侧怎么画: 这一句**不占回复框、不带 session、不动"下一刻把话
+ * 投给谁"那笔账** —— 它是一句主动说的话, 主人看一眼就知道她为什么这时候开口
+ *
+ * 推不出去只记一行: 球被关掉的时候它本来就没有落脚处, 那不是要报给模型的错
+ */
+function reportSay(text) {
+  const line = String(text ?? '').trim()
+  if (!line) return
+  void call('overlay', { op: 'say', text: line.slice(0, 200) }).catch((error) => {
+    console.warn(`luwi-channel: the ball did not get a bubble: ${error?.message ?? error}`)
+  })
+}
+
+/**
+ * 贴一张表情到浮标 (2026-11-07 主人: "能让 luwi 发表情包更具人味")
+ *
+ * 参数是 `$DSH_HOME/lw/stickers/` 里的**文件名**: 应用那一侧按名字读图 (带路径的名字它不认),
+ * 于是"她贴哪一张"这件事只由这个目录里有什么决定
+ */
+function reportSticker(id) {
+  const name = String(id ?? '').trim()
+  if (!name) return
+  void call('overlay', { op: 'sticker', id: name }).catch((error) => {
+    console.warn(`luwi-channel: the sticker did not reach the ball: ${error?.message ?? error}`)
+  })
+}
+
+/* ── 判断层的落点 (2026-11-07) ─────────────────────────────────────────────── */
+
+/**
+ * 每条 `kind` 的缺省那句话
+ *
+ * 直推给球时用它 —— **不把数字念给主人听**: "王者荣耀今天 118 分钟"是判断的依据, 不是该说出口的
+ * 那句话。想让她的语气不一样, 改 `lw/router.json` 的 `lines` 就行
+ */
+const ROUTER_LINES = Object.freeze({
+  rest: '都这么久了, 起来走两步吧',
+  wish: '今天还没动那件事, 要不要现在看一眼',
+  chat: '在干嘛呢',
+})
+
+/** 那份文件: `$DSH_HOME/lw/router.json` (规则 + 上一次判断 + 上次开口的时刻) */
+function routerStatePath() {
+  const home = process.env.DSH_HOME
+  return home ? join(home, 'lw', 'router.json') : null
+}
+
+/** 读一份 JSON, 读不动就回 null (坏了与没有在这件事上是同一个意思) */
+async function readRouterJson(path) {
+  if (!path) return null
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** 原子写一份 JSON (与 ball-phase.json / proactive.json 同一条路) */
+async function writeRouterJson(path, payload) {
+  if (!path) return
+  const temporary = temporaryName(path)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`)
+    await rename(temporary, path)
+  } catch (error) {
+    console.warn(`luwi-channel: ${basename(path)} was not written: ${error?.message ?? error}`)
+  }
+}
+
+/** 读 `signals.jsonl` 的尾部若干行 (应用写的, 一行一件事) */
+async function readRouterSignals(path, limit) {
+  try {
+    const text = await readFile(path, 'utf8')
+    return text
+      .split('\n')
+      .filter(Boolean)
+      .slice(-limit)
+      .map((one) => {
+        try {
+          return JSON.parse(one)
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 判断要的全部输入, 一次读齐
+ *
+ * 四份文件全是**别人写的**: `usage.json` / `signals.jsonl` 归应用, `wishes.json` 归这里,
+ * `proactive-gate.json` 归应用。读不到一律当空 —— 判断层不该因为少一份文件就停摆
+ */
+async function readRouterInputs() {
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  const lw = join(home, 'lw')
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
+  const wishes = ((await readRouterJson(join(lw, 'wishes.json')))?.items) ?? []
+  const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
+  const gate = (await readRouterJson(join(lw, 'proactive-gate.json'))) ?? {}
+  const settings = (await readRouterJson(join(home, 'automations', 'settings.json'))) ?? {}
+  // **他上一次主动说话是什么时候** (2026-11-07): 退让那一条要判"她说完之后他有没有接"
+  const inboxTail = await readRouterSignals(join(home, 'voice', 'inbox.jsonl'), 60)
+  const lastUserAt = inboxTail
+    .filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
+    .reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
+  const ignored = await refreshIgnored(lastUserAt)
+  // 静默窗口与自动指令共用同一份 (`automations/settings.json` 的 `quiet`)
+  const window = String(settings?.quiet?.window ?? '')
+  const [from, to] = window.split(/[-~]/).map((one) => one.trim())
+  const lastSpokenAt = Math.max(
+    Number(state?.lastSpokenAt ?? 0) || 0,
+    Number(gate?.lastAt ?? 0) || 0,
+  )
+  return {
+    now: Date.now(),
+    quiet: { enabled: settings?.quiet?.enabled === true, from, to },
+    lastSpokenAt,
+    ignored,
+    usage,
+    wishes: Array.isArray(wishes) ? wishes : [],
+    signals,
+    rules: state?.rules ?? {},
+  }
+}
+
+/**
+ * 数"她说了几次没人接" (2026-11-07)
+ *
+ * 判据只有一条: **上一次开口之后, 主人有没有主动说过话** (`voice` / `keyboard` / `ball` 三个来源
+ * 里的任意一行)。说过就清零, 没说过就 +1 —— 而同一个"上次开口"只数一次 (`countedFor`), 否则
+ * 每 25 分钟一拍就涨一次, 半小时就能把一个人判成"叫不动"
+ *
+ * @returns 现在累计几次没人接 (0~5)
+ */
+async function refreshIgnored(lastUserAt) {
+  const path = routerStatePath()
+  const state = (await readRouterJson(path)) ?? {}
+  const awaiting = state?.awaiting
+  const awaitingAt = Number(awaiting?.at ?? 0) || 0
+  if (awaitingAt <= 0) return Math.max(0, Number(state?.ignored ?? 0) || 0)
+  if (lastUserAt > awaitingAt) {
+    // 他接话了: 这笔账清零 (下一次没人接才重新数)
+    await writeRouterJson(path, { ...state, v: 1, ignored: 0, awaiting: null, countedFor: 0 })
+    return 0
+  }
+  if (Number(state?.countedFor ?? 0) === awaitingAt) {
+    return Math.max(0, Number(state?.ignored ?? 0) || 0)
+  }
+  const ignored = Math.min(5, (Number(state?.ignored ?? 0) || 0) + 1)
+  await writeRouterJson(path, { ...state, v: 1, ignored, countedFor: awaitingAt })
+  return ignored
+}
+
+/** 直推给球的那一句 (说人话, 不带数字) */
+function routerLine(decision) {
+  const custom = decision?.lines?.[decision.kind]
+  return typeof custom === 'string' && custom.trim() ? custom.trim() : ROUTER_LINES[decision.kind] ?? ''
+}
+
+/**
+ * 叫醒一场主动对话时的开场正文
+ *
+ * **brief 不是台词**: 它是"为什么现在说"的事实, 说成什么人话由这一场决定 —— 所以这里明确要求
+ * 它别复述这一行
+ */
+function routerStartLine(decision) {
+  return [
+    `[她的判断] ${decision.kind}: ${decision.brief}`,
+    '开场不要复述这一行, 也不要说"我注意到" —— 直接说那句人话, 一两句',
+    '说完就停, 不追问; 想记住的事用 lw_wish 记下来',
+  ].join('\n')
+}
+
+/** 说完之后记两笔账: 这次开口的时刻, 以及未了的事"今天提过了" */
+async function routerMarkSaid(decision) {
+  const home = process.env.DSH_HOME
+  if (!home) return
+  const now = Date.now()
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  await writeRouterJson(routerStatePath(), {
+    ...state,
+    v: 1,
+    at: now,
+    lastSpokenAt: now,
+    // 这一笔是"退让"那条的起点: 下一次判断时看它之后他有没有说话 (见 [refreshIgnored])
+    awaiting: { at: now, kind: String(decision?.kind ?? '') },
+    last: decision,
+  })
+  if (decision?.kind !== 'wish' || !decision?.id) return
+  const items = await readWishes()
+  const day = routerDayKey(now)
+  const updated = items.map((one) => {
+    if (String(one?.id ?? '') !== decision.id) return one
+    const said = Array.isArray(one.said) ? one.said.filter(Boolean) : []
+    return { ...one, said: [...new Set([...said, day])].slice(-30) }
+  })
+  await writeWishes(updated)
+}
+
+/** 记着的事最多几条: 记太多等于什么都不记 */
+const WISH_MAX = 64
+
+/** 那份文件: `$DSH_HOME/lw/wishes.json` (宿主单写者, 判断层与 `lw_wish` 共用) */
+function wishesPath() {
+  const home = process.env.DSH_HOME
+  return home ? join(home, 'lw', 'wishes.json') : null
+}
+
+/** 现在记着哪几件 (读不动就是空的: 这一份坏了不该让她连一句话都说不出) */
+async function readWishes() {
+  const file = (await readRouterJson(wishesPath())) ?? {}
+  const items = Array.isArray(file.items) ? file.items : []
+  return items.filter((one) => one && typeof one === 'object')
+}
+
+/** 整份重写 (原子写; 超过 [WISH_MAX] 就从最老的丢) */
+async function writeWishes(items) {
+  await writeRouterJson(wishesPath(), { v: 1, at: Date.now(), items: items.slice(-WISH_MAX) })
+}
+
+/** 她学到的词最多几条 (与 QQ 桥接那一份同一个量级) */
+const SLANG_MAX = 2000
+
+/** 一个字段最长多少字 */
+const SLANG_FIELD_MAX = 300
+
+/** `slang.md` 里最多列几条 (再多就不是"她说话带点你的词", 是贴词典) */
+const SLANG_IN_MARKDOWN = 20
+
+/** 那份文件: `$DSH_HOME/lw/slang.json` */
+function slangPath() {
+  const home = process.env.DSH_HOME
+  return home ? join(home, 'lw', 'slang.json') : null
+}
+
+/** 给模型看的那一份 (她自己读, 不是给人看的界面) */
+function slangMarkdownPath() {
+  const home = process.env.DSH_HOME
+  return home ? join(home, 'lw', 'slang.md') : null
+}
+
+/** 现在记着哪些词 (候补也算, 状态在每一条里) */
+async function readSlang() {
+  const file = (await readRouterJson(slangPath())) ?? {}
+  const entries = Array.isArray(file.entries) ? file.entries : []
+  return entries.filter((one) => one && typeof one.content === 'string' && one.content.trim())
+}
+
+async function writeSlang(entries) {
+  await writeRouterJson(slangPath(), { v: 1, at: Date.now(), entries: entries.slice(-SLANG_MAX) })
+}
+
+/**
+ * 把"已经确认"的那些词写成一份 markdown, 给会话读
+ *
+ * 为什么另写一份 md 而不是让她直接读 json: 这一份是**念给她听的句子**, 不是数据 —— 会话里 `read`
+ * 一次就懂, 不必自己解析状态与字段
+ */
+async function renderSlang() {
+  const target = slangMarkdownPath()
+  if (!target) return 0
+  const entries = await readSlang()
+  const confirmed = entries.filter((one) => one?.status === 'confirmed').slice(-SLANG_IN_MARKDOWN)
+  const rules = [
+    '# 主人说话里的那些词',
+    '',
+    '用得上就用, 不要解释这个词是什么意思, 也不要在正式场合用。',
+    '没有合适的就空着, 硬凑一个词比不用更像机器人。',
+    '',
+  ]
+  const body = confirmed.map((one) => {
+    const meaning = one?.meaning ? ` — ${one.meaning}` : ''
+    const example = one?.example ? ` (例: ${one.example})` : ''
+    return `- ${one.content}${meaning}${example}`
+  })
+  await mkdir(dirname(target), { recursive: true }).catch(() => {})
+  await writeFile(target, `${[...rules, ...body].join('\n')}\n`).catch(() => {})
+  return confirmed.length
+}
+
+/**
+ * 敲门那一下: 读齐输入 -> 判断 -> 要么直推一句, 要么开一场主动对话
+ *
+ * 直推优先 (`to === 'ball'`): 球那一场还在的时候, 一句话就够了 —— 为一句提醒开一整场会话是
+ * 拿全量上下文换一句"歇会儿吧"
+ */
+async function routerTick(ctx) {
+  const inputs = await readRouterInputs()
+  if (inputs === null) return { skipped: true, why: 'this profile has no DSH_HOME' }
+  const decision = judgeRouter(inputs)
+  if (decision.say !== true) {
+    const state = (await readRouterJson(routerStatePath())) ?? {}
+    await writeRouterJson(routerStatePath(), { ...state, v: 1, at: inputs.now, last: decision })
+    return { said: false, why: decision.why }
+  }
+  const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
+  if (decision.to === 'ball') {
+    const line = routerLine(decision)
+    if (line) {
+      if (inBall) reportSay(line)
+      // 球那一场不在 (冷启动 / 宿主刚起来): 走一场主动对话, 否则这句话没有落脚处
+      else await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
+    }
+  } else {
+    await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
+  }
+  await routerMarkSaid(decision)
+  console.log(`luwi-channel: the router spoke (${decision.kind}: ${decision.brief})`)
+  return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
 }
 
 /**
@@ -8239,13 +9169,15 @@ function proactiveScreenGate(exec) {
  */
 function proactiveStartLine(text, summaryPath) {
   const asked = String(text ?? '').trim()
-    || '最新探索摘要 -> 记忆搜索 -> 今天的日历 -> 通知摘要, 再决定要不要开口'
+    || '最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口'
   return [
     '这是到点自己开的一场主动对话, 不是主人刚说的话.',
     '',
     asked,
     '',
-    '启动顺序: 最新探索摘要 -> 记忆搜索 -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
+    // 2026-11-07 起把"记忆搜索"换成 `lw_wish`: Luwi 上根本没有记忆插件, 那一句只会让模型去找一个
+    // 不存在的工具 —— "记着的事"才是这一档真正读得到的东西
+    '启动顺序: 最新探索摘要 -> 记着的事 (lw_wish op=list) -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
     `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
     '默认只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.',
     '没有值得说的就保持沉默, 一条话都不要写.',

@@ -522,8 +522,8 @@ check('宿主起来时两个 ensure 都调', [
   /ExploreSchedule\.ensure\(this\)/.test(service),
 ], [true, true])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限', [
-  /settingsSection\(\s*key = "explore"/u.test(screen),
+check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限 (2026-11-07 起这一段并进「活动」)', [
+  /settingsSection\(\s*key = "activity"/u.test(screen),
   screen.includes('R.string.settings_explore_toggle'),
   screen.includes('R.string.settings_explore_at'),
   screen.includes('R.string.settings_explore_card'),

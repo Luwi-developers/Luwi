@@ -490,8 +490,8 @@ check(
 check(
   '回复框排在朗读开关前面 (关掉朗读也要有框), 正文有限长',
   [
-    plugin.includes('reportReply(replyChannelText(spoken), session.id)'),
-    plugin.indexOf('reportReply(replyChannelText(spoken), session.id)')
+    plugin.includes('reportReply(replyChannelText(speakable), session.id)'),
+    plugin.indexOf('reportReply(replyChannelText(speakable), session.id)')
       < plugin.indexOf("void call('speak', { op: 'status' })"),
     plugin.includes('line.length <= 2000'),
   ],

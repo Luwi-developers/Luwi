@@ -122,7 +122,10 @@ internal object AutomationMonitors {
         // 解锁: 系统广播, 动态注册即可 (清单里声明的那种要 export, 这里反而更省)
         // 注意 registerReceiver 的返回值是"粘性 Intent", 不是"成没成功" —— 非粘性广播成功时也回 null,
         // 所以判据只能是"没抛" (2026-10-17 模拟器上量到的: 按返回值判会把一条注册好的接收器丢掉)
-        if ("unlock" in wanted) {
+        //
+        // **2026-11-07 起与规则无关, 一直挂着**: 判断层要拿"他刚解锁了"这一件事 (见
+        // `UsageLedger.signal`), 而这个广播零权限、零成本; 只在省电那一档摘掉
+        if (!paused) {
             if (unlock == null) {
                 val receiver = object : BroadcastReceiver() {
                     override fun onReceive(from: Context, intent: Intent?) {

@@ -19,10 +19,10 @@ class SettingsSectionsTest {
     /** D1 拍板的那六段: 省电那一段 + 「常用」一级分组下那五段 (导航那一段 2026-10-17 撤了) */
     private val common = listOf("power", "appearance", "channel", "ball", "wake", "speak")
 
-    /** 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 定时对话 2.8.0 #22 加在探索后面) */
+    /** 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成) */
     private val abilities = listOf(
         "notifications", "screenshot", "look", "lock",
-        "explore", "proactive", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+        "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
     )
 
     @Test
