@@ -5,6 +5,9 @@ import android.os.PowerManager
 import android.util.Log
 import io.github.yuloong07star.luwi.channel.LwAccessibility
 import io.github.yuloong07star.luwi.channel.LwNotificationListener
+import io.github.yuloong07star.luwi.tool.ExploreSchedule
+import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.ProactiveGate
 import io.github.yuloong07star.luwi.voice.VoiceInbox
@@ -407,6 +410,19 @@ internal object AutomationEngine {
         pollDigest(context)
         // 组合那条 60 秒 tick: 只在有组合规则时跑, 熄屏不跑 (风险 17)
         tickCombos(context, now)
+        // 排期自愈与会话锁收尾 (2026-11-07): 探索那个闹钟只在 fire / save / ensure 时排,
+        // 漏一次就永久停; 这一拍按现状校一遍 (算出来的时刻没变就一个系统调用都不发)。
+        // 锁那一半: 宿主已经把这一场收尾了 (`explore.json` 里 run 没了 / over / 过了 deadline)
+        // 就提前放手, 不必按到预算尽头
+        runCatching {
+            ExploreSchedule.ensureIfStale(context, now)
+            // 补跑也必须在这里: 漏掉的那一次不会有闹钟来叫 (见 [ExploreSchedule.ensureCatchUp])
+            ExploreSchedule.ensureCatchUp(context, now)
+            LwSessionLock.reconcile(
+                LwSessionLock.TAG_EXPLORE,
+                ExploreTask.running(context, now) != null,
+            )
+        }.onFailure { warn("schedule", it) }
     }
 
     /* ── 事件入口 (监测器叫它们) ─────────────────────────────────────────── */

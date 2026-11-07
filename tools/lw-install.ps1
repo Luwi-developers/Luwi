@@ -315,8 +315,16 @@ if ($Perms) {
         Write-Host "  $op -> $kept"
     }
     # 忽略电池优化: host 要一直活着, 不然系统会在后台把它冻住
+    #
+    # 写完要**回读** (2026-11-07): 从前只打印一句 "whitelisted" —— 写失败也是这一句, 而这条名单正是
+    # 半夜那一场探索有没有网的那个前提。回读里找不到就说没成功
     Adb shell "dumpsys deviceidle whitelist +$Package" | Out-Null
-    Write-Host "  battery optimisation: whitelisted"
+    $whitelist = (Adb shell "dumpsys deviceidle whitelist") -join "`n"
+    if ($whitelist -match [regex]::Escape($Package)) {
+        Write-Host "  battery optimisation -> whitelisted"
+    } else {
+        Write-Host "  battery optimisation -> NOT whitelisted (回读里没有 $Package)" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""

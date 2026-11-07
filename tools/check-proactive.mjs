@@ -87,7 +87,8 @@ check('配置就那四个键 (enabled / times / unlock / last)',
   true)
 check('`times` 空表 / 全坏都退回 09:30', /ifEmpty \{ listOf\(DEFAULT_AT\) \}/u.test(schedule), true)
 check('到点先拉宿主, 等它起来才投', [
-  /ExploreSchedule\.wakeHost\(context\)/u.test(schedule),
+  // 2026-11-07: 传 onStarted —— 服务真的开始启动之后广播才 finish, 返回的也不再是裸 boolean
+  /ExploreSchedule\.wakeHost\(context, onStarted = release\)/u.test(schedule),
   /DshHost\.status !is HostStatus\.Running/u.test(schedule),
 ], [true, true])
 check('投的是 `source:"proactive"` 那一行', [
@@ -140,7 +141,7 @@ check('手动「立刻跑一次」不查也不占这笔账 (B4-b ⑦)', [
 check('静默时段保留在排期那一侧, 到点先看它再看宿主 (B4-b ⑨)', [
   /val quiet = quietWhy\(context, now\)/u.test(schedule),
   /save\(context, current\.copy\(last = Last\(now, "skipped", quiet\)/u.test(schedule),
-  schedule.indexOf('val quiet = quietWhy') < schedule.indexOf('ExploreSchedule.wakeHost(context)'),
+  schedule.indexOf('val quiet = quietWhy') < schedule.indexOf('ExploreSchedule.wakeHost(context, onStarted = release)'),
 ], [true, true, true])
 
 check('静默窗口读的是自动指令那一份设置 (缺省 23:00-07:00, 同一个解析器)', [

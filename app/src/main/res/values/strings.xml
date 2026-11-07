@@ -113,20 +113,10 @@
     <string name="settings_source_summary">The GitHub release API URL, for example %1$s; empty goes back to the built-in one</string>
 
     <string name="settings_section_appearance">Appearance</string>
-    <string name="settings_section_appearance_summary">Colours, corners and how dark it is</string>
+    <string name="settings_section_appearance_summary">Follow the system, light, or dark</string>
     <string name="settings_theme_follow_system">Follow system</string>
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
-    <string name="settings_monet">Monet colors</string>
-    <string name="settings_monet_summary">Use Monet dynamic colors</string>
-    <string name="settings_monet_key_color">Monet Key Color</string>
-    <string name="settings_monet_key_color_summary">Set the Monet accent color</string>
-    <string name="settings_monet_palette_style">Monet Palette Style</string>
-    <string name="settings_monet_palette_style_summary">Set the Monet palette style</string>
-    <string name="settings_monet_color_spec">Monet Color Spec</string>
-    <string name="settings_monet_color_spec_summary">Set the Monet color spec</string>
-    <string name="settings_squircle">Squircle corners</string>
-    <string name="settings_squircle_summary">Use smooth rounded rectangles on rounded UI elements</string>
 
     <string name="settings_section_channel">Privileged channel</string>
     <string name="settings_section_channel_summary">Anything that touches or reads the screen needs it</string>
@@ -145,6 +135,9 @@
     <string name="ready_complete">All set</string>
     <string name="ready_check">Check what\'s needed</string>
     <string name="ready_check_summary">See what is still missing</string>
+    <string name="ready_permissions">Choose permissions</string>
+    <string name="ready_permissions_summary">You can also change these in Settings</string>
+    <string name="ready_permissions_close">Done</string>
     <string name="ready_reading">Reading...</string>
     <string name="ready_dialog_close">Start using Luwi</string>
     <string name="ready_channel">Privileged channel</string>
@@ -257,25 +250,9 @@
     <string name="settings_wake_speech_ready">In place: the recogniser and the segmenter, about %1$s in all</string>
     <string name="settings_wake_speech_missing">Not downloaded yet, about %1$s in all; tap to fetch it (Wi-Fi recommended)</string>
     <string name="settings_wake_speech_partial">%1$d of %2$d files are in place; tap to fetch the rest</string>
-    <string name="model_setup_title">Two models are still missing</string>
     <string name="bundled_notice_title">Do not update the bundled plugins yourself</string>
     <string name="bundled_notice_body">These are built into the host and shipped with each Luwi release: DeepSeek Harness, mneme, dsh-imagegen, and the Custom mode. Every Luwi update already brings them to the latest version that fits this build. Updating them on your own can lose data, and the risk is yours to bear.</string>
     <string name="bundled_notice_ok">I understand</string>
-    <string name="model_setup_summary">Being called by name and speaking to it both need the two models below. Every launch checks for them; if they are missing it asks up to 3 times and then stops, and the Wake section in Settings can still fetch them.</string>
-    <string name="model_setup_attempt">Reminder %1$d of %2$d; after %2$d it stops checking and stops asking</string>
-    <string name="model_setup_wake">Wake word model</string>
-    <string name="model_setup_wake_note">Decides whether the name wakes it; about %1$s</string>
-    <string name="model_setup_speech">Speech model</string>
-    <string name="model_setup_speech_note">SenseVoice plus the segmenter; about %1$s, Wi-Fi recommended</string>
-    <string name="model_setup_ready">In place</string>
-    <string name="model_setup_missing">Not installed yet</string>
-    <string name="model_setup_download">Download and enable</string>
-    <string name="model_setup_downloading">Downloading</string>
-    <string name="model_setup_progress">%1$s / %2$s</string>
-    <string name="model_setup_later">Later</string>
-    <string name="model_setup_need_mic">The microphone permission is still needed, or it cannot hear you</string>
-    <string name="model_setup_mic_action">Grant it</string>
-    <string name="model_setup_done">In place, ready to use</string>
     <string name="settings_wake_words">Wake word</string>
     <string name="settings_wake_words_none">Nothing set yet; the default %1$s is what is being watched for (tap to change it)</string>
     <string name="settings_wake_words_now">Watching for: %1$s</string>
@@ -1034,21 +1011,6 @@
     <string name="preview_open_refused">That file is outside the workspace</string>
     <string name="preview_open_missing">No app on this device can open that file</string>
 
-    <string name="webview_trouble_title">This WebView is too old</string>
-    <string name="webview_trouble_missing">Current WebView is %1$s, and the built-in compatibility layer still leaves these missing: %2$s</string>
-    <string name="webview_trouble_slow">The interface has not appeared after %1$d seconds; the usual cause is an old WebView (this one is %2$s)</string>
-    <string name="webview_trouble_steps">How to update it</string>
-    <string name="webview_trouble_step_store">1. Update “Android System WebView” in the app store: the copy this phone actually loads is %1$s</string>
-    <string name="webview_trouble_step_manual">2. No update there? Open its app page and check that it is not disabled; if it offers “Uninstall updates”, use that first and then update again from the store. On some phones Chrome provides the WebView, so update that one too</string>
-    <string name="webview_trouble_step_multi">3. A mirrored space or a second user carries its own WebView, so each of them has to be updated separately</string>
-    <string name="webview_trouble_step_reopen">4. Reopen Luwi after updating (remove it from recents first); this dialog decides again by itself</string>
-    <string name="webview_trouble_target">A WebView at Chrome %1$d or newer is enough for this interface</string>
-    <string name="webview_trouble_details">Open the app page</string>
-    <string name="webview_trouble_market">Open the app store</string>
-    <string name="webview_trouble_retry">Retry</string>
-    <string name="webview_trouble_later">Use it as is</string>
-    <string name="webview_trouble_no_settings">Could not open the WebView app page on this device</string>
-    <string name="webview_trouble_no_market">No app store on this device</string>
 </resources>
 
 

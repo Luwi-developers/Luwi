@@ -66,6 +66,8 @@ const code = card
 // 顺序靠"步骤标题"认: 每一件在 [steps] 里只出现一次, 而且顺序看得见
 const stepTitles = [...card.matchAll(/title\s*=\s*stringResource\(R\.string\.(ready_[a-z_]+)\)/gu)]
   .map((one) => one[1])
+  // `ready_permissions` 是竖轨上那个入口行的标题, 不是四件依赖之一 (它没有状态、不进环的分母)
+  .filter((key) => !key.startsWith('ready_permissions'))
 check(
   '四件的顺序: 特权通道 → 无障碍 → 唤醒模型 → 语音模型',
   stepTitles,
@@ -189,12 +191,75 @@ check(
     card.includes('DialogProperties(usePlatformDefaultWidth = false)'),
     card.includes('contentAlignment = Alignment.Center'),
     card.includes('verticalScroll(rememberScrollState())'),
-    card.includes('fun ReadyCardBody()'),
+    /fun ReadyCardBody\(permissionsDone: Boolean, onPermissions: \(\) -> Unit\)/u.test(card),
     card.includes('R.string.ready_dialog_close'),
     // 原来那套"内嵌占位"跟着内嵌挂载一起退休了: 对话框里没有要 reserve 的页面空间
     !card.includes('reserve.toDp()'),
   ],
   [true, true, true, true, true, true, true, true],
+)
+
+check(
+  '第五件是「选择权限」入口, 点开是设置页那一段本身 (2026-11-07 主人)',
+  [
+    card.includes('R.string.ready_permissions'),
+    /internal fun ReadyPermissionsDialog\(onDismiss: \(\) -> Unit\)/u.test(card),
+    // 权限那一段只有一份实现: 设置页那个函数必须是 internal, 否则卡里调不到, 迟早被抄成第二份
+    card.includes('PermissionsItems()'),
+    /internal fun PermissionsItems\(\)/u.test(settings),
+    // 它不是 ReadyStep: 不进环的分母, 也不参与"还差几步"
+    [...code.matchAll(/^\s+action = ReadyAction\./gmu)].length,
+    // 位置: 竖轨里的第五个节点 (2026-11-07 主人: "也放在那个竖向进度条的下方"), 不能掉到"下一步"
+    // 按钮后面去; 四行的末行不再收口 (`last = false`), 轨道才接得到它
+    (() => {
+      const rows = card.indexOf('steps.forEachIndexed')
+      const link = card.indexOf('ReadyLinkRow(')
+      const next = card.indexOf('if (next != null)')
+      return rows >= 0 && link > rows && next > link && card.includes('last = false')
+    })(),
+    zh.includes('<string name="ready_permissions">选择权限</string>'),
+    en.includes('<string name="ready_permissions">Choose permissions</string>'),
+  ],
+  [true, true, true, true, 4, true, true, true],
+)
+
+check(
+  '权限那一行的节点颜色与就绪判断 (2026-11-07 主人: 颜色不对 / 没办却说准备完毕)',
+  [
+    // 未办 / 已办都是四件同一档的节点: 不另画第五种 (2026-11-07 主人: "保持一致")
+    card.includes('state = if (done) ReadyState.DONE else ReadyState.TODO'),
+    // 箭头那套已经撤了: 竖轨里不该再出现四件都没有的形状
+    !card.includes('val half = NodeRadius.toPx() * 0.42f'),
+    card.includes('onAccent = colors.surface'),
+    // 就绪判断把这一件也算进去, 否则权限没看过也会说"全部就绪"
+    card.includes('if (permissionsDone) 1 else 0'),
+    card.includes('val total = steps.size + 1'),
+    card.includes('ReadyHead(done = done, total = total, missing = missing)'),
+    // 关掉那一窗才算办过, 而且跨启动记得住
+    card.includes('PermissionsSeen.read'),
+    card.includes('PermissionsSeen.mark'),
+    zh.includes('<string name="ready_permissions_summary">也可在设置里进行修改</string>'),
+    en.includes('<string name="ready_permissions_summary">You can also change these in Settings</string>'),
+  ],
+  [true, true, true, true, true, true, true, true, true, true],
+)
+
+check(
+  '第二窗的「完成」常驻底部, 且不压在权限项上 (2026-11-07 主人)',
+  [
+    // 滚区只包内容: 按钮在它之外, 于是滚到底时最后一行停在按钮上面, 不会被盖住
+    /Column\(\s*modifier = Modifier\s*\.weight\(1f, fill = false\)\s*\.verticalScroll/u.test(card) ||
+      card.includes('.weight(1f, fill = false)'),
+    card.includes('R.string.ready_permissions_close'),
+    (() => {
+      const scroller = card.indexOf('.weight(1f, fill = false)')
+      const close = card.indexOf('R.string.ready_permissions_close')
+      return scroller > 0 && close > scroller
+    })(),
+    // 标题也固定: 滚到第十七项时还要知道这一窗是什么
+    card.includes('MiuixTheme.textStyles.title3'),
+  ],
+  [true, true, true, true],
 )
 
 check(

@@ -191,6 +191,15 @@ val packHostTree = tasks.register<Exec>("packHostTree") {
     // 三份预设声明与内置的 dsh-custom-mode 也从仓库拷进树 (见 tools/pack-host.mjs 那两段),
     // 所以 preset 那几份源码也是这一步的输入
     inputs.dir(rootProject.file("presets"))
+    // 安卓那份 node-pty 预编译 (2026-11-07): pack-host.mjs 的末尾把 jniLibs 里的 liblwpty.so
+    // 拷成树里的 `node_modules/node-pty/prebuilds/android-arm64/pty.node`, 所以它也是这一步的输入
+    //
+    // 少了这两行, 只换 .so 时这个任务判 UP-TO-DATE, 树里那份 pty.node 还是上一次的 (或者干脆没有):
+    // 2026-11-07 13:35 就是这么丢掉一次的 —— 包里有 `lib/arm64-v8a/liblwpty.so`, 树里却没有
+    // `prebuilds/android-arm64`。只声明这两个文件, 不声明整个 jniLibs (那里还有 68 MB 的 libnode.so
+    // 与 33 MB 的 libwicudata.so, 全量哈希会拖慢每次配置)
+    inputs.files(rootProject.file("app/src/main/jniLibs/arm64-v8a/liblwpty.so"))
+    inputs.files(rootProject.file("app/src/main/jniLibs/arm64-v8a/liblwptyhelper.so"))
     // 酒馆在仓库外: 它的源进了构建, 改了就得重打这棵树
     tavernRoot?.let { inputs.dir(it) }
     inputs.property("dshPin", dshPin)

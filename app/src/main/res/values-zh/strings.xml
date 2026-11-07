@@ -112,20 +112,10 @@
     <string name="settings_source_title">更新源</string>
     <string name="settings_source_summary">GitHub Release 的 API 地址, 例如 %1$s; 留空就回到缺省</string>
     <string name="settings_section_appearance">外观</string>
-    <string name="settings_section_appearance_summary">深浅色、主题色与圆角</string>
+    <string name="settings_section_appearance_summary">跟随系统、浅色或深色</string>
     <string name="settings_theme_follow_system">跟随系统</string>
     <string name="settings_theme_light">浅色</string>
     <string name="settings_theme_dark">深色</string>
-    <string name="settings_monet">Monet 颜色</string>
-    <string name="settings_monet_summary">开启后使用 Monet 动态配色</string>
-    <string name="settings_monet_key_color">Monet Key Color</string>
-    <string name="settings_monet_key_color_summary">设置 Monet 强调色</string>
-    <string name="settings_monet_palette_style">Monet Palette Style</string>
-    <string name="settings_monet_palette_style_summary">设置 Monet 调色板风格</string>
-    <string name="settings_monet_color_spec">Monet Color Spec</string>
-    <string name="settings_monet_color_spec_summary">设置 Monet 色彩规格</string>
-    <string name="settings_squircle">圆角矩形</string>
-    <string name="settings_squircle_summary">在圆角 UI 元素上使用平滑的圆角矩形</string>
 
     <string name="settings_section_channel">特权通道</string>
     <string name="settings_section_channel_summary">动屏幕、读屏与 OCR 都要靠它</string>
@@ -144,6 +134,9 @@
     <string name="ready_complete">全部就绪</string>
     <string name="ready_check">检查所需依赖</string>
     <string name="ready_check_summary">看看还差什么没开</string>
+    <string name="ready_permissions">选择权限</string>
+    <string name="ready_permissions_summary">也可在设置里进行修改</string>
+    <string name="ready_permissions_close">完成</string>
     <string name="ready_reading">读取中...</string>
     <string name="ready_dialog_close">开始使用 Luwi</string>
     <string name="ready_channel">特权通道</string>
@@ -256,25 +249,9 @@
     <string name="settings_wake_speech_ready">已就位: 识别模型 + 切段模型, 一共约 %1$s</string>
     <string name="settings_wake_speech_missing">还没下载, 一共约 %1$s; 点一下补上 (建议 Wi-Fi)</string>
     <string name="settings_wake_speech_partial">对了 %1$d/%2$d 个文件, 按一下补齐</string>
-    <string name="model_setup_title">还差两个模型</string>
     <string name="bundled_notice_title">不建议自行更新随包插件</string>
     <string name="bundled_notice_body">下面这几样是嵌在 host 里的, 随 Luwi 每一次更新一起换到最新且适配本版本的那一份: DeepSeek Harness / mneme / dsh-imagegen / 自定义模式。自行更新可能丢失数据 (记忆库这类带数据的最容易), 相关风险需自行承担。</string>
     <string name="bundled_notice_ok">我知道了</string>
-    <string name="model_setup_summary">要能喊醒我, 也要能用语音输入, 需要先装好下面这两个模型。每次打开应用都会检查; 缺模型最多提醒 3 次, 之后不再弹, 也可以在设置 → 唤醒里补下。</string>
-    <string name="model_setup_attempt">第 %1$d / %2$d 次提醒; 到 %2$d 次之后不再检测, 也不再弹出</string>
-    <string name="model_setup_wake">唤醒词模型</string>
-    <string name="model_setup_wake_note">决定喊不喊得醒; 约 %1$s</string>
-    <string name="model_setup_speech">语音模型</string>
-    <string name="model_setup_speech_note">SenseVoice + 切段模型; 约 %1$s, 建议 Wi-Fi</string>
-    <string name="model_setup_ready">已就位</string>
-    <string name="model_setup_missing">还没装好</string>
-    <string name="model_setup_download">下载并启用</string>
-    <string name="model_setup_downloading">正在下载</string>
-    <string name="model_setup_progress">%1$s / %2$s</string>
-    <string name="model_setup_later">稍后</string>
-    <string name="model_setup_need_mic">还需要麦克风权限, 不然听不到你说话</string>
-    <string name="model_setup_mic_action">去授权</string>
-    <string name="model_setup_done">已经就位, 可以去用了</string>
     <string name="settings_wake_words">唤醒词</string>
     <string name="settings_wake_words_none">还没设过, 现在守的是缺省那一句 %1$s (点进来可以换)</string>
     <string name="settings_wake_words_now">现在守的是: %1$s</string>
@@ -1033,21 +1010,6 @@
     <string name="preview_open_refused">这个文件不在工作区里</string>
     <string name="preview_open_missing">这台设备上没有能打开它的应用</string>
 
-    <string name="webview_trouble_title">WebView 版本太旧</string>
-    <string name="webview_trouble_missing">当前 WebView 是 %1$s, 内置兼容层之后仍缺这些前端能力: %2$s</string>
-    <string name="webview_trouble_slow">界面 %1$d 秒了还没出来, 多半是 WebView 太旧 (当前 %2$s)</string>
-    <string name="webview_trouble_steps">怎么更新</string>
-    <string name="webview_trouble_step_store">1. 先在应用商店里更新「Android System WebView」: 这台设备真正加载的那一份是 %1$s</string>
-    <string name="webview_trouble_step_manual">2. 商店里没有更新就打开应用详情页, 看它是不是被停用了; 有「卸载更新」就先退回去, 再回商店更新一次; 有些机器由 Chrome 提供, 那一个也要一起更新</string>
-    <string name="webview_trouble_step_multi">3. 分身空间 / 多用户各自有一份 WebView, 每个用户都得单独更新一次</string>
-    <string name="webview_trouble_step_reopen">4. 更新完把 Luwi 从最近任务里清掉再打开; 这条提示会自己再判一次</string>
-    <string name="webview_trouble_target">WebView 到 Chrome %1$d 就够这个界面用了</string>
-    <string name="webview_trouble_details">打开应用详情页</string>
-    <string name="webview_trouble_market">打开应用商店</string>
-    <string name="webview_trouble_retry">重试</string>
-    <string name="webview_trouble_later">先这样用</string>
-    <string name="webview_trouble_no_settings">打不开这台设备上 WebView 的应用详情页</string>
-    <string name="webview_trouble_no_market">这台设备上没有能打开应用商店的应用</string>
 </resources>
 
 

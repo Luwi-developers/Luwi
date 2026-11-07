@@ -230,4 +230,66 @@ class ExploreScheduleTest {
         assertEquals("开始了一场探索 · 到点先把锁屏解开了", ExploreSchedule.describeLast(withNote))
         assertEquals("开始了一场探索", ExploreSchedule.describeLast(without))
     }
+
+    /* ── 错过补跑 (2026-11-07) ─────────────────────────────────────────────── */
+
+    /**
+     * 什么才算"漏了"
+     *
+     * 这一条挡的是"刚刚打开开关就在大白天凭空开一场": `last.at` 一次都没写过时, 那不是漏, 是还没开始
+     */
+    @Test
+    fun aScheduleThatNeverRanHasNothingToCatchUp() {
+        val now = moment("2026-10-18T08:00:00+08:00")
+
+        assertNull(ExploreSchedule.catchUpLateMs(null, "03:00", now, zone))
+    }
+
+    /** 上一趟就是今天这一次: 已经跑过了, 再补就是同一天开两场 */
+    @Test
+    fun theRunThatJustHappenedIsNotCatchUp() {
+        val now = moment("2026-10-18T08:00:00+08:00")
+        val last = moment("2026-10-18T03:00:00+08:00")
+
+        assertNull(ExploreSchedule.catchUpLateMs(last, "03:00", now, zone))
+    }
+
+    /** 今天凌晨那场没跑 (last 停在昨天): 早上八点补一趟, 晚了五小时 */
+    @Test
+    fun aMissedNightIsCaughtUpInTheMorning() {
+        val now = moment("2026-10-18T08:00:00+08:00")
+        val last = moment("2026-10-17T03:00:00+08:00")
+
+        assertEquals(
+            5 * 60 * 60_000L,
+            ExploreSchedule.catchUpLateMs(last, "03:00", now, zone),
+        )
+    }
+
+    /** 刚过一分钟也算漏 (闹钟被 ROM 清掉时就是这样) */
+    @Test
+    fun aMinuteLateStillCounts() {
+        val now = moment("2026-10-18T03:01:00+08:00")
+        val last = moment("2026-10-17T03:00:00+08:00")
+
+        assertEquals(60_000L, ExploreSchedule.catchUpLateMs(last, "03:00", now, zone))
+    }
+
+    /** 晚了九小时就不硬补了: 隔了半天的任务卡不是当时的上下文 */
+    @Test
+    fun tooLateIsNotCatchUp() {
+        val now = moment("2026-10-18T12:00:00+08:00")
+        val last = moment("2026-10-17T03:00:00+08:00")
+
+        assertNull(ExploreSchedule.catchUpLateMs(last, "03:00", now, zone))
+    }
+
+    /** 今晚还没到: 那是**等闹钟**的那一场, 别把昨天那次当成漏跑 */
+    @Test
+    fun beforeTodaysMomentThereIsNothingToCatchUp() {
+        val now = moment("2026-10-18T01:00:00+08:00")
+        val last = moment("2026-10-17T03:00:00+08:00")
+
+        assertNull(ExploreSchedule.catchUpLateMs(last, "03:00", now, zone))
+    }
 }
