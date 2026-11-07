@@ -33,7 +33,9 @@ const host = await read('host-plugin/index.mjs')
 const speech = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/SpeechModelDownload.kt')
 const wake = await read('app/src/main/java/io/github/yuloong07star/luwi/wake/WakeWordDownload.kt')
 const setup = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/ModelSetup.kt')
-const dialog = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/ModelSetupDialog.kt')
+// 那个「还差两个模型」的说明窗 2026-11-07 撤了 (主人: 这个弹窗可以去掉了); 文件没了, 这里按空串读,
+// 于是下面那几条弹窗相关的断言一律走反向 —— 谁把它挂回来, 那一条就红
+const dialog = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/ModelSetupDialog.kt').catch(() => '')
 const nav = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/AppNav.kt')
 const settings = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt')
 const lwSpeech = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwSpeech.kt')
@@ -145,7 +147,7 @@ check('提醒次数在弹出来那一刻就加; 旧布尔记号迁移成 1 次',
   /putInt\(COUNT, next\)/.test(setup),
   /LEGACY_SEEN/.test(setup),
   /putInt\(COUNT, 1\)/.test(setup),
-  /if \(asked != null\) prompt = asked/.test(dialog),
+  !/ModelSetupPrompt\(\)/u.test(nav),
 ], [true, true, true, true])
 check('下载编排: 缺唤醒词先下唤醒词 (下完补词表 / 按许可起听), 再下语音', [
   /WakeWordDownload\.download\(context\)/.test(setup),
@@ -154,17 +156,14 @@ check('下载编排: 缺唤醒词先下唤醒词 (下完补词表 / 按许可起
   /fun afterModelDownload\(context: Context\): String/.test(lwWake),
   /WakeWordWords\.defaultText\(\)/.test(lwWake),
 ], [true, true, true, true, true])
-check('入口: AppNav 挂上弹窗, 设置页有补下那一行', [
-  /ModelSetupPrompt\(\)/u.test(nav),
+check('入口只剩两处: 体检表那两行 (带下载) 与设置页补下那一行', [
+  // 首启那个说明窗撤了 (2026-11-07 主人: 这个弹窗可以去掉了), 所以 AppNav 里不许再有它
+  !/ModelSetupPrompt\(\)/u.test(nav),
   /SpeechModelDownload\.refresh\(context\)/u.test(settings),
   /R\.string\.settings_wake_speech\b/.test(settings),
-], [true, true, true])
-check('弹窗文案两份都在 (标题 / 第几次 / 稍后 / 麦克风提示)', [
-  ['model_setup_title', 'model_setup_summary', 'model_setup_attempt', 'model_setup_later', 'model_setup_need_mic', 'settings_wake_speech']
-    .filter((key) => !zh.includes(`name="${key}"`) || !en.includes(`name="${key}"`)),
-  ['model_setup_title', 'model_setup_summary', 'model_setup_attempt', 'model_setup_later', 'model_setup_need_mic', 'settings_wake_speech']
-    .every((key) => zh.includes(`name="${key}"`) && en.includes(`name="${key}"`)),
-], [[], true])
+  // 它的 16 条文案也一起删了: 两份 strings 里一个都不许剩
+  !zh.includes('model_setup_') && !en.includes('model_setup_'),
+], [true, true, true, true])
 
 console.log(`\n${checks - failures} / ${checks} 通过`)
 if (failures > 0) process.exit(1)

@@ -135,7 +135,6 @@ import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.sync.ModeModel
 import io.github.yuloong07star.luwi.sync.PairPayload
 import io.github.yuloong07star.luwi.sync.SyncSetting
-import io.github.yuloong07star.luwi.theme.MonetKeyColorOptions
 import io.github.yuloong07star.luwi.theme.ThemeSettings
 import io.github.yuloong07star.luwi.theme.ThemeStore
 import io.github.yuloong07star.luwi.tool.LwEdgeSpeech
@@ -191,8 +190,6 @@ import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
-import top.yukonga.miuix.kmp.theme.ThemeColorSpec
-import top.yukonga.miuix.kmp.theme.ThemePaletteStyle
 
 /**
  * 设置页的字符串都在 `strings.xml` 里 (en 与 zh 各一份), 名字以 `settings_` 开头, 措辞照 SFA 的
@@ -209,9 +206,6 @@ private val themeModes = listOf(
 )
 
 
-/** 调色板风格与色彩规范直接取 Miuix 的枚举名, 它们是 Google 那边的术语 */
-private val paletteStyles = ThemePaletteStyle.entries.map { it.name }
-private val colorSpecs = ThemeColorSpec.entries.map { it.name }
 
 /**
  * 收起来的那几段怎么存 (见 [SettingsScreen] 里的 `collapsed`)
@@ -536,53 +530,14 @@ fun SettingsScreen() {
                 onToggle = toggleSection,
             ) {
                 Column {
+                    // 只剩深浅色 (2026-11-07 主人: "外观只留深浅色, 其它默认关闭并删除选项") ——
+                    // Monet 动态配色 (连同键色 / 调色板风格 / 色彩规范三个下拉) 与「圆角矩形」那两栏
+                    // 一起撤掉了: 这一页不再给第二个旋钮, 主题色与圆角跟着 Miuix 自己的默认走
                     TabRow(
                         tabs = themeModes.map { stringResource(it) },
                         selectedTabIndex = settings.mode.coerceIn(0, themeModes.lastIndex),
                         onTabSelected = { ThemeStore.update(settings.copy(mode = it)) },
                     )
-                    Spacer(modifier = Modifier.height(UiSpacing.ContentVertical))
-                    Card {
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_monet),
-                            summary = stringResource(R.string.settings_monet_summary),
-                            checked = settings.monet,
-                            onCheckedChange = { ThemeStore.update(settings.copy(monet = it)) },
-                        )
-                        AnimatedVisibility(settings.monet) {
-                            OverlayDropdownPreference(
-                                title = stringResource(R.string.settings_monet_key_color),
-                                summary = stringResource(R.string.settings_monet_key_color_summary),
-                                items = MonetKeyColorOptions,
-                                selectedIndex = settings.seed.coerceIn(0, MonetKeyColorOptions.lastIndex),
-                                onSelectedIndexChange = { ThemeStore.update(settings.copy(seed = it)) },
-                            )
-                        }
-                        AnimatedVisibility(settings.monet && settings.seed > 0) {
-                            Column {
-                                OverlayDropdownPreference(
-                                    title = stringResource(R.string.settings_monet_palette_style),
-                                    summary = stringResource(R.string.settings_monet_palette_style_summary),
-                                    items = paletteStyles,
-                                    selectedIndex = settings.palette.coerceIn(0, paletteStyles.lastIndex),
-                                    onSelectedIndexChange = { ThemeStore.update(settings.copy(palette = it)) },
-                                )
-                                OverlayDropdownPreference(
-                                    title = stringResource(R.string.settings_monet_color_spec),
-                                    summary = stringResource(R.string.settings_monet_color_spec_summary),
-                                    items = colorSpecs,
-                                    selectedIndex = settings.spec.coerceIn(0, colorSpecs.lastIndex),
-                                    onSelectedIndexChange = { ThemeStore.update(settings.copy(spec = it)) },
-                                )
-                            }
-                        }
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_squircle),
-                            summary = stringResource(R.string.settings_squircle_summary),
-                            checked = settings.squircle,
-                            onCheckedChange = { ThemeStore.update(settings.copy(squircle = it)) },
-                        )
-                    }
                 }
             }
 
@@ -4402,7 +4357,7 @@ private const val MAX_PICKED_RULES = 12
  * 统页点的就开那一页。**没有第三步** —— 这里不做"假装已授权"
  */
 @Composable
-private fun PermissionsItems() {
+internal fun PermissionsItems() {
     val context = LocalContext.current
     val activity = LocalActivity.current
     // 申请的结果回来要重画, 所以留一个能变的记号

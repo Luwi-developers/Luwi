@@ -1133,24 +1133,10 @@ private fun HostWebView(
             Log.w(WEB_TAG, "the page never rendered within ${STUCK_SECONDS}s on ${webInfo.label}")
         }
     }
-    WebViewTroubleDialog(
-        info = webInfo,
-        missing = compatMissing,
-        stuck = stuck,
-        onDismiss = {
-            compatMissing = emptyList()
-            stuck = false
-        },
-        onRetry = {
-            // 「重试」= 换一块新的从头加载: 走的不是 reload —— renderer 死过 / 卡住两档里, 旧的
-            // 那一块要么已经 destroy, 要么这一页本来就画不出来, reload 它没有意义
-            stuck = false
-            halted = false
-            rebuilds = 0
-            readyAt = 0
-            generation += 1
-        },
-    )
+    // 「WebView 版本太旧 / 卡住了」那个弹窗 **2026-11-07 撤掉了** (主人: "这个也去掉"): 它原来
+    // 兜的是"polyfill 没垫全"与"12 秒没画出 root"两档, 而这两档在真机上一直是"看见了也做不了什么"
+    // —— 那四条更新指引对普通人来说只是在开屏上多挡一层。**检测本身留着**: 上面那句
+    // `Log.w(page never rendered)` 与桥报上来的 missing 仍然进日志, 出事时有读数可查
 
     /**
      * 等下一次 `onPageFinished` (超时回 false): "重载真的落地了没有"只有它答得上来

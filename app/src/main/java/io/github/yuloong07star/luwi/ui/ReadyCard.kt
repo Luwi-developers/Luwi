@@ -111,6 +111,16 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  */
 @Composable
 internal fun ReadyCardDialog(onDismiss: () -> Unit) {
+    // 第二个窗 (2026-11-07 主人: "在开机引导里再加上选择权限, 弹出第二个权限小窗")
+    //
+    // 为什么是第二个窗而不是在这一窗里换内容: 权限那一段是设置页现成的那一份 ([PermissionsItems]),
+    // 十几行, 与四件依赖挤在同一张卡里会把"还差几步"埋掉; 而它也不该被"体检"的语气绑住 —— 想开哪
+    // 个开哪个, 开完关掉就回到体检表
+    var permissions by remember { mutableStateOf(false) }
+    // 竖轨上那个节点办过没有 (2026-11-07 主人: "完成后那个节点要变蓝表示完成")。**关掉那一窗才算办过**
+    // —— 点开又立刻点空白关掉也是一个完整的动作, 但"打开中"不该先亮蓝: 那会让人以为已经做完了
+    val context = LocalContext.current
+    var permissionsSeen by remember { mutableStateOf(PermissionsSeen.read(context)) }
     Dialog(
         // 点空白、按返回键两条路都能关: 这不是"必须答了才能用"的告示, 是一张随时能再打开的体检表
         onDismissRequest = onDismiss,
@@ -140,7 +150,7 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
                         .verticalScroll(rememberScrollState())
                         .padding(UiSpacing.Large),
                 ) {
-                    ReadyCardBody()
+                    ReadyCardBody(permissionsDone = permissionsSeen, onPermissions = { permissions = true })
                     TextButton(
                         text = stringResource(R.string.ready_dialog_close),
                         onClick = onDismiss,
@@ -152,6 +162,114 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
             }
         }
     }
+    // 窗口按创建次序叠, 后建的在上面 —— 这一窗压在体检表之上, 关掉它体检表还在原处
+    if (permissions) {
+        ReadyPermissionsDialog(
+            onDismiss = {
+                permissions = false
+                // 关掉算办过: 节点变蓝, 而且这个记号跨启动 (见 [PermissionsSeen])
+                PermissionsSeen.mark(context)
+                permissionsSeen = true
+            },
+        )
+    }
+}
+
+/**
+ * 第二个窗: 权限 (2026-11-07 主人: "里面有设置里权限版块的内容, 用户可点击打开")
+ *
+ * 正文整个是设置页「权限」那一段的 [PermissionsItems] —— **一份实现两处显示**, 不另抄一遍: 那一份
+ * 每行自己知道怎么要 (运行时的弹框 / 特殊访问的系统页), 也自己在 ON_RESUME 时重读状态, 所以从系统页
+ * 回来这一行就变成新的, 不需要这里再写一套刷新
+ */
+@Composable
+internal fun ReadyPermissionsDialog(onDismiss: () -> Unit) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        val scrim = remember { MutableInteractionSource() }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.4f))
+                .clickable(interactionSource = scrim, indication = null) { onDismiss() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clickable(interactionSource = scrim, indication = null) {},
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 十七个能力比一屏高得多: 卡片封在屏幕的 78%
+                        .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.78f).dp),
+                ) {
+                    // 标题固定在顶上: 滚到第十七项时还要知道这一窗是什么
+                    Text(
+                        text = stringResource(R.string.ready_permissions),
+                        style = MiuixTheme.textStyles.title3,
+                        modifier = Modifier.padding(
+                            start = UiSpacing.Large,
+                            end = UiSpacing.Large,
+                            top = UiSpacing.Large,
+                        ),
+                    )
+                    // 只有这一截滚。**「完成」不在里面** (2026-11-07 主人: "完成按钮要一直放下方"):
+                    // 它原来跟着内容滚, 滚到一半就看不见了
+                    //
+                    // `fill = false` 是这一处唯一要小心的地方: 内容少时卡片该矮 (屏幕 78% 只是上限),
+                    // 内容多时这一截才吃满剩下的高度。全填满会让四项的机器上也挂一张占大半屏的空卡
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            // 滚到底时最后一行与「完成」之间留一点: 不加这一截, 那一行会紧贴着按钮上沿,
+                            // 看着像被按钮压住了半行 (实测就是这样)
+                            .padding(bottom = UiSpacing.Small),
+                    ) {
+                        PermissionsItems()
+                    }
+                    // 固定底栏。它在滚区**之外**, 所以内容滚到底时最后一行停在它上面, 不会被它盖住 ——
+                    // 这也是为什么这里不是叠一层 Box: 叠起来就要自己算按钮高度去给内容让位, 算错了就是
+                    // 最后一项点不到
+                    TextButton(
+                        text = stringResource(R.string.ready_permissions_close),
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = UiSpacing.Large)
+                            .padding(top = UiSpacing.Small, bottom = UiSpacing.Large),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 「选择权限」这一行办过没有 (2026-11-07 主人: "完成后那个节点要变蓝表示完成")
+ *
+ * 与 [ReadyDialogSeen] 同一个写法, 但语义不同: 那个记"首启弹过一次", 这个记"权限那一窗关过一次"。
+ * 记在偏好里而不是进程里, 因为它是"这台机器上我处理过这件事"的事实 —— 重启后应当还是蓝的
+ */
+internal object PermissionsSeen {
+
+    private const val STORE = "luwi"
+
+    /** 关过一次 (落偏好, 跨启动) */
+    private const val KEY = "ready-permissions-seen"
+
+    fun read(context: Context): Boolean = prefs(context).getBoolean(KEY, false)
+
+    fun mark(context: Context) {
+        runCatching { prefs(context).edit().putBoolean(KEY, true).apply() }
+    }
+
+    private fun prefs(context: Context) = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
 }
 
 /**
@@ -203,7 +321,7 @@ internal object ReadyDialogSeen {
 
 /** 对话框里那一坨: 一个环 + 四件依赖 + 下一步该按的那一颗按钮 */
 @Composable
-private fun ReadyCardBody() {
+private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // 这两个都是 Compose 状态: 通道与无障碍由各自的 Setting 在 worker 线程上填 —— 所以这里不需要轮询,
@@ -300,8 +418,12 @@ private fun ReadyCardBody() {
         ),
     )
 
-    val done = steps.count { it.state == ReadyState.DONE }
-    val missing = steps.size - done
+    // 进度**把「选择权限」也算进去** (2026-11-07 主人: "没有完成权限时却显示准备完毕") —— 它虽然
+    // 不是 ReadyStep (没有四档状态), 但它确实有一件事没办, 而顶部那句"全部就绪"是给整张卡下的
+    // 结论: 权限没看过就报就绪, 等于把最后一步藏起来了。所以分母是四件 + 这一件
+    val done = steps.count { it.state == ReadyState.DONE } + if (permissionsDone) 1 else 0
+    val total = steps.size + 1
+    val missing = total - done
 
     // 过门记录 (cf33e06): 这张卡是唯一同时看得见这几项的地方, 埋点跟着它走就不必再挂别的 watcher。
     // 只记前两件 —— 四件里只有通道与无障碍在「五道门」那张表上有位置, 两个模型是随时可删可下的东西,
@@ -325,17 +447,30 @@ private fun ReadyCardBody() {
         return
     }
 
-    ReadyHead(done = done, total = steps.size, missing = missing)
+    ReadyHead(done = done, total = total, missing = missing)
 
     steps.forEachIndexed { index, step ->
         // 用下标当身份: 四件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
         ReadyRow(
             step = step,
             index = index,
-            last = index == steps.lastIndex,
+            // 轨道要接着往下走到「选择权限」那个节点, 所以末行不再收口
+            last = false,
             modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
         )
     }
+
+    // 竖轨上的第五个节点: 「选择权限」 (2026-11-07 主人: "也放在那个竖向进度条的下方, 到选择权限时
+    // 用户点击即可弹出窗口")。形态与上面四件一样 (同一个 x 上的节点 + 同一条轨道), 但它**不是**
+    // ReadyStep —— 没有状态、不进环的分母、也不参与"还差几步": 它是一行的入口, 点开是设置页
+    // 「权限」那一段本身, 关掉就回到这张体检表
+    ReadyLinkRow(
+        title = stringResource(R.string.ready_permissions),
+        detail = stringResource(R.string.ready_permissions_summary),
+        index = steps.size,
+        done = permissionsDone,
+        onClick = onPermissions,
+    )
 
     // 没有"下一步"时整块不画 (四件都办完就是这样): 不该留一块空框
     if (next != null) {
@@ -456,6 +591,100 @@ private fun ReadyRing(done: Int, total: Int, modifier: Modifier = Modifier) {
  *
  * 进度槽与右侧百分比格在所有状态下都占着位置: 开始下载时那一行不该长高, 整张卡也不该跟着重排
  */
+/**
+ * 竖轨上的一个入口行: 有节点、有轨道、整行可点, 但没有状态
+ *
+ * **为什么单开一个函数而不复用 [ReadyRow]**: [ReadyRow] 那一行的身份是 `ReadyStep` (四档状态、
+ * 进度弧、失败色、做完弹一下), 而这一行没有状态可报 —— 强行塞一个假的 `ReadyState` 会让环的分母、
+ * "还差几步"、以及下载进度那几条逻辑全部跟着它算。所以两条共用的只有几何: 同一个 x 上的节点、同一
+ * 条轨道、同一套入场动效
+ *
+ * 节点的画法是一条圆环加一个右箭头, 意思是"这一行会带你到别处", 与上面四件的勾/圈/环区分开
+ */
+@Composable
+private fun ReadyLinkRow(
+    title: String,
+    detail: String,
+    index: Int,
+    done: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val enter = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        try {
+            delay(index * RowStaggerMillis)
+            enter.animateTo(1f, tween(durationMillis = RowEnterMillis, easing = FastOutSlowInEasing))
+        } finally {
+            if (enter.value < 1f) enter.snapTo(1f)
+        }
+    }
+
+    val colors = MiuixTheme.colorScheme
+    // 角色映射 (2026-11-07 按 ui skill 重定, 主人同日: "选择权限颜色不对"):
+    //
+    //   未办 → 与四件**同一档** (浅圈), 已办 → 与四件**同一档** (实心主色 + 勾)。这一行不另画第五种
+    //          节点: 2026-11-07 主人先嫌"灰得像禁用", 试过"主色描边 + 箭头"之后又定成"保持一致" ——
+    //          一串同款圆圈里插一个箭头, 反而它最突兀
+    //
+    // 文字不跟着变: 标题始终 onSurface, 副标题始终淡化一档 —— 变化的只有节点与轨道, 否则一行字在
+    // "办过"前后换色, 会在滚动的竖轨里显得像另一项
+    val accent = colors.primary
+    val dim = colors.onSurface.copy(alpha = 0.28f)
+    // 轨道与 [ReadyRow] 同一个口径 (办过的那一段跟着主色走), 末行也只画到节点为止
+    val rail = if (done) accent.copy(alpha = 0.45f) else dim
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = RowMinHeight)
+            .clickable(onClick = onClick)
+            .drawBehind {
+                val x = NodeCenterX.toPx()
+                // 上一行画到自己的底, 这一行再从顶画到节点上缘 —— 两段接得上
+                drawLine(
+                    color = rail,
+                    start = Offset(x, 0f),
+                    end = Offset(x, (NodeCenterY - NodeRadius - 2.dp).toPx()),
+                    strokeWidth = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                )
+            }
+            .graphicsLayer { alpha = enter.value },
+    ) {
+        Canvas(
+            modifier = Modifier
+                .width(NodeSlotWidth)
+                .height(NodeCenterY + NodeRadius + 2.dp),
+        ) {
+            // **与四件完全一致** (2026-11-07 主人: "选择权限未完成时应该也和其它的一样, 保持一致"):
+            // 没办就是四件那种浅圈, 办过就是实心勾 —— 这一行不另发明第五种节点画法。原来那个"主色
+            // 描边 + 箭头"是想用箭头当"可点"的暗号, 但四件里没有谁的节点长得像箭头, 于是在一串同款
+            // 圆圈里它反而最突兀; 而"这一行能点"本来就由整行的点击区与小字说明承担
+            drawStepNode(
+                state = if (done) ReadyState.DONE else ReadyState.TODO,
+                progress = 1f,
+                accent = accent,
+                onAccent = colors.surface,
+                dim = dim,
+                error = colors.error,
+            )
+        }
+        Spacer(Modifier.width(NodeGap))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MiuixTheme.textStyles.body1,
+                color = colors.onSurface,
+            )
+            Text(
+                text = detail,
+                style = MiuixTheme.textStyles.body2,
+                color = colors.onSurface.copy(alpha = 0.5f),
+            )
+        }
+    }
+}
+
 @Composable
 private fun ReadyRow(
     step: ReadyStep,

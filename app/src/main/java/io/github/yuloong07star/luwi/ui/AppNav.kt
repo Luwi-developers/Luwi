@@ -124,15 +124,9 @@ fun LuwiApp() {
         if (ballRequest == null) return@LaunchedEffect
         while (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
     }
-    val controller = remember(
-        settings.mode,
-        settings.monet,
-        settings.seed,
-        settings.palette,
-        settings.spec,
-    ) {
-        settings.controller()
-    }
+    // 主题只跟深浅一档走 (2026-11-07 主人: "外观只留深浅色") —— Monet 那几个字段已经删了, 所以这里
+    // 的 key 只剩 mode: 换深浅才重算控制器, 别的什么都不该再让它重算一次
+    val controller = remember(settings.mode) { settings.controller() }
     // 2026-10-27 主人: "取消左右跳转, 直接跳转" —— 那天把全局转场换成 NavTransitions.None;
     // 2026-10-27 晚主人补一句: "除酒馆页面, 跳转继续用左右翻转进入" —— 所以全局转场恢复
     // MiuixDefault (左右滑动进场), 只有酒馆那几页在 entry 上单独钉 None (进出酒馆都不扫光,
@@ -187,7 +181,9 @@ fun LuwiApp() {
         }
         CompositionLocalProvider(
             LocalRootNavigator provides navigator,
-            LocalSquircleEnabled provides settings.squircle,
+            // 圆角矩形那个开关撤了 (2026-11-07 主人: "其它默认关闭"): 恒为 false 就是"用 Miuix
+            // 自己的圆角", 与删掉开关之前"关着"的样子一致
+            LocalSquircleEnabled provides false,
         ) {
             NavDisplay(
                 backStack = backStack,
@@ -225,9 +221,9 @@ fun LuwiApp() {
                     },
                 )
             }
-            // 首启的模型说明 (2026-10-28 主人): 缺唤醒词 / 语音模型时弹一次, 只弹一次;
-            // 检测与"弹过了"都记在 ModelSetup 里, 这里只负责把它挂到每一页之上
-            ModelSetupPrompt()
+            // 首启那个「还差两个模型」的说明窗 **2026-11-07 撤掉了** (主人: "这个弹窗可以去掉了"):
+            // 体检表里那两行本来就写着模型在不在、各多大、带下载按钮, 再多一窗是同一个意思说两遍;
+            // 何况全新装的机器第一次进来先撞见它, 撞完还要再撞体检表
             // 首启那张「开始使用」体检表 (2026-11-04 主人 #1①): 第一次进应用时若还有没办的就弹一次,
             // 一个居中对话框, 弹过记在 `ready-dialog-seen` 里, 之后走设置页那一行「检查所需依赖」。
             // 挂在最外层 (与上面那条同一个位置), 于是它在**开屏那一屏**上就盖得住

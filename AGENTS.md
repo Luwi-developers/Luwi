@@ -86,7 +86,7 @@
 - **球休闲两档 (半隐 / 半藏)**, 共用 `PEEK_IDLE_MS` 5 s; `TRANSLUCENT_ALPHA = 0.5` (半隐=一半透明度), 半藏不参与; 该收边时一定要收, **回弹判据是 `idleDueNow`, 不能拿 `wait.peek` 反推**
 - **一个状态可有多支动作** (`ball.json` 写数组), 进档随机起头、演完换下一支、下一支后台预解, 过 `MAX_DECODED_FRAMES` 就不预解
 - **立绘按高贴满**: 素材同一高度出, 宽度按比例居中; **别改回 `Gravity.FILL`**
-- **老 WebView 要垫 polyfill**: `assets/web/lw-compat.js` 经 `addDocumentStartJavaScript` 注入, `MIN_MAJOR` = **116** (`Promise.withResolvers` / `AbortSignal.any`); 兜底是 12 秒没画出 `root` 就弹真 `Dialog`
+- **老 WebView 要垫 polyfill**: `assets/web/lw-compat.js` 经 `addDocumentStartJavaScript` 注入, `MIN_MAJOR` = **116** (`Promise.withResolvers` / `AbortSignal.any`); **那个"12 秒没画出 `root` 就弹真 `Dialog`"的兜底 2026-11-07 撤了** (主人: 这个也去掉), 卡住只留 `Log.w(page never rendered)` 一行
 - **补 polyfill 要扫 `host-tree` 里所有 client bundle**, 不能只看 `dsh-web-frontend/dist`
 - **切后台回来不重载**: renderer 钉 `RENDERER_PRIORITY_BOUND`, `onRenderProcessGone` 返回 true 换新 (最多 3 次, `MAX_PAGE_REBUILDS`); **同一地址只 load 一次**; 判据 `tools/check-host-persistence.mjs`
 - **两块 WebView 键盘避让**用 `ui/KeyboardInsets.kt` 的 `rememberImeLift` (只认贴底键盘); `adjustResize` 在 targetSdk 37 下不管用

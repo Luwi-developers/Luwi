@@ -60,7 +60,8 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
  * 1. **[install] 在"文档开始"时把 `assets/web/lw-compat.js` 先跑一遍** —— 用
  *    `WebViewCompat.addDocumentStartJavaScript` (`WebViewFeature.DOCUMENT_START_SCRIPT`, WebView 83+
  *    都有), 它保证在页面自己那一段之前执行。垫上之后老机器不用折腾更新 WebView
- * 2. **[WebViewTroubleDialog] 兜住"还是卡住了"那一档**: 页面把"还缺什么"报回来 ([Bridge]), 或者
+ * 2. **卡住那一档只留日志** (2026-11-07 撤掉了原来那个 `WebViewTroubleDialog` 弹窗): 页面把"还缺什么"
+ *    报回来 ([Bridge]), 或者
  *    12 秒还没 ready 就弹窗, 说清当前版本并给「去更新 WebView」—— 别让人对着转圈干等
  *
  * 更新那条路对普通人本来就不友好 (国内没有 Play, vivo 分身空间还是独立用户), 所以**它是第二条路,
@@ -127,7 +128,7 @@ internal object WebCompat {
      * 把 polyfill 装到"文档开始"那一刻
      *
      * @return true = 真的装上了 (老 WebView 也走得通这条路); false = 这台 WebView 太老没有这个钩子,
-     *   那时只剩 [WebViewTroubleDialog] 那一半 —— 日志里会留一行, 判据在真机上才看得见
+     *   那时只有日志那一半 —— 判据在真机上才看得见
      */
     fun install(view: WebView, script: String): Boolean {
         if (script.isBlank()) return false
@@ -201,150 +202,6 @@ internal object WebCompat {
     }
 }
 
-/**
- * "界面起不来"那一问 (真 `Dialog`: WebView 是同窗口的子 View, Miuix 的 OverlayDialog 盖不住它)
- *
- * 两种触发, 正文不同、下面那几步一样:
- * - 页面报上来"还缺这些 API" ([missing] 非空) —— polyfill 没垫全, 这一档最该去更新
- * - 12 秒还没 ready ([stuck]) —— 连报告都没上来, 可能是更老的引擎在解析期就死了
- *
- * **正文是分步的更新指引** (2026-10-26 主人: "加 webview 更新指引"): 只说"去更新 WebView"对普通人
- * 不够用 —— 到底更新哪一个包、商店里没有更新怎么办、分身里那一份算不算、更新完怎么确认, 四步都要
- * 写在眼前。两个入口 (应用详情页 / 应用商店) 是分开的: `market://` 在国产 ROM 上经常落不对地方,
- * 而应用详情页一直有; 「重试」与「先这样用」照旧 (关窗不记任何记号, 下次进来还会再判一次)
- */
-@Composable
-internal fun WebViewTroubleDialog(
-    info: WebCompat.Info,
-    missing: List<String>,
-    stuck: Boolean,
-    onDismiss: () -> Unit,
-    onRetry: () -> Unit,
-) {
-    if (missing.isEmpty() && !stuck) return
-    val context = LocalContext.current
-    val noDetails = stringResource(R.string.webview_trouble_no_settings)
-    val noMarket = stringResource(R.string.webview_trouble_no_market)
-    val reason = if (missing.isNotEmpty()) {
-        stringResource(R.string.webview_trouble_missing, info.label, missing.joinToString(", "))
-    } else {
-        stringResource(R.string.webview_trouble_slow, STUCK_SECONDS, info.label)
-    }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        val scrim = remember { MutableInteractionSource() }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.4f))
-                .clickable(interactionSource = scrim, indication = null) { onDismiss() },
-            contentAlignment = Alignment.Center,
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
-                    // 卡片自己吃掉点击, 不然点正文也会关窗
-                    .clickable(interactionSource = scrim, indication = null) {},
-            ) {
-                // 只有正文滚, 按钮钉在卡片底下 —— 弹窗自己不会滚, 四步加读数在小屏上会超出去
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = 520.dp)
-                        .verticalScroll(rememberScrollState())
-                        .padding(start = 24.dp, end = 24.dp, top = 24.dp),
-                ) {
-                    Text(
-                        text = stringResource(R.string.webview_trouble_title),
-                        style = MiuixTheme.textStyles.title3,
-                    )
-                    Text(
-                        text = reason,
-                        style = MiuixTheme.textStyles.body2,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_steps),
-                        style = MiuixTheme.textStyles.body2,
-                        modifier = Modifier.padding(top = 16.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_step_store, info.packageName),
-                        style = MiuixTheme.textStyles.body2,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_step_manual),
-                        style = MiuixTheme.textStyles.body2,
-                        color = colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_step_multi),
-                        style = MiuixTheme.textStyles.body2,
-                        color = colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_step_reopen),
-                        style = MiuixTheme.textStyles.body2,
-                        color = colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    Text(
-                        text = stringResource(R.string.webview_trouble_target, WebCompat.MIN_MAJOR),
-                        style = MiuixTheme.textStyles.footnote1,
-                        color = colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
-                }
-                Column(modifier = Modifier.padding(24.dp)) {
-                    TextButton(
-                        text = stringResource(R.string.webview_trouble_details),
-                        onClick = {
-                            if (WebCompat.openDetails(context, info) == null) {
-                                Toast.makeText(context, noDetails, Toast.LENGTH_LONG).show()
-                            }
-                            onDismiss()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.textButtonColorsPrimary(),
-                    )
-                    Row(horizontalArrangement = Arrangement.SpaceBetween) {
-                        TextButton(
-                            text = stringResource(R.string.webview_trouble_market),
-                            onClick = {
-                                if (WebCompat.openMarket(context, info) == null) {
-                                    Toast.makeText(context, noMarket, Toast.LENGTH_LONG).show()
-                                }
-                                onDismiss()
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(20.dp))
-                        TextButton(
-                            text = stringResource(R.string.webview_trouble_later),
-                            onClick = onDismiss,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    TextButton(
-                        text = stringResource(R.string.webview_trouble_retry),
-                        onClick = {
-                            onDismiss()
-                            onRetry()
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                    )
-                }
-            }
-        }
-    }
-}
 
 /** 卡住那一档在正文里报的秒数, 与 [HostScreen] 那个计时器同一个数 */
 internal const val STUCK_SECONDS = 12
