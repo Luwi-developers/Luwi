@@ -95,23 +95,15 @@ if (!existsSync(treePath('@modusensus/dsh-mneme/lib/client.js'))) {
     check(`选择器 ${selector} 在已构建的产物里命中`, where, needle === 'data-files-path' ? 'files' : 'mneme')
   }
 
-  // 第三条补丁按 `dsh-web-mobile` 自己写上去的那个属性定位框架: 它一旦改名, 这条补丁就静默失效,
-  // 而现象只是"窄屏上会话那一列又变成 0 宽"(整片空白), 所以那个字符串必须在它的产物里还在
-  check('窄屏栅格那条补丁的抓手在 dsh-web-mobile 的产物里命中', [
-    client.includes('[data-mobile-nav="frame"]'),
-    client.includes('html body [data-mobile-nav="frame"]'),
-    await contains('dsh-web-mobile/lib/client.js', 'data-mobile-nav'),
-  ], [true, true, true])
-
-  // 抽屉那条补丁抓两个东西: 宿主自己的遮罩属性 (`[data-sidebar-mask]`, 由 AppFrame 写在
-  // div 上) 与侧栏列的哈希类名 (`*sidebarCol`)。前者改名 → 遮罩又会被当成抽屉列 (打开是白的);
-  // 后者改名 → 抬不到 z 1300 (插件的背面压在抽屉上)。两边都必须在这棵树上还在
-  check('抽屉那条补丁的两个抓手都还在宿主的产物里', [
+  // 第三条、第四条补丁 (窄屏栅格 / 抽屉遮罩) 在 dsh-web-mobile 3.3.0 之后已经删掉: 上游把两条
+  // 都做成了自己的 `@patch` (`> [class*="_centerCol"] { grid-area: 1/1/2/2 }` 与
+  // `> [class*="_drawerMask"] { display: none }`)。这里留一条回归闸: 一旦 `pack-host` 又把
+  // 那个版本钉回去 3.1.0, 这两条本地补丁必须补回来 —— 判据是 pin 不能低于 3.3.0
+  const pin = /`\$\{webui\}@(\d+\.\d+\.\d+)`/.exec(packer)
+  check('pack-host 钉的 dsh-web-mobile 不低于 3.3.0 (低于它就得把栅格/遮罩两节补回 ui-fix)', [
     client.includes('[data-sidebar-mask]'),
-    client.includes('[class*="sidebarCol"]'),
-    await contains('@deepseek-ai/dsh-client-ui-layout/lib/client.js', 'sidebar-mask'),
-    await contains('@deepseek-ai/dsh-client-ui-layout/lib/client.js', 'sidebarCol'),
-  ], [true, true, true, true])
+    pin === null ? 'no-pin' : (Number(pin[1].split('.')[0]) * 10000 + Number(pin[1].split('.')[1]) * 100 + Number(pin[1].split('.')[2]) >= 30300 ? 'ok' : pin[1]),
+  ], [false, 'ok'])
 
   check('两段补丁用到的那个 CSS 变量在这棵树里有定义', frontendText.includes('--dsw-alias-border-l2'), true)
 }

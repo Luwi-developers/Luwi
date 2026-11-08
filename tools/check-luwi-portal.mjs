@@ -82,6 +82,10 @@ expect('client.js', client, 'uiWorkspace.openSession')
 expect('client.js', client, 'window.LuwiPortal')
 expect('client.js', client, 'window.__LUWI_PORTAL__')
 expect('client.js', client, 'portalVisible')
+// 边缘划入的接管 (2026-11-08): 3.3.0 自己那条会被 pointercancel 打断, 所以这一层自己接
+expect('client.js', client, 'installEdgeSwipe')
+expect('client.js', client, "window.__LW_EDGE_SWIPE__")
+expect('client.js', client, "ctx.get('layout')")
 // 界面上不放那两颗按钮: 进出都在 Luwi 菜单里 (2026-11-07 主人)
 if (client.includes('回到 dsh')) {
   failures.push('client.js: 界面上还留着「回到 dsh」按钮 (应该只在 Kotlin 菜单里)')

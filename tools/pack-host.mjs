@@ -569,13 +569,22 @@ console.log(`pack-host: pruned ${String(pruned)} package(s) this device cannot r
 // 且 3.0.6 与 3.1.0 的 peerDependencies 逐条相同, 那道闸本来就不成立。3.1.0 相对 3.0.6 多出来的是
 // 两处面板退场快照的修复 (旧 disposer 删掉新实例 / 退出侧边栏留下永不自清的全屏快照), 正是批次 4
 // 要量的那两条
+//
+// **3.1.0 -> 3.3.0 (2026-11-08)**: 3.1.0 是按 0.2.1 的宿主写的, 换到 0.2.2 之后它在两处错位 ——
+// 会话列被压成 0 宽 (整页空白)、原生抽屉遮罩被当成抽屉列 (侧栏打开是一块白, 还会一开就弹回),
+// 我们在 `presets/ui-fix` 第三、四节补过。3.3.0 上游把两处都做成自己的 `@patch` 了
+// (`> [class*="_centerCol"] { grid-area: 1/1/2/2 }` 与 `> [class*="_drawerMask"] { display: none }`,
+// 抽屉规则的抓手同时从 `> :first-child` 换成 `> [class*="_sidebarCol"]`), 所以升上去之后
+// ui-fix 那两节就删掉。3.3.0 的 peer 范围也收窄成 `>=0.2.2-rc.1 <0.3.0-0`, 与本树一致;
+// `--legacy-peer-deps` 仍然留着 —— 那是为了不让 npm 把这一串 peer 真装进这个 scratch 目录,
+// 与版本宽不宽无关
 const webui = 'dsh-web-mobile'
 const webuiStage = join(out, '.webui-stage')
 mkdirSync(webuiStage, { recursive: true })
 writeFileSync(join(webuiStage, 'package.json'), `${JSON.stringify({ name: 'lw-webui-stage', private: true }, null, 2)}\n`)
 run(
   'npm',
-  ['install', `${webui}@3.1.0`, '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional', '--legacy-peer-deps'],
+  ['install', `${webui}@3.3.0`, '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional', '--legacy-peer-deps'],
   webuiStage,
 )
 cpSync(join(webuiStage, 'node_modules', webui), join(out, 'node_modules', webui), { recursive: true })
@@ -613,7 +622,13 @@ console.log(`pack-host: ${webui} imports cleanly`)
 //
 // 装完 import 一次, 理由与上面那一步一样: 少一个依赖时 npm 不会说话, 而它要到**加载时**才抛 ——
 // 设备上的表现是"生图那一整块不见了", 不是一句安装错误
-const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.6.7' }
+// **2026-11-08 升到 1.15.6** (1.6.7 用了很久): 跨了 9 个 minor, 但下面三件**逐条验过没变**:
+// `lib/index.js` 里那三处 `path.join(homedir(), ".dsh", "dsh-imagegen")` 仍然**恰好 3 次**、
+// `src/templates/*.json` 仍是运行时真读的那份离线快照 (5 个文件, 面板里的「模板」那一栏就是它们)、
+// 工具名仍是 `generate_image` / `edit_image`; 依赖仍是 `@deepseek-ai/schemastery` + `lucide-react`,
+// 树里那份 schemastery 是 3.19.0 (要求 ^3.18.4, 满足)。`docs/` 这一版只剩 0.1 MB (演示视频没了),
+// 裁剪照旧。真机读数: host 起得来、生图面板与模板栏渲染、历史记录空但可读 (这台机没生成过图)
+const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.15.6' }
 
 /** 拉 npm 的那条 registry: 这台开发机上 registry.npmjs.org 不通, 缺省走 npmmirror */
 const npmRegistry = process.env.LW_NPM_REGISTRY ?? 'https://registry.npmmirror.com'
@@ -715,7 +730,17 @@ console.log(
 // 蒸馏修复 (#494 转录围栏 / 解析失败护栏) 与那一批新能力. **升级后必须真机打开面板确认数据面** (列表可能
 // 仍然空白, 那是前端那一层, 不要误判成"库被清空" —— 判据是 `/api/dsh-mneme/list` 与 `memory.db` 的
 // 大小 / mtime). "酒馆不写记忆"那三处补丁在 0.9.4 上照旧打得中
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.9.4' }
+// **2026-11-08 升到 0.12.0**: 0.9.4 在 Luwi 的基座上面板那一块渲染不出来 (只剩标题 / 标签栏 /
+// 筛选栏, 列表区空白, 数据面本身正常), 从 0.9.1 起一直这么将就着。0.12.0 在 0.2.2 上试通了:
+// 面板五个标签 (记忆 / 实体 / 状态 / 设置)、语义检索、重要性行、时间树都渲染出来, 计数与实际库一致
+// —— 真机上「共 0 条」是**真的 0 条** (那台机器没有 API key, 蒸馏根本没跑过; 直接读 `memory.db`
+// 得到 memories=0 / llm_audit_logs=12), 不是又一次"没显示"。
+//
+// 三个酒馆排除锚点在 0.12.0 上**照旧各命中一次** (`lib/config.js` 的 autoSummarize 那行、
+// `lib/summarize.js` 的 summarize 签名、`lib/inject.js` 的 `text: (ctx) => {`), 上游仍然没有
+// 自己实现 `excludeAgentPresets`。0.12.0 新增了 `仓库地志`(choro) 与一批 lib 模块, 我们只裁
+// docs/test/src/scripts/lib.map, 别的不动
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.12.0' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
@@ -823,11 +848,10 @@ console.log(
   `pack-host: installed ${mnemePlugin.name}@${mnemePlugin.version} from ${npmRegistry}`,
 )
 
-// **面板前端也用 0.9.4 自带的** (2026-10-29 主人: "只用0.9.4即可"): 它那份 `lib/client.js` 在 Luwi 的
-// dsh 基座 (rc.3) 上渲染不出记忆列表那一块 —— 面板只剩标题、标签栏与筛选栏, 统计与列表区是空的
-// (真机实测; 数据面与 `/api/dsh-mneme/list` 都正常, 只是前端那一层). 这一档显示问题接受, 等上游下一版;
-// **别为了"面板好看"把 client.js 换成 0.9.0 那份** —— 那样 0.9.4 的新功能 (M.O. 工作流 / 人格 /
-// 画像草稿) 连设置项都看不到, 主人要的是新版能力
+// **面板前端也用它自带的那份** (2026-10-29 主人: "只用0.9.4即可" → 2026-11-08 换成 0.12.0 之后
+// 那条"列表空白"的妥协不再需要): 0.9.x 那份 `lib/client.js` 在 Luwi 的 dsh 基座上渲染不出记忆列表,
+// 面板只剩标题 / 标签栏 / 筛选栏; 0.12.0 在 0.2.2 上渲染完整, 所以**别再往回换**, 也**别再为了
+// "面板好看"去改前端那一层** —— 换版本就够
 // 随包发的第三个第三方插件 `dsh-our-free-model` (免费模型通道 + 渠道管理面板) 于 2026-10-30 撤下
 //
 // 主人原话: "删除 ourfreemodel 这个随包插件"。原来那一段 (锁 git 的 40 位 commit 取包 / 点一遍

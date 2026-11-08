@@ -51,8 +51,8 @@ function check(name, got, want) {
 const image = /const imagePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
 const mneme = /const mnemePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
 
-check('生图插件仍按自己那份声明取进树', [image?.[1], image?.[2]], ['@dickpy/dsh-imagegen', '1.6.7'])
-check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.9.4'])
+check('生图插件仍按自己那份声明取进树', [image?.[1], image?.[2]], ['@dickpy/dsh-imagegen', '1.15.6'])
+check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.12.0'])
 
 // 2026-10-30 主人: "删除 ourfreemodel 这个随包插件" —— 三处接缝 (取包 / 挂行 / 贴 config) 一起撤,
 // 钉一条"它不在"的判据, 免得将来谁又把它按老文档加回去. 撤下的那一行还得从老设备上摘掉: OWNED 只管
@@ -64,7 +64,7 @@ check(
     /Owned\(\s*"free-model"/u.test(rows),
     rows.includes('MANAGED_DISTRIBUTION'),
     rows.includes('private val RETIRED = listOf("free-model" to "dsh-our-free-model")'),
-    rows.includes('val next = retired(patch, id, packageName, root)'),
+    rows.includes('val next = retired(patch, id, packageName, root.absolutePath)'),
   ],
   [false, false, false, true, true],
 )
