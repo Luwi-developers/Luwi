@@ -20,7 +20,10 @@ param(
     # 分支已存在 → PATCH；不存在 → POST 创建。对象照旧逐个比对 SHA，全对才动 ref。
     [string]$Branch = '',
     # 只动 ref、不重放 tag（推 PR 分支时默认就不打 tag，这里留个显式开关给特殊场景）
-    [switch]$NoTag
+    [switch]$NoTag,
+    # 推**私有仓**（Luwi-private/tavern 那份酒馆源）时用: 跳过下面那道"历史里有酒馆就不许推"的
+    # 公开仓闸。2026-11-08 加 —— 那道闸按的是"这个仓库是不是公开仓", 而脚本现在两处都在用
+    [switch]$Private
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,8 +65,8 @@ function Iso([string]$name, [string]$email, [string]$stamp) {
 # 酒馆闭源 (2026-10-29): 推送前先看**历史**里有没有酒馆实现 —— 删掉只影响最新树, 不影响历史,
 # c6aa501 那条链照样翻得到; 公开仓必须从 public/main (2c61255 起家) 上推
 $tavernHistory = @(git rev-list HEAD -- 'app/src/main/java/io/github/yuloong07star/luwi/tavern' 'app/src/main/java/io/github/yuloong07star/luwi/ui/Tavern*.kt' 'host-plugins/luwi-tavern' 'presets/tavern' 2>$null)
-if ($tavernHistory.Count -gt 0) {
-    throw "HEAD 的历史里有酒馆 ($($tavernHistory.Count) 个提交, 最早 $($tavernHistory[-1].Substring(0,7))) —— 公开仓不能推, 先跑 tools/lw-export-public.ps1 并切到 public/main"
+if ($tavernHistory.Count -gt 0 -and -not $Private) {
+    throw "HEAD 的历史里有酒馆 ($($tavernHistory.Count) 个提交, 最早 $($tavernHistory[-1].Substring(0,7))) —— 公开仓不能推, 先跑 tools/lw-export-public.ps1 并切到 public/main (推私有仓本身请加 -Private)"
 }
 
 $base = (git rev-parse $RemoteRef).Trim()
