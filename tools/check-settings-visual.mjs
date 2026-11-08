@@ -69,6 +69,17 @@ check('没有阴影 (卡片靠 1dp 描边分层)', [
 const hexValues = [...palette.matchAll(/Color\(0x([0-9A-Fa-f]{8})\)/gu)].map((m) => m[1].toUpperCase())
 check('没有紫 / 靛这一类 AI 指纹蓝', hexValues.filter((h) => /6366F1|8B5CF6|7C3AED|3B82F6/u.test(h)), [])
 
+// "面"这一族 (Card 的底 / 选中态的底) 必须是中性灰: 一旦偏蓝, 满页都是淡蓝块
+// (2026-11-08 主人: "菜单打开和酒馆版块还是有蓝底" —— 根因是 surfaceContainer 带着蓝相)
+const faceColors = [...palette.matchAll(/(?<![A-Za-z])(surfaceContainer(?:High)?|primaryContainer|secondaryContainer|tertiaryContainer) = Color\(0xFF([0-9A-Fa-f]{6})\)/gu)]
+  .map((m) => ({ name: m[1], hex: m[2].toUpperCase() }))
+const bluish = faceColors.filter(({ hex }) => {
+  const r = parseInt(hex.slice(0, 2), 16)
+  const b = parseInt(hex.slice(4, 6), 16)
+  return b - r > 12
+})
+check(`"面"色不带蓝相 (${faceColors.length} 个, 蓝只留在 primary)`, bluish.map((c) => `${c.name} #${c.hex}`), [])
+
 /* ── 二、段行的排法 ───────────────────────────────────────────────────── */
 
 check('段标题是竖排 (SectionTitle 里 Column 而不是并肩的 Row)', [
