@@ -81,11 +81,19 @@ object ThemeStore {
     }
 }
 
-/** 把设置变成 Miuix 的主题控制器: 只有深浅一档, 不再有 Monet 那几条分支 */
+/**
+ * 把设置变成 Miuix 的主题控制器: 只有深浅一档, 不再有 Monet 那几条分支
+ *
+ * 2026-11-08 起多带两样东西: [LuwiPalette] 的深浅两套 [top.yukonga.miuix.kmp.theme.Colors]。
+ * Miuix 0.9.4 的 `ThemeController` 就收了这两项, 所以换配色不必碰库、也不必在页面里逐个改颜色 -
+ * 页面读到的 `colorScheme` 就是这一份, 开关 / 滑块 / 选中态一起跟着换
+ */
 fun ThemeSettings.controller(): ThemeController = ThemeController(
     colorSchemeMode = when (mode.coerceIn(0, 2)) {
         ThemeSettings.MODE_LIGHT -> ColorSchemeMode.Light
         ThemeSettings.MODE_DARK -> ColorSchemeMode.Dark
         else -> ColorSchemeMode.System
     },
+    lightColors = LuwiPalette.light,
+    darkColors = LuwiPalette.dark,
 )

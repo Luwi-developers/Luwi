@@ -25,6 +25,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.theme.ApplySystemBarsAppearance
+import io.github.yuloong07star.luwi.theme.LuwiType
 import io.github.yuloong07star.luwi.theme.ThemeStore
 import io.github.yuloong07star.luwi.theme.controller
 import io.github.yuloong07star.luwi.update.AutoUpdate
@@ -162,7 +163,9 @@ fun LuwiApp() {
         }
     }
 
-    MiuixTheme(controller = controller) {
+    // 字阶与配色一样走 [LuwiType] / [io.github.yuloong07star.luwi.theme.LuwiPalette] 这两份
+    // 常量: 换字号不必再回到页面里逐个改, 也不会出现"这一页 14 那一页 15"的走岔
+    MiuixTheme(controller = controller, textStyles = LuwiType.textStyles) {
         // 系统栏图标要跟着实际渲染出来的配色, 手动钉成深色时也得跟着变
         ApplySystemBarsAppearance(LocalActivity.current?.window)
         val cornerRadius = rememberNavSystemCornerRadius()
