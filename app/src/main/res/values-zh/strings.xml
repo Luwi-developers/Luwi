@@ -279,7 +279,7 @@
     <string name="settings_power_keepalive_failed">这台设备上没有能打开「忽略电池优化」的页面</string>
     <string name="settings_wake_need_model">唤醒词模型还没下, 用下面那一行「下载唤醒词模型」</string>
     <string name="settings_wake_action">叫醒之后</string>
-    <string name="settings_wake_action_summary">命中那一下除了震动响铃, 还要不要顺手做一件事</string>
+    <string name="settings_wake_action_summary">除了响铃还做什么</string>
     <string name="settings_wake_action_wake">只叫醒 (讲一句话)</string>
     <string name="settings_wake_action_video">顺带切到视频模式</string>
     <string name="settings_wake_action_phone">顺带切回手机模式</string>
@@ -612,11 +612,11 @@
     <string name="settings_automation_every_minutes">每 %1$d 分钟</string>
     <string name="settings_automation_every_meters">至少移动 %1$d 米</string>
     <string name="settings_automation_weather_every">天气多久问一次</string>
-    <string name="settings_automation_weather_every_summary">免 key 源 (Open-Meteo)</string>
+    <string name="settings_automation_weather_every_summary">免 key 源</string>
     <string name="settings_automation_place_every">位置多久问一次</string>
-    <string name="settings_automation_place_every_summary">只用网络定位, 省电时不注册</string>
+    <string name="settings_automation_place_every_summary">只用网络定位</string>
     <string name="settings_automation_place_meters">位置至少移动多远</string>
-    <string name="settings_automation_place_meters_summary">移动不到这个距离就不叫"换了地方"</string>
+    <string name="settings_automation_place_meters_summary">移动不到就不算换地方</string>
     <string name="settings_automation_quiet">静默时段</string>
     <string name="settings_automation_quiet_summary">这段里只判不响</string>
     <string name="settings_automation_quiet_title">静默时段</string>

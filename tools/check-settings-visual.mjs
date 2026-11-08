@@ -117,6 +117,13 @@ const over = uniq.filter((k) => {
 })
 check(`行内小字都在一行内 (${uniq.length} 条, 超长的 ${over.length} 条)`, over, [])
 
+/** 下拉行的宽度最紧: 右边那个"当前值"标签占掉的比开关还多, 一行只剩 14 字左右
+ *  (2026-11-08 合并后在"叫醒之后"那一行上量到) */
+const dropdown = [...screen.matchAll(/OverlayDropdownPreference\((?:(?!\n\s{0,8}[A-Z][A-Za-z]+\()[^])*?summary\s*=\s*stringResource\(\s*R\.string\.(settings_[a-z0-9_]+)/gsu)]
+  .map((m) => m[1])
+const dropdownOver = [...new Set(dropdown)].filter((k) => (zhMap.get(k) ?? '').length > 14)
+check(`下拉行摘要不超过 14 字 (${new Set(dropdown).size} 条)`, dropdownOver, [])
+
 const enOver = uniq.filter((k) => {
   const v = enMap.get(k) ?? ''
   return !v.includes('\\n') && v.length > 60

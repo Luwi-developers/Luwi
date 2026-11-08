@@ -280,7 +280,7 @@
     <string name="settings_power_keepalive_failed">This device has no page that allows ignoring battery optimisation</string>
     <string name="settings_wake_need_model">The wake word model is not downloaded yet; the download row below is what gets it</string>
     <string name="settings_wake_action">After a hit</string>
-    <string name="settings_wake_action_summary">What else to do on a hit besides buzz and ring</string>
+    <string name="settings_wake_action_summary">What else to do on a hit</string>
     <string name="settings_wake_action_wake">Just wake (one sentence)</string>
     <string name="settings_wake_action_video">Also switch to video mode</string>
     <string name="settings_wake_action_phone">Also switch back to phone mode</string>
@@ -613,11 +613,11 @@
     <string name="settings_automation_every_minutes">Every %1$d minutes</string>
     <string name="settings_automation_every_meters">Only after %1$d metres</string>
     <string name="settings_automation_weather_every">How often the weather is asked</string>
-    <string name="settings_automation_weather_every_summary">Keyless source (Open-Meteo)</string>
+    <string name="settings_automation_weather_every_summary">Keyless source</string>
     <string name="settings_automation_place_every">How often the place is asked</string>
-    <string name="settings_automation_place_every_summary">Network location only, off while saving power</string>
+    <string name="settings_automation_place_every_summary">Network location only</string>
     <string name="settings_automation_place_meters">How far the phone must move</string>
-    <string name="settings_automation_place_meters_summary">Less than this is not "a different place"</string>
+    <string name="settings_automation_place_meters_summary">Shorter moves do not count as a new place</string>
     <string name="settings_automation_quiet">Quiet hours</string>
     <string name="settings_automation_quiet_summary">Conditions still fire, nothing rings</string>
     <string name="settings_automation_quiet_title">Quiet hours</string>
