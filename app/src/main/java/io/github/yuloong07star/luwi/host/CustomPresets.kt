@@ -53,8 +53,19 @@ internal object CustomPresets {
     /** 那个助手的目录名: 与 [io.github.yuloong07star.luwi.channel.LwModes] 说的 `custom` 是同一个 */
     const val ASSISTANT = "custom"
 
-    /** `selectedDefault` 指向它: 新会话默认落在自定义模式上 (切模式的人设就是写进它里面那份 `prompt.md`) */
-    const val DEFAULT_PRESET = "custom"
+    /**
+     * `selectedDefault` 指向它: 新会话默认落在 **Luwi 档**上 (2026-11-08 主人定)
+     *
+     * 这一档的 persona 在 `presets/luwi/cordis.patch.yml`: 二代仿真那套说话的规矩, 装在会操作手机的
+     * agent 上. `custom` 仍然在 (人设是主人自己写在 `.agent-presets/custom/prompt.md` 里的), 随时能切回
+     */
+    const val DEFAULT_PRESET = "luwi"
+
+    /** 上一版的默认档: 老机器的注册表里写着它时, 由 [retuneDefault] 一次性改到 [DEFAULT_PRESET] */
+    const val OLD_DEFAULT_PRESET = "custom"
+
+    /** 那个"已经改过一次"的标记: 主人之后自己选了别的档, 不能每次起 host 都被改回去 */
+    private const val MARKER_DEFAULT = ".preset-default-luwi"
 
     /**
      * 那个助手要的那五个文件, **顺序就是写的顺序** (与上游 `seed.mjs` 的 `PRESET_FILES` 一致)
@@ -73,6 +84,9 @@ internal object CustomPresets {
     /** 声明各自那个 loader 行 id: 幂等判据就是"patch 里有没有这一行" */
     private const val ROW_EXPLORE = "preset-explore"
 
+    /** Luwi 那一份 (2026-11-08): 新会话的默认档, 二代仿真 + 手机操作 */
+    private const val ROW_LUWI = "preset-luwi"
+
     /** 主动对话那一份 (2.8.0 B4-a): 到点自己开一场, 默认只提醒 */
     private const val ROW_PROACTIVE = "preset-proactive"
 
@@ -88,6 +102,7 @@ internal object CustomPresets {
      * 名单的反面): 2.7.8 批次 7 把写死在 `ensurePatch` 里的那张表提了出来, 于是加一份 / 退一份都只改这里
      */
     val PRESET_ROWS: List<Pair<String, String>> = listOf(
+        ROW_LUWI to "luwi",
         ROW_EXPLORE to "explore",
         ROW_PROACTIVE to "proactive",
     ) + if (LuwiTavern.enabled) listOf(ROW_TAVERN to "tavern") else emptyList()
@@ -346,8 +361,10 @@ internal object CustomPresets {
             patch = withoutRow(patch, row)
             Log.i(TAG, "the retired preset declaration $row is now out of ${file.absolutePath}")
         }
-        // 我们那一条注册表行: 只负责"没有时写一份默认", 已经有的话一个字都不动 (主人可能自己选过)
+        // 我们那一条注册表行: 没有时写一份默认 (新装的机器落在这里, 值就是 DEFAULT_PRESET)
         if (!hasRow(patch, ROW_REGISTRY)) patch = appendBlock(patch, REGISTRY_ROW)
+        // 老机器里那份注册表还指着上一版默认档: 改过去, **只改一次** (见 [retuneDefaultOnce])
+        else patch = retuneDefaultOnce(context, patch)
         if (patch != before) {
             file.parentFile?.mkdirs()
             file.writeText(patch)
@@ -448,6 +465,31 @@ internal object CustomPresets {
         }
         while (collapsed.isNotEmpty() && collapsed.last().isBlank()) collapsed.removeAt(collapsed.lastIndex)
         return collapsed.joinToString("\n") + "\n"
+    }
+
+    /**
+     * 把注册表那行 `selectedDefault` 从上一版默认档改到 [DEFAULT_PRESET] (纯算术, 见 `CustomPresetsTest`)
+     *
+     * 只认**恰好一行** `selectedDefault: <OLD_DEFAULT_PRESET>`: 一行都没有 (已经改过 / 主人自己选了别的)
+     * 或者出现多行 (patch 不干净) 都原样返回。缩进跟着原来那一行走, 别的字一个不动。
+     */
+    fun retuneDefault(patch: String): String {
+        val pattern = Regex("(?m)^([ \\t]*)selectedDefault:[ \\t]*${Regex.escape(OLD_DEFAULT_PRESET)}[ \\t]*$")
+        if (pattern.findAll(patch).count() != 1) return patch
+        return pattern.replace(patch) { match -> "${match.groupValues[1]}selectedDefault: $DEFAULT_PRESET" }
+    }
+
+    /** 同一件事, 但**一辈子只做一次**: 标记 [MARKER_DEFAULT] 在就不再动 (主人之后自己选的档不作数) */
+    private fun retuneDefaultOnce(context: Context, patch: String): String {
+        val marker = File(home(context), MARKER_DEFAULT)
+        if (marker.isFile) return patch
+        val next = retuneDefault(patch)
+        if (next != patch) Log.i(TAG, "the default preset is now $DEFAULT_PRESET (was $OLD_DEFAULT_PRESET)")
+        runCatching {
+            marker.parentFile?.mkdirs()
+            marker.writeText("$DEFAULT_PRESET\n")
+        }.onFailure { Log.w(TAG, "the default-preset marker could not be written", it) }
+        return next
     }
 
     /**

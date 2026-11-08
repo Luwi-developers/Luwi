@@ -1,0 +1,20 @@
+{
+  "name": "luwi-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Luwi 的门户界面: 在 dsh 的对话界面上盖一层自己的界面, 与球共用同一场会话, 并把判断层与工作结构摆出来",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "license": "Apache-2.0"
+}

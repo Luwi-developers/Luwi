@@ -62,6 +62,9 @@ object PluginOverlay {
         // 只含 CSS 覆盖的自有 client 包 (2.7.8 批次 4, D8 = b): 它没有配置要改, 所以挂在覆盖层上
         // (那两行要能被设置面板改的归 PluginRows)。宿主那一半是空的, 客户端那一半在 lib/client.js
         Row("luwi-ui-fix", "node_modules/luwi-ui-fix/index.mjs"),
+        // 门户那一层 (2026-11-07): 与 ui-fix 同一个形状 —— 宿主那一半空着, 客户端那一半是盖在 dsh
+        // 对话界面上的整张门户 (判断层 / 工作结构 / 球那场会话)。它没有配置要改, 所以也挂在这一层
+        Row("luwi-portal", "node_modules/luwi-portal/index.mjs"),
         // docx 试探 (2.7.9 第 6 条 T8): 与 ui-fix 同一个形状 —— 宿主那一半是空的, 客户端那一半往
         // 右栏注册一个 `priority: 'extension'` 的类型与一张 hello 卡。它没有配置要改, 所以也挂在这一层
         Row("lw-docx-preview", "node_modules/lw-docx-preview/index.mjs"),
@@ -93,6 +96,7 @@ object PluginOverlay {
         Row("luwi-dsh-sync", "node_modules/luwi-dsh-sync/index.mjs"),
         if (LuwiTavern.enabled) Row("luwi-tavern", "node_modules/luwi-tavern/index.mjs") else null,
         Row("luwi-ui-fix", "node_modules/luwi-ui-fix/index.mjs"),
+        Row("luwi-portal", "node_modules/luwi-portal/index.mjs"),
         Row("lw-docx-preview", "node_modules/lw-docx-preview/index.mjs"),
     )
 

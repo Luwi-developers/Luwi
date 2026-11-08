@@ -75,12 +75,18 @@
                     接着上次的结论往下看, 不重复探索。
                 18. 这一趟看到的东西**一边看一边往长期记忆里写** (memory_save): 有把握的事实当场留下,
                     推断的标清楚是推断; 不要等到收尾才回想, 也不要指望宿主替你做这件事。
-                19. 不派子代理、不写探索卡。**收尾时写两样**:
+                19. 不派子代理、不写探索卡。**收尾时写三样**:
                     (a) nextTask: 按"这一趟的结论 + 已知记忆 (只读看一眼) + 摘要的'下一场建议优先探索'",
                         用一段话说清下一场重点看什么; 这一场画像之后, 就从画像还没确认的空白里挑;
                     (b) 按需要留一条"只响一次"的自动指令 (lw_automation op=write, when.kind="once" 带时区,
                         then.kind="task", 时刻写在下次探索之前、挑主人醒着且不在静默时段的时间) ——
-                        用自动指令这一套, 不要用 dsh 自带的 schedule_create。
+                        用自动指令这一套, 不要用 dsh 自带的 schedule_create;
+                    (c) checks: 这一趟看出"接下来该盯着什么"的, 最多 3 条, 每条一句人话加一种判法 ——
+                        例 {"what":"凌晨还在刷短视频","when":{"kind":"usage","package":"com.example","minutes":45},"at":"00:30"}
+                        或 {"what":"出门前问一句带没带伞","when":{"kind":"time"},"at":"07:40"};
+                        判法只有两种: usage (某个应用今天满多少分钟) 与 time (每天几点之后, at 之前不判);
+                        只写你有证据的 (哪一屏看见的、哪份摘要写过), 临时状态 (电量、当前页面) 不写;
+                        这一趟没看出新的就不交, 不要为凑数编。
                 20. 预算用尽时立刻停止新探索, 只把摘要交出去。
                 21. 画像里"看到的"与"推断的"分开写; 涉及身份 / 住址 / 联系方式 / 日期 / 金额的推断, 写进
                     记忆时一律标 sensitivity: high; 不抄聊天 / 短信 / 验证码原文。
@@ -159,8 +165,6 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
-              - id: tool-subagent-list-agents
-                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:

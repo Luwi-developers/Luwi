@@ -47,6 +47,7 @@ import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.tool.SimSetting
 import io.github.yuloong07star.luwi.ui.PickMediaActivity
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.voice.VoiceCommands
@@ -2947,6 +2948,14 @@ class OverlayService : Service() {
      * 排队这一层只管顺序与节奏, 一条都不碰输入框 —— 于是"下一条到达时用户正在打的字"从不参与
      * 这件事, 也就不会被改写
      */
+    /**
+     * 「更多设置」里那一档开口节奏 (读不到就用缺省 —— 与 QQ 桥接的二代仿真同一套数)
+     *
+     * 它只在"分条发送"那两条路上用到, 一次读一份就够: `sim.json` 是主人的配置, 不是热数据
+     */
+    private fun simSend(): SimSetting.Send =
+        runCatching { SimSetting.plan(this).send }.getOrDefault(SimSetting.Send())
+
     private fun deliverReply(text: String, session: String?) {
         val line = text.trim()
         if (line.isEmpty()) return
@@ -2957,7 +2966,7 @@ class OverlayService : Service() {
             outboxBusy = false
             outboxSession = from
         }
-        val merged = BallOutbox.offer(outbox.toList(), line)
+        val merged = BallOutbox.offer(outbox.toList(), line, BallOutbox.limitOf(simSend()))
         outbox.clear()
         outbox.addAll(merged)
         drainOutbox()
@@ -2980,7 +2989,7 @@ class OverlayService : Service() {
             } else {
                 finishOutboxOne()
             }
-        }, BallOutbox.gapFor(line))
+        }, BallOutbox.gapFor(line, simSend(), kotlin.random.Random.nextFloat()))
     }
 
     private fun finishOutboxOne() {
@@ -3047,8 +3056,9 @@ class OverlayService : Service() {
         val lines = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
         if (lines.isEmpty()) return
         outboxSession = ""
+        val limit = BallOutbox.limitOf(simSend())
         lines.forEach { line ->
-            val merged = BallOutbox.offer(outbox.toList(), line)
+            val merged = BallOutbox.offer(outbox.toList(), line, limit)
             outbox.clear()
             outbox.addAll(merged)
         }

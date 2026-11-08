@@ -81,7 +81,12 @@ internal object AutomationStore {
     /** 一次最多读回多少条历史 */
     const val MAX_HISTORY = 200
 
-    /** 十二个监测器 + 频率档 + 静默时段 + "允许它自己动手" (每日总次数上限 2.8.0 起取消) */
+    /**
+     * 十二个监测器 + 频率档 + 静默时段 (每日总次数上限 2.8.0 起取消)
+     *
+     * **「允许它自己动手」那道总闸 2026-11-07 撤了**: `task` 那一种从此直接执行, 旧文件里留着的
+     * `allowActing` 由读盘那一步忽略, 下一次保存设置时自然消失
+     */
     data class Settings(
         val monitors: Map<String, Boolean>,
         val weatherMinutes: Int,
@@ -89,7 +94,6 @@ internal object AutomationStore {
         val placeMeters: Int,
         val quietEnabled: Boolean,
         val quietWindow: String,
-        val allowActing: Boolean,
     ) {
         fun monitor(kind: String): Boolean = monitors[kind] ?: true
     }
@@ -366,7 +370,6 @@ internal object AutomationStore {
             ),
             quietEnabled = AutomationRule.boolOr(root["quiet"]?.let { (it as? JsonObject)?.get("enabled") }, true),
             quietWindow = AutomationRule.stringOr(root["quiet"]?.let { (it as? JsonObject)?.get("window") }, DEFAULT_QUIET),
-            allowActing = AutomationRule.boolOr(root["allowActing"], false),
         )
     }
 
@@ -384,7 +387,6 @@ internal object AutomationStore {
                 put("enabled", settings.quietEnabled)
                 put("window", settings.quietWindow)
             })
-            put("allowActing", settings.allowActing)
         }
         file.writeText(AutomationJson.writer.encodeToString(JsonObject.serializer(), root) + "\n")
         return file

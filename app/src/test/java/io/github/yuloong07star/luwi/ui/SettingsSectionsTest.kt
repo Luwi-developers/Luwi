@@ -89,7 +89,8 @@ class SettingsSectionsTest {
     @Test
     fun sectionKeysAreUnique() {
         assertEquals("段名不能重复", SettingsSectionKeys.size, SettingsSectionKeys.toSet().size)
-        assertEquals("现在页面上是 21 段", 21, SettingsSectionKeys.size)
-        assertEquals("常用六段 + 能力十五段", SettingsSectionKeys.size, common.size + abilities.size)
+        // 2026-11-07: 「探索」与「定时对话」合成「活动」那一段之后是 20 段 (原来写死 21, 这条一直红着)
+        assertEquals("现在页面上是 20 段", 20, SettingsSectionKeys.size)
+        assertEquals("常用六段 + 能力十四段", SettingsSectionKeys.size, common.size + abilities.size)
     }
 }

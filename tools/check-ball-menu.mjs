@@ -427,14 +427,16 @@ check(
 /* ── 六、设置页那个刷新按钮 (2026-10-17 主人: 改完设置当场生效) ───────────── */
 
 check(
-  '刷新按钮在「更多」左边, 而且真的把那一页重读一遍',
+  // 2026-11-04 主人撤了右上角那个刷新按钮 (各段自己在进页面 / ON_RESUME 时读一次), 判据跟着翻面:
+  // 它现在要的是"那一排一个都别回来" —— 原来这六条查的是"在", 撤按钮那天没跟着改, 一直红着
+  '刷新按钮已经撤掉 (六个记号一个都不许回潮)',
   [
-    settings.includes('MiuixIcons.Refresh'),
-    settings.includes('var reload by remember { mutableIntStateOf(0) }'),
-    settings.includes('key(reload) {'),
-    settings.includes('reload += 1'),
-    settings.includes('R.string.settings_refreshed'),
-    settings.includes('R.string.settings_refresh'),
+    !settings.includes('MiuixIcons.Refresh'),
+    !settings.includes('var reload by remember { mutableIntStateOf(0) }'),
+    !settings.includes('key(reload) {'),
+    !settings.includes('reload += 1'),
+    !settings.includes('R.string.settings_refreshed'),
+    !settings.includes('R.string.settings_refresh'),
   ],
   [true, true, true, true, true, true],
 )

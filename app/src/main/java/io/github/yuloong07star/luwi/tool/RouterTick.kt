@@ -66,12 +66,23 @@ internal object RouterTick {
      * 现在开着没有 (读不到 / 读坏了都算关着)
      *
      * 缺省关是刻意的: 一个"会自己开口"的东西, 装上就开始说, 比装上不说话糟得多
+     *
+     * **2026-11-07 晚**: 「更多设置」里那一档 `sim.json` 的 `wake.mode = active` 也算开 —— 那是
+     * 主人对这一页的直说, 与这里的开关任一为开就敲
      */
-    fun enabled(context: Context): Boolean = runCatching {
-        val raw = file(context).takeIf { it.isFile }?.readText() ?: return false
-        val root = json.parseToJsonElement(raw).jsonObject
-        root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
-    }.getOrDefault(false)
+    fun enabled(context: Context): Boolean {
+        val bySwitch = runCatching {
+            val raw = file(context).takeIf { it.isFile }?.readText()
+            if (raw == null) {
+                false
+            } else {
+                val root = json.parseToJsonElement(raw).jsonObject
+                root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
+            }
+        }.getOrDefault(false)
+        if (bySwitch) return true
+        return runCatching { SimSetting.plan(context).wake.active }.getOrDefault(false)
+    }
 
     /**
      * 打开 / 关掉 (设置页那一行)
@@ -108,11 +119,15 @@ internal object RouterTick {
     /**
      * 下一次隔多久 (纯函数, 单测钉着)
      *
-     * [roll] 是 0~1 之间的一个数: 传进来而不是自己在里面取, 于是它在没有设备的地方也量得动
+     * [roll] 是 0~1 之间的一个数: 传进来而不是自己在里面取, 于是它在没有设备的地方也量得动。
+     * 2026-11-07 晚: 两头改成参数 —— 「更多设置」里那一档 `sim.json` 的 `wake.gapMinMs` / `gapMaxMs`
+     * 就是这两个数, 不传就是原来那 25~55 分钟
      */
-    fun gapFor(roll: Float): Long {
+    fun gapFor(roll: Float, minMs: Long = MIN_GAP_MS, maxMs: Long = MAX_GAP_MS): Long {
         val bounded = roll.coerceIn(0f, 1f)
-        return MIN_GAP_MS + ((MAX_GAP_MS - MIN_GAP_MS) * bounded).toLong()
+        val low = minOf(minMs, maxMs).coerceAtLeast(0L)
+        val high = maxOf(minMs, maxMs).coerceAtLeast(low)
+        return low + ((high - low) * bounded).toLong()
     }
 
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
@@ -128,7 +143,12 @@ internal object RouterTick {
             manager.cancel(pending)
             return
         }
-        val next = System.currentTimeMillis() + gapFor(Random.nextFloat())
+        val plan = runCatching { SimSetting.plan(context).wake }.getOrNull()
+        val next = System.currentTimeMillis() + gapFor(
+            Random.nextFloat(),
+            plan?.gapMinMs ?: MIN_GAP_MS,
+            plan?.gapMaxMs ?: MAX_GAP_MS,
+        )
         val exact = runCatching { manager.canScheduleExactAlarms() }.getOrDefault(false)
         runCatching {
             if (exact) {
