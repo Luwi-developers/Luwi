@@ -153,6 +153,24 @@ const sectionKeys = [...zh.matchAll(/<string name="(settings_section_[a-z]+_summ
 const longSection = sectionKeys.filter(([, v]) => v.length > 27)
 check(`段摘要不超过 27 字 (${sectionKeys.length} 条)`, longSection.map(([k]) => k), [])
 
+/** 酒馆那一段住在私有仓 (Luwi-private/tavern), 它的行内小字与设置页同一条规矩
+ *  读不到就跳过: 公开树里 `LuwiTavern` 是空实现, 这一份判据也要能在只有公开仓的机器上跑通 */
+const tavern = await readFile(
+  new URL('../Luwi-private/tavern/app/src/main/java/io/github/yuloong07star/luwi/ui/TavernSection.kt', root),
+  'utf8',
+).catch(() => '')
+if (tavern) {
+  const tavernInline = [...tavern.matchAll(/summary\s*=\s*stringResource\(\s*R\.string\.(settings_[a-z0-9_]+)/gu)]
+    .map((m) => m[1])
+  const tavernOver = [...new Set(tavernInline)].filter((k) => {
+    const v = zhMap.get(k) ?? ''
+    return !v.includes('\\n') && v.length > 23
+  })
+  check(`酒馆段行内小字也在一行内 (${new Set(tavernInline).size} 条)`, tavernOver, [])
+} else {
+  console.log('skip 酒馆段不在这一份构建里 (没有 Luwi-private/tavern)')
+}
+
 /* ── 四、依赖与键集合 ─────────────────────────────────────────────────── */
 
 check('没有新增 UI 依赖 (material3 仍不是本项目的)', [
