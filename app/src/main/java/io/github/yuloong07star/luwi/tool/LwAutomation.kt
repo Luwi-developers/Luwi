@@ -204,8 +204,7 @@ internal object LwAutomation {
         }
         rows += "acting" to when {
             settings == null -> "unknown"
-            settings.allowActing -> "allowed: a task rule may act on its own"
-            else -> "off: a 'task' rule will be held back"
+            else -> "allowed: a task rule acts on its own (the old global switch was removed on 2026-11-07)"
         }
         rows += "proactive gap" to (ProactiveGate.lastAt(context).takeIf { it > 0 }?.let { last ->
             "last spoke " + stamp(last) + " (" + (ProactiveGate.source(context) ?: "unknown") + "), " +

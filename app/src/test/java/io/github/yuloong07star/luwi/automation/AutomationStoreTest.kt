@@ -67,7 +67,17 @@ class AutomationStoreTest {
             assertTrue("$kind 缺键时是开", settings.monitor(kind))
         }
         assertTrue("静默时段缺键时是开", settings.quietEnabled)
-        assertFalse("允许它自己动手缺键时是关", settings.allowActing)
+    }
+
+    @Test
+    fun `旧文件里的 allowActing 读进来不影响任何事`() {
+        // 2026-11-07: 那道总闸撤了, 旧文件里留着的键只是被忽略 —— 读得出来, 不再有对应的字段
+        val settings = AutomationStore.settingsFrom(buildJsonObject {
+            put("allowActing", false)
+            put("quiet", buildJsonObject { put("enabled", true) })
+        })
+        assertTrue("静默时段那一份照旧读", settings.quietEnabled)
+        assertEquals("监测源还是九个", AutomationRule.WATCH_KINDS.size, settings.monitors.size)
     }
 
     @Test

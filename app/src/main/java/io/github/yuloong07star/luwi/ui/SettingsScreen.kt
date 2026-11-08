@@ -87,6 +87,7 @@ import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.Wishes
 import io.github.yuloong07star.luwi.tool.SchedulePanel
+import io.github.yuloong07star.luwi.tool.SimSetting
 import io.github.yuloong07star.luwi.tool.LwApiVoices
 import io.github.yuloong07star.luwi.tool.LwCamera
 import io.github.yuloong07star.luwi.tool.LwAutomation
@@ -139,6 +140,7 @@ import io.github.yuloong07star.luwi.scaffolds.settings.SettingsHairline
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsNote
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsPanel
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSpace
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsTabs
 import io.github.yuloong07star.luwi.sync.ModeModel
 import io.github.yuloong07star.luwi.sync.PairPayload
 import io.github.yuloong07star.luwi.sync.SyncSetting
@@ -183,7 +185,6 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
@@ -562,10 +563,14 @@ fun SettingsScreen() {
                     // 只剩深浅色 (2026-11-07 主人: "外观只留深浅色, 其它默认关闭并删除选项") ——
                     // Monet 动态配色 (连同键色 / 调色板风格 / 色彩规范三个下拉) 与「圆角矩形」那两栏
                     // 一起撤掉了: 这一页不再给第二个旋钮, 主题色与圆角跟着 Miuix 自己的默认走
-                    TabRow(
-                        tabs = themeModes.map { stringResource(it) },
-                        selectedTabIndex = settings.mode.coerceIn(0, themeModes.lastIndex),
-                        onTabSelected = { ThemeStore.update(settings.copy(mode = it)) },
+                    //
+                    // 2026-11-08 主人: "有的有蓝底, 有的没有, 取消这个蓝底" —— Miuix 的 TabRow 会给选中
+                    // 那一格铺淡底, 而这一页别的选中态都不铺底。换成 SettingsTabs: 选中只靠主色文字
+                    // 与底下那根 18dp 短线, 与整页的"线和颜色说层级"同一个语言
+                    SettingsTabs(
+                        options = themeModes.map { stringResource(it) },
+                        selected = settings.mode.coerceIn(0, themeModes.lastIndex),
+                        onSelect = { ThemeStore.update(settings.copy(mode = it)) },
                     )
                 }
             }
@@ -673,6 +678,9 @@ fun SettingsScreen() {
 
             // 活动 (2026-11-07 主人): 原「探索」与「定时对话」合成一段 —— 她的日程、她开口的时机、
             // 她记着的事都在同一个入口里, 不用在两段之间来回找。三段小标题分开, 各自的条目一行没改
+            //
+            // 2026-11-07 晚: 每组那一句段首读数**挪到卡片外面** (主人: "活动里第一个选项被小字挡住了"),
+            // 三个小标题与三张卡片之间由这一层的 spacedBy 统一给 8 dp
             settingsSection(
                 key = "activity",
                 title = R.string.settings_section_activity,
@@ -680,12 +688,34 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                SectionSmallTitle(stringResource(R.string.settings_activity_daily))
-                SettingsPanel { ExploreItems() }
-                SectionSmallTitle(stringResource(R.string.settings_activity_speak))
-                SettingsPanel { ProactiveItems() }
-                SectionSmallTitle(stringResource(R.string.settings_activity_knows))
-                SettingsPanel { KnowsItems() }
+                Column(verticalArrangement = Arrangement.spacedBy(UiSpacing.Medium)) {
+                    SectionSmallTitle(stringResource(R.string.settings_activity_daily))
+                    ExploreOverview()
+                    SettingsPanel { ExploreItems() }
+                    SectionSmallTitle(stringResource(R.string.settings_activity_speak))
+                    ProactiveOverview()
+                    SettingsPanel { ProactiveItems() }
+                    SectionSmallTitle(stringResource(R.string.settings_activity_knows))
+                    SettingsPanel { KnowsItems() }
+                    // 更多设置 (2026-11-07 晚): 潜水与唤醒 / 开口节奏 / 判断层那一套参数 —— 与 QQ 桥接
+                    // 的二代仿真同一个口径; 敲钟之后"看什么"由探索自己加, 这一行只把入口摆出来
+                    //
+                    // 弹窗而不是二级页 (主人当天: "改成像选择权限那样的弹窗"): 它是一页参数, 不值得
+                    // 占一次跳转; 状态记在段内, 收起这一段就等于把它关掉
+                    var simOpen by remember { mutableStateOf(false) }
+                    val activityHaptic = LocalHapticFeedback.current
+                    ArrowPreference(
+                        title = stringResource(R.string.settings_activity_more),
+                        summary = stringResource(R.string.settings_activity_more_summary),
+                        onClick = {
+                            activityHaptic.contextClick()
+                            simOpen = true
+                        },
+                    )
+                    if (simOpen) {
+                        SimSettingsDialog(onDismiss = { simOpen = false })
+                    }
+                }
             }
 
             settingsSection(
@@ -3191,27 +3221,19 @@ private fun clockStamp(at: Long): String =
  *
  * 卡不在这里改写; 它在每次探索收尾时由宿主按 `nextTask` 覆盖 (见 [ExploreTask])
  */
+/**
+ * 「日常」那一组的段首读数 (2026-11-07 晚, 主人: "活动里第一个选项被小字挡住了")
+ *
+ * 这一句原来住在 `Card` 里的第一行, 紧贴上面那个小标题 —— 小字与第一个开关的标题挤在一起,
+ * 看着像被压住。现在它**挪到卡片外面**, 与 [SectionSmallTitle] 同一层、同一缩进, 卡片里
+ * 第一行就是开关本身
+ */
 @Composable
-private fun ExploreItems() {
+private fun ExploreOverview() {
     val context = LocalContext.current
-    val haptic = LocalHapticFeedback.current
-    var revision by remember { mutableIntStateOf(0) }
-    var editingAt by rememberSaveable { mutableStateOf(false) }
-    var editingCard by rememberSaveable { mutableStateOf(false) }
-    var editingSummary by rememberSaveable { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
-
-    val plan = remember(revision) { ExploreSchedule.plan(context) }
-    val cardText = remember(revision) { ExploreTask.read(context) }
-    val cardSummary = remember(revision) { ExploreTask.summary(context) }
-    val running = remember(revision) { ExploreTask.running(context) }
-    val nextAt = remember(revision) { ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) }
-
-    fun save(next: ExploreSchedule.Plan) {
-        ExploreSchedule.save(context, next)
-        revision += 1
-    }
-
+    val plan = remember { ExploreSchedule.plan(context) }
+    val running = remember { ExploreTask.running(context) }
+    val nextAt = remember { ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) }
     val overview = buildString {
         append(
             if (plan.enabled) {
@@ -3228,7 +3250,33 @@ private fun ExploreItems() {
             append(context.getString(R.string.settings_explore_running, clockStamp(it.deadline)))
         }
     }
-    PlaceholderItems(overview)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
+    ) {
+        Text(text = overview, color = colorScheme.onSurfaceVariantActions)
+    }
+}
+
+@Composable
+private fun ExploreItems() {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    var revision by remember { mutableIntStateOf(0) }
+    var editingAt by rememberSaveable { mutableStateOf(false) }
+    var editingCard by rememberSaveable { mutableStateOf(false) }
+    var editingSummary by rememberSaveable { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    val plan = remember(revision) { ExploreSchedule.plan(context) }
+    val cardText = remember(revision) { ExploreTask.read(context) }
+    val cardSummary = remember(revision) { ExploreTask.summary(context) }
+
+    fun save(next: ExploreSchedule.Plan) {
+        ExploreSchedule.save(context, next)
+        revision += 1
+    }
 
     SwitchPreference(
         title = stringResource(R.string.settings_explore_toggle),
@@ -3536,6 +3584,32 @@ private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (S
  * 这一页能改的三样 (开不开 / 一天那几个时刻 / 到点允不允许解屏) 都走 [ProactiveSchedule.save]:
  * 落盘与重排闹钟是同一件事, 改完 `SchedulePanel.invalidate()` 一下, 下一眼才看得到新值
  */
+/**
+ * 「她什么时候开口」那一组的段首读数 (2026-11-07 晚, 与 [ExploreOverview] 同一处修法)
+ *
+ * 原来它在 `Card` 里第一行, 小字与第一个开关挤在一起; 现在卡片外, 卡片第一行就是开关
+ */
+@Composable
+private fun ProactiveOverview() {
+    val context = LocalContext.current
+    val plan = remember { SchedulePanel.read(context).proactive }
+    val next = remember { SchedulePanel.read(context).proactiveNext }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
+    ) {
+        Text(
+            text = if (plan.enabled && next != null) {
+                context.getString(R.string.settings_proactive_next, scheduleStamp(next))
+            } else {
+                context.getString(R.string.settings_proactive_no_next)
+            },
+            color = colorScheme.onSurfaceVariantActions,
+        )
+    }
+}
+
 @Composable
 private fun ProactiveItems() {
     val context = LocalContext.current
@@ -3554,16 +3628,6 @@ private fun ProactiveItems() {
         SchedulePanel.invalidate()
         revision += 1
     }
-
-    // 下一场 (⑪ 的 nextTrigger): 关着 / 认不出时刻时没有
-    val next = reading.proactiveNext
-    PlaceholderItems(
-        if (plan.enabled && next != null) {
-            context.getString(R.string.settings_proactive_next, scheduleStamp(next))
-        } else {
-            context.getString(R.string.settings_proactive_no_next)
-        },
-    )
 
     SwitchPreference(
         title = stringResource(R.string.settings_proactive_toggle),
@@ -3936,12 +4000,6 @@ private fun AutomationItems() {
             haptic.contextClick()
             editingQuiet = true
         },
-    )
-    SwitchPreference(
-        title = stringResource(R.string.settings_automation_allow_acting),
-        summary = stringResource(R.string.settings_automation_allow_acting_summary),
-        checked = settings.allowActing,
-        onCheckedChange = { save(settings.copy(allowActing = it)) },
     )
 
     PlaceholderItems(stringResource(R.string.settings_automation_history))

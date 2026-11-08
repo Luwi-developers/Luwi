@@ -16,17 +16,58 @@ import org.junit.Test
  */
 class CustomPresetsTest {
 
-    /** 那张行 id 表: 探索 / 主动对话 / 酒馆 (2026-10-18 手机/视频两条预设下线; 2026-10-27 加回酒馆; 2.8.0 B4-a 加主动对话) */
+    /** 那张行 id 表: Luwi / 探索 / 主动对话 / 酒馆 (2026-10-18 手机/视频两条预设下线; 2.8.0 B4-a 加主动对话; 2026-11-08 加默认档 luwi) */
     @Test
-    fun `随包发的模式预设是探索主动对话与酒馆`() {
+    fun `随包发的模式预设是主动对话探索与酒馆`() {
         assertEquals(
             listOf(
+                "preset-luwi" to "luwi",
                 "preset-explore" to "explore",
                 "preset-proactive" to "proactive",
                 "preset-tavern" to "tavern",
             ),
             CustomPresets.PRESET_ROWS,
         )
+    }
+
+    /** 新会话的默认档: 2026-11-08 起是 luwi (人设 = 二代仿真 + 手机操作), 不再是 custom */
+    @Test
+    fun `默认档是 luwi`() {
+        assertEquals("luwi", CustomPresets.DEFAULT_PRESET)
+        assertEquals("custom", CustomPresets.OLD_DEFAULT_PRESET)
+    }
+
+    /** 老机器那份注册表: 只改 `selectedDefault` 那一行, 缩进留着, 别的字一个不动 */
+    @Test
+    fun `retuneDefault 只把旧默认档改过去`() {
+        val text = """
+            - id: agent-preset-registry
+              config:
+                default: standard
+                selectedDefault: custom
+            - id: session-log-deepseek
+              config:
+                enabled: false
+        """.trimIndent()
+        val next = CustomPresets.retuneDefault(text)
+        assertTrue(next.contains("selectedDefault: luwi"))
+        assertFalse(next.contains("selectedDefault: custom"))
+        // 缩进与别的条目原样
+        assertTrue(next.contains("    default: standard"))
+        assertTrue(next.contains("- id: session-log-deepseek"))
+        // 幂等: 再跑一次一个字都不变
+        assertEquals(next, CustomPresets.retuneDefault(next))
+    }
+
+    /** 主人自己选过别的档 / 这一行根本不在 / 出现多行: 都原样返回, 绝不猜 */
+    @Test
+    fun `retuneDefault 不碰不是旧默认档的 patch`() {
+        val explore = "  selectedDefault: explore\n"
+        assertEquals(explore, CustomPresets.retuneDefault(explore))
+        val none = "- id: agent-preset-registry\n  config:\n    default: standard\n"
+        assertEquals(none, CustomPresets.retuneDefault(none))
+        val twice = "  selectedDefault: custom\n  selectedDefault: custom\n"
+        assertEquals(twice, CustomPresets.retuneDefault(twice))
     }
 
     /** profile 要挂的两个包: 自定义模式进 bundle, 酒馆只做依赖 (它没有 bundle patch) */

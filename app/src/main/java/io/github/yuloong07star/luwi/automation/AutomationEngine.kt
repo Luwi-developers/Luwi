@@ -33,8 +33,7 @@ import java.util.concurrent.TimeUnit
  * 三层里的中间那一层 (条件在 [AutomationMonitors], 动作在这里收口), 它管四件事:
  *
  * 1. **判定**: 十一条条件各自的"现在算不算命中", 加上光感那条的迟滞与"持续多少秒"
- * 2. **防骚扰**: 静默时段 / 每条的冷却与每日上限 / 与主动排期共用的 30 分钟闸 /
- *    "允许它自己动手"那道总闸
+ * 2. **防骚扰**: 静默时段 / 每条的冷却与每日上限 / 与主动排期共用的 30 分钟闸
  * 3. **记账**: 每一次真的决定要不要动都落一行到 `history.jsonl` —— 主人问"它为什么没响"时, 唯一
  *    答得出来的就是那一份
  * 4. **该起来谁**: 六个监测器不是常驻的, `requiredMonitors()` 说此刻该注册哪几个, 省电时把轮询那
@@ -332,7 +331,6 @@ internal object AutomationEngine {
                     placeMeters = AutomationStore.DEFAULT_PLACE_METERS,
                     quietEnabled = true,
                     quietWindow = AutomationStore.DEFAULT_QUIET,
-                    allowActing = false,
                 ),
             )
         places = runCatching { AutomationStore.places(context) }.getOrDefault(emptyMap())
@@ -963,7 +961,6 @@ internal object AutomationEngine {
             window != null && PowerWindow.inside(PowerWindow.minutesOfDay(now), window) -> "quiet"
             last + cooldownMs > now -> "cooldown"
             today >= rule.dailyLimit -> "limit"
-            rule.thenKind == "task" && !on.allowActing -> "no_acting"
             else -> null
         }
         if (blocked != null) {
@@ -971,7 +968,7 @@ internal object AutomationEngine {
                 "quiet" -> "现在是静默时段 (${PowerWindow.describe(window!!)})"
                 "cooldown" -> "上一条才 ${(now - last) / 60_000} 分钟, 冷却 ${rule.cooldownMinutes} 分钟"
                 "limit" -> "今天已经 $today 次, 上限 ${rule.dailyLimit} 次"
-                else -> "这条规则要动手, 而「允许它自己动手」关着"
+                else -> blocked
             }
             noteBlocked(context, rule, blocked, said, now)
             // 被拦下也算这一次成立用掉了: 不清标记的话冷却一过就会按同一份新鲜标记再响一次
@@ -1407,8 +1404,6 @@ internal object AutomationEngine {
     /**
      * 设置页那个「立刻跑一次」: 不走条件, 也不走冷却与静默 —— 主人自己点的那一下就是"现在做"
      *
-     * 只留一道闸: `task` 那一种仍要「允许它自己动手」开着 (它与"点一下看看"不是一回事, 会真的动手机)
-     *
      * **30 分钟闸也不拦它, 而且它不占那笔账** (2.8.0 B4-b ⑦): 这是主人当面点的, 不是系统自己找话说;
      * 记进历史的 `manual = true` 让读数分得清这一条, 下一句主动投递照旧按上一次自动开口算 30 分钟
      */
@@ -1416,9 +1411,6 @@ internal object AutomationEngine {
         val application = context.applicationContext
         refresh(application, force = false)
         val rule = rules.firstOrNull { it.name == name } ?: return "这条规则读不出来, 没投出去"
-        if (rule.thenKind == "task" && settings?.allowActing != true) {
-            return "这条要动手, 而「允许它自己动手」关着"
-        }
         val seq = VoiceInbox.append(application, prompt(rule), source = VoiceInbox.SOURCE_AUTOMATION)
         val now = System.currentTimeMillis()
         record(

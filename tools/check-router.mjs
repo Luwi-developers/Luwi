@@ -273,6 +273,101 @@ check(
   true,
 )
 
+/* ── 七、探索交来的检测项与沉睡前观察 (2026-11-07 晚) ───────────────────── */
+
+/*
+ * 主人那一句是"检测的内容应由探索时加上" —— 于是判断层多一个候选来源 (`checks`), 而"什么时候敲钟"
+ * 那一半仍在「更多设置」里。这一节钉住四件事: 命中/不命中、关掉的不判、今天提过的不提、分数顺序;
+ * 外加沉睡前观察那一道 (他还在说话就先别插嘴)
+ */
+
+const usageGame = { today: [{ pkg: GAME, label: '王者荣耀', ms: 150 * 60 * 1000 }] }
+const checkUsage = { id: 'c1', what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, enabled: true }
+const checkTime = { id: 'c2', what: '出门前问一句', when: { kind: 'time' }, at: '07:40', enabled: true }
+
+check('没有 checks 时一切照旧', judgeRouter(base({ usage: usageGame })).kind, 'rest')
+
+check(
+  'usage 类到线就命中 (那条线由探索写)',
+  judgeRouter(base({
+    usage: usageGame,
+    lastSpokenAt: NOW - 5 * HOUR,
+    checks: [checkUsage],
+    rules: { gameMinutes: 1000 },
+  })).kind,
+  'check',
+)
+
+check(
+  'usage 类没到线不判',
+  judgeRouter(base({
+    usage: { today: [{ pkg: GAME, ms: 60 * 60 * 1000 }] },
+    lastSpokenAt: NOW - 5 * HOUR,
+    checks: [checkUsage],
+  })).say,
+  false,
+)
+
+check(
+  'time 类到点之后命中',
+  judgeRouter(base({ lastSpokenAt: NOW - 5 * HOUR, checks: [checkTime] })).kind,
+  'check',
+)
+
+check(
+  'time 类还没到点就不判 (at 是"几点之后")',
+  judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    checks: [{ ...checkTime, at: '23:30' }],
+  })).say,
+  false,
+)
+
+check(
+  '主人关掉的那一条不判',
+  judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    checks: [{ ...checkTime, enabled: false }],
+  })).say,
+  false,
+)
+
+check(
+  '今天已经提过的那一条不再提 (checksSaid 那笔账)',
+  judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    checks: [checkTime],
+    checksSaid: { c2: '2026-11-07' },
+  })).say,
+  false,
+)
+
+check(
+  '未了的事与检测项同时成立时先说未了的事',
+  judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    wishes: [{ id: 'cet4', what: '考四级', due: in37, said: [] }],
+    checks: [checkTime],
+  })).kind,
+  'wish',
+)
+
+check(
+  '他还在说话时先不开口 (沉睡前观察)',
+  judgeRouter(base({ lastSpokenAt: NOW - 5 * HOUR, lastUserAt: NOW - 60 * 1000 })).why,
+  'he is still talking',
+)
+
+check(
+  '说完过了五分钟就照旧判 (预设置 5 分钟)',
+  judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    lastUserAt: NOW - 6 * 60 * 1000,
+    usage: usageGame,
+  })).kind,
+  'rest',
+)
+
 /* ── 六、缺省与形状 ─────────────────────────────────────────────────────── */
 
 check('缺省值表是冻结的', Object.isFrozen(ROUTER_DEFAULTS), true)

@@ -525,5 +525,27 @@ check('触发消息把这一次的事件证据带出去', [
   /这次的条件/.test(engine),
 ], [true, true, true])
 
+/*
+ * 2026-11-07 主人: 「允许它自己动手」默认打开, 并把那个选项删掉 —— 于是那道总闸整个撤了,
+ * `task` 那一种从此直接执行。判据钉住三件事: 字段不再存在、设置页不再有那一行、两份
+ * strings.xml 也不再留着那两个键 (留着只会在下一次接回去时悄悄复活)
+ */
+check('「允许它自己动手」那道总闸撤了: 字段 / 判断 / 开关 / 文案四处一起走', [
+  // 注释里可以提这个键 (说明它被忽略), 但 `val` 与赋值都不许再有
+  !/val allowActing/.test(store),
+  !/allowActing =/.test(store),
+  !/\.allowActing/.test(engine),
+  !/no_acting/.test(engine),
+  !/settings_automation_allow_acting/.test(screen),
+  !/settings_automation_allow_acting/.test(zh),
+  !/settings_automation_allow_acting/.test(en),
+], [true, true, true, true, true, true, true])
+
+check('status 那一行如实说 task 自己会动手', /allowed: a task rule acts on its own/.test(tool), true)
+
+check('旧文件里的 allowActing 只是被忽略 (那张单测在)', (await read(
+  'app/src/test/java/io/github/yuloong07star/luwi/automation/AutomationStoreTest.kt',
+)).includes('旧文件里的 allowActing 读进来不影响任何事'), true)
+
 console.log(`\n${checks - failures} / ${checks} 条通过`)
 if (failures > 0) process.exit(1)

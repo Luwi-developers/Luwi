@@ -1,5 +1,7 @@
 package io.github.yuloong07star.luwi.overlay
 
+import io.github.yuloong07star.luwi.tool.SimSetting
+
 /**
  * 往框里放东西的队列 (2026-11-07)
  *
@@ -18,10 +20,10 @@ internal object BallOutbox {
     /** 一次最多排几条: 再多就该她自己收敛, 不是框的事 */
     const val MAX = 6
 
-    /** 两条之间的停顿下限: 太短会看成同一条, 太长会以为卡住了 */
+    /** 两条之间的停顿下限 (没有 plan 时的兜底, 2026-11-07 之前的那个手感) */
     const val GAP_MIN_MS = 320L
 
-    /** 两条之间的停顿上限 */
+    /** 两条之间的停顿上限 (同上) */
     const val GAP_MAX_MS = 720L
 
     /**
@@ -32,14 +34,31 @@ internal object BallOutbox {
      */
     const val SPEAK_POLL_MS = 220L
 
+    /** 这一档的队列上限: 主人关掉分条 (`burstEnabled`) 时收成一条, 于是几条会合成一段话 */
+    fun limitOf(send: SimSetting.Send): Int =
+        if (send.burstEnabled) send.burstMaxMessages.coerceIn(1, MAX) else 1
+
     /**
      * 上一条画完到放下一条之间等多久 (纯函数)
      *
-     * 按字数给: 短句几乎没有等待, 长句多给一点 —— 读得完的量级才像人在说话
+     * 2026-11-07 晚: 两段算式都交给 [send] —— 它来自「更多设置」那一页, 缺省值照 QQ 桥接的
+     * `socialV2.send` (基础 1~3 s, 每字 20 ms, 两成概率换成 5~10 s 的长停顿)。[roll] 传进来而
+     * 不是在里面取, 于是"什么时候落到长停顿那一档"在没有设备的地方也量得动
      */
-    fun gapFor(text: String): Long {
-        val wanted = GAP_MIN_MS + text.length * 8L
-        return wanted.coerceIn(GAP_MIN_MS, GAP_MAX_MS)
+    fun gapFor(
+        text: String,
+        send: SimSetting.Send = SimSetting.Send(),
+        roll: Float = 0f,
+    ): Long {
+        val bounded = roll.coerceIn(0f, 1f)
+        if (bounded < send.longGapProbability) {
+            val low = minOf(send.longGapMinMs, send.longGapMaxMs)
+            val high = maxOf(send.longGapMinMs, send.longGapMaxMs)
+            return low + ((high - low) * bounded).toLong()
+        }
+        val low = minOf(send.gapMinMs, send.gapMaxMs)
+        val high = maxOf(send.gapMinMs, send.gapMaxMs)
+        return (low + text.length * send.perCharMs).coerceIn(low, high)
     }
 
     /**
@@ -57,10 +76,11 @@ internal object BallOutbox {
      *
      * 调用方拿回新表之后整份替换自己的队列, 于是"有界"这件事只有一个地方说了算
      */
-    fun offer(queued: List<String>, line: String): List<String> {
+    fun offer(queued: List<String>, line: String, limit: Int = MAX): List<String> {
         val wanted = line.trim()
         if (wanted.isEmpty()) return queued
-        if (queued.size < MAX) return queued + wanted
+        val capped = limit.coerceIn(1, MAX)
+        if (queued.size < capped) return queued + wanted
         return mergeOverflow(queued, wanted)
     }
 }

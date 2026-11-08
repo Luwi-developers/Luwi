@@ -1,0 +1,13 @@
+{
+  "name": "@local/dsh-preset-luwi",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Luwi default preset: the phone-operating agent that also talks like a person. Second-generation simulation behaviour (one thought per line, short lines, no customer-service voice, honest about not knowing) on top of the full tool surface, because this is the owner's own device and not a group chat.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

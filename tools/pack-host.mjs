@@ -163,6 +163,10 @@ function pnpmEnvironment() {
   pnpmEnv = {
     ...process.env,
     PATH: sanitizedPath(),
+    // 0.2.2 (2026-11-08): inspector 的 devtools 前端在 Windows 上解析不了
+    // chrome-devtools-frontend 的裸 .ts 导入, 而 host 树用不到那一段 —— 这一层直接跳过它。
+    // Gradle 的 Exec 会覆盖环境白名单, 所以开关必须写在这里, 不能只靠调用方的 DSH_SKIP_DEVTOOLS
+    DSH_SKIP_DEVTOOLS: process.env.DSH_SKIP_DEVTOOLS ?? '1',
     // 本机 %LOCALAPPDATA%\npm-cache 对子进程会拒写 (npm install 的 mkdtemp 报 EPERM, 2026-11-06 实测);
     // Gradle 那一侧会显式传进来, 手工跑这一份时退到工作区的 .lwtmp 下
     npm_config_cache: process.env.npm_config_cache ?? ensureNpmCache(join(process.cwd(), '.lwtmp', 'npm-cache')),
@@ -524,6 +528,10 @@ writeFileSync(join(out, 'package.json'), `${JSON.stringify({
 // Windows 的二进制塞进 APK。所以这一步只解包、不跑任何 lifecycle
 const installArgs = ['install', '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional']
 if (process.platform === 'win32') installArgs.push('--ignore-scripts')
+// 0.2.2 起这一族里有只跑 macOS 的成员 (`@deepseek-ai/dsh-experimental-cua-macos`, os=darwin),
+// 平铺安装时 npm 会以 EBADPLATFORM 整批拒掉 —— 那一包不会在安卓上被加载, 装进去只是多几 KB,
+// 所以这里用 --force 让平台检查让路 (Windows 与其它平台都加: 打的是安卓的树, 不是本机的树)
+installArgs.push('--force')
 run(process.platform === 'win32' ? 'npm.cmd' : 'npm', installArgs, out)
 
 // 裁掉这台设备上永远用不到的构建期 / 浏览器自动化包 (2026-10-05, 1.2.0 的瘦身那一步)
@@ -844,6 +852,14 @@ const uiFixInstalled = join(out, 'node_modules', 'luwi-ui-fix')
 cpSync(uiFix, uiFixInstalled, { recursive: true })
 console.log(`pack-host: installed the Luwi CSS overlay from ${uiFix}`)
 
+// 门户那一层 (2026-11-07): 与 ui-fix 同一个拷法 —— 源是 `presets/luwi-portal`, 落进
+// `node_modules/luwi-portal`。**两半都要拷** (理由同上): 宿主那一半空着, 只为了让 Loader 认这一行;
+// 界面与桥调用全在 `lib/client.js` 里
+const luwiPortal = fileURLToPath(new URL('../presets/luwi-portal', import.meta.url))
+const luwiPortalInstalled = join(out, 'node_modules', 'luwi-portal')
+cpSync(luwiPortal, luwiPortalInstalled, { recursive: true })
+console.log(`pack-host: installed the Luwi portal overlay from ${luwiPortal}`)
+
 // docx 试探 (2.7.9 第 6 条 T8): 与上面那一个同一个拷法 —— 源是 `presets/docx-preview`, 落进
 // `node_modules/lw-docx-preview`。宿主那一半是空的, 类型与 hello 卡在 `lib/client.js` 里
 const docxPreview = fileURLToPath(new URL('../presets/docx-preview', import.meta.url))
@@ -950,10 +966,13 @@ console.log(`pack-host: installed dsh-custom-mode from ${customMode}`)
  *
  * **2026-11-05 起多一份 `proactive`** (2.8.0 B4-a 主动对话): 到点自己开的那一场用它, persona 与
  * 插件表都是"只提醒"那一档 (`host-plugin/index.mjs` 的 `startProactive` 按这个 id 解析)
+ *
+ * **2026-11-08 起多一份 `luwi`** (默认档): 二代仿真那套说话的规矩装在这台会操作手机的 agent 上;
+ * 它同时是新会话的 `selectedDefault` (见 `host/CustomPresets.kt` 的 `DEFAULT_PRESET`)
  */
 const presetSeed = join(out, 'lw-presets')
 mkdirSync(presetSeed, { recursive: true })
-const presets = ['explore', 'proactive']
+const presets = ['luwi', 'explore', 'proactive']
 if (withTavern) presets.push('tavern')
 for (const name of presets) {
   const source = name === 'tavern'
@@ -995,6 +1014,38 @@ if (existsSync(ptyAndroid)) {
   console.log(`pack-host: staged the Android pty addon (${(statSync(ptyAndroid).size / 1024).toFixed(0)} KB) at node_modules/node-pty/prebuilds/android-arm64/pty.node`)
 } else {
   console.log('pack-host: no Android pty addon under jniLibs/arm64-v8a, so the terminal stays unavailable on device')
+}
+
+/**
+ * flock 的安卓分支 (2026-11-08)
+ *
+ * `@deepseek-ai/node-addon-system` 只发 linux / darwin 的 `system.node`, `flock.js` 的
+ * `loadBinding()` 见到 `android` 直接抛 `ERR_FLOCK_UNSUPPORTED_PLATFORM`。而 0.2.2 的 JSONL
+ * 持久化在 POSIX 上必须先拿写租约 (`session-persistence-jsonl/src/lease.ts` 的
+ * `SessionWriteLease.acquire`), 于是**安卓上"新建会话"整条失败**:
+ * `failed to create session: Error: flock is not supported on android-arm64`
+ * (2026-11-08 真机 22041216C 实测, 见 docs/0.2.2-new-session-record.md)
+ *
+ * 这里在物化出来的树里给那个 shim 加一条安卓直通: 宿主是**单进程**, 进程内的写占用已经互斥,
+ * 与上游 `webworker-runtime` 那份单进程替身 (`node-addon-system-flock.ts`) 同一个理由。
+ *
+ * **没有改 fork 源码**: `native/system/AGENTS.md` 写着"缺绑定时拒绝获取, 绝不静默放行",
+ * 那是上游对多进程 POSIX 的契约; 这一条是 Luwi 对自己这个单进程宿主的决定, 所以落在打包这一步,
+ * 上游一版发了 android 预编译 (或者持久化那层给出显式的单写者模式) 就把这一段删掉
+ */
+const flockShim = join(out, 'node_modules', '@deepseek-ai', 'node-addon-system', 'lib', 'flock.js')
+const ANDROID_FLOCK_GUARD = "if (process.platform === 'android')\n        return;"
+if (existsSync(flockShim)) {
+  const text = readFileSync(flockShim, 'utf8')
+  const anchor = 'export async function tryLockExclusive(fd) {'
+  if (text.includes(ANDROID_FLOCK_GUARD)) {
+    console.log('pack-host: the flock shim already carries the android branch')
+  } else if (!text.includes(anchor)) {
+    throw new Error('pack-host: flock.js 的形状变了, 安卓那条直通没地方插 —— 先看上游这一版改了什么')
+  } else {
+    writeFileSync(flockShim, text.replace(anchor, `${anchor}\n    ${ANDROID_FLOCK_GUARD}`))
+    console.log('pack-host: added the android branch to the flock shim (single-process host, no kernel lease)')
+  }
 }
 
 const { files, bytes } = measure(join(out, 'node_modules'))

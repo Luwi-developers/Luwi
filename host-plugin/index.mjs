@@ -3787,8 +3787,8 @@ const TOOLS = [
     + ' once {at:"2026-10-18T21:30:00+08:00"} at an absolute moment with a'
     + ' timezone - it fires once and then turns itself off, and it is what to use for a one-off'
     + ' follow-up (the time must carry its offset, never a bare local time). then.kind is "remind" (say a line, post a notification and answer) or'
-    + ' "task" (open a conversation and do the thing - that only runs while the user has turned on'
-    + ' 允许它自己动手). **Do not write the wording of a reminder into then.text: that sentence is'
+    + ' "task" (open a conversation and do the thing - it acts on its own; the old global switch was'
+    + ' removed on 2026-11-07). **Do not write the wording of a reminder into then.text: that sentence is'
     + ' written when the rule fires, in the conversation the rule opens**; put there what the user'
     + ' asked for (for example "提醒主人今天是妈妈的生日"). Leave the two limits out unless the user'
     + ' asked for something else: the defaults are cooldownMinutes (30) and dailyLimit (5). **When the'
@@ -3861,7 +3861,11 @@ const TOOLS = [
       + ' op=finish also takes `nextTask`: the task for the NEXT exploration, one short paragraph,'
       + ' decided from this run, the previous summary and the memory you already have. The host'
       + ' writes it over the task card, so the next scheduled run starts from it - leave it out and'
-      + ' the card stays as it is.',
+      + ' the card stays as it is. `checks` is the other half of finishing: at most three things the'
+      + ' judgement layer should watch from now on, each one a sentence plus one computable shape'
+      + ' ({"what":"凌晨还在刷短视频","when":{"kind":"usage","package":"com.example","minutes":45},"at":"00:30"}),'
+      + ' and only what you have evidence for - the settings page lists them and the owner may switch'
+      + ' one off. If this run turned up nothing new, hand none in rather than inventing one.',
     parameters: {
       op: {
         type: 'string',
@@ -3885,6 +3889,18 @@ const TOOLS = [
         description: 'finish only: the task of the next exploration, one paragraph (what to look'
           + ' at next time). It becomes the card the next scheduled run uses',
       },
+      checks: {
+        type: 'array',
+        items: { type: 'object', additionalProperties: true },
+        description: 'finish only: at most 3 things the judgement layer should watch from now on,'
+          + ' each one a sentence plus one way to compute it. Only what you have evidence for -'
+          + ' a screen you saw, a summary that mentioned it. Two shapes:'
+          + ' {what:"凌晨还在刷短视频", when:{kind:"usage", package:"com.example", minutes:45}, at:"00:30"}'
+          + ' or {what:"出门前问一句带没带伞", when:{kind:"time"}, at:"07:40"}. "at" (HH:mm) means'
+          + ' not judged before that hour. They land in router.json checks and the settings page'
+          + ' lists them (the owner can switch one off or drop it). Temporal state (battery, the'
+          + ' current page) does not belong here - use memory_save for facts about him',
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -3898,6 +3914,7 @@ const TOOLS = [
         const outcome = await finishExplore(hostCtx, {
           summary: args?.summary,
           nextTask: args?.nextTask,
+          checks: args?.checks,
         }, sessionIdOf(exec))
         return exploreFinishText(outcome)
       }
@@ -4502,10 +4519,14 @@ const TOOLS = [
       }
       if (op === 'status') {
         const state = (await readRouterJson(routerStatePath())) ?? {}
+        const inputs = await readRouterInputs()
         return JSON.stringify({
           lastSpokenAt: Number(state.lastSpokenAt ?? 0) || 0,
           last: state.last ?? null,
-          rules: state.rules ?? {},
+          rules: inputs?.rules ?? state.rules ?? {},
+          // 探索交来的检测项 (2026-11-07 晚): 看一眼"现在盯着什么"就是这一段
+          checks: inputs?.checks ?? [],
+          checksSaid: inputs?.checksSaid ?? {},
         })
       }
       throw new Error(`op has to be judge, say or status, not "${op}"`)
@@ -6715,6 +6736,13 @@ const ROUTER_DEFAULTS = Object.freeze({
   chatChance: 0.35,
   chatAfterMs: 4 * 60 * 60 * 1000,
   /**
+   * 沉睡前观察 (2026-11-07 晚): 主人刚说完话的这几分钟里, 她这一拍不敲
+   *
+   * 与 QQ 桥接二代仿真的 `wake.preSleepWaitMs` 同一个口径 ("5 分钟内没人说话就可以沉") ——
+   * 这里换个方向用: 有人在说话就先别插嘴。「更多设置」里能改, 0 表示关掉这一道
+   */
+  preSleepWaitMs: 5 * 60 * 1000,
+  /**
    * 连着说了两次都没人理之后, 下一次开口要隔多久
    *
    * 这是"活人感"里最难做对的一条: 机器不会退让, 人会自动收敛 —— 主人 2026-11-07 的口径是
@@ -6780,6 +6808,51 @@ function routerInsideQuiet(minutes, from, to) {
 }
 
 /**
+ * 探索交给判断层的一条"盯着什么"命中了没有 (纯函数)
+ *
+ * 主人 2026-11-07 晚: **检测的内容由探索时加上** —— 探索每天跑一趟, 它看得见手机上真有什么,
+ * 而设置页里那个人想不出来。所以 `checks` 只收两种能算出来的判法:
+ *
+ *   - `{ kind: 'usage', package, minutes }` 某个应用今天用满多少分钟 (不给 package 就是"任意一个游戏")
+ *   - `{ kind: 'time' }` 每天到了 `at` 之后
+ *
+ * @returns 命中时那句事实 (给 brief 用), 没命中回空串
+ */
+function routerCheckHit(check, input, now) {
+  if (!check || check.enabled === false) return ''
+  const when = check?.when ?? {}
+  const kind = String(when.kind ?? '')
+  const at = String(check?.at ?? '')
+  if (at) {
+    const [hour, minute] = at.split(':')
+    const h = Number(hour)
+    const m = Number(minute)
+    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) return ''
+    if (routerMinutesOfDay(now) < h * 60 + m) return ''
+  }
+  if (kind === 'usage') {
+    const wanted = Number(when.minutes ?? 0) || 0
+    if (wanted <= 0) return ''
+    const pkg = String(when.package ?? '')
+    const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
+    const matched = today.filter((one) => (
+      pkg
+        ? String(one?.pkg ?? '') === pkg
+        : one?.game === true || ROUTER_GAME_PACKAGES.has(String(one?.pkg ?? ''))
+    ))
+    const ms = matched.reduce((sum, one) => sum + (Number(one?.ms ?? 0) || 0), 0)
+    const minutes = Math.floor(ms / 60000)
+    if (minutes < wanted) return ''
+    return `${matched.length === 1 ? String(matched[0]?.label || pkg) + ' ' : ''}今天 ${minutes} 分钟`
+  }
+  if (kind === 'time') {
+    if (!at) return ''
+    return `现在 ${routerClockText(now)}`
+  }
+  return ''
+}
+
+/**
  * 这一次要不要开口 (纯函数, 无 fs 无时钟无随机源)
  *
  * 主人这一批要的是"她自己挑时机": 打游戏久了提醒歇一会儿、记着的事到点提一句、太久没说话随口问
@@ -6794,6 +6867,13 @@ function judgeRouter(input) {
   const quiet = input?.quiet ?? {}
   if (quiet.enabled === true && routerInsideQuiet(routerMinutesOfDay(now), quiet.from, quiet.to)) {
     return { say: false, why: `quiet hours (${quiet.from}-${quiet.to})` }
+  }
+  // 沉睡前观察 (2026-11-07 晚): 主人还在说话就先别插嘴 —— 与二代仿真的"5 分钟没人说话才沉"
+  // 同一个数, 「更多设置」里能改, 0 关掉这一道
+  const lastUserAt = Number(input?.lastUserAt ?? 0) || 0
+  const preSleepMs = Number(rules.preSleepWaitMs ?? 0) || 0
+  if (preSleepMs > 0 && lastUserAt > 0 && now - lastUserAt < preSleepMs) {
+    return { say: false, why: 'he is still talking' }
   }
   const lastSpokenAt = Number(input?.lastSpokenAt ?? 0)
   // **退让** (2026-11-07): 连着两次说完都没人理, 就把下一次开口推到 [ROUTER_DEFAULTS.ignoredCooldownMs]
@@ -6849,6 +6929,23 @@ function judgeRouter(input) {
       to: 'ball',
       id: String(one?.id ?? ''),
       brief: `${one?.what ?? '那件事'}还有 ${days} 天, 今天还没提过`,
+    })
+  }
+  // **探索交来的检测项** (2026-11-07 晚, 主人: "检测的内容应由探索时加上"): 分数排在"未了的事"
+  // 之后、"随口问一句"之前 —— 它是她自己看出来的规律, 不如主人亲口交代的事硬, 但比没话找话要紧
+  const saidToday = routerDayKey(now)
+  for (const one of Array.isArray(input?.checks) ? input.checks : []) {
+    const fact = routerCheckHit(one, input, now)
+    if (!fact) continue
+    const id = String(one?.id ?? '')
+    if (!id) continue
+    if (String((input?.checksSaid ?? {})[id] ?? '') === saidToday) continue
+    candidates.push({
+      kind: 'check',
+      score: 3,
+      to: 'ball',
+      id,
+      brief: `${String(one?.what ?? '那件事')} · ${fact}`,
     })
   }
   if (candidates.length === 0) {
@@ -8691,10 +8788,35 @@ async function readRouterSignals(path, limit) {
 }
 
 /**
+ * 「更多设置」那一份 `sim.json` 里属于判断层的那几个数 (2026-11-07 晚)
+ *
+ * 缺键 / 坏值一律**不放进结果**: `{ ...ROUTER_DEFAULTS, ...rules }` 里 spread 一个 undefined 会把
+ * 缺省值盖成 undefined, 于是"没写"变成"没有", 判断层就静默地换了一套数
+ */
+function simRouterRules(sim) {
+  const out = {}
+  const put = (key, value) => {
+    const number = Number(value)
+    if (Number.isFinite(number) && number >= 0) out[key] = number
+  }
+  put('gameMinutes', sim?.router?.gameMinutes)
+  put('wishDays', sim?.router?.wishDays)
+  put('cooldownMs', sim?.router?.cooldownMs)
+  put('chatChance', sim?.router?.chatChance)
+  put('chatAfterMs', sim?.router?.chatAfterMs)
+  put('ignoredCooldownMs', sim?.router?.ignoredCooldownMs)
+  put('preSleepWaitMs', sim?.wake?.preSleepWaitMs)
+  return out
+}
+
+/**
  * 判断要的全部输入, 一次读齐
  *
  * 四份文件全是**别人写的**: `usage.json` / `signals.jsonl` 归应用, `wishes.json` 归这里,
  * `proactive-gate.json` 归应用。读不到一律当空 —— 判断层不该因为少一份文件就停摆
+ *
+ * 2026-11-07 晚又多了两样: `sim.json` (「更多设置」的阈值, 盖在同一份规则表上) 与
+ * `router.json` 的 `checks` / `checksSaid` (探索交来的检测项与"今天提过了"那笔账)
  */
 async function readRouterInputs() {
   const home = process.env.DSH_HOME
@@ -8706,28 +8828,37 @@ async function readRouterInputs() {
   const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
   const gate = (await readRouterJson(join(lw, 'proactive-gate.json'))) ?? {}
   const settings = (await readRouterJson(join(home, 'automations', 'settings.json'))) ?? {}
+  const sim = (await readRouterJson(join(lw, 'sim.json'))) ?? {}
   // **他上一次主动说话是什么时候** (2026-11-07): 退让那一条要判"她说完之后他有没有接"
   const inboxTail = await readRouterSignals(join(home, 'voice', 'inbox.jsonl'), 60)
   const lastUserAt = inboxTail
     .filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
     .reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
   const ignored = await refreshIgnored(lastUserAt)
-  // 静默窗口与自动指令共用同一份 (`automations/settings.json` 的 `quiet`)
+  // 静默窗口: 「更多设置」里那一份在就按它 (`sim.json` 一写就是全键), 否则回落到自动指令那一份
   const window = String(settings?.quiet?.window ?? '')
   const [from, to] = window.split(/[-~]/).map((one) => one.trim())
+  const simFrom = String(sim?.wake?.quietFrom ?? '').trim()
+  const simTo = String(sim?.wake?.quietTo ?? '').trim()
+  const quiet = (simFrom || simTo)
+    ? { enabled: sim?.wake?.quietEnabled !== false, from: simFrom || from, to: simTo || to }
+    : { enabled: settings?.quiet?.enabled === true, from, to }
   const lastSpokenAt = Math.max(
     Number(state?.lastSpokenAt ?? 0) || 0,
     Number(gate?.lastAt ?? 0) || 0,
   )
   return {
     now: Date.now(),
-    quiet: { enabled: settings?.quiet?.enabled === true, from, to },
+    quiet,
     lastSpokenAt,
     ignored,
+    lastUserAt,
     usage,
     wishes: Array.isArray(wishes) ? wishes : [],
     signals,
-    rules: state?.rules ?? {},
+    rules: { ...(state?.rules ?? {}), ...simRouterRules(sim) },
+    checks: Array.isArray(state?.checks) ? state.checks : [],
+    checksSaid: state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {},
   }
 }
 
@@ -8779,12 +8910,17 @@ function routerStartLine(decision) {
   ].join('\n')
 }
 
-/** 说完之后记两笔账: 这次开口的时刻, 以及未了的事"今天提过了" */
+/** 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那一条"今天提过了" */
 async function routerMarkSaid(decision) {
   const home = process.env.DSH_HOME
   if (!home) return
   const now = Date.now()
+  const day = routerDayKey(now)
   const state = (await readRouterJson(routerStatePath())) ?? {}
+  const saidBefore = (state?.checksSaid && typeof state.checksSaid === 'object') ? state.checksSaid : {}
+  const checksSaid = decision?.kind === 'check' && decision?.id
+    ? { ...saidBefore, [String(decision.id)]: day }
+    : saidBefore
   await writeRouterJson(routerStatePath(), {
     ...state,
     v: 1,
@@ -8793,10 +8929,10 @@ async function routerMarkSaid(decision) {
     // 这一笔是"退让"那条的起点: 下一次判断时看它之后他有没有说话 (见 [refreshIgnored])
     awaiting: { at: now, kind: String(decision?.kind ?? '') },
     last: decision,
+    ...(Object.keys(checksSaid).length > 0 ? { checksSaid } : {}),
   })
   if (decision?.kind !== 'wish' || !decision?.id) return
   const items = await readWishes()
-  const day = routerDayKey(now)
   const updated = items.map((one) => {
     if (String(one?.id ?? '') !== decision.id) return one
     const said = Array.isArray(one.said) ? one.said.filter(Boolean) : []
@@ -10216,6 +10352,81 @@ async function chooseExplorePreset(ctx) {
   }
 }
 
+/** 判断层最多同时盯几件事 (再多就成了一张待办清单, 不是"活人") */
+const ROUTER_CHECKS_MAX = 12
+
+/** 一条检测项那句话的上限: 它还要当"说出口的那半句"用 */
+const ROUTER_CHECK_CHARS = 60
+
+/**
+ * 由 `what` 出一个稳定的短 id
+ *
+ * 同一句话再交一次**覆盖那一条**而不是越堆越多 —— 探索连着几天看出同一件事是常态
+ */
+function routerCheckId(what) {
+  let hash = 0
+  for (const character of String(what)) {
+    hash = (hash * 31 + character.codePointAt(0)) >>> 0
+  }
+  return `c${hash.toString(16)}`
+}
+
+/**
+ * 探索交来的检测项写进 `router.json` (2026-11-07 晚, 主人: "检测的内容应由探索时加上")
+ *
+ * 只收两种判法 (`usage` / `time`), 参数坏的那一条**整条丢掉**而不是写一半 —— 判断层里一条算不出来
+ * 的检查项等于每拍白算一次。写的时候保留那份文件里别的键 (判断层的账与应用那一侧写的东西)
+ */
+async function exploreChecksWrite(list) {
+  const path = routerStatePath()
+  if (!path) return { written: 0, total: 0, error: 'this profile has no DSH_HOME' }
+  const clean = []
+  for (const one of Array.isArray(list) ? list : []) {
+    const what = String(one?.what ?? '').trim().slice(0, ROUTER_CHECK_CHARS)
+    if (!what) continue
+    const when = one?.when && typeof one.when === 'object' ? one.when : {}
+    const kind = String(when.kind ?? '').trim()
+    if (kind !== 'usage' && kind !== 'time') continue
+    const row = { what, when: { kind } }
+    if (kind === 'usage') {
+      const minutes = Number(when.minutes ?? 0)
+      if (!Number.isFinite(minutes) || minutes <= 0) continue
+      row.when.minutes = Math.min(1440, Math.round(minutes))
+      const pkg = String(when.package ?? '').trim()
+      if (pkg) row.when.package = pkg
+    }
+    const at = String(one?.at ?? '').trim()
+    if (at) {
+      const [hour, minute] = at.split(':')
+      const h = Number(hour)
+      const m = Number(minute)
+      if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) continue
+      row.at = at
+    }
+    if (kind === 'time' && !row.at) continue
+    clean.push(row)
+  }
+  if (clean.length === 0) return { written: 0, total: 0 }
+  const state = (await readRouterJson(path)) ?? {}
+  const existing = Array.isArray(state?.checks) ? state.checks : []
+  const day = routerDayKey(Date.now())
+  const merged = [...existing]
+  for (const one of clean) {
+    const id = routerCheckId(one.what)
+    const row = { id, ...one, enabled: true, from: day }
+    const at = merged.findIndex((other) => String(other?.id ?? '') === id)
+    if (at >= 0) {
+      // 主人关掉的那一条不会被一次探索重新打开: 他关过一次就是他不想看
+      merged[at] = { ...merged[at], ...row, enabled: merged[at]?.enabled !== false }
+    } else {
+      merged.push(row)
+    }
+  }
+  const kept = merged.slice(-ROUTER_CHECKS_MAX)
+  await writeRouterJson(path, { ...state, v: 1, checks: kept })
+  return { written: clean.length, total: kept.length }
+}
+
 /** 收尾: 交摘要 (唯一的出口) */
 async function finishExplore(_ctx, args = {}, sessionId = '') {
   // 下一场那张卡 (批次 8): 收尾时模型交一段话, 宿主覆盖 `lw/explore-card.md`。**先算出来**,
@@ -10223,6 +10434,9 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
   const askedNext = typeof args?.nextTask === 'string'
     ? args.nextTask.trim().slice(0, EXPLORE_TASK_CHARS)
     : ''
+  // 这一趟看出来的"接下来该盯什么" (2026-11-07 晚, 主人: "检测的内容应由探索时加上"): 与 nextTask
+  // 同一个位置写, 一次最多三条, 写进 `router.json` 的 `checks`
+  const askedChecks = Array.isArray(args?.checks) ? args.checks : []
   if (exploreRun.session === null) {
     // **同一场刚交过就如实说"已经落过了"** (2026-10-17 真机上量到的形态, 见 [exploreState] 的
     // lastSaved): 桩摘要不算, 那种情况模型补一份真的正是我们要的
@@ -10243,6 +10457,7 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     if (fresh) {
       const task = askedNext === '' ? null : await exploreTaskWrite(askedNext)
       if (task?.error) console.warn(`luwi-channel: the next task card was not written: ${task.error}`)
+      const checks = await exploreChecksWrite(askedChecks)
       // ⑥ 上一次收尾如果桥不通、屏没关成, 这一次补上 (账是幂等的, 已经关掉的行不会再调桥)
       await exploreReleaseScreens('finish', saved.session)
       return {
@@ -10252,6 +10467,7 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
         chars: saved.chars,
         truncated: false,
         nextTask: task,
+        checks,
       }
     }
     return { saved: false, why: 'no exploration is running, so there is nothing to finish' }
@@ -10274,9 +10490,13 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     else if (task !== null) {
       console.log(`luwi-channel: the next exploration's task card now says ${task.chars} characters`)
     }
+    const checks = await exploreChecksWrite(askedChecks)
+    if (checks.written > 0) {
+      console.log(`luwi-channel: the judgement layer now watches ${checks.total} thing(s)`)
+    }
     exploreState.finished += 1
     console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
-    return { saved: true, ...saved, nextTask: task }
+    return { saved: true, ...saved, nextTask: task, checks }
   } finally {
     // ⑥ finish 走 finally: 摘要 / 写卡哪一步失败都不许把屏留下, 归还自己的错也不许盖掉摘要的答案
     await exploreReleaseScreens(ended, finishing)
@@ -10375,12 +10595,21 @@ function exploreFinishText(outcome) {
     : outcome.nextTask.error
       ? `next task: the card was NOT written (${outcome.nextTask.error})`
       : `next task: the card for the next run now has ${outcome.nextTask.chars} characters`
+  // 检测项那一行 (2026-11-07 晚): 交了几条、判断层现在一共盯着几件
+  const checks = outcome.checks === undefined || outcome.checks === null
+    ? 'checks: none were handed in'
+    : outcome.checks.error
+      ? `checks: they were NOT written (${outcome.checks.error})`
+      : outcome.checks.written === 0
+        ? 'checks: none were usable (each one needs what + a usage or time shape)'
+        : `checks: ${outcome.checks.written} written, the judgement layer now watches ${outcome.checks.total}`
   if (outcome.already === true) {
     return [
       `this exploration's summary was already saved: ${outcome.path}`,
       `body: ${outcome.chars} characters`,
       'nothing was written a second time - do not hand the same report in again',
       nextTask,
+      checks,
     ].join('\n')
   }
   if (outcome.saved !== true) return `the summary was not saved: ${outcome.why}`
@@ -10388,6 +10617,7 @@ function exploreFinishText(outcome) {
     `exploration finished: ${outcome.path}`,
     `body: ${outcome.chars} characters${outcome.truncated ? ' (cut at the 8000-character limit)' : ''}`,
     nextTask,
+    checks,
   ].join('\n')
 }
 

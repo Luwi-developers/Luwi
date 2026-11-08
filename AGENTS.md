@@ -160,7 +160,10 @@
 - 技能 `$DSH_HOME/skills/<name>/SKILL.md`, 快捷指令 `$DSH_HOME/quick-commands/<名字>.md`; 随包**显式列名字**不整目录拷; 技能缺什么补什么, 样例只发一次 (`.lw-seed`)
 - `lw_quick` / `lw_automation` 的 op 两份实现, 判据 `check-quick-commands.mjs` / `check-automations.mjs`; **删除只在桥上**
 - 自动指令: 规则 `$DSH_HOME/automations/<名字>.json`; **没有启用的规则就不注册**; 事件驱动不回退 UsageStats 轮询; 「且/或」收 2~5 个叶子**不许嵌套**; 命中后清新鲜标记 (**同一次只响一声**); 防骚扰: 静默 23:00-07:00 + 冷却 30 分钟 + 每天 5 次
+- **`task` 类直接执行** (2026-11-07: 那道「允许它自己动手」总闸撤了, `AutomationStore.Settings.allowActing` 与设置页那一行一起删; 旧 `settings.json` 里留着的键只是被忽略)
 - **探索没有手动开始**: 每天一个时刻由 `AlarmManager` (requestCode 42) 投一句话, 卡由 `lw_explore op=finish` 的 `nextTask` 演进 (上限 8000 字); **省电不拦探索**, 跳过只剩"上一场还在跑"; **宿主没在跑就先拉起来再投** (2.8.0 #9: 到点那一下 `startForegroundService` + 等就绪, 不再只记 skipped)
+- **收尾写三样** (2026-11-07 晚): 摘要 / `nextTask` / `checks` —— `checks` 是"接下来该盯什么", 最多 3 条 (判法只有 `usage` 与 `time`), 宿主写进 `$DSH_HOME/lw/router.json` 的 `checks`, 判断层当第三档候选 (分数 3, 排在未了的事之后、随口问一句之前)
+- **检测的内容由探索加, 时机与节奏由设置页给**: `$DSH_HOME/lw/sim.json` (见 `tool/SimSetting.kt`, 缺省值照 QQ 桥接的 `socialV2`) 管潜水/活跃、敲钟间隔、沉睡前观察、分条节奏、判断层阈值; 设置 → 活动 → 更多设置 就是它的界面, 那一页**没有手写检测项**的入口 (只有开关与忘掉) —— 判据 `tools/check-sim.mjs` / `check-router.mjs`
 - 探索解锁: 开关是 `explore-schedule.json` 的 `unlock` (缺省关), 与「唤醒时自动解锁」是两个开关
 
 ## 随包插件

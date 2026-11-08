@@ -87,6 +87,12 @@ check('全局间距常量没被顺手改 (别的页面也在用)', /val PageHori
 
 check('列表左右缩进走本页自己的 16dp', /horizontalPadding = SettingsSpace\.Inset/u.test(screen), true)
 
+// 只有选中态铺底的那种控件会破坏"这页不铺底"的一致 (2026-11-08 主人: "取消这个蓝底")
+check('没有会铺底的分段控件 (外观段用 SettingsTabs)', [
+  /TabRow\(/u.test(screen),
+  /SettingsTabs\(/u.test(screen),
+], [false, true])
+
 /* ── 三、小字不许再变长 ───────────────────────────────────────────────── */
 
 /** 取一份 strings.xml 里指定前缀的条目 */

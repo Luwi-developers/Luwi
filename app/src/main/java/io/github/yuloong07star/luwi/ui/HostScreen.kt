@@ -793,6 +793,21 @@ private fun mainMenu(
                 } else {
                     null
                 },
+                // 门户那一层的进出口 (2026-11-07 主人: "回到对话层没有按钮补一下, 和返回 dsh 这些都
+                // 加到 luwi 菜单里, 不放界面上"): 界面上不放按钮, 两个动作都在这里 —— 收起门户看 dsh,
+                // 或者从 dsh 回到门户。方向由页面报上来的 `PortalState.open` 决定
+                DropdownItem(
+                    text = if (PortalState.open) "回到 dsh" else "回到对话层",
+                    onClick = {
+                        val run = PortalState.run
+                        val script = if (PortalState.open) {
+                            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.hide()"
+                        } else {
+                            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.show()"
+                        }
+                        run?.invoke(script)
+                    },
+                ),
                 // 反馈: 与设置页 ⋮ 第一条同一个对话框 (2026-10-29)
                 DropdownItem(
                     text = feedbackLabel,
@@ -911,6 +926,9 @@ private fun HostWebView(
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                     // 输入框旁边那个麦克风指示器要问的两件事都在 app 这一侧 (服务在不在听、点一下停)
                     addJavascriptInterface(WakeBridge(viewContext.applicationContext), WAKE_BRIDGE)
+                    // 门户那一层 (2026-11-07): 判断层与工作结构在 `$DSH_HOME/lw` 里, 球那场的账在
+                    // `$DSH_HOME/voice/session.json` 里 —— 页面读不到 app 沙盒, 所以从这座桥走
+                    addJavascriptInterface(PortalBridge(viewContext.applicationContext), PORTAL_BRIDGE)
                     // 老 WebView 那一档: 先把桥挂上 (页面把"还缺什么"报回来), 再让 polyfill 在文档
                     // **开始**时跑 —— 顺序不能反, 反了那段报告就没人接
                     addJavascriptInterface(
@@ -1011,6 +1029,9 @@ private fun HostWebView(
                                     onReady()
                                 }
                             }
+                            // 门户那一层的 JS 入口 (2026-11-07): 菜单里那一条点了就走这里 ——
+                            // 每次文档加载都重新挂一遍, 换一次文档旧的 WebView 就不能用了
+                            PortalState.run = { script -> view.evaluateJavascript(script, null) }
                             // 每次文档加载都把那个指示器装回去: 它是我们画在页面上的, 换一次文档就没了
                             view.evaluateJavascript(WAKE_BADGE_JS, null)
                             // 「回应用」那一跳在等"页面什么时候回来" (重载 / 冷启动那两档都是它)
@@ -1540,6 +1561,9 @@ private const val READY_PROBE = "(function(){var r=document.getElementById('root
 
 /** The name the page sees for the bridge above: `window.Luwi` */
 private const val WAKE_BRIDGE = "Luwi"
+
+/** 门户那一层的桥名: `window.LuwiPortal` (判断层 / 工作结构 / 球那场的账) */
+private const val PORTAL_BRIDGE = "LuwiPortal"
 
 /**
  * 页面与 app 之间那一座桥: 唤醒词那两件事 + "现在在看哪一场"
