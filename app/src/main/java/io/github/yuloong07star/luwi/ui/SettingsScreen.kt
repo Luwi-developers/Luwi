@@ -135,6 +135,10 @@ import io.github.yuloong07star.luwi.scaffolds.LazyColumn
 import io.github.yuloong07star.luwi.scaffolds.SectionSmallTitle
 import io.github.yuloong07star.luwi.scaffolds.SectionTitle
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsHairline
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsNote
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsPanel
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSpace
 import io.github.yuloong07star.luwi.sync.ModeModel
 import io.github.yuloong07star.luwi.sync.PairPayload
 import io.github.yuloong07star.luwi.sync.SyncSetting
@@ -192,6 +196,7 @@ import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 /**
@@ -341,13 +346,26 @@ internal fun LazyListScope.settingsSection(
 ) {
     item {
         val closed = key in collapsed
-        SectionTitle(
-            title = stringResource(title),
-            summary = summary(),
-            collapsed = closed,
-            onToggle = { onToggle(key) },
-        )
-        AnimatedVisibility(!closed) { content() }
+        Column {
+            SectionTitle(
+                title = stringResource(title),
+                summary = summary(),
+                collapsed = closed,
+                onToggle = { onToggle(key) },
+            )
+            AnimatedVisibility(!closed) {
+                // 展开那一段: 标题与面板之间 10dp, 面板之后 20dp 才到细线 - 于是"打开的一页"
+                // 自己有一块呼吸, 收起的那几行则紧贴着排 (2026-11-08)
+                Column(
+                    modifier = Modifier.padding(
+                        top = SettingsSpace.PanelGap,
+                        bottom = SettingsSpace.SectionGap,
+                    ),
+                ) { content() }
+            }
+            // 每一段底下一条细线: 二十段因此是一份目录而不是一堵字墙
+            SettingsHairline()
+        }
     }
 }
 
@@ -497,18 +515,23 @@ fun SettingsScreen() {
         LazyColumn(
             contentPadding = innerPadding,
             scrollBehavior = scrollBehavior,
+            // 2026-11-08 重做排版: 段与段之间的距离改由每一段自己给 (一条细线 + 展开态那 20dp),
+            // 骨架这一层不再统一加 12dp - 否则收起态那二十行会被拉开, 一页装不下几个段, "目录"
+            // 这个形态就没了。左右缩进也从全局那 12dp 收到本页自己的 16dp (SettingsSpace.Inset)
+            itemSpacing = 0.dp,
+            horizontalPadding = SettingsSpace.Inset,
         ) {
             // **「检查所需依赖」放在「省电」那一段上方** (2026-11-04 主人 #1②): 一行, 点一下把那张体检表
             // 居中弹出来 —— 与首启自动弹的那一次是同一个对话框 ([ReadyCardDialog]), 所以想再看一遍
-            // "还差什么没开"不必等下一次冷启动。它自己一张卡, 不归哪一段 (没有可收起的标题)
+            // "还差什么没开"不必等下一次冷启动。它自己一条提示, 不归哪一段 (没有可收起的标题)
+            // 2026-11-08: 从 Card 改成描边块 (SettingsNote) - 它说的是一件提示, 不该长成一张设置卡
             item {
-                Card {
-                    ArrowPreference(
-                        title = stringResource(R.string.ready_check),
-                        summary = stringResource(R.string.ready_check_summary),
-                        onClick = { readyOpen = true },
-                    )
-                }
+                SettingsNote(
+                    title = stringResource(R.string.ready_check),
+                    summary = stringResource(R.string.ready_check_summary),
+                    onClick = { readyOpen = true },
+                    modifier = Modifier.padding(bottom = SettingsSpace.GroupBottom),
+                )
             }
 
             // **省电那一段单独排在第一个** (主人 2026-10-08: "省电模式单独拿出来放第一排"): 它原本是
@@ -521,7 +544,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { PowerItems() }
+                SettingsPanel { PowerItems() }
             }
 
             // 两层分组的第一层 (2026-10-08 主人: "优化设置页排版"): 上面这一组是"天天要碰的",
@@ -554,7 +577,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { ChannelItems() }
+                SettingsPanel { ChannelItems() }
             }
 
             // 浮标 / 唤醒词 / 说话 三段的顺序 (2026-10-08 一起排的): 先"球在不在", 再"喊一声", 最后
@@ -566,7 +589,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { BallItems() }
+                SettingsPanel { BallItems() }
             }
 
             settingsSection(
@@ -576,7 +599,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { WakeItems() }
+                SettingsPanel { WakeItems() }
             }
 
             settingsSection(
@@ -586,7 +609,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { SpeakItems() }
+                SettingsPanel { SpeakItems() }
             }
 
             // 「模式与模型」那一段 (3.0.2 需求 2) 已并进「视频模式」那一段 (2026-10-16): 视频模式用
@@ -604,7 +627,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { NotificationItems() }
+                SettingsPanel { NotificationItems() }
             }
 
             settingsSection(
@@ -614,7 +637,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { ScreenshotItems() }
+                SettingsPanel { ScreenshotItems() }
             }
 
             settingsSection(
@@ -628,7 +651,7 @@ fun SettingsScreen() {
                 // 到 luwi 的视频模式设置里"): **用哪一个模型说话**在最上面 (它原来是单独一段
                 // 「模式与模型」, 归并过来是因为"视频模式用哪个模型"就是这一段的事), 后面才是那台
                 // 相机自己的参数 (抓几张 / 隔多久 / 多大 / 要不要拼网格)
-                Card {
+                SettingsPanel {
                     Column {
                         ModeItems()
                         LookItems()
@@ -645,7 +668,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { LockItems() }
+                SettingsPanel { LockItems() }
             }
 
             // 活动 (2026-11-07 主人): 原「探索」与「定时对话」合成一段 —— 她的日程、她开口的时机、
@@ -658,11 +681,11 @@ fun SettingsScreen() {
                 onToggle = toggleSection,
             ) {
                 SectionSmallTitle(stringResource(R.string.settings_activity_daily))
-                Card { ExploreItems() }
+                SettingsPanel { ExploreItems() }
                 SectionSmallTitle(stringResource(R.string.settings_activity_speak))
-                Card { ProactiveItems() }
+                SettingsPanel { ProactiveItems() }
                 SectionSmallTitle(stringResource(R.string.settings_activity_knows))
-                Card { KnowsItems() }
+                SettingsPanel { KnowsItems() }
             }
 
             settingsSection(
@@ -672,7 +695,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { AutomationItems() }
+                SettingsPanel { AutomationItems() }
             }
 
             // 快捷指令那一段 (批次 7): 与「自动指令」挨着, 因为两段都是"主人自己定的那几件事",
@@ -684,7 +707,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { QuickItems() }
+                SettingsPanel { QuickItems() }
             }
 
             // 插件那一段 (2.5.1 批次 9 的 P0 / P1): 这一段是生态的入口 —— 装 / 启用 / 停用 / 卸 /
@@ -696,7 +719,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { PluginItems() }
+                SettingsPanel { PluginItems() }
             }
 
             // 技能那一段 (2.7.0): 与插件挨着 —— 两段都是"给这台机器加东西", 区别是技能只加提示词与
@@ -708,7 +731,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { SkillItems() }
+                SettingsPanel { SkillItems() }
             }
 
             // Linux 沙盒那一段 (2.7.7): 也是"给这台机器加东西", 加的是一个能装包能编译的用户空间。
@@ -721,7 +744,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { LinuxItems() }
+                SettingsPanel { LinuxItems() }
             }
 
             // Luwi-dsh-sync 那一段 (G1-2): 两台机器怎么连上这件事全在这里 —— 会话仓库 / 工作区仓库 /
@@ -734,7 +757,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { SyncItems() }
+                SettingsPanel { SyncItems() }
             }
 
             // 酒馆那一段 (P1, 2026-10-24): 一场多人对谈, 一轮一个人说话。它不建 DSH 会话、不碰
@@ -758,7 +781,7 @@ fun SettingsScreen() {
                 collapsed = collapsed,
                 onToggle = toggleSection,
             ) {
-                Card { PermissionsItems() }
+                SettingsPanel { PermissionsItems() }
             }
 
             // 开屏接口文档 (2026-10-25 主人: "不要加这个版块，你在设置末尾加个接口文档，能让用户用
@@ -1737,7 +1760,7 @@ private fun SyncItems() {
             onDismissRequest = { showRaw = false },
         ) {
             Column(modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                Text(text = SyncSetting.pretty(context), fontSize = 12.sp)
+                Text(text = SyncSetting.pretty(context), style = MiuixTheme.textStyles.footnote1)
             }
             Spacer(modifier = Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.SpaceBetween) {
@@ -3405,7 +3428,7 @@ private fun ExploreSummaryDialog(file: File, onDismiss: () -> Unit) {
                     R.string.settings_explore_summary_failed,
                     "这份文件读不出来",
                 ),
-                fontSize = 12.sp,
+                style = MiuixTheme.textStyles.footnote1,
                 color = if (body == null) colorScheme.error else colorScheme.onSurfaceVariantSummary,
             )
         }
@@ -4704,7 +4727,7 @@ private fun LookItems() {
     Column(modifier = Modifier.fillMaxWidth().padding(UiSpacing.Large)) {
         Text(
             text = stringResource(R.string.settings_look_note),
-            fontSize = 12.sp,
+            style = MiuixTheme.textStyles.footnote1,
             color = colorScheme.onSurfaceVariantSummary,
         )
     }
@@ -5747,7 +5770,7 @@ private fun BallItems() {
     Text(
         text = stringResource(R.string.settings_ball_drag_tip),
         color = colorScheme.onSurfaceVariantActions,
-        fontSize = 12.sp,
+        style = MiuixTheme.textStyles.footnote1,
         modifier = Modifier.padding(horizontal = UiSpacing.PageHorizontal),
     )
 }

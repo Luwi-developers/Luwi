@@ -19,7 +19,7 @@
     <string name="boot_log_collapse">点一下收起</string>
 
     <string name="settings_section_api">接口</string>
-    <string name="settings_section_api_summary">当前开放的接口：开屏、浮标状态、语音状态、快捷指令、技能、自动指令</string>
+    <string name="settings_section_api_summary">现在开放了哪些接口</string>
     <string name="settings_api_doc">接口文档</string>
     <string name="settings_api_doc_title">接口文档</string>
     <string name="settings_api_doc_summary">点开看全文（同一份也写在 %1$s）</string>
@@ -38,7 +38,7 @@
     <string name="settings_refresh">刷新</string>
     <string name="settings_refreshed">设置已重新读取</string>
     <string name="settings_restart_host">重启 DSH host</string>
-    <string name="settings_restart_host_summary">改了 host 读一次的东西 (工作区落在哪、局域网开关) 之后点它</string>
+    <string name="settings_restart_host_summary">改了工作区或局域网开关之后点它</string>
 
     <string name="settings_menu_feedback">Luwi反馈</string>
     <string name="settings_menu_feedback_summary">报一个问题, 或者私密说一句</string>
@@ -57,12 +57,12 @@
 
     <string name="settings_section_power">省电</string>
     <string name="settings_section_power_summary">省电的时候关掉什么, 以及怎么让 host 留在后台</string>
-    <string name="settings_power_state_idle">没在省电: 唤醒词按「唤醒词」那一段的许可守着</string>
+    <string name="settings_power_state_idle">没在省电: 唤醒词照旧守着</string>
 
     <string name="settings_about_title">关于 Luwi</string>
     <string name="settings_about_version">版本 %1$s (%2$d)</string>
     <string name="settings_about_update">检测更新</string>
-    <string name="settings_about_update_summary">读 GitHub 上最新那条 Release 的版本号比一比</string>
+    <string name="settings_about_update_summary">比对 GitHub 上最新那条 Release</string>
     <string name="settings_about_source">更新源</string>
     <string name="settings_about_source_default">用缺省那一条</string>
 
@@ -159,17 +159,17 @@
     <string name="ready_action_retry">重新下载 %1$s</string>
     <string name="ready_action_running">正在下载 %1$d%%</string>
     <string name="settings_channel_autostart">允许 Luwi 自启动</string>
-    <string name="settings_channel_autostart_summary">只是一行跳转: 去系统那一页自己点, 应用不改任何开关</string>
+    <string name="settings_channel_autostart_summary">只是一行跳转</string>
     <string name="settings_channel_autostart_failed">这台设备上没有能打开的那一页</string>
 
     <string name="settings_accessibility">允许 DSH 通过无障碍服务读取屏幕内容</string>
-    <string name="settings_accessibility_summary">启用后, 模型直接能读到屏幕上每个控件的文字与精确位置</string>
+    <string name="settings_accessibility_summary">让它读到屏幕上的文字与位置</string>
     <string name="settings_accessibility_manual">跳转到无障碍设置</string>
 
     <string name="settings_section_notifications">通知</string>
     <string name="settings_section_notifications_summary">读通知栏, 也发通知</string>
     <string name="settings_notifications">允许 DSH 读取通知栏</string>
-    <string name="settings_notifications_summary">启用后, 模型能列出通知栏里有什么并把它清掉; 打开它也是"通知能越过锁屏弹成横幅"的前提</string>
+    <string name="settings_notifications_summary">读通知栏, 也能清掉</string>
     <string name="settings_notifications_manual">跳转到通知使用权设置</string>
     <string name="settings_notifications_banner">跳转到全屏通知设置</string>
 
@@ -181,46 +181,46 @@
     <string name="settings_mode_endpoint_summary">%1$s · %2$s · key %3$s</string>
     <string name="settings_mode_endpoint_none">还没添加模型: 视频模式用上面那条说的模型</string>
     <string name="settings_mode_endpoint_using">走添加的模型: %1$s</string>
-    <string name="settings_mode_endpoint_note">接口地址与模型名两个都填好, 视频模式那一次请求就走这个模型 (OpenAI 兼容的接口, 会在 dsh 自己的模型列表里多出一条「Luwi 视频模式」); 两个只填一个不算配好, 仍然用上面那条说的模型。API Key 存在这一份配置里, 界面上只出打码形态, 清空接口地址就回到上面那条说的模型</string>
+    <string name="settings_mode_endpoint_note">地址与模型名都填好才走这个模型 (OpenAI 兼容); 只填一个仍用上面选的那个。API Key 只存在这份配置里, 界面打码</string>
     <string name="settings_mode_endpoint_url_note">接口地址: http(s) 开头的地址, 一般带 /v1, 例如 https://api.deepseek.com/v1</string>
     <string name="settings_mode_endpoint_key_note">API Key: 这个接口的密钥; 自己的网关不要密钥时留空</string>
     <string name="settings_mode_endpoint_model_note">模型名: 接口那边认的 id, 例如 deepseek-chat</string>
     <string name="settings_mode_endpoint_off">关掉添加的模型</string>
-    <string name="settings_mode_endpoint_off_summary">回到上面那条说的模型 (API Key 留着, 下次填回来不用重打)</string>
+    <string name="settings_mode_endpoint_off_summary">回到上面那条模型; API Key 留着</string>
 
     <string name="settings_section_screenshot">截图</string>
     <string name="settings_section_screenshot_summary">一张图缩到多大再交给模型</string>
     <string name="settings_screenshot_auto">指代不明时自动截图</string>
-    <string name="settings_screenshot_auto_summary">你说「这个」「这张图」「屏幕上」「照片里」这类话时, 投递前自动附一张主屏截图 (视频模式除外)</string>
+    <string name="settings_screenshot_auto_summary">提到「这张图」时自动附图</string>
     <string name="settings_screenshot_budget">截图预算</string>
     <string name="settings_screenshot_budget_summary">将截图缩放到这个像素数以内再交给模型</string>
     <string name="settings_budget_low">低 (%1$d)</string>
     <string name="settings_budget_default">默认 (%1$d)</string>
     <string name="settings_budget_high">高 (%1$d)</string>
     <string name="settings_screenshot_bytes">截图字节预算</string>
-    <string name="settings_screenshot_bytes_summary">PNG 超过 %1$d 字节就再缩一次, 这是应用这一半的上限; 路由自己的上限是 settings.yaml 里的 imageMaxBytes, 超过它的图会让模型请求失败</string>
-    <string name="settings_screenshot_bytes_dialog">单位是 KiB, 打字可以给到 %2$d; 超过滑块上限 %1$d 的值要先把 settings.yaml 里的 imageMaxBytes 一起调上去</string>
+    <string name="settings_screenshot_bytes_summary">PNG 超过 %1$d 字节就再缩一次</string>
+    <string name="settings_screenshot_bytes_dialog">单位 KiB; 超过 %1$d 要先把 settings.yaml 的 imageMaxBytes 调上去</string>
 
     <string name="settings_section_look">视频模式</string>
-    <string name="settings_section_look_summary">视频模式用哪一个模型说话、取几张、隔多久</string>
+    <string name="settings_section_look_summary">用哪个模型说话, 取几张, 隔多久</string>
     <string name="settings_look_owner">视频模式占用</string>
     <string name="settings_look_owner_free">没有会话占着相机: 取景与切视频模式都不会被拦</string>
     <string name="settings_look_owner_busy">会话 %1$s 从 %2$s 起占着相机; 点这一行强制释放</string>
     <string name="settings_look_interval">每张截图间隔</string>
-    <string name="settings_look_interval_summary">两张之间隔 %1$d ms; 抓一张本身要两百到四百毫秒, 所以这是要的那个数, 不是做到的那个数</string>
+    <string name="settings_look_interval_summary">隔 %1$d ms, 实测会慢一点</string>
     <string name="settings_look_interval_dialog">单位是毫秒, %1$d 到 %2$d</string>
     <string name="settings_look_count">截图张数</string>
-    <string name="settings_look_count_summary">每次取景抓 %1$d 张; 模型可以在某一次调用里点名要几张, 而这里是它的缺省</string>
+    <string name="settings_look_count_summary">每次抓 %1$d 张; 模型调用时可以点名改</string>
     <string name="settings_look_quality">截图清晰度</string>
-    <string name="settings_look_quality_summary">抓帧按不超过 %1$d 像素挑尺寸; 下一次开相机生效, 相机正开着时应用会当场重开一次</string>
+    <string name="settings_look_quality_summary">抓帧不超过 %1$d 像素; 下次开相机生效</string>
     <string name="settings_look_quality_low">低 (%1$d)</string>
     <string name="settings_look_quality_default">默认 (%1$d)</string>
     <string name="settings_look_quality_high">高 (%1$d)</string>
     <string name="settings_look_sheet">一次取景也拼成一张网格</string>
-    <string name="settings_look_sheet_summary">把这几张也拼成一张图, 模型先读那一张 —— 十来张图变成一次读图。每一格都是缩小的副本, 所以它是用来看动起来的, 不是用来读小字的</string>
+    <string name="settings_look_sheet_summary">拼成一张网格, 十来张一次读</string>
     <string name="settings_look_note">这几条给的是视频模式那台相机的应用这一半: 抓几张、隔多久、多大、要不要拼成一张网格。路由那一半 (imagePixelBudget 与 imageMaxBytes) 在 dsh 自己的 settings.yaml 里, 超过预算的图会在 host 那边重新编码一次再交给模型</string>
     <string name="settings_voice_silence">静音多久算一句说完</string>
-    <string name="settings_voice_silence_summary">%1$s 秒; 调小发得更早, 而正常的停顿可能被切成两句</string>
+    <string name="settings_voice_silence_summary">%1$s 秒, 调小更早发</string>
     <string name="settings_voice_silence_dialog">单位是秒, %1$s 到 %2$s</string>
 
     <string name="settings_ocr_backend">计算单元: %1$s</string>
@@ -233,9 +233,9 @@
     <string name="settings_section_wake">唤醒</string>
     <string name="settings_section_wake_summary">喊一声就开始听</string>
     <string name="settings_wake_status">监听状态</string>
-    <string name="settings_wake_state_listening">正在听「%1$s」; 喊一声或者点一下浮标就听你说一句</string>
-    <string name="settings_wake_state_voice">正在听「%1$s」, 常驻语音也在跑 (视频模式要的那一档, 说完一句接着听)</string>
-    <string name="settings_wake_state_allowed">允许唤醒开着, 但这个服务没在跑; 把那一个开关关掉再打开一次</string>
+    <string name="settings_wake_state_listening">正在听「%1$s」, 喊一声就答</string>
+    <string name="settings_wake_state_voice">正在听「%1$s」, 常驻语音也在跑</string>
+    <string name="settings_wake_state_allowed">许可是开的, 服务没跑; 开关重开一次</string>
     <string name="settings_wake_state_idle">没在听; 打开下面那个开关就开始</string>
     <string name="settings_wake_hits">这一次从起服务到现在命中 %1$d 次</string>
     <string name="settings_wake_mic_missing">麦克风权限还没给, 下面「权限」那一段里有入口</string>
@@ -255,36 +255,36 @@
     <string name="settings_wake_words">唤醒词</string>
     <string name="settings_wake_words_none">还没设过, 现在守的是缺省那一句 %1$s (点进来可以换)</string>
     <string name="settings_wake_words_now">现在守的是: %1$s</string>
-    <string name="settings_wake_words_summary">一行一个词, 写成 词=带音调数字的拼音, 例如 肥鱼肥鱼=fei2 yu2 fei2 yu2; 拼音会转成模型自己的符号, 表里没有的会被拒绝而不是静默丢掉</string>
+    <string name="settings_wake_words_summary">一行一个 词=拼音</string>
     <string name="settings_wake_words_saved">已保存: %1$s</string>
     <string name="settings_wake_words_unsaved">没保存: %1$s</string>
     <string name="settings_wake_allow">允许唤醒</string>
-    <string name="settings_wake_allow_summary">允许这个应用一直听着唤醒词 (3.3M 的本地关键词模型, 5.3 MB); 它只是许可, 打开之后麦克风才开始守那个词, 通知栏留一条常驻与一个「停止」</string>
+    <string name="settings_wake_allow_summary">一直听唤醒词 (本地模型)</string>
     <string name="settings_wake_power_save">省电模式</string>
-    <string name="settings_wake_power_save_summary">只停唤醒词监听: 麦克风整个关掉, 喊不醒; host、浮标与通知都留着, 点球照样能说一句话。它是此刻的开关, 不动上面那个许可</string>
-    <string name="settings_wake_state_power_save">省电模式开着: 麦克风关着, 喊不醒; 点球仍能听你说一句 (把下面那个开关关掉就恢复)</string>
+    <string name="settings_wake_power_save_summary">只停唤醒词, 点球照说</string>
+    <string name="settings_wake_state_power_save">省电中: 喊不醒, 点球还能说一句</string>
     <string name="settings_wake_power_window">省电时段</string>
     <string name="settings_wake_power_window_none">没开定时; 点进来写一段, 例如 %1$s</string>
-    <string name="settings_wake_power_window_set">约在 %1$s; 到点自己进省电模式, 出了时段自己回来</string>
-    <string name="settings_wake_power_window_now">现在就在这一段里 (%1$s), 省电模式此刻生效</string>
-    <string name="settings_wake_power_window_summary">只写一段: 23:00-07:00 这种 (跨零点也认)。清空这一行就是关掉定时</string>
+    <string name="settings_wake_power_window_set">约在 %1$s; 时段内省电, 出来自己恢复</string>
+    <string name="settings_wake_power_window_now">现在就在这一段里 (%1$s)</string>
+    <string name="settings_wake_power_window_summary">写成 23:00-07:00; 清空=关掉</string>
     <string name="settings_wake_power_window_hint">23:00-07:00</string>
-    <string name="settings_wake_power_window_bad">看不懂这个写法; 要的是 23:00-07:00 这种一段 (小时 0-23, 分钟 0-59)</string>
-    <string name="settings_wake_power_window_empty">起止相同等于空窗, 那样永远不省电; 换个时间, 或者清空这一行关掉定时</string>
+    <string name="settings_wake_power_window_bad">写法看不懂; 要 23:00-07:00 这种</string>
+    <string name="settings_wake_power_window_empty">起止相同=空窗, 永远不省电</string>
     <string name="settings_wake_power_save_automation">省电时连自动指令的监测一起停</string>
-    <string name="settings_wake_power_save_automation_summary">只停费电的那两种 (天气与地点); 通知 / 前台应用 / 光感 / 时间照旧</string>
+    <string name="settings_wake_power_save_automation_summary">只停天气与地点</string>
     <string name="settings_power_keepalive">后台保活</string>
     <string name="settings_power_keepalive_granted">已允许: 系统不会在后台把 host 冻住</string>
     <string name="settings_power_keepalive_missing">还没允许: 系统会在后台把 host 冻住, 切回来就得重新加载一遍; 点一下去允许</string>
     <string name="settings_power_keepalive_failed">这台设备上没有能打开「忽略电池优化」的页面</string>
     <string name="settings_wake_need_model">唤醒词模型还没下, 用下面那一行「下载唤醒词模型」</string>
     <string name="settings_wake_action">叫醒之后</string>
-    <string name="settings_wake_action_summary">命中那一下除了震一下、响一声、把界面叫起来, 还要不要顺手做一件事; 「切模式」那两条走的是与说出来一样的那条命令路 (命令词表只有一份, 在宿主那一侧)</string>
+    <string name="settings_wake_action_summary">命中那一下除了震动响铃, 还要不要顺手做一件事</string>
     <string name="settings_wake_action_wake">只叫醒 (讲一句话)</string>
     <string name="settings_wake_action_video">顺带切到视频模式</string>
     <string name="settings_wake_action_phone">顺带切回手机模式</string>
     <string name="settings_wake_vibrate">叫醒时震动</string>
-    <string name="settings_wake_vibrate_summary">命中那一下震 500 ms; 关掉之后它只响一声短提示音, 界面照旧叫起来</string>
+    <string name="settings_wake_vibrate_summary">命中震 500 ms</string>
     <string name="wake_badge_listening">正在听</string>
     <string name="wake_badge_stop">点一下关掉</string>
     <string name="settings_section_ball">浮标</string>
@@ -292,22 +292,22 @@
     <string name="settings_ball_overlay">悬浮窗权限</string>
     <string name="settings_ball_overlay_summary">浮标要画在别的应用上面, 没这条屏幕上不会出现; 点这一行去系统页改</string>
     <string name="settings_ball_on">显示浮标</string>
-    <string name="settings_ball_on_summary">开着时屏幕上留一颗小球: 点一下说话, 长按出菜单, 拖到边上收进去</string>
+    <string name="settings_ball_on_summary">屏幕上留一颗球</string>
         <string name="settings_ball_size">球大小</string>
-    <string name="settings_ball_size_summary">球多大 (48-80 dp): 大一点看得清, 小一点不挡屏幕; 改完立刻生效 (球半秒内换成新尺寸), 若没变就重启一次 Luwi; 现在: %1$d dp</string>
-    <string name="settings_ball_size_summary_theme">你设的是 %1$d dp, 而现在这套外观至少要 %2$d dp (它用的是全身立绘), 所以此刻是 %3$d dp; 改完立刻生效, 若没变就重启一次 Luwi</string>
+    <string name="settings_ball_size_summary">球多大, 48-80 dp (现在 %1$d)</string>
+    <string name="settings_ball_size_summary_theme">你设 %1$d dp; 这套外观最少要 %2$d, 现在是 %3$d</string>
     <string name="settings_ball_size_dialog">打一个 dp 数 (%1$d-%2$d)</string>
     <string name="settings_ball_translucent">半隐</string>
-    <string name="settings_ball_translucent_summary">闲着 5 秒后整颗球淡到一半不透明度, 不那么挡屏幕底下的东西; 碰一下立刻回到全不透明, 说与听时那口呼吸照旧</string>
+    <string name="settings_ball_translucent_summary">闲 5 秒淡到半透明</string>
     <string name="settings_ball_peek">半藏</string>
-    <string name="settings_ball_peek_summary">再闲一会儿 (5 秒) 就把球挪一半到屏幕外, 碰一下滑回来; 关掉它就一直在那儿露着, 只有你拖它才动</string>
+    <string name="settings_ball_peek_summary">再闲 5 秒收一半</string>
     <string name="settings_ball_tap_voice">点击语音输入</string>
-    <string name="settings_ball_tap_voice_summary">开: 点一下球就进语音; 关掉后点球不说话, 只当普通点击 (长按照旧弹菜单)</string>
+    <string name="settings_ball_tap_voice_summary">点一下球就进语音</string>
     <string name="settings_ball_state_up">球在屏幕上, 停在%1$s</string>
     <string name="settings_ball_state_down">球现在不在屏幕上</string>
     <string name="settings_ball_permission">缺「显示在其他应用上层」这条权限, 上面那个开关打开也不会出现</string>
     <string name="settings_ball_missing_host">host 还没报出界面地址; 球能说话, 而上面那条输入条要等它</string>
-    <string name="settings_ball_drag_tip">挪球的时候先往上拖一点再横着挪: 球贴在最左或最右时, 直接往中间拖会先碰到系统那条返回手势, 结果球没动、反而退出了当前应用</string>
+    <string name="settings_ball_drag_tip">先往上拖一点再横挪, 否则会触发系统返回手势</string>
     <string name="settings_ball_hide_failed">球没能摘下来, 所以还在屏幕上: %1$s</string>
     <string name="ball_dock_left">左边</string>
     <string name="ball_dock_right">右边</string>
@@ -356,12 +356,12 @@
     <string name="settings_section_speak">说话</string>
     <string name="settings_section_speak_summary">回答怎么念出来</string>
     <string name="settings_speak_auto">说话回答</string>
-    <string name="settings_speak_auto_summary">开着时每一轮回答落定就自己说出来; 关掉之后它不会自己出声, 而点名要说一句 (lw_speak) 与下面那个试听照旧</string>
+    <string name="settings_speak_auto_summary">每轮答完自己念出来</string>
     <string name="settings_speak_stop">停止</string>
     <string name="menu_stop_speaking">停止说话</string>
     <string name="menu_stop_speaking_now">掐断正在说的这一段</string>
     <string name="menu_stop_speaking_idle">现在没有在说</string>    <string name="settings_speak_follow">语速跟随系统</string>
-    <string name="settings_speak_follow_summary">开着时说出来的就是系统「文字转语音输出」里那个语速; 关掉它 (或者直接拖下面那个滑块) 才由本应用自己定</string>
+    <string name="settings_speak_follow_summary">跟随系统的语速</string>
     <string name="settings_speak_rate">语速</string>
     <string name="settings_speak_rate_summary">%1$.2f 倍</string>
     <string name="settings_speak_rate_dialog">单位是倍数, %1$s 到 %2$s 之间</string>
@@ -372,7 +372,7 @@
     <string name="settings_speak_volume_hint_boosted">往上加的是增益; 到了上限 (300%%) 再往上就没得加了</string>
     <string name="settings_speak_volume_hint_muted">0%% 就是不出声</string>
     <string name="settings_speak_volume_dialog">单位是百分数, %1$d 到 %2$d 之间; 100%% 是这条音色本来的电平</string>
-    <string name="settings_speak_volume_system">系统引擎的音量在它自己手里: 应用这一侧没有 API 能改, 用它说话时调的是手机的媒体音量; 换到自带那条才有这一条滑块</string>
+    <string name="settings_speak_volume_system">系统音量归系统管</string>
     <string name="settings_speak_voice">音色</string>
     <string name="settings_speak_voice_unknown">引擎还没起来, 点一下重试</string>
     <string name="settings_speak_voice_none">这条引擎没有列出中文音色, 只能去系统那一页换</string>
@@ -382,7 +382,7 @@
     <string name="settings_speak_engine_system">系统文字转语音引擎</string>
     <string name="settings_speak_engine_on_device">自己导入的音色（本机模型）</string>
     <string name="settings_speak_engine_on_device_pick">正在用；在下面挑一个音色</string>
-    <string name="settings_speak_engine_on_device_summary">用 voices 目录里的 sherpa-onnx 模型说话；起头慢一截，但声音是自己的</string>
+    <string name="settings_speak_engine_on_device_summary">voices 里的 sherpa-onnx</string>
     <string name="settings_speak_engine_on_device_using">正在用 %1$s 说话</string>
     <string name="settings_speak_engine_edge">Edge 在线（免费）</string>
     <string name="settings_speak_engine_edge_summary">用微软 Edge 的朗读接口说话，不用密钥；音色是它在线的那几个</string>
@@ -391,11 +391,11 @@
     <string name="settings_speak_edge_custom">自定义音色名</string>
     <string name="settings_speak_edge_custom_dialog">填接口认的音色名，例如 zh-CN-XiaoxiaoNeural；留空回到缺省</string>
     <string name="settings_speak_edge_probe">检测 Edge 在线</string>
-    <string name="settings_speak_edge_probe_summary">走一趟完整的握手与一句短话（只收音频、不播放）；回执还会说清用的是本地令牌还是官网那个令牌端点</string>
+    <string name="settings_speak_edge_probe_summary">走一趟握手加一句短话</string>
     <string name="settings_speak_edge_probe_ok">Edge 通着：%1$d ms（%2$s 令牌）</string>
     <string name="settings_speak_edge_probe_failed">Edge 不通：%1$s</string>
     <string name="settings_speak_engine_api">API TTS（自填地址 + 密钥）</string>
-    <string name="settings_speak_engine_api_summary">把文本发给一个 OpenAI 兼容的 /v1/audio/speech 接口，用它自己的音色说话</string>
+    <string name="settings_speak_engine_api_summary">OpenAI 兼容的 speech 接口</string>
     <string name="settings_speak_engine_api_pick">在下面填地址与密钥</string>
     <string name="settings_speak_engine_api_using">正在用 %1$s 说话</string>
     <string name="settings_speak_api_url">API 地址</string>
@@ -416,14 +416,14 @@
     <string name="settings_speak_api_voices_scanning">正在读音色库...</string>
     <string name="settings_speak_api_voices_broken">音色库读不出来：%1$s</string>
     <string name="settings_speak_api_voice_model">模型 %1$s</string>
-    <string name="settings_speak_online_volume">这条引擎的响度由服务与手机媒体音量决定；应用这一侧的增益只对自带那条模型有意义</string>
+    <string name="settings_speak_online_volume">响度跟媒体音量走</string>
     <string name="settings_speak_models">本机音色</string>
     <string name="settings_speak_models_scanning">正在扫描...</string>
-    <string name="settings_speak_models_none">%1$s 下什么都没找到；把模型目录拷进去再点一下重扫</string>
+    <string name="settings_speak_models_none">%1$s 下没找到模型</string>
     <string name="settings_speak_models_usable">%1$s 模型；点它用它说话</string>
     <string name="settings_speak_models_directory">模型放在哪</string>
     <string name="settings_speak_models_directory_summary">%1$s\n一个目录算一个音色；点一下重扫</string>    <string name="settings_speak_system">系统文字转语音设置</string>
-    <string name="settings_speak_system_summary">换引擎、下语音包、调它自己的语速都在那一页; 本应用只能在这条引擎给出的音色里挑</string>
+    <string name="settings_speak_system_summary">换引擎、下语音包、调语速都在那一页</string>
     <string name="settings_speak_preview">试听</string>
     <string name="settings_speak_previewing">正在说...</string>
     <string name="settings_speak_preview_summary">用上面选的音色与语速说一句, 好让耳朵来定</string>
@@ -431,18 +431,18 @@
     <string name="settings_speak_sample">回答会以这个样子说出来。</string>
 
     <string name="settings_section_lock">锁屏</string>
-    <string name="settings_section_lock_summary">熄屏也能叫醒, 叫醒之后按你自己的解锁动作走一遍</string>
+    <string name="settings_section_lock_summary">熄屏也能叫醒, 按你的解锁走一遍</string>
     <string name="settings_lock_wake_screen">叫醒时点亮屏幕</string>
-    <string name="settings_lock_wake_screen_summary">熄屏时也听得见唤醒词; 不开这一条, 那一次命中就落在黑屏里。有特权通道就先走通道 (KEYCODE_WAKEUP), 其次是应用自己的电源锁, 全屏通知是最后一条</string>
+    <string name="settings_lock_wake_screen_summary">熄屏时也听得见唤醒词</string>
     <string name="settings_lock_auto_unlock">唤醒时自动解锁</string>
-    <string name="settings_lock_auto_unlock_summary">屏幕亮了之后, 把录下来的那一条走一遍 —— 于是喊一声就能到桌面。这等于把解锁密码交给本应用: 指纹与人脸第三方代不了, 图案只是实验性支持。缺省关着; 每次重放都在通知栏留一行, 连着失败三次就自己关掉</string>
+    <string name="settings_lock_auto_unlock_summary">亮屏后重放录下的那一条</string>
     <string name="settings_lock_inject_unlock">注入解锁</string>
-    <string name="settings_lock_inject_unlock_summary">开启后解锁更快: 亮屏之后直接输入密码并确认, 不再重放录制的手势, 每一步之间的等待也一并省去 (真机实测: 亮屏后不发任何手势, 只输入密码即可解锁)。密码在下面「注入密码」里设置, 不必先录制解锁动作。若本机锁屏不接受注入的输入, 或者解锁方式是图案, 请关闭本项并改用「录制解锁」; 录制内容始终保留, 本项不会删除它。连续三次失败会自动关闭「唤醒时自动解锁」</string>
+    <string name="settings_lock_inject_unlock_summary">亮屏后直接输密码, 不重放手势</string>
     <string name="settings_lock_inject_password">注入密码</string>
-    <string name="settings_lock_inject_password_none">尚未设置; 点这里输入用于注入解锁的密码或 PIN, 不必录制解锁动作</string>
-    <string name="settings_lock_inject_password_set">已保存 %1$d 位密码; 点这里修改, 留空保存即清除</string>
+    <string name="settings_lock_inject_password_none">还没设; 点这里输入密码</string>
+    <string name="settings_lock_inject_password_set">已存 %1$d 位; 点这里改</string>
     <string name="settings_lock_inject_password_dialog">注入密码</string>
-    <string name="settings_lock_inject_password_dialog_summary">仅供「注入解锁」使用: 亮屏之后直接输入这段密码并确认。它以 Keystore 加密保存, 不会写入解锁脚本, 也不会出现在日志里; 留空保存即清除。保存后可用「测试一次」验证</string>
+    <string name="settings_lock_inject_password_dialog_summary">只给「注入解锁」用。Keystore 加密保存, 不进脚本也不进日志; 留空保存即清除</string>
     <string name="settings_lock_inject_password_confirm">保存</string>
     <string name="settings_lock_inject_password_saved">注入密码已保存 (加密存储)</string>
     <string name="settings_lock_inject_password_cleared">注入密码已清除</string>
@@ -451,31 +451,31 @@
     <string name="settings_lock_secret_pattern">已保存 %1$d 个点的图案</string>
     <string name="settings_lock_record">录制解锁</string>
     <string name="settings_lock_record_none">还没录过; 点它对着锁屏走一遍你自己的解锁</string>
-    <string name="settings_lock_record_done">%1$d 步, 装于 %2$s; 密码那一格放着 %3$s</string>
-    <string name="settings_lock_record_done_inject">%1$d 步, 装于 %2$s; 密码那一格放着 %3$s —— 注入解锁已开启, 若注入不可用, 关闭它即可改用本录制</string>
-    <string name="settings_lock_record_running">正在录: 请在手机上走一遍解锁 (已经录到 %1$d 步)</string>
+    <string name="settings_lock_record_done">%1$d 步, 装于 %2$s</string>
+    <string name="settings_lock_record_done_inject">%1$d 步; 注入解锁已开启</string>
+    <string name="settings_lock_record_running">正在录: 在手机上走一遍解锁 (已 %1$d 步)</string>
     <string name="settings_lock_record_dialog">录制解锁</string>
-    <string name="settings_lock_record_dialog_summary">这台手机有密码或 PIN 就先打在这里 (只有滑动锁就留空)。按下去之后应用会把屏锁上, 然后请对着锁屏走一遍平时那套解锁动作 —— 解开了它自己收工。**敲密码那几个点击一个字都不录**: 第一次点击起的东西整段丢掉, 改由这里填的这一份负责, 而它是用 Keystore 加密存的, 明文不落盘</string>
+    <string name="settings_lock_record_dialog_summary">有密码就先打在这里 (纯滑动锁留空)。按下去会锁屏, 然后照平时那套解一遍; 敲密码那几个点击不录, 由这里填的加密保存</string>
     <string name="settings_lock_record_start">锁上屏幕并开始录</string>
     <string name="settings_lock_script">导入解锁脚本</string>
     <string name="settings_lock_script_none">不想走一遍就用脚本写出来; 框里先给一份模板</string>
-    <string name="settings_lock_script_done">现在是 %1$d 步; 点它就能把这一条当脚本看, 改完再放回去</string>
+    <string name="settings_lock_script_done">现在 %1$d 步; 点它看脚本</string>
     <string name="settings_lock_script_dialog">导入解锁脚本</string>
-    <string name="settings_lock_script_dialog_summary">一行一步, 空行与 # 后面的内容都忽略。动词一共六个: key / tap / swipe / stroke / text / wait —— 比如 "swipe 0.5 0.85 0.5 0.2 700"。坐标是 0~1 的比例而不是像素, 所以写 540 1200 会被拒。text 是"这里要输密码"的意思, **它不带参数**: 密码一个字都不写在脚本里, 从下面那一格进加密那一份。导入会替掉之前录的或导的那一条</string>
+    <string name="settings_lock_script_dialog_summary">一行一步: key / tap / swipe / stroke / text / wait。坐标写 0~1 的比例, 不写像素; 密码不进脚本, 从下面那一格进加密那份。导入会替掉现有那一条</string>
     <string name="settings_lock_script_password">密码 / PIN (脚本里有 text 那一步才要填)</string>
     <string name="settings_lock_script_confirm">导入</string>
     <string name="settings_lock_imported">导入了 %1$d 步: %2$s</string>
     <string name="settings_lock_import_failed">什么都没导入: %1$s</string>
     <string name="settings_lock_replay">测试一次</string>
-    <string name="settings_lock_replay_summary">先锁上屏幕, 再按当前设置执行一次解锁 (开启「注入解锁」时测试的就是注入), 并报告执行到哪一步</string>
+    <string name="settings_lock_replay_summary">锁屏后按当前设置试一次解锁</string>
     <string name="settings_lock_replay_running">正在试...</string>
     <string name="settings_lock_clear">清除录制</string>
-    <string name="settings_lock_clear_summary">步骤序列 / 工作区里那份明文副本 / 加密的密码与那把 Keystore 密钥, 一起删</string>
-    <string name="settings_lock_cleared">录制已经删掉, 加密的密码也连着那把 Keystore 密钥一起走了</string>
-    <string name="settings_lock_note_none">还没试过。录制里只留动作: 密码进加密那一格, 而"敲密码那几个点击"是有意丢掉的</string>
+    <string name="settings_lock_clear_summary">步骤序列、明文副本、密码与密钥一起删</string>
+    <string name="settings_lock_cleared">录制与加密的密码都已删掉</string>
+    <string name="settings_lock_note_none">还没试过; 录制里只留动作</string>
 
     <string name="settings_section_activity">活动</string>
-    <string name="settings_section_activity_summary">她每天自己看看这台手机, 也在你觉得合适的时候开口</string>
+    <string name="settings_section_activity_summary">她自己看看手机, 择时开口</string>
     <string name="settings_activity_daily">她每天自己看看手机</string>
     <string name="settings_activity_speak">她什么时候开口</string>
     <string name="settings_activity_knows">她记着你哪些事</string>
@@ -490,16 +490,16 @@
     <string name="settings_explore_toggle_summary">到点自己开一场, 不用手动点</string>
     <string name="settings_explore_at">每天几点开始</string>
     <string name="settings_explore_at_summary">每天 %1$s</string>
-    <string name="settings_explore_at_dialog_summary">一天一次: 填 HH:mm (例如 03:00), 到点她自己开始</string>
+    <string name="settings_explore_at_dialog_summary">一天一次, 填 HH:mm (例如 03:00)</string>
     <string name="settings_explore_at_hint">03:00</string>
     <string name="settings_explore_at_bad">时刻要写成 HH:mm, 例如 03:00</string>
     <string name="settings_explore_unlock">允许锁屏解锁</string>
-    <string name="settings_explore_unlock_summary">到点先点亮屏幕并解开锁屏 (用「锁屏」那一段录的解)</string>
+    <string name="settings_explore_unlock_summary">到点先亮屏并解锁</string>
     <string name="settings_explore_unlock_missing">还没录过解锁: 开着只会点亮屏幕, 要真解开先到「锁屏」那一段录制或填密码</string>
     <string name="settings_explore_minutes">每场多少分钟</string>
-    <string name="settings_explore_minutes_summary">每场 %1$d 分钟 (1~180, 缺省 30)</string>
+    <string name="settings_explore_minutes_summary">每场 %1$d 分钟 (1~180)</string>
     <string name="settings_explore_steps">每场多少步</string>
-    <string name="settings_explore_steps_summary">每场最多 %1$d 步 (1~1000, 缺省 60)</string>
+    <string name="settings_explore_steps_summary">每场最多 %1$d 步 (1~1000)</string>
     <string name="settings_explore_budget">预算 %1$d 分 / %2$d 步</string>
     <string name="settings_explore_preset">预设: %1$s</string>
     <string name="settings_explore_preset_why">为什么是它: %1$s</string>
@@ -513,7 +513,7 @@
     <string name="settings_explore_not_started">这次探索没开成</string>
     <string name="settings_explore_card">下一次探索的任务</string>
     <string name="settings_explore_card_empty">(空: 到点会自由探索这台手机)</string>
-    <string name="settings_explore_card_dialog_summary">这一份就是下一场的开场任务; 她每次探索结束也会按那一趟改写它</string>
+    <string name="settings_explore_card_dialog_summary">下一场的开场任务; 每趟探索结束会改写它</string>
     <string name="settings_explore_card_hint">用一段话说清下一场看什么</string>
     <string name="settings_explore_card_saved">已经存好了, 下一场就用这一份</string>
     <string name="settings_explore_card_save_failed">没写进去 (文件不可写), 这一份没生效</string>
@@ -526,16 +526,16 @@
 
     <string name="settings_proactive_toggle">按时间自己开一场对话</string>
     <string name="settings_router_tick">她自己挑时机开口</string>
-    <string name="settings_router_tick_summary">每 25~55 分钟看一眼: 打游戏久了 / 记着的事到点 / 太久没说话, 值得说才开口</string>
+    <string name="settings_router_tick_summary">每 25~55 分钟看一眼</string>
     <string name="settings_router_tick_failed">没写进去 (文件不可写), 这一下没生效</string>
-    <string name="settings_proactive_toggle_summary">到点自己开口, 不用手动点; 与自动指令共用 30 分钟闸</string>
+    <string name="settings_proactive_toggle_summary">到点自己开口</string>
     <string name="settings_proactive_times">每天几点</string>
     <string name="settings_proactive_times_summary">每天 %1$s</string>
-    <string name="settings_proactive_times_dialog_summary">一个或多个 HH:mm, 用逗号隔开 (例如 09:30, 18:00); 到点自己开一场</string>
+    <string name="settings_proactive_times_dialog_summary">一个或多个 HH:mm, 逗号隔开 (例如 09:30, 18:00)</string>
     <string name="settings_proactive_times_hint">09:30, 18:00</string>
     <string name="settings_proactive_times_bad">每个时刻都要写成 HH:mm, 例如 09:30</string>
     <string name="settings_proactive_unlock">允许锁屏解锁</string>
-    <string name="settings_proactive_unlock_summary">到点先点亮屏幕并解开锁屏 (用「锁屏」那一段录的解)</string>
+    <string name="settings_proactive_unlock_summary">到点先亮屏并解锁</string>
     <string name="settings_proactive_unlock_missing">还没录过解锁: 开着只会点亮屏幕, 要真解开先到「锁屏」那一段录制或填密码</string>
     <string name="settings_proactive_next">下一次 %1$s</string>
     <string name="settings_proactive_no_next">还没有下一次 (开着才有)</string>
@@ -558,24 +558,24 @@
     <string name="settings_proactive_note">排期在 proactive-schedule.json, 改完立刻重排; 规则的正文在「自动指令」那一段改</string>
 
     <string name="settings_section_automation">自动指令</string>
-    <string name="settings_section_automation_summary">满足条件就做一件事 (提醒一声, 或者开一场会话干活)</string>
-    <string name="settings_automation_empty">还没有自动指令。存在这里: %1$s; 点下面的「新建」说一句"到点 / 到了某地 / 收到某条通知就做什么", 规则由模型写</string>
+    <string name="settings_section_automation_summary">满足条件就做一件事</string>
+    <string name="settings_automation_empty">还没有规则 (存在 %1$s); 点「新建」说一句</string>
     <string name="settings_automation_new">新建一条自动指令</string>
-    <string name="settings_automation_new_summary">说一句"什么时候、要做什么", 条件与参数交给模型写</string>
+    <string name="settings_automation_new_summary">说一句「何时、做什么」</string>
     <string name="settings_automation_new_title">新建自动指令</string>
-    <string name="settings_automation_new_dialog_summary">只要一行: 什么时候、要做什么。冷却时间 (0 到 1440 分钟, 0 表示不冷却) 由你定; 规则由模型写成 JSON, 写完这一页就能看见它</string>
+    <string name="settings_automation_new_dialog_summary">一行说清: 什么时候、要做什么。规则由模型写成 JSON</string>
     <string name="settings_automation_new_hint">例如: 每天八点提醒我带伞</string>
     <string name="settings_automation_create">交给模型写</string>
     <string name="settings_automation_create_prompt">请把下面这件事做成一条自动指令, 用 lw_automation op=write 写进 automations, 名字你起一个短的中文名, when 挑最合适的那一种条件, then 用 remind (提醒一声) 或 task (开一场会话去干活); 冷却时间必须写成 cooldownMinutes: %2$d 分钟 —— 这是主人自己定的, 不许改成别的数: %1$s</string>
     <string name="settings_automation_manage">删掉或改一改一条</string>
     <string name="settings_automation_manage_summary">先选一条, 再选做什么</string>
     <string name="settings_automation_manage_title">哪一条?</string>
-    <string name="settings_automation_pick_summary">选中之后再选: 立刻跑一次 / 改冷却时间 / 改一改 / 删掉</string>
+    <string name="settings_automation_pick_summary">跑一次 / 改冷却 / 改一改 / 删掉</string>
     <string name="settings_automation_open_title">这条自动指令</string>
     <string name="settings_automation_run">立刻跑一次</string>
     <string name="settings_automation_edit">改一改</string>
     <string name="settings_automation_edit_title">改哪一处?</string>
-    <string name="settings_automation_edit_summary">说一句要怎么改; 模型先读它现在是什么, 再把改好的写回去</string>
+    <string name="settings_automation_edit_summary">说一句怎么改; 模型先读再写回</string>
     <string name="settings_automation_edit_hint">例如: 改成工作日八点, 每天最多两次</string>
     <string name="settings_automation_edit_prompt">请改一改自动指令「%1$s」: %2$s —— 先用 lw_automation op=read 读它现在是什么, 再用 op=write 把改好的写回去</string>
     <string name="settings_automation_delete">删掉这一条</string>
@@ -584,14 +584,14 @@
     <string name="settings_automation_delete_failed">「%1$s」没删掉: 文件不在或者删不动</string>
     <string name="settings_automation_cooldown">改冷却时间</string>
     <string name="settings_automation_cooldown_title">冷却时间</string>
-    <string name="settings_automation_cooldown_dialog_summary">同一条规则两次触发之间至少隔这么久; 0 到 1440 分钟, 0 = 不冷却。改完立刻生效</string>
+    <string name="settings_automation_cooldown_dialog_summary">两次触发至少隔这么久; 0 到 1440 分钟, 0 = 不冷却</string>
     <string name="settings_automation_cooldown_label">冷却时间 (分钟)</string>
     <string name="settings_automation_cooldown_saved">冷却改成 %1$d 分钟了</string>
     <string name="settings_automation_cooldown_failed">冷却没改成: 这条规则读不出来或者文件写不进去</string>
     <string name="settings_automation_sent">已经投出去了: 每次触发都新开一场会话, 提醒的措辞由模型现写</string>
     <string name="settings_automation_send_failed">没能投出去 (队列文件写不进去)</string>
     <string name="settings_automation_broken">这一条读不出来: %1$s</string>
-    <string name="settings_automation_broken_delete_summary">这一条读不出来, 删掉会把原件与 rejected/ 里的副本一起删掉: %1$s</string>
+    <string name="settings_automation_broken_delete_summary">读不出来, 删就一起删副本</string>
     <string name="settings_automation_rule_state">今天 %1$d/%2$d 次</string>
     <string name="settings_automation_last">上次 %1$s</string>
     <string name="settings_automation_rule_cooldown">冷却 %1$d 分钟</string>
@@ -612,34 +612,34 @@
     <string name="settings_automation_every_minutes">每 %1$d 分钟</string>
     <string name="settings_automation_every_meters">至少移动 %1$d 米</string>
     <string name="settings_automation_weather_every">天气多久问一次</string>
-    <string name="settings_automation_weather_every_summary">便宜的免 key 数据源 (Open-Meteo); 同一个地点问一次, 几条规则共用那一份</string>
+    <string name="settings_automation_weather_every_summary">免 key 源 (Open-Meteo)</string>
     <string name="settings_automation_place_every">位置多久问一次</string>
-    <string name="settings_automation_place_every_summary">只用网络定位 (WiFi 与基站), 极少开 GPS; 省电时整条不注册</string>
+    <string name="settings_automation_place_every_summary">只用网络定位, 省电时不注册</string>
     <string name="settings_automation_place_meters">位置至少移动多远</string>
     <string name="settings_automation_place_meters_summary">移动不到这个距离就不叫"换了地方"</string>
     <string name="settings_automation_quiet">静默时段</string>
-    <string name="settings_automation_quiet_summary">这一段里条件照判, 只是不响 (与省电时段是两笔账)</string>
+    <string name="settings_automation_quiet_summary">这段里只判不响</string>
     <string name="settings_automation_quiet_title">静默时段</string>
-    <string name="settings_automation_quiet_dialog_summary">写成 23:00-07:00 这样; 跨零点也认, 起止相同等于不静默</string>
+    <string name="settings_automation_quiet_dialog_summary">写成 23:00-07:00; 跨零点也认, 起止相同=不静默</string>
     <string name="settings_automation_quiet_hint">例如: 23:00-07:00</string>
     <string name="settings_automation_quiet_bad">这句时间看不懂, 没有改</string>
     <string name="settings_automation_allow_acting">允许它自己动手</string>
-    <string name="settings_automation_allow_acting_summary">开着时标了 task 的那几条才会真的去做 (默认关); 提醒那一种不受它管</string>
+    <string name="settings_automation_allow_acting_summary">task 类才会真去做</string>
     <string name="settings_automation_history">最近做了什么</string>
     <string name="settings_automation_history_empty">还没有判定过。若有规则该响而没响, 上面监测器那几行的状态与"为什么可能不响"就是答案</string>
     <string name="settings_automation_note">规则正文由模型写, 这一页只读它; 点一条的开关 = 启用 / 停用, 其余动作在「删掉或改一改一条」里</string>
 
     <string name="settings_section_quick">快捷指令</string>
-    <string name="settings_section_quick_summary">点一下就交给模型去跑的那几条工作流, 一条一个 md 文件</string>
+    <string name="settings_section_quick_summary">点一下就交给模型的那几条工作流</string>
     <string name="settings_quick_empty">还没有快捷指令。存在这里: %1$s; 点下面的「新建」说一句要做什么, 模型会把它写成一条</string>
     <string name="settings_quick_no_summary">(没有摘要行)</string>
     <string name="settings_quick_new">新建一条快捷指令</string>
     <string name="settings_quick_new_summary">说一句这条要做什么, 正文交给模型写</string>
     <string name="settings_quick_new_title">新建快捷指令</string>
-    <string name="settings_quick_new_dialog_summary">只要一行: 这条快捷指令要做什么。名字与步骤由模型写, 写完这一页就能看见它</string>
+    <string name="settings_quick_new_dialog_summary">一行说清这条要做什么; 名字与步骤由模型写</string>
     <string name="settings_quick_new_hint">例如: 帮我把这周的会排到上午</string>
     <string name="settings_quick_create">交给模型写</string>
-    <string name="settings_quick_action_summary">运行: 把它投进当前会话 (没有会话就新建一场), 模型照着它走。删除: 只删掉这个文件, 不可恢复</string>
+    <string name="settings_quick_action_summary">运行或删除这一条</string>
     <string name="settings_quick_run">运行这一条</string>
     <string name="settings_quick_delete">删除这一条</string>
     <string name="settings_quick_run_sentence">用快捷指令: %1$s</string>
@@ -651,7 +651,7 @@
     <string name="settings_quick_note">点一条 = 投进会话; 队列文件与语音那条链是同一个, 所以"没有会话就新建、10 分钟内接同一场"照旧</string>
 
     <string name="settings_section_skills">技能</string>
-    <string name="settings_section_skills_summary">把这台手机上的应用对应的技能交给 dsh</string>
+    <string name="settings_section_skills_summary">把手机上应用的技能交给 dsh</string>
     <string name="settings_skills_empty">随包目录里的应用这台机器上一个都没装, 所以没有技能要加</string>
     <string name="settings_skills_have">已经装了 —— 命中 %1$s</string>
     <string name="settings_skills_missing">还没装 —— 命中 %1$s</string>
@@ -667,7 +667,7 @@
     <string name="settings_skills_delete_failed">有 %1$d 条没删掉</string>
     <string name="settings_skills_note">技能只是提示词材料: 它落在 dsh 家里那份 SKILL.md, 不动任何权限。装的时候从不覆盖已经在的那一份 —— 已装页里是检测更新 / 一键升级 / 卸载, 可用页里是刷新技能 / 全部安装 / 逐条装</string>
     <string name="settings_skills_browse">浏览技能仓库</string>
-    <string name="settings_skills_browse_summary">列出 %1$s 里全部技能与它们的版本: 点一条装, 已经在的那条点它是升级</string>
+    <string name="settings_skills_browse_summary">列出 %1$s 的技能</string>
     <string name="settings_skills_browse_query">按名字或用途搜</string>
     <string name="settings_skills_browse_loading">正在读本机缓存的那份索引…</string>
     <string name="settings_skills_browse_empty">本机还没有索引: 先刷新一次</string>
@@ -686,9 +686,9 @@
     <string name="settings_skills_browse_edited_overwrite">连它们一起盖</string>
     <string name="settings_skills_browse_edited_keep">保留我的</string>
     <string name="settings_skills_installed">查看已装 app-skill</string>
-    <string name="settings_skills_installed_summary">本机装着 %1$d 条: 检测更新 / 一键升级 / 卸载</string>
+    <string name="settings_skills_installed_summary">本机 %1$d 条</string>
     <string name="settings_skills_available">查看本机可用 app-skill</string>
-    <string name="settings_skills_available_summary">%1$s 里全部技能: 刷新技能 / 全部安装 / 挑一条装</string>
+    <string name="settings_skills_available_summary">%1$s 全部技能</string>
     <string name="skills_installed_title">已装技能</string>
     <string name="skills_available_title">可用技能</string>
     <string name="skills_check_updates">检测更新</string>
@@ -710,7 +710,7 @@
     <string name="skills_busy">正在处理…</string>
 
     <string name="settings_section_linux">Linux 沙盒</string>
-    <string name="settings_section_linux_summary">一个 Alpine 环境, 能装包能编译, 命令从它里面跑</string>
+    <string name="settings_section_linux_summary">一个能装包能编译的 Alpine 环境</string>
     <string name="settings_linux_reading">正在读它的状态…</string>
     <string name="settings_linux_absent">未安装</string>
     <string name="settings_linux_installed">已安装 (%1$s)</string>
@@ -721,18 +721,18 @@
     <string name="settings_linux_note">它不是安全沙盒: 沙盒里跑的东西读不到应用的凭据 (那条靠 uid 挡住), 但它换来的是 shell 一档的系统能力, 面反而比应用自己更大; /work 就是会话工作区, 别处看不见 —— 而那只是 proot 的视野约定, 不是边界; 网络是通的, 收不紧。每条命令跑完不留进程</string>
     <string name="settings_linux_install">装入 Linux 环境</string>
     <string name="settings_linux_reinstall">重装 Linux 环境</string>
-    <string name="settings_linux_install_summary">把随包那份 Alpine 解到 /data/local/tmp/lwlinux, rootfs 会从头来一遍 (装进沙盒里的应用再装回来只有随包那一份)</string>
+    <string name="settings_linux_install_summary">解到 /data/local/tmp 就重来</string>
     <string name="settings_linux_remove">删掉它</string>
-    <string name="settings_linux_remove_summary">整棵 rootfs 与里面 apk add 装过的一切一起删</string>
+    <string name="settings_linux_remove_summary">rootfs 与装过的包一起删</string>
     <string name="settings_linux_remove_dialog_title">删掉 Linux 沙盒?</string>
-    <string name="settings_linux_remove_dialog_summary">删掉 /data/local/tmp/lwlinux 下的整棵 rootfs 与其中安装的所有包, 没有回收站; 再装回来只有随包那一份。(通道断开之后这个目录连这个按钮都够不着, 那时要清只能走 adb)</string>
+    <string name="settings_linux_remove_dialog_summary">删掉整个 rootfs 与里面装的包, 没有回收站; 再装只有随包那一份</string>
     <string name="settings_linux_remove_dialog_ok">删掉</string>
 
     <string name="settings_section_sync">同步</string>
-    <string name="settings_section_sync_summary">默认关着。用电脑面板上的二维码配对一次 (仓库 / 分支 / 对端地址与口令一次带过来), 会话就在两台机器之间走; 让电脑替你干活那条「跨设备通道」也住这一段, 它与同步无关, 随时可用</string>
+    <string name="settings_section_sync_summary">电脑面板扫码配对, 会话在两台机之间走</string>
 <string name="settings_sync_note">同步首次拉取耗时较长, 需在电脑上安装同步插件, 扫码即可配对</string>
 <string name="settings_sync_plugin">电脑上的同步插件</string>
-<string name="settings_sync_plugin_summary">在电脑的 dsh 里装上它, 再扫码配对: %1$s</string>
+<string name="settings_sync_plugin_summary">在电脑 dsh 里装它再扫码</string>
     <string name="settings_sync_master">同步</string>
     <string name="settings_sync_master_on">开着: 会话按 git 在两台机器之间走</string>
     <string name="settings_sync_master_off">关着: 不拉不推, 后台一趟都不跑 (默认)</string>
@@ -751,7 +751,7 @@
     <string name="settings_sync_pair_paste_note">扫不出来的话, 把整段文本复制过来 (它是以 luwi-sync:// 开头的)</string>
     <string name="settings_sync_pair_error_camera">相机权限没给: 在系统设置里允许相机, 或者把配对文本粘进来</string>
     <string name="settings_sync_pair_reconfirm_title">换一台电脑重新配对?</string>
-    <string name="settings_sync_pair_reconfirm_body">这台手机已经和 %1$s 配过对。重新配对 (这张码来自 %2$s) 会重置同步基线, 并清掉仓库里的旧会话</string>
+    <string name="settings_sync_pair_reconfirm_body">已和 %1$s 配过对。重新配对会重置同步基线, 并清掉仓库里的旧会话</string>
     <string name="settings_sync_pair_reconfirm_ok">重新配对</string>
     <string name="settings_sync_pair_done">配对完成, 正在重启 DSH host…</string>
 
@@ -913,7 +913,7 @@
     <string name="settings_sync_status_paired">已配对：%1$s · 仓库 %2$s · 分支 %3$s · 每 %4$d 分钟拉一次</string>
     <string name="settings_sync_status_unpaired">还没配对: 配对之后再打开同步, 没配对时仓库地址是空的</string>
     <string name="settings_sync_show">看当前配置</string>
-    <string name="settings_sync_show_summary">只读地看一眼 session-sync.json (口令已打码; 原文只在文件里)</string>
+    <string name="settings_sync_show_summary">只读看一眼 session-sync.json</string>
     <string name="settings_sync_show_dialog">这一段写的那份文件 (口令已打码)</string>
     <string name="settings_sync_close">关闭</string>
 
@@ -921,16 +921,16 @@
     <string name="settings_section_plugin_summary">装上别人写的包, 给这台手机加能力</string>
     <string name="settings_plugin_empty">一个插件都没有装。插件落在 %1$s —— 点下面的「装入插件包」收一份进来</string>
     <string name="settings_plugin_install">装入插件包</string>
-    <string name="settings_plugin_install_summary">.lwp 文件, 或者一份解开的目录 (里面有 plugin.json); 装完还要勾能力才启得来</string>
+    <string name="settings_plugin_install_summary">.lwp 文件或解开的目录</string>
     <string name="settings_plugin_link">从链接装入</string>
-    <string name="settings_plugin_link_summary">一个 .lwp 的 https 链接; 验与装跟本地那份走的是完全同一条链</string>
+    <string name="settings_plugin_link_summary">.lwp 的 https 链接</string>
     <string name="settings_plugin_link_title">从链接装入</string>
-    <string name="settings_plugin_link_dialog_summary">只收 https。签名、逐文件哈希、版本、工具前缀与声明的能力全过之前, 一个字都不落地</string>
+    <string name="settings_plugin_link_dialog_summary">只收 https; 签名、哈希、版本、能力全过之前不落地</string>
     <string name="settings_plugin_link_hint">https://…/something.lwp</string>
     <string name="settings_plugin_link_install">下载并装入</string>
     <string name="settings_plugin_link_busy">正在下…</string>
     <string name="settings_plugin_browse">浏览插件仓库</string>
-    <string name="settings_plugin_browse_summary">在官方索引里搜索并安装; 装之前按索引核整包与发布者</string>
+    <string name="settings_plugin_browse_summary">官方索引里搜并安装</string>
     <string name="settings_plugin_index_query">搜名字 / 作者 / 工具 / 标签</string>
     <string name="settings_plugin_index_loading">正在读缓存…</string>
     <string name="settings_plugin_index_empty">索引还没取过。点下面的「刷新索引」联网取一份 (平时只读缓存, 不联网)</string>
@@ -944,7 +944,7 @@
         <string name="settings_plugin_index_install">安装</string>
     <string name="settings_plugin_index_installing">正在安装…</string>
 <string name="settings_plugin_index_close">完成</string>
-    <string name="settings_plugin_capabilities_summary">它声明的能力就摆在这儿, 勾了才给。带 ★ 的那几条是敏感档, 默认不勾, 要自己点。答应之后一路做完: 装包 → 把伴侣 APK 也装上 → 启用</string>
+    <string name="settings_plugin_capabilities_summary">勾了才给, ★ 默认不勾</string>
     <string name="settings_plugin_capabilities_action">装它</string>
     <string name="settings_plugin_capabilities_busy">正在装…</string>
     <string name="settings_plugin_companion_missing">伴侣应用 %1$s 没装 —— 它的工具在装上之前都动不了</string>
@@ -952,7 +952,7 @@
     <string name="settings_plugin_companion_install">把伴侣 APK 装上</string>
     <string name="settings_plugin_companion_busy">正在装…</string>
     <string name="settings_plugin_developer">开发者模式</string>
-    <string name="settings_plugin_developer_summary">允许装入没有发布者签名的本地包。装一个插件就是信任它, 平时不要开</string>
+    <string name="settings_plugin_developer_summary">允许装无签名的本地包</string>
     <string name="settings_plugin_note">装一个插件就是信任它: 它拿到的能力就是你在这一页勾给它的那些; 启用那一步会去绑伴侣应用的服务</string>
     <string name="settings_plugin_state_broken">读不出来</string>
     <string name="settings_plugin_state_enabled">在岗</string>
@@ -971,7 +971,7 @@
     <string name="settings_plugin_audit_empty">它还没有调用过任何能力</string>
     <string name="settings_plugin_uninstall">卸载并删掉它的数据</string>
     <string name="settings_widget_section">桌面组件</string>
-    <string name="settings_widget_section_summary">桌面上那几格现在挂谁。一个槽同一时刻只挂一只插件 (同槽互斥), 换一只只重画, 不用重装任何东西</string>
+    <string name="settings_widget_section_summary">桌面格子里挂谁</string>
     <string name="settings_widget_slot_anim_name">Luwi 动画组件</string>
     <string name="settings_widget_slot_image_name">Luwi 图文组件</string>
     <string name="settings_widget_slot_anim_desc">会动的那一格: 里面装的是你在插件页里挑好的帧序列</string>
@@ -993,7 +993,7 @@
     <string name="settings_plugin_inline_same_uid">它与 Luwi 同权限 (同一个 uid): 运行时那几道能力检查对它是体验, 不是墙</string>
     <string name="settings_plugin_inline_whitelisted">它的作者在白名单里 (指纹 %1$s)</string>
     <string name="settings_theme_row">浮标外观</string>
-    <string name="settings_theme_summary">多个主题插件可以同时装着, 同一时刻只生效一个; 读不到就回内置画法</string>
+    <string name="settings_theme_summary">多个主题插件可同时装, 同一时刻只生效一个</string>
     <string name="settings_theme_builtin">内置画法</string>
     <string name="settings_theme_now">现在用的是它</string>
     <string name="settings_theme_use">换成这一套</string>
