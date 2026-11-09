@@ -1142,6 +1142,26 @@
     <string name="preview_open_refused">That file is outside the workspace</string>
     <string name="preview_open_missing">No app on this device can open that file</string>
 
+    <string name="doctor_menu">Self-check &amp; report</string>
+    <string name="doctor_menu_summary">See which layer is off; decide about reporting only if it stays broken</string>
+    <string name="doctor_title">Self-check &amp; report</string>
+    <string name="doctor_summary">Everything below was read on this phone. Luwi collects no personal content and uploads no private data: no screenshots, no screen content, no chats or typing, no contacts, files, accounts or API keys. Nothing leaves this phone unless you press “Report anonymously”.</string>
+    <string name="doctor_why">Why reporting helps: the same “it does nothing” can come from the privileged channel, accessibility, the virtual screen, the models or storage. The report spells out all eight, so the author can reproduce and fix it. You do not need to describe the problem — paste this report in the group, or press report.</string>
+    <string name="doctor_entry_from_guide">Stuck here? Self-check &amp; report</string>
+    <string name="doctor_copy">Copy report</string>
+    <string name="doctor_copied">Copied</string>
+    <string name="doctor_recheck">Check again</string>
+    <string name="doctor_send">Report anonymously</string>
+    <string name="doctor_sending">Sending…</string>
+    <string name="doctor_send_ok">Sent, thank you</string>
+    <string name="doctor_send_failed">Could not send: %1$s</string>
+    <string name="doctor_send_confirm_title">Only this report goes out — okay?</string>
+    <string name="doctor_send_confirm_summary">What is sent is exactly the report above, ten lines:\n· app version (e.g. 2.8.0 (19))\n· model / system / SDK / language (e.g. Xiaomi M2012K10C (ares) · Android 13 (SDK 33) · zh_CN)\n· one line per check, each just OK/WARN/FAIL plus a sentence; the eight checks are app, device, host, Node, privileged channel, accessibility, virtual screen, storage.\n\nWhat is never sent: screenshots or screen content, chats or typing, contacts / files / photos, accounts or API keys, host logs, any unique device identifier (no IMEI, ANDROID_ID or advertising ID, and we generate no install id). Like any website, the server sees your IP address, but we store no identifier tied to it.</string>
+    <string name="doctor_send_confirm_send">Send</string>
+    <string name="doctor_group_line">Still stuck? Come to the QQ group %1$s (tap this line to copy the number, then paste the report above). Things get fixed faster there, and it helps us too.</string>
+    <string name="doctor_group_copy">Copy group number %1$s</string>
+    <string name="doctor_group_copied">Group number copied</string>
+    <string name="boot_failed_report">Report this error</string>
 </resources>
 
 

@@ -1855,6 +1855,9 @@ private fun HostBootPanel(
     val failure = status as? HostStatus.Failed
     // 失败时一进来就是展开的: 那时日志就是唯一的线索, 不该再让人点一下
     var expanded by remember(failure) { mutableStateOf(failure != null) }
+    // 起不来的时候设置页可能都进不去, 自检这条路得摆在这一屏上
+    // (2026-11-08 主人: 自检修不了, 由他自己决定要不要匿名上报)
+    var reportFailure by remember(failure) { mutableStateOf(false) }
     // 主人 / agent 写的那份 splash.json (见 [SplashSetting]): 每次进来现读, 改完下一次开屏就是新的
     val splash = SplashSetting.config(context)
     // 自己那张图标: 只在文件真的换了 (大小/时间变了) 才重新解一遍
@@ -1915,6 +1918,13 @@ private fun HostBootPanel(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (failure != null) {
+                TextButton(
+                    text = stringResource(R.string.boot_failed_report),
+                    onClick = { reportFailure = true },
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
             if (splash.subtitle.isNotBlank()) {
                 Text(
                     text = splash.subtitle,
@@ -1986,6 +1996,7 @@ private fun HostBootPanel(
         }
         // 「开始使用」那张体检表**不再挂在启动页底部** (2026-11-04 主人 #2: 不要放底部): 它现在是
         // 一个居中对话框, 首启由 [ReadyPrompt] 弹一次, 之后走设置页那一行「检查所需依赖」
+        if (reportFailure) DoctorDialog(onDismissRequest = { reportFailure = false })
         if (splash.credit.isNotBlank()) {
             Text(
                 text = splash.credit,

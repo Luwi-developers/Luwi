@@ -1141,6 +1141,26 @@
     <string name="preview_open_refused">这个文件不在工作区里</string>
     <string name="preview_open_missing">这台设备上没有能打开它的应用</string>
 
+    <string name="doctor_menu">自检与上报</string>
+    <string name="doctor_menu_summary">查一查哪一层不对；修不了再决定要不要上报</string>
+    <string name="doctor_title">自检与上报</string>
+    <string name="doctor_summary">下面每一项都是在这一台手机上读到的。Luwi 不收集你的任何隐私内容，也不上传隐私数据：不读、不存、不发截图、屏幕内容、聊天、输入、联系人、文件、账号与 API Key。你不点「匿名上报」，一个字节都不会出去。</string>
+    <string name="doctor_why">为什么要上报：同一句「没反应」可能是特权通道、无障碍、虚拟屏、模型或存储里的任何一层，报告把八项摊开写清，作者照着就能复现并修掉。所以你不用会描述问题，把这份报告贴进群里或者点一下上报就行。</string>
+    <string name="doctor_entry_from_guide">卡在这一步了？自检与上报</string>
+    <string name="doctor_copy">复制报告</string>
+    <string name="doctor_copied">已复制</string>
+    <string name="doctor_recheck">重新检查</string>
+    <string name="doctor_send">匿名上报</string>
+    <string name="doctor_sending">正在上报…</string>
+    <string name="doctor_send_ok">已上报, 谢谢</string>
+    <string name="doctor_send_failed">上报失败: %1$s</string>
+    <string name="doctor_send_confirm_title">只会发这份报告，可以吗？</string>
+    <string name="doctor_send_confirm_summary">会发的，只有上面这份报告的原文，共十行：\n· 应用版本（例：2.8.0 (19)）\n· 机型 / 系统 / SDK / 语言（例：Xiaomi M2012K10C (ares) · Android 13 (SDK 33) · zh_CN）\n· 八项状态各一句，每句只是 OK/WARN/FAIL 加一句说明；八项是应用、设备、宿主程序、Node、特权通道、无障碍、虚拟屏、存储。\n\n不会发的：截图与屏幕内容、聊天与输入、联系人 / 文件 / 相册、账号与 API Key、宿主日志、设备唯一标识（没有 IMEI / ANDROID_ID / 广告 ID，也不生成任何安装编号）。服务器会像任何网站一样看到你的 IP，但不据此存任何用户标识。</string>
+    <string name="doctor_send_confirm_send">发送</string>
+    <string name="doctor_group_line">修不好就来群里说：%1$s（点这一行复制群号，再把上面的报告贴进去）。群里修得更快，也是对我们的支持。</string>
+    <string name="doctor_group_copy">复制群号 %1$s</string>
+    <string name="doctor_group_copied">群号已复制</string>
+    <string name="boot_failed_report">把这个错误报上去</string>
 </resources>
 
 

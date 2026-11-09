@@ -393,6 +393,8 @@ fun SettingsScreen() {
     // ⋮ 里那几件事 (反馈 / 检测更新 / 关于 …) 共用这一个"现在开着哪一页"的记号, null = 都没开
     // 同一刻只画一个对话框, 见 AboutDialogs 的文件头
     var about by remember { mutableStateOf<AboutPage?>(null) }
+    // 自检与上报 (2026-11-08 主人: 出事先自检, 修不了再由他自己决定要不要发)
+    var doctor by remember { mutableStateOf(false) }
     // 捐赠页那一行要跟着"刚填过的那个地址"变, 而它在偏好里 —— 对话框关掉时重新读一次
     // 收起来的那几段 (主人 2026-10-08: "把各设置版块设置为可折叠的"; 2026-10-16 第 1 条: 进页面只展开
     // 省电与「常用」那六段, 能力那 13 段收着): **缺省只展开白名单那七段** ([SettingsSectionsAlwaysOpen]),
@@ -444,6 +446,13 @@ fun SettingsScreen() {
                     OverlayIconDropdownMenu(
                         entry = DropdownEntry(
                             items = listOf(
+                                DropdownItem(
+                                    // 2026-11-08 主人: 自检排第一条 —— 它答的是"我这一层对不对",
+                                    // 而反馈答的是"我要说点什么", 先有读数再说话
+                                    text = stringResource(R.string.doctor_menu),
+                                    summary = stringResource(R.string.doctor_menu_summary),
+                                    onClick = { doctor = true },
+                                ),
                                 DropdownItem(
                                     // 2.7.9 第 10 条 (2026-10-19 主人: 反馈入口放 ⋮ 的第一条):
                                     // 后端还没就绪, 这一条走"复制 + 打开 New Issue 页"的本地兜底
@@ -832,7 +841,18 @@ fun SettingsScreen() {
 
         // 最上面那一行「检查所需依赖」点出来的那张体检表 (2026-11-04 主人 #1②): 与首启自动弹的
         // 那一次是同一个对话框, 只是这里随时打得开
-        if (readyOpen) ReadyCardDialog(onDismiss = { readyOpen = false })
+        if (readyOpen) {
+            ReadyCardDialog(
+                onDismiss = { readyOpen = false },
+                onReport = {
+                    readyOpen = false
+                    doctor = true
+                },
+            )
+        }
+
+        // ⋮ 第一条那颗自检: 八项读数全在本机, 点上报才发
+        if (doctor) DoctorDialog(onDismissRequest = { doctor = false })
 
         // ⋮ 里那几件事的对话框: 同一刻只画一个, 由那一个 [about] 记号决定是哪一页 (见 AboutDialogs)
         when (about) {
