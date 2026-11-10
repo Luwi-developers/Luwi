@@ -1075,6 +1075,9 @@ object PrivilegedBridge {
         // p 图那条链的最后一站 (2.5.0 批次 9): 把成图放进相册, 顺手打开。写的是 MediaStore,
         // 所以"所有文件访问权限"有没有给都不影响这一条
         "gallery" -> appContext { LwGallery.dispatch(it, request) }
+        // 2.8.1 B2: 主人自己装的那几个工具, 登记在 `$DSH_HOME/lw/external-apps.json` 里
+        // 与 `apps` 的分工: 那一条列全机, 这一条只认登记过的 id, 于是模型既不必猜包名也不必读 label
+        "external" -> appContext { ExternalApps.dispatch(it, request) }
         "takePhoto" -> appContext { LwPhoto.dispatch(it, request) }
         // 通知栏那一侧: 读的是系统绑在本进程里的监听服务, 与无障碍同一条路
         "notifications" -> appContext { LwNotifications.dispatch(it, request) }
