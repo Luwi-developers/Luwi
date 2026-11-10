@@ -23,6 +23,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.tool.LwIn
 
 /**
  * 输入通道那几条尺寸, 全在这里 —— 主人 2026-10-05 给的是**像素**: "长度的像素为 650, 行数上限为
@@ -241,11 +242,27 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         fun onClose()
 
         /**
-         * 输入框右上角那个 `＋` 被点了一下: 挑一张图发给她 (2026-11-07 主人: "球的文本框加个发图功能")
+         * 输入框右上角那个 `＋` 被点了一下: 挑图片或文件发给她
          *
-         * View 自己起不了选图器 (那道闸只有 Activity 收得到结果), 所以这里只把"有人要发图"交出去
+         * 2026-11-07 只有"挑一张图"; **2026-11-09 主人改口径**: "ball 时的输入框那个加号改成与门户
+         * 时 + 同功能, 可发图片和文件" —— 于是这一颗现在起的是多选 (图片与文件一起挑), 落盘走
+         * `LwIn` (与门户 `+` 同一个函数)
+         *
+         * View 自己起不了选择器 (那道闸只有 Activity 收得到结果), 所以这里只把"有人要发东西"交出去
          */
-        fun onPickImage()
+        fun onPickAttach()
+
+        /** 框里已经挂上的那颗附件 chip 被点了: 弹预览窗 (图片 / 文件都由调用方分路) */
+        fun onPreviewAttach(pick: LwIn.Pick)
+
+        /** 附件 chip 右边那个 `×`: 这一份不发了 */
+        fun onRemoveAttach(pick: LwIn.Pick)
+
+        /** 她发来的那张图被点了: 弹预览窗 (`rel` 是行里那一段, 按它找盘上那一份) */
+        fun onPreviewImage(rel: String, name: String)
+
+        /** 她递来的那份文件被点了: 弹预览窗 */
+        fun onPreviewFile(rel: String, name: String)
     }
 
     /**
@@ -322,9 +339,13 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         setTextColor(TEXT)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, TEXT_SP)
         inputType = InputType.TYPE_NULL
+        // **TYPE_NULL 会把 TextView 标成单行** (2026-11-10 真机定位): 单行布局把每个 `\n` 画成一个空格,
+        // 几条回复于是糊成一行、只剩末尾那一截露在框里 (截图里那句"儿待着。 嗯。 嗯。")。这里显式解掉,
+        // 再把多行与换行写回来 —— **`inputType` 必须留在最前面**, 它会把后面这几条又覆盖一遍
+        setSingleLine(false)
+        maxLines = BallBox.REPLY_LINES
         isFocusable = false
         isFocusableInTouchMode = false
-        maxLines = BallBox.REPLY_LINES
         gravity = Gravity.TOP or Gravity.START
         setHorizontallyScrolling(false)
         setLineSpacing(0f, BallBox.LINE_SPACING)
@@ -376,6 +397,69 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
     }
 
     /**
+     * 她发来的那一张图 (2026-11-09)
+     *
+     * 与 [sticker] 是**同一个槽的两种东西**: 表情走上面那一张 (占比 18%), 图走这一张 (占比
+     * [BallMedia.MAX_HEIGHT_PERCENT]) —— 两张都常驻在列里会同时占高, 而"她刚说了什么"只该占一格
+     *
+     * **宽高由 [BallMedia.imageBox] 先算好写进 LayoutParams**, 不靠 `adjustViewBounds` 现量: 那块窗是
+     * `WRAP_CONTENT` 的, 而"量之前高度是 0"正是"图落地了而那一格是空的, 滚一下回复框才长出来"那条病
+     *
+     * 点一下交出去 ([Listener.onPreviewImage]): 框里封顶、看得全的地方是预览窗
+     */
+    private val mediaImage = ImageView(context).apply {
+        // **不裁了** (2026-11-10 收到一半之后): 图本来就缩进框里, `FIT_CENTER` 让它整张都在
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        visibility = GONE
+        isClickable = true
+        setOnClickListener { listener.onPreviewImage(mediaRel, mediaName) }
+    }
+
+    /** 她递来的那份文件: 蓝字、可点 (主人 2026-11-09: "文件也可点击") */
+    private val mediaFile = TextView(context).apply {
+        setTextColor(FILE_TEXT)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        val padH = dp(10)
+        val padV = dp(7)
+        setPadding(padH, padV, padH, padV)
+        background = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(FILE_BACKGROUND)
+        }
+        visibility = GONE
+        isClickable = true
+        setOnClickListener { listener.onPreviewFile(mediaRel, mediaName) }
+    }
+
+    /** 媒体那一格现在画的是哪一份 (点开预览窗时按它找) */
+    private var mediaRel = ""
+
+    private var mediaName = ""
+
+    /** 图的原尺寸: [applyImageSize] 按它算那一格的高度 */
+    private var mediaSize: Pair<Int, Int>? = null
+
+    /**
+     * 待发的附件那一行 (`＋` 挑进来的, 还没随这一句发出去)
+     *
+     * 与门户的 `#lwp-attach-row` 同一个位置关系: 挂在输入框下面、分隔线上面 —— 写的时候看得见自己
+     * 挂了什么, 而"发出去"这件事仍然只由回车那一下决定
+     */
+    private val attachRow = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        visibility = GONE
+        setPadding(0, dp(6), 0, 0)
+    }
+
+    /** 已经挂上的那几份 (顺序就是发送时的顺序) */
+    private val attachPicks = mutableListOf<LwIn.Pick>()
+
+    /** 每份附件在 [attachRow] 里那一颗 (摘的时候按它找) */
+    private val attachViews = mutableMapOf<String, View>()
+
+    /**
      * 右上角那个 `×`: 点一下把框收掉
      *
      * 画的是那个字符而不是一张图 (项目里没有图标资源这一层, 而它是 12 sp 就能看清的一个符号), 位置与
@@ -394,10 +478,12 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
     }
 
     /**
-     * 右上角那个 `＋` (在 `×` 左边一格): 挑一张图发给她
+     * 输入框右上角那个 `＋` (在 `×` 左边一格): 挑图片或文件发给她
      *
      * 画法与 [close] 一样是那个字符本身, 位置靠 [CLOSE_RESERVE_DP] 那个空档推开 —— 于是输入框的
      * 右内边距翻了一倍, 长句子折行时不会压到两个按钮下面
+     *
+     * 2026-11-09 起它与门户那颗 `+` 同功能 (多选 / 图片与文件都收), 见 [Listener.onPickAttach]
      */
     private val pick = TextView(context).apply {
         text = PICK_GLYPH
@@ -407,8 +493,8 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         val padH = dp(CLOSE_PAD_H_DP)
         val padV = dp(CLOSE_PAD_V_DP)
         setPadding(padH, padV, padH, padV)
-        contentDescription = context.getString(R.string.ball_box_pick_image)
-        setOnClickListener { listener.onPickImage() }
+        contentDescription = context.getString(R.string.ball_box_pick_attach)
+        setOnClickListener { listener.onPickAttach() }
     }
 
     init {
@@ -423,8 +509,14 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         val wide = LinearLayout.LayoutParams.MATCH_PARENT
         val tall = LinearLayout.LayoutParams.WRAP_CONTENT
         column.addView(input, LinearLayout.LayoutParams(wide, tall))
+        // 待发的附件行在输入框下面 (与门户 `#lwp-attach-row` 同一个位置关系)
+        column.addView(attachRow, LinearLayout.LayoutParams(wide, tall))
         column.addView(divider, LinearLayout.LayoutParams(wide, dp(1)))
         column.addView(sticker, LinearLayout.LayoutParams(wide, LinearLayout.LayoutParams.WRAP_CONTENT))
+        // 媒体那一格: 她的图与她的文件共用这一槽 (宽高在贴上去的那一瞬就算好, 见 applyImageSize)
+        column.addView(mediaImage, LinearLayout.LayoutParams(wide, LinearLayout.LayoutParams.WRAP_CONTENT))
+        // 文件那颗是 **wrap**: 只包住名字那一截 (主人要的是"只显示文件名", 一颗撑满整行的底不是)
+        column.addView(mediaFile, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, tall))
         column.addView(replies, LinearLayout.LayoutParams(wide, tall))
         addView(column, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(close, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END))
@@ -533,6 +625,22 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
     }
 
     /**
+     * 换了一场: 把回复这一块清空
+     *
+     * 框是"最近那一场的话"的落脚处, 不是跨场记录 (2026-11-10): 别一场开始说话时若还留着上一场的
+     * 几条, 就会看到"两场的话拼在同一个框里", 与门户只画当前一场对不上
+     */
+    fun clearReplies() {
+        kept.clear()
+        replies.setText("")
+        replies.visibility = GONE
+        divider.visibility = GONE
+        sticker.visibility = GONE
+        mediaImage.visibility = GONE
+        mediaFile.visibility = GONE
+    }
+
+    /**
      * 一条**本地的信息** (不是回答, 也不是报错): 现在唯一的来源是球菜单那一行「看余额」
      *
      * 它以 [INFO_MARK] 开头, 与回答分得开, 与那几条 `⚠` 提示也分得开。**三条会话账一个都不动**
@@ -567,7 +675,9 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
 
     /** 把 [kept] 画到只读那一块里, 并把最新那一条顶到框口 ([BallBox.newestStart] 那条口径) */
     private fun render(newest: String) {
-        val joined = kept.joinToString("\n\n")
+        // 一条一行, **不留空白行** (2026-11-10 主人: "ball 上有空行, 可以换行, 但不要留一空白行"):
+        // 以前用 "\n\n", 两条回复之间就多出一条空行; 回复之间靠换行与分隔线已经够分开
+        val joined = kept.joinToString("\n")
         val start = BallBox.newestStart(joined, newest)
         replies.setText(joined)
         // **光标只能落在真的存下来的那段字里**: 这块是只读的 EditText, `setText` 之后拿到的长度未必
@@ -610,11 +720,163 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
     fun appendSticker(bitmap: Bitmap) {
         sticker.setImageBitmap(bitmap)
         sticker.visibility = VISIBLE
+        // 同一个槽: 表情顶掉图与文件, 一格只画一样 (新的那张才是"她刚说的")
+        mediaImage.visibility = GONE
+        mediaFile.visibility = GONE
+        mediaRel = ""
+        mediaName = ""
+        mediaSize = null
         divider.visibility = VISIBLE
+    }
+
+    /**
+     * 她发来的一张图 (2026-11-09)
+     *
+     * 顺序 **[BallMedia.imageBox] 算尺寸 → 写进 LayoutParams → 才 `requestLayout`**: 这一格的高度在
+     * 位图落地的那一瞬就定了, 于是"图来了但那一格是空的, 滚一下才长出来"没有发生的余地
+     *
+     * @param w/h 原图尺寸 (行里的 `w`/`h`; 读不到传 0, 按 4:3 兜底)
+     * @param rel 行里那一段 (`assets/…`): 点开预览窗时按它找文件
+     */
+    fun appendImage(bitmap: Bitmap, w: Int, h: Int, rel: String, name: String) {
+        mediaImage.setImageBitmap(bitmap)
+        mediaRel = rel
+        mediaName = name
+        mediaSize = (if (w > 0) w else bitmap.width) to (if (h > 0) h else bitmap.height)
+        mediaImage.visibility = VISIBLE
+        sticker.visibility = GONE
+        mediaFile.visibility = GONE
+        divider.visibility = VISIBLE
+        // 宽要等这一次布局排完才知道 (框宽还没量), 所以先排一次、量到了再按真宽算一次
+        applyImageSize()
+        post { applyImageSize() }
+    }
+
+    /**
+     * 她递来的一份文件: 只画文件名 (蓝字、可点), 与门户那颗 chip 同一个口径
+     *
+     * 2026-11-09 之前这里什么也没有 —— 服务那一侧把它压成「（文件）」三个字塞进只读区, 而主人要的是
+     * "文件名可点击, 点开弹预览窗"
+     */
+    fun appendFile(rel: String, name: String, bytes: Long) {
+        val label = name.ifEmpty { rel.substringAfterLast('/') }.ifEmpty { FILE_FALLBACK }
+        val size = BallMedia.sizeText(bytes)
+        // 长名字要能收: 宽度上限按框的内容宽算 (量不到时按标称宽兜), 右边留一点余量给圆角
+        val inner = (width - paddingLeft - paddingRight).takeIf { it > 0 }
+            ?: (BallBox.WIDTH_PX - dp(BallBox.PAD_H_DP) * 2)
+        mediaFile.maxWidth = (inner - dp(4)).coerceAtLeast(dp(120))
+        mediaFile.text = if (size.isEmpty()) label else "$label  ·  $size"
+        mediaFile.contentDescription = context.getString(R.string.ball_box_open_file, label)
+        mediaFile.setOnClickListener { listener.onPreviewFile(mediaRel, mediaName) }
+        mediaRel = rel
+        mediaName = label
+        mediaSize = null
+        mediaFile.visibility = VISIBLE
+        sticker.visibility = GONE
+        mediaImage.visibility = GONE
+        divider.visibility = VISIBLE
+    }
+
+    /** 媒体那一格该多高: 宽铺满、高按比例封顶 ([BallMedia.imageBox]); 量到真宽再补一次 */
+    private fun applyImageSize() {
+        val size = mediaSize ?: return
+        val metrics = resources.displayMetrics
+        val inner = (width - paddingLeft - paddingRight).takeIf { it > 0 }
+            ?: (BallBox.WIDTH_PX - dp(BallBox.PAD_H_DP) * 2)
+        // **两个上限各收一半** (2026-11-10 主人: "最大长宽都缩短到原来一半"): 宽原来是铺满, 现在
+        // 只占总宽的一半; 高原来是 36% 屏高, 现在是 18%
+        val maxWidth = (inner * BallMedia.MAX_WIDTH_PERCENT / 100).coerceAtLeast(dp(48))
+        val maxHeight = metrics.heightPixels * BallMedia.MAX_HEIGHT_PERCENT / 100
+        val (boxWidth, boxHeight) = BallMedia.imageBox(size.first, size.second, maxWidth, maxHeight)
+        val params = mediaImage.layoutParams as? LinearLayout.LayoutParams ?: return
+        if (params.width == boxWidth && params.height == boxHeight) return
+        params.width = boxWidth
+        params.height = boxHeight
+        mediaImage.layoutParams = params
+        requestLayout()
+    }
+
+    /* ── 待发的附件 (`＋` 挑进来的那几份) ─────────────────────────────────── */
+
+    /**
+     * 挂一份附件到输入框下面
+     *
+     * 同一份重复挑到两次时**只留一份** (`path` 是这把钥匙): 文件名那一条已经顺延成 `-2`, 而主人手上
+     * 记的是"我刚选的那份", 挂两遍只会让它发两遍
+     */
+    fun addAttachment(pick: LwIn.Pick) {
+        if (attachPicks.size >= BallMedia.MAX_ATTACH) return
+        if (attachPicks.any { it.path == pick.path }) return
+        attachPicks.add(pick)
+        val chip = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(FILE_BACKGROUND)
+            }
+            setPadding(dp(10), dp(4), dp(6), dp(4))
+            setOnClickListener { listener.onPreviewAttach(pick) }
+        }
+        val label = TextView(context).apply {
+            text = pick.name
+            setTextColor(FILE_TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setOnClickListener { listener.onPreviewAttach(pick) }
+        }
+        val remove = TextView(context).apply {
+            text = "×"
+            setTextColor(HINT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(8), 0, dp(4), 0)
+            contentDescription = context.getString(R.string.ball_attach_remove, pick.name)
+            setOnClickListener { listener.onRemoveAttach(pick) }
+        }
+        chip.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        chip.addView(remove, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        attachViews[pick.path] = chip
+        attachRow.addView(
+            chip,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(6)
+            },
+        )
+        attachRow.visibility = VISIBLE
+        divider.visibility = VISIBLE
+        requestLayout()
+    }
+
+    /** 摘掉一份 (`×` 或发送之后清空) */
+    fun removeAttachment(pick: LwIn.Pick) {
+        attachPicks.removeAll { it.path == pick.path }
+        attachViews.remove(pick.path)?.let { runCatching { attachRow.removeView(it) } }
+        attachRow.visibility = if (attachPicks.isEmpty()) GONE else VISIBLE
+        requestLayout()
+    }
+
+    /** 现在挂着哪几份 (发送时按这个顺序拼附件段) */
+    fun attachments(): List<LwIn.Pick> = attachPicks.toList()
+
+    /** 发出去之后整行清掉 */
+    fun clearAttachments() {
+        attachPicks.clear()
+        attachViews.clear()
+        attachRow.removeAllViews()
+        attachRow.visibility = GONE
+        requestLayout()
     }
 
     /** 现在有没有贴着一张图 (判据用) */
     fun hasSticker(): Boolean = sticker.visibility == VISIBLE
+
+    /** 现在媒体那一格画的是什么 (`image` / `file` / 空): 判据用 */
+    fun mediaKind(): String = when {
+        mediaImage.visibility == VISIBLE -> "image"
+        mediaFile.visibility == VISIBLE -> "file"
+        else -> ""
+    }
 
     /** 现在框里留着几条回复 (判据用) */
     fun replyCount(): Int = kept.size
@@ -630,12 +892,19 @@ internal class BoxView(context: Context, private val listener: Listener) : Frame
         /** 右上角那个关闭按钮: 字符 / 字号 / 内边距, 以及输入框右边给它留的那一条 (dp) */
         const val CLOSE_GLYPH = "×"
 
-        /** 发图那个字符: 与 [CLOSE_GLYPH] 同一档字号, 摆在它左边一格 */
+        /** 发东西那个字符: 与 [CLOSE_GLYPH] 同一档字号, 摆在它左边一格 */
         const val PICK_GLYPH = "＋"
         const val CLOSE_SP = 15f
         const val CLOSE_PAD_H_DP = 8
         const val CLOSE_PAD_V_DP = 2
         const val CLOSE_RESERVE_DP = 30
+
+        /** 文件那一条: 认不出名字时的兜底 (正常不会有 — 名字从行里的 `name` 来) */
+        const val FILE_FALLBACK = "文件"
+
+        /** 文件与附件 chip 的字色 / 底色: 蓝字 = "这个能点" (与门户 `.lwp-file` 同一个意思) */
+        val FILE_TEXT = 0xFF8FB4FF.toInt()
+        val FILE_BACKGROUND = 0x338FB4FF
 
         /** 提示那一行的记号: 与回答同一块只读区, 一眼分得开 ([appendNote]) */
         const val NOTE_MARK = "⚠"

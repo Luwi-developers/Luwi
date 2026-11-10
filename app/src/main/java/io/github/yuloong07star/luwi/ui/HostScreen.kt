@@ -4,12 +4,14 @@ import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.Insets
 import android.net.Uri
 import android.os.Environment
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -858,7 +860,13 @@ private fun HostWebView(
     // WebView 实例与"这个文档加载完过几次": 切换那一步要拿它跑 JS, 还要等重载真的落地
     var page by remember { mutableStateOf<WebView?>(null) }
     // 2026-10-28: 键盘起来时这块 WebView 让出贴底键盘那一段 (悬浮键盘不让), 否则会话输入框被压在键盘后面
+    // 2026-11-09: **门户盖着时不再让 WebView 变矮** —— 让位改由页面自己抬 (`--lwp-ime`), 见下面那段
     val imeLift = rememberImeLift()
+    val portalOpen = PortalState.open
+    // 推给页面的数**必须是 dp 而不是设备像素**: WebView 里 1 CSS px 就是 1 dp (393 宽的屏报 393 CSS px,
+    // 屏本身 1080 设备像素), 拿 `roundToPx()` 那笔 (922) 当 CSS px 写下去就是整屏高 —— 2026-11-09 真机
+    // 踩到, 输入卡被顶到顶栏下面
+    val imeLiftDp = imeLift.value.roundToInt()
     var finishes by remember { mutableIntStateOf(0) }
     // renderer 是 Chrome 那边独立的一个进程: 它一死这块 WebView 就再也不能用, 只能整块重建 ——
     // generation 一变就换一块新的 (key 在 AndroidView 外面), rebuilds 是"同一个窗最多自动重建几次";
@@ -893,8 +901,12 @@ private fun HostWebView(
     // renderer 死了就整块换新的 (见下面 onRenderProcessGone): key 一变 AndroidView 就重建;
     // halted 那一档整块不挂, 所以不会有人再去用已经 destroy 的旧实例
     if (!halted) key(generation) {
+        // 键盘那一格 (2026-11-09 主人: "呼出键盘时不应整个界面上移, 只要输入框和聊天记录向上移"):
+        // **门户盖着时这一块尺寸一点都不动** —— 变矮的是页面里那层 flex (对话区 + 输入卡), 于是
+        // 背景图 / 头栏 / 底下那屏 dsh 都不重排, 起落也就不卡了。门户收起时仍是旧做法: 缩 WebView
+        // (dsh 自己的输入框靠这个贴到键盘上沿, 它不认识 `--lwp-ime`)
         AndroidView(
-            modifier = modifier.padding(bottom = imeLift),
+            modifier = if (portalOpen) modifier else modifier.padding(bottom = imeLift),
             factory = { viewContext ->
                 CookieManager.getInstance().setAcceptCookie(true)
                 WebView(viewContext).apply {
@@ -915,6 +927,16 @@ private fun HostWebView(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
+                    // **键盘那一段不让 WebView 自己再让一次** (2026-11-09): 上面那个 padding 与页面的
+                    // `--lwp-ime` 已经把它让开了; Chromium 若还按 IME inset 收可视视口, 会顺手把整页
+                    // 平移上去 (定位在 `position:fixed` 的那一层也跟着动) —— 那正是"整个界面上移、顶部
+                    // 被裁"的另一半原因。所以 IME 那一段在这里吃掉, 其余 inset 原样交给它
+                    setOnApplyWindowInsetsListener { _, insets ->
+                        WindowInsets.Builder(insets)
+                            .setInsets(WindowInsets.Type.ime(), Insets.NONE)
+                            .setVisible(WindowInsets.Type.ime(), false)
+                            .build()
+                    }
                     // **切后台回来整页重载的根因就在这一行**: renderer 是独立进程, 视图不可见时
                     // 缺省允许被降级甚至回收, 回到前台只能从头加载。这里把它钉在 BOUND (可见那一档,
                     // 不是 IMPORTANT 那档"关键任务"), 并且**不可见时也不豁免** (第二个参数 true 才是
@@ -1129,6 +1151,22 @@ private fun HostWebView(
                 if (view.alpha != alpha) view.alpha = alpha
                 page = view
             },
+        )
+    }
+
+    // 键盘那一格 (2026-11-09): 门户盖着时只把这个数推给页面 —— 页面自己写 `--lwp-ime`, 抬的是对话区
+    // 与输入卡, **这一块 WebView 不动**。变了才推 (一次起落十来帧, 每帧一句 evaluateJavascript 就够;
+    // 页面那头同值直接返回)。`PortalState.imePx` 是给"页面刷新 / 收起再张"那一档留的: 那时页面挂载
+    // 会来问一次 (`LuwiPortal.portalIme()`), 正好补上错过的那一下
+    LaunchedEffect(portalOpen, imeLiftDp, page) {
+        // 门户收起时清 0: dsh 那一屏走的是缩 WebView 那条路, 与这个数无关
+        PortalState.imePx = if (portalOpen) imeLiftDp else 0
+        if (!portalOpen) return@LaunchedEffect
+        // 一行读数: "整页被顶上去 / 卡一下" 时先看这一行 (值与页面拿到的那个数逐字相同, 单位 dp)
+        Log.i(WEB_TAG, "ime lift ${imeLiftDp}dp portal=$portalOpen")
+        page?.evaluateJavascript(
+            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.setKeyboard($imeLiftDp)",
+            null,
         )
     }
 

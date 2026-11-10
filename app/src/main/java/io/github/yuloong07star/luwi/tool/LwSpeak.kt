@@ -86,6 +86,12 @@ internal object LwSpeak {
         "clip" -> clip(context, request)
         "stop" -> stop()
         "release" -> release()
+        // 朗读流 (2026-11-10, 方案 `docs/Luwi-朗读与显示分离-方案-2026-11-09.md`): 自己一段稿子,
+        // 自己的队列与游标 —— 与显示流那本账 (outbox / gapMs) 一个字节都不混
+        "read" -> read(context, request)
+        "cancel" -> cancelRead()
+        "prepare" -> prepare(context, request)
+        "cache" -> cache(context, request)
         // 音色库 (2026-10-25): 会话自己的文件工具被沙箱关在工作区, 看不到 $DSH_HOME, 所以登记走这里
         "voice" -> voice(context, request)
         // 只读探针: 系统引擎到底把声音放在哪种属性上 (判据换不换得成, 靠它一句话定), 见 [probe]
@@ -93,8 +99,243 @@ internal object LwSpeak {
         // Edge 那条的体检 (2026-10-20): 走一趟完整握手与合成, 只收不播; 回执说清用的是本地还是远端令牌
         "edge" -> LwEdgeTts.probe(request.bool("remote", false))
         else -> throw IllegalArgumentException(
-            "op has to be status, speak, clip, stop, release, voice, probe or edge, not \"$op\"",
+            "op has to be status, speak, clip, stop, release, read, cancel, prepare, cache, voice," +
+                " probe or edge, not \"$op\"",
         )
+    }
+
+    /* ── 朗读流: 自己的队列与游标 (2026-11-10) ──────────────────────────────
+     *
+     * 方案 `docs/Luwi-朗读与显示分离-方案-2026-11-09.md` §4.1 / §4.4 / §4.5:
+     *
+     * ```
+     * 显示流: jsonl ──→ 门户 / 球 (逐行, 按 gapMs)      ── 永不等合成
+     * 朗读流: 朗读稿 ──→ 合成 / 缓存 ──→ 播放 ──→ 游标  ── 只读显示流, 不写它
+     * ```
+     *
+     * 四条硬口径:
+     *  1. **显示流永不等合成**: 这里只做"念", 一个字节都不写 jsonl, 也不动 `gapMs` / `dueAt`
+     *  2. **一次调用一段**: 宿主按 §4.3 的规则洗好稿子 (≤6 句) 再交过来, 这里不再切句
+     *  3. **打断 = 念完当前段即停** (§4.5): `op=cancel` 只置标志并清队, 不切半句
+     *  4. **游标是这本账的**: `readCursor` 只记"最后一条开始念的 seq", 进程重启丢了就丢了 —— 丢的
+     *     后果只是"这一句不念", 不是"念两遍"
+     */
+
+    /** 队列里那一段: 稿子 + 谁点的音色 + 宿主那边的 seq (只给读数) */
+    private class ReadTask(val seq: Int, val text: String, val voice: String)
+
+    private val readLock = Any()
+    private val readQueue = java.util.ArrayDeque<ReadTask>()
+
+    @Volatile
+    private var readWorker: Thread? = null
+
+    /** 被打断: 当前这一段念完就停, 队列里没开始的都丢掉 (§4.5) */
+    @Volatile
+    private var readCancelled: Boolean = false
+
+    /** 朗读游标: 最后一条开始念的 seq */
+    @Volatile
+    private var readCursor: Int = 0
+
+    /** 读数: 起过几趟 / 念成几段 / 丢了几段 */
+    private val readRuns = AtomicInteger(0)
+    private val readPlayed = AtomicInteger(0)
+    private val readDropped = AtomicInteger(0)
+
+    /** 队列里有几段还没开始 */
+    private val readWaiting: Int
+        get() = synchronized(readLock) { readQueue.size }
+
+    /**
+     * `op=read`: 把一段稿子排进朗读队列, **立刻返回**
+     *
+     * 为什么是排队而不是"直接念": 一次 `lw_say` 可能给 2~6 段 (方案 §4.7 的一次一段), 而通道是串行的 ——
+     * 直接念就是把工具调用堵上好几秒。排队之后"交出去就走", 念到哪一段由游标记
+     */
+    private fun read(context: Context, request: JsonObject): JsonObject {
+        val text = request.stringOrNull("text")?.trim().orEmpty()
+        if (text.isEmpty()) {
+            return buildJsonObject {
+                put("queued", false)
+                put("detail", "there is nothing to read: the script is empty")
+            }
+        }
+        val task = ReadTask(
+            seq = request.numberOrNull("seq")?.toInt() ?: 0,
+            text = text,
+            voice = request.stringOrNull("voice").orEmpty(),
+        )
+        val waiting: Int
+        synchronized(readLock) {
+            readQueue.addLast(task)
+            // 新的一段排进来就把"停下"那道标志撤掉: 新一轮该念就念 (§4.5 的 cancel 只对当时那一轮)
+            readCancelled = false
+            waiting = readQueue.size
+        }
+        startReadWorker(context)
+        return buildJsonObject {
+            put("queued", true)
+            put("waiting", waiting)
+            put("cursor", readCursor)
+            put("characters", text.length)
+            put("detail", "queued: ${text.length} characters, ${waiting} waiting; op=cancel stops after the current segment")
+        }
+    }
+
+    /**
+     * `op=cancel`: 当前这一段念完就停 (§4.5)
+     *
+     * **故意不调 [stop]**: 切半句在听感上比多说一句更糟。这里只置标志 + 清队, 正在放的那一份照常放完
+     */
+    private fun cancelRead(): JsonObject {
+        val dropped: Int
+        val speaking: Boolean
+        val waiting: Int
+        synchronized(readLock) {
+            readCancelled = true
+            dropped = readQueue.size
+            readQueue.clear()
+            waiting = readQueue.size
+            speaking = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+        }
+        if (dropped > 0) readDropped.addAndGet(dropped)
+        return buildJsonObject {
+            put("cancelled", true)
+            put("dropped", dropped)
+            put("speaking", speaking)
+            put("waiting", waiting)
+            put("cursor", readCursor)
+            put(
+                "detail",
+                if (speaking) {
+                    "the segment being spoken will finish, then it stops; $dropped queued segment(s) were dropped"
+                } else {
+                    "nothing was being spoken; $dropped queued segment(s) were dropped"
+                },
+            )
+        }
+    }
+
+    /** 朗读流的工人: 一次一段, 段与段之间看有没有被叫停 */
+    private fun startReadWorker(context: Context) {
+        synchronized(readLock) {
+            if (readWorker != null) return
+            val app = context.applicationContext
+            val runs = readRuns.incrementAndGet()
+            val worker = Thread({
+                try {
+                    while (true) {
+                        val task = synchronized(readLock) {
+                            if (readCancelled) {
+                                readDropped.addAndGet(readQueue.size)
+                                readQueue.clear()
+                                null
+                            } else {
+                                readQueue.pollFirst()
+                            }
+                        } ?: break
+                        readCursor = task.seq
+                        val request = buildJsonObject {
+                            put("op", "speak")
+                            put("text", task.text)
+                            if (task.voice.isNotBlank()) put("voice", task.voice)
+                        }
+                        val spoken = runCatching { speak(app, request).bool("spoken", false) }
+                            .getOrDefault(false)
+                        if (spoken) readPlayed.incrementAndGet()
+                    }
+                } catch (error: Throwable) {
+                    Log.w(TAG, "the read-aloud worker stopped", error)
+                } finally {
+                    synchronized(readLock) { readWorker = null }
+                    // 收尾: 队列里剩下的那次也没有人要了
+                    val leftover = synchronized(readLock) {
+                        val left = readQueue.size
+                        readQueue.clear()
+                        left
+                    }
+                    if (leftover > 0) readDropped.addAndGet(leftover)
+                }
+            }, "lw-read-$runs")
+            worker.isDaemon = true
+            readWorker = worker
+            worker.start()
+        }
+    }
+
+    /**
+     * `op=prepare`: **只合成不播** (§4.7), 落 [ReadCache]
+     *
+     * 只有 Edge 那条能预合成 (它的合成与播放是分开的两步); 别的引擎要么合成在系统进程里 (系统), 要么
+     * 跟着播一起出 (自带那条), 所以这里如实说"这条引擎没法预先备好", 不假装成功
+     */
+    private fun prepare(context: Context, request: JsonObject): JsonObject {
+        val text = request.stringOrNull("text")?.trim().orEmpty()
+        if (text.isEmpty()) {
+            return buildJsonObject { put("prepared", false); put("why", "there is nothing to prepare") }
+        }
+        val speed = (request.numberOrNull("rate")?.toFloat() ?: SpeakSettings.rate).coerceIn(0.5f, 2.0f)
+        val voice = request.stringOrNull("voice").orEmpty().ifBlank { SpeakSettings.edgeVoice }
+        if (SpeakSettings.engine != SpeakSettings.Engine.EDGE) {
+            return buildJsonObject {
+                put("prepared", false)
+                put("engine", readingWith())
+                put("why", "only the Edge engine can be prepared ahead of time (its synthesis is separate from playback)")
+            }
+        }
+        val key = ReadCache.key(text, voice, speed)
+        ReadCache.read(context, key)?.let {
+            return buildJsonObject {
+                put("prepared", true)
+                put("cached", true)
+                put("ms", 0)
+                put("bytes", it.size)
+                put("voice", voice)
+                put("detail", "already in the cache, so op=speak will not touch the network")
+            }
+        }
+        val started = System.currentTimeMillis()
+        val bytes = runCatching { LwEdgeTts.bytesOf(context, text, speed, voice) }.getOrNull()
+        val took = System.currentTimeMillis() - started
+        return buildJsonObject {
+            put("prepared", bytes != null)
+            put("cached", false)
+            put("ms", took)
+            put("bytes", bytes?.size ?: 0)
+            put("voice", voice)
+            put("detail", if (bytes != null) {
+                "synthesised ${bytes.size} bytes in ${took} ms and cached them"
+            } else {
+                "the Edge call did not return any audio in ${took} ms"
+            })
+        }
+    }
+
+    /** `op=cache`: 这一份额有多大 / 清掉它 (设置页与读数用) */
+    private fun cache(context: Context, request: JsonObject): JsonObject {
+        val action = request.stringOrNull("action")?.trim()?.ifBlank { "status" } ?: "status"
+        return when (action) {
+            "clear" -> buildJsonObject {
+                val removed = ReadCache.clear(context)
+                put("action", "clear")
+                put("removed", removed)
+                put("entries", ReadCache.entries(context).size)
+                put("detail", "removed $removed cached clip(s)")
+            }
+
+            "status" -> buildJsonObject {
+                put("action", "status")
+                put("entries", ReadCache.entries(context).size)
+                put("bytes", ReadCache.bytes(context))
+                put("max", ReadCache.MAX_ENTRIES)
+                put("maxBytes", ReadCache.MAX_BYTES)
+                put("path", ReadCache.directory(context).absolutePath)
+                put("detail", "the read-aloud cache holds at most ${ReadCache.MAX_ENTRIES} clips")
+            }
+
+            else -> throw IllegalArgumentException("action has to be status or clear, not \"$action\"")
+        }
     }
 
     /**
@@ -323,6 +564,15 @@ internal object LwSpeak {
             put("clipPlaying", LwClips.playingNow())
             put("clipsWanted", LwClips.following())
             put("clipsMade", LwClips.followed(context))
+            // 朗读流自己那本账 (2026-11-10, 方案 §4.4): 游标 / 排队几段 / 念成几段 / 丢了几段 ——
+            // "她刚才为什么没念"要能从这几个数里读出来
+            put("readCursor", readCursor)
+            put("readWaiting", readWaiting)
+            put("readRuns", readRuns.get())
+            put("readPlayed", readPlayed.get())
+            put("readDropped", readDropped.get())
+            put("readCache", ReadCache.entries(context).size)
+            put("readCacheBytes", ReadCache.bytes(context))
         }
     }
 

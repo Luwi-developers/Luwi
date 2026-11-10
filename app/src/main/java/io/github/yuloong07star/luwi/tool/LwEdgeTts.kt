@@ -53,7 +53,7 @@ internal object LwEdgeTts {
         return try {
             pieces.forEach { piece ->
                 if (stopped) return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
-                val audio = synthesize(chosenVoice, piece, speed)
+                val audio = synthesize(chosenVoice, piece, speed, context)
                     ?: return "stopped on request while saying \"${piece.take(SCRIBBLE)}\""
                 if (!LwVoiceClip.play(context, audio, "mp3")) {
                     return if (stopped) {
@@ -80,7 +80,16 @@ internal object LwEdgeTts {
      * 回来 null = 这次被叫停 (调用方按"没合成出来"处理, 保留旧的那份)
      */
     internal fun bytesOf(text: String, speed: Float, voice: String): ByteArray? =
-        synthesize(voice, text, speed)
+        synthesize(voice, text, speed, null)
+
+    /**
+     * 带合成缓存的版本 (2026-11-10, 朗读流与 `op=prepare` 走这一条)
+     *
+     * 与上面那条的差别只有一处: 命中 [ReadCache] 就直接给那份音频, 不连网; 没命中才合成, 合成完顺手
+     * 存一份。**填音那条 (没有 Context) 不缓存** —— 它要的是"跟当前音色现对"的新音频
+     */
+    internal fun bytesOf(context: Context, text: String, speed: Float, voice: String): ByteArray? =
+        synthesize(voice, text, speed, context)
 
     /** 掐断: 连着的与放着的都要停; 都没在动时回 null */
     fun stop(): String? {
@@ -100,7 +109,12 @@ internal object LwEdgeTts {
      *
      * 回来 null = 这次是被叫停的 (调用方按"停了"报, 不当作失败)
      */
-    private fun synthesize(voice: String, text: String, speed: Float): ByteArray? {
+    private fun synthesize(voice: String, text: String, speed: Float, context: Context? = null): ByteArray? {
+        // ① 缓存: 同一句稿子 + 同一个音色 + 同一个语速 = 同一份音频, 不必再连一趟网 (§4.7)
+        val cacheKey = if (context == null) null else ReadCache.key(text, voice, speed)
+        if (context != null && cacheKey != null) {
+            ReadCache.read(context, cacheKey)?.let { return it }
+        }
         val local = try {
             collect(voice, text, speed, LwEdgeSpeech.gec(System.currentTimeMillis()), LwEdgeSpeech.SEC_MS_GEC_VERSION, remote = false)
         } catch (error: EdgeRejected) {
@@ -112,6 +126,8 @@ internal object LwEdgeTts {
                 )
             collect(voice, text, speed, remote.token, remote.version, remote = true)
         }
+        // ② 合成出来的那份存起来 (被叫停时 local 是 null, 不存)
+        if (context != null && cacheKey != null && local != null) ReadCache.write(context, cacheKey, local)
         return local
     }
 

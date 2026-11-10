@@ -263,6 +263,8 @@ api-voice:    {{API_VOICE}}
   要不要开口由宿主那侧的 `judgeRouter` 定
 - `rules` 里能改的：`gameMinutes`（多久算久）/ `wishDays`（提前几天提）/ `cooldownMs` /
   `chatChance` / `chatAfterMs`
+- **2026-11-10 起 `gameMinutes` / `wishDays` 只由她自己写**：探索收尾的 `rules` 或对话里的
+  `lw_router op=rules`（`sim.json` 与设置页都不再有这两格，缺省 100 / 60）
 
 ```json
 // lw/slang.json —— 宿主写（`lw_slang`）；lw/slang.md 是它渲染出来给会话读的那一份

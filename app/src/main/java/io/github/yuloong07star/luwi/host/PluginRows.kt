@@ -106,6 +106,11 @@ internal object PluginRows {
     private fun memoryConfig(context: Context): List<String> = listOf(
         "memoryDir: '${File(File(context.filesDir, DshHost.HOME_DIR), "memory").absolutePath}'",
         "excludeAgentPresets: ['tavern']",
+        // 2026-11-08 主人要的是"人格卡能被她自己登记成一份长期记忆" (对话层方案 P3):
+        // `document` 那一档在插件里缺省是**关的** (`config.js` 里 `documentMemoryEnabled: false`),
+        // 关着的时候 `memory_register_document` 会被拒 (真机读数: 她自己回"document 记忆这一档是关着的,
+        // 得先把它打开我才能登")。开着之后长文档在记忆里只留一张摘要卡, 正文仍归她管、按需读
+        "documentMemoryEnabled: true",
     )
 
     /**
@@ -188,7 +193,9 @@ internal object PluginRows {
      */
     fun ensuredRow(patch: String, rowId: String, entryPath: String, config: List<String> = emptyList()): String {
         val name = fileUrlOf(entryPath)
-        return if (hasInsertRow(patch, rowId)) namedRow(patch, rowId, name) else withRow(patch, rowId, name, config)
+        // 行已经挂上时: 名字对一次账, **config 那几行也补一次** (2026-11-08: 否则老安装永远拿不到新键)
+        return if (hasInsertRow(patch, rowId)) ensuredConfig(namedRow(patch, rowId, name), rowId, config)
+        else withRow(patch, rowId, name, config)
     }
 
     /**
@@ -291,6 +298,56 @@ internal object PluginRows {
         if (lines[entry] == line) return patch
         lines[entry] = line
         return lines.joinToString("\n").trimEnd() + "\n"
+    }
+
+    /**
+     * 把这一行里**该由应用代写的那几行 config** 补齐 (缺哪一行补哪一行, 别的行一个字节都不动)
+     *
+     * 2026-11-08: [memoryConfig] 新加了一条 `documentMemoryEnabled: true` (对话层方案 P3 要她把人格卡
+     * 登记成 document 记忆), 而 [ensuredRow] 原来只对 `name:` 那一行做对账 —— 行已经挂上的老安装
+     * 永远拿不到新键。判法按**键名**: 值改过就覆盖成应用这份, 面板里加的别的键不动
+     */
+    fun ensuredConfig(patch: String, rowId: String, config: List<String>): String {
+        if (config.isEmpty()) return patch
+        val lines = patch.lines().toMutableList()
+        val at = lines.indexOfFirst { indentOf(it) > 0 && it.trimStart() == "- id: $rowId" }
+        if (at < 0) return patch
+        val rowIndent = indentOf(lines[at])
+        // 这一行的地盘: 往后到缩进不比它深为止
+        var end = at + 1
+        while (end < lines.size && (lines[end].isBlank() || indentOf(lines[end]) > rowIndent)) end += 1
+        val nameAt = (at + 1 until end).firstOrNull { lines[it].trimStart().startsWith("name:") }
+        if (nameAt == null) return patch
+        val configAt = (at + 1 until end).firstOrNull { lines[it].trimStart() == "config:" }
+        val itemIndent = " ".repeat(rowIndent + 4)
+        val keyIndent = " ".repeat(rowIndent + 2)
+        var next = patch
+        for (line in config) {
+            val key = line.substringBefore(":")
+            val hit = (at + 1 until end).firstOrNull {
+                lines[it].trimStart().startsWith("$key:") && indentOf(lines[it]) > rowIndent
+            }
+            val current = next.lines().toMutableList()
+            if (hit != null) {
+                if (current[hit].trim() == line) continue
+                current[hit] = itemIndent + line
+                next = current.joinToString("\n").trimEnd() + "\n"
+                continue
+            }
+            val configLine = (at + 1 until end).firstOrNull { current[it].trimStart() == "config:" }
+            val insertAt = if (configLine == null) {
+                current.add(nameAt + 1, keyIndent + "config:")
+                nameAt + 2
+            } else {
+                // 跟在已有那几行 config 后面 (没有就紧贴 `config:` 下面)
+                var scan = configLine + 1
+                while (scan < current.size && current[scan].isNotBlank() && indentOf(current[scan]) > indentOf(current[configLine])) scan += 1
+                scan
+            }
+            current.add(insertAt, itemIndent + line)
+            next = current.joinToString("\n").trimEnd() + "\n"
+        }
+        return next
     }
 
     /**

@@ -3,6 +3,41 @@ package io.github.yuloong07star.luwi.overlay
 import io.github.yuloong07star.luwi.tool.SimSetting
 
 /**
+ * 队列里的一条 (2026-11-08 起不再只是一段文本)
+ *
+ * 那一份 jsonl 里的每一行都带着它自己的 `gapMs` (`lw_say` 写下来的, 门户与球读同一份), 所以队列里
+ * 的一条要能把它带上:
+ *
+ * - `gapMs >= 0`: **它自己带着节奏** —— 照它放, 不再各自抽随机
+ * - `gapMs < 0`: 老路径 (`overlay op=reply` / `op=burst` / `op=say`) 放进去的, 按 [BallOutbox.gapFor]
+ *   现场算 (那些路没有一份文件可以读)
+ *
+ * `sticker` / `image` 二选一非空就是"这一条要画一张图"; `image` 是行里的 `rel` (相对 `lw/out`)
+ */
+internal data class BallSay(
+    val text: String,
+    val gapMs: Long = -1L,
+    val sticker: String = "",
+    val image: String = "",
+    val session: String = "",
+    /** 她主动冒的一句 (`overlay op=say`): 画进同一块只读区, 但不写回复那几笔账 */
+    val say: Boolean = false,
+    /**
+     * `kind=file` 那一行 (2026-11-09): 文件名 / 行里的相对路径 / 字节数
+     *
+     * 以前球上把它压成「（文件）」三个字 —— 主人那一句是"文件也可点击", 于是这里得把名字与路径带上,
+     * 画成一颗能点的 chip (点开走悬浮预览窗)
+     */
+    val file: String = "",
+    val fileRel: String = "",
+    val fileBytes: Long = 0L,
+) {
+    /** 是不是"纯文字"那一条 (媒体那三种合并不出来, 见 [BallOutbox.mergeOverflow]) */
+    val isPlainText: Boolean
+        get() = sticker.isEmpty() && image.isEmpty() && file.isEmpty()
+}
+
+/**
  * 往框里放东西的队列 (2026-11-07)
  *
  * 主人这一天的三条口径:
@@ -67,20 +102,36 @@ internal object BallOutbox {
      * 丢话是最伤的那种省事 —— 她说的话少了一句, 主人只会以为她没说完。合起来至少字都在,
      * 而且换行之后仍然看得出是两件事
      */
-    fun mergeOverflow(queued: List<String>, line: String): List<String> =
-        if (queued.isEmpty()) listOf(line)
-        else queued.dropLast(1) + (queued.last() + "\n" + line)
+    /**
+     * 满了再排一条: **两边都是纯文字才合并**, 否则丢最旧的那条 (2026-11-09)
+     *
+     * 媒体那三种 (`sticker` / `image` / `file`) 合不出来 —— 一段字接一个文件名只剩一串字, 图更是直接
+     * 没了。所以满队列时的规矩分两种:
+     *
+     * - 双方都纯文字 → 接在最后一条后面 (字都在, 换行之后仍看得出是两件事)
+     * - 有一方是媒体 → **丢最旧的那一条** (`drop(1)`), 新的一条排在队尾: 顺序不乱, 而"最旧的已经过时"
+     */
+    fun mergeOverflow(queued: List<BallSay>, line: BallSay): List<BallSay> {
+        if (queued.isEmpty()) return listOf(line)
+        val last = queued.last()
+        if (last.isPlainText && line.isPlainText) {
+            return queued.dropLast(1) + last.copy(text = last.text + "\n" + line.text)
+        }
+        return queued.drop(1) + line
+    }
 
     /**
      * 排一条 (纯函数): 没满就追加, 满了就合并, 回一份新的表
      *
-     * 调用方拿回新表之后整份替换自己的队列, 于是"有界"这件事只有一个地方说了算
+     * 调用方拿回新表之后整份替换自己的队列, 于是"有界"这件事只有一个地方说了算。合并只动 `text`,
+     * 那一条自己的 `gapMs` 留着 —— 节奏不因为合并而变
      */
-    fun offer(queued: List<String>, line: String, limit: Int = MAX): List<String> {
-        val wanted = line.trim()
-        if (wanted.isEmpty()) return queued
+    fun offer(queued: List<BallSay>, line: BallSay, limit: Int = MAX): List<BallSay> {
+        if (line.text.isBlank() && line.sticker.isEmpty() && line.image.isEmpty() && line.file.isEmpty()) {
+            return queued
+        }
         val capped = limit.coerceIn(1, MAX)
-        if (queued.size < capped) return queued + wanted
-        return mergeOverflow(queued, wanted)
+        if (queued.size < capped) return queued + line
+        return mergeOverflow(queued, line)
     }
 }

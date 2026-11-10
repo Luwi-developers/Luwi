@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import io.github.yuloong07star.luwi.host.DshHost
+import io.github.yuloong07star.luwi.tool.SimSetting
 import java.io.File
 
 /**
@@ -23,8 +24,22 @@ internal object BallStickers {
     /** 贴上去那张图最多占屏高的百分之几 (再高就把框撑没了) */
     const val MAX_HEIGHT_PERCENT = 18
 
-    /** 单张上限: 超过这一份不解码 (表情包不该有几兆) */
+    /**
+     * 单张上限的**缺省**值 (2026-11-10 起这一条能改: 设置 → 活动 → 更多设置 → 表情)
+     *
+     * 真正常用的是 [capBytes]: 它读那一页的设置, 读不到才回落到这个数
+     */
     const val MAX_BYTES = 2L * 1024 * 1024
+
+    /**
+     * 现在允许多大 (设置 → 活动 → 更多设置 → 表情)
+     *
+     * 与宿主 `lw_sticker op=fetch` 的下载闸、门户那条加表情的路读的是同一格 `sim.json` —— 三处只要
+     * 有一处还写死 2 MB, 就会出现"她存下了、球上画不出来"那种安静的空框
+     */
+    fun capBytes(context: Context): Long = runCatching {
+        SimSetting.plan(context).sticker.maxBytes
+    }.getOrDefault(MAX_BYTES)
 
     fun directory(context: Context): File =
         File(File(File(context.filesDir, DshHost.HOME_DIR), "lw"), DIRECTORY)
@@ -40,8 +55,16 @@ internal object BallStickers {
     fun load(context: Context, id: String, maxHeight: Int): Bitmap? {
         val name = id.trim()
         if (name.isEmpty() || name.contains('/') || name.contains('\\') || name.contains("..")) return null
-        val file = File(directory(context), name)
-        if (!file.isFile || file.length() > MAX_BYTES) return null
+        return loadFile(File(directory(context), name), maxHeight, capBytes(context))
+    }
+
+    /**
+     * 按**文件**读一张图 (2026-11-08: 她发来的图落在 `lw/out/assets/…`, 不在表情那个目录里)
+     *
+     * 上限与幂等那几条跟按名字读的一模一样: 超过 [maxBytes] 不解码、只解到 [maxHeight] 那一档
+     */
+    fun loadFile(file: File, maxHeight: Int, maxBytes: Long = MAX_BYTES): Bitmap? {
+        if (!file.isFile || file.length() > maxBytes) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         runCatching { BitmapFactory.decodeFile(file.absolutePath, bounds) }.getOrNull()
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -57,8 +80,9 @@ internal object BallStickers {
 
     /** 现在有哪几张 (给 `overlay op=state` 与排查用; 按名字排) */
     fun names(context: Context): List<String> = runCatching {
+        val cap = capBytes(context)
         directory(context).listFiles()
-            ?.filter { it.isFile && it.length() in 1..MAX_BYTES }
+            ?.filter { it.isFile && it.length() in 1..cap }
             ?.map { it.name }
             ?.sorted()
             .orEmpty()

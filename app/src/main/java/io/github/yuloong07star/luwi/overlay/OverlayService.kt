@@ -46,7 +46,11 @@ import io.github.yuloong07star.luwi.plugin.widget.WidgetHost
 import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.tool.BallAttach
+import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.tool.OutFile
+import io.github.yuloong07star.luwi.tool.OutWatch
 import io.github.yuloong07star.luwi.tool.SimSetting
 import io.github.yuloong07star.luwi.ui.PickMediaActivity
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -56,6 +60,7 @@ import io.github.yuloong07star.luwi.voice.VoiceLive
 import io.github.yuloong07star.luwi.voice.VoiceState
 import io.github.yuloong07star.luwi.wake.WakeWordService
 import io.github.yuloong07star.luwi.wake.WakeWordState
+import io.github.yuloong07star.luwi.workspace.Workspace
 
 /**
  * 浮标现在什么样: 通道方法 `overlay` 的 state 就读这里
@@ -335,6 +340,17 @@ internal object OverlayState {
      */
     @Volatile
     var pendingSticker: String? = null
+
+    /**
+     * 她发来、而通道还没开着的那一张图 (2026-11-08, 方案 §4.2; 2026-11-09 连原尺寸一起带)
+     *
+     * 与 [pendingSticker] 分开: 那一张从 `lw/stickers` 按名字读, 这一张已经解成位图了 (图在
+     * `lw/out/assets/…`, 读不到就当场说一句 `⚠`, 不留一个补不出来的空位)
+     *
+     * **带上 `w/h` 与 `rel`**: 上屏那一刻要按原尺寸算那一格的高度, 而 `rel` 是点开预览窗时找文件的钥匙
+     */
+    @Volatile
+    var pendingMedia: BallMedia.Pending? = null
 
     /** 球上现在画的那三个字, 空 = 空闲 */
     @Volatile
@@ -941,6 +957,10 @@ class OverlayService : Service() {
         // 先按现有那一份对一次账, 再盯住它 —— 三处读取之一 (另两处: inotify 事件、宿主翻成在跑)
         runCatching { readBallPhase() }
         startPhaseWatch()
+        // 她说的话那份文件 (2026-11-08): 与门户读同一份 jsonl, 见 [startOutWatch]
+        runCatching { startOutWatch() }
+        // 挑好的附件从那个透明 Activity 回到这块框 (2026-11-09): 同一个进程, 一份内存队列就够
+        BallPicks.bind { picks -> handler.post { runCatching { attachPicks(picks) } } }
         // 余额那份文件同一个盯法 (2026-10-16): 宿主一刷, 框里那条「正在取」就地换成真数
         startBalanceWatch()
         balanceStamp = runCatching { BalanceFile.file(this).lastModified() }.getOrDefault(0L)
@@ -994,6 +1014,95 @@ class OverlayService : Service() {
         runCatching { watch.start(this) }
             .onFailure { problem -> OverlayState.phaseNote = "盯不住 ball-phase.json: ${problem.message}" }
         phaseWatch = watch
+    }
+
+    /**
+     * 她说的话那份文件 (`lw/out` 下的 jsonl): **与门户共用同一个 observer** (见 [OutWatch])
+     *
+     * 方案 §3.2「浮球改成读同一份」: 宿主不再给球推一份副本 (推两份必然漂移), 球按自己的水位读同一份
+     * jsonl。两边初始水位不一样是**有意的** —— 门户打开时拿全量 (要把历史画出来), 球打开时取文件尾
+     * (那块框只接新话: 20 秒没人碰就自己关, 往里面倒历史只是噪音)
+     */
+    private fun startOutWatch() {
+        if (outWatch != null) return
+        outWatch = OutWatch.watch(this) { changed ->
+            // 回调在 FileObserver 自己那条线程上, 界面这些东西都是主线程的
+            handler.post { runCatching { readOutStream(changed) } }
+        }
+        // 起来的这一下先把已经存在的那几场记上水位, 于是历史一条都不补
+        handler.post { runCatching { readOutStream("") } }
+    }
+
+    /** 读增量: `changed` 空 = 把所有已知的几场都看一眼 (起来那一拍) */
+    private fun readOutStream(changed: String) {
+        val ids = if (changed.isNotEmpty()) listOf(changed) else OutFile.sessions(this)
+        for (id in ids) {
+            var mark = outWatermark[id]
+            if (mark == null) {
+                val max = OutFile.maxSeq(this, id)
+                // **起来那一拍只记水位** (历史一条不补); 而**具体的变更事件里第一次见到这一场**, 可能是
+                // 新会话的第一条 (`lw_say` 或宿主在 turn end 补的那一行) —— 这一条不能整场跳过,
+                // 否则新会话的第一句话永远不上球 (2026-11-10 修): 从 `max - 1` 取最后一条
+                if (changed.isEmpty()) {
+                    outWatermark[id] = max
+                    continue
+                }
+                mark = (max - 1).coerceAtLeast(0)
+                outWatermark[id] = mark
+            }
+            val page = OutFile.page(this, id, mark)
+            if (page.max > mark) outWatermark[id] = page.next
+            if (page.lines.isEmpty()) continue
+            enqueueOut(page.lines, id)
+        }
+    }
+
+    /**
+     * 把新读到的几行排进队列 (条数与间隔都来自那一份文件, 球这一侧一次都不自己合并/自己抽随机)
+     *
+     * 队列空着时还要判一次"等够了没有": 上一行可能是十分钟前放的, 那这一句**立刻**上屏, 而不是再等
+     * 它自己那个 `gapMs` (见 [OutFile.dueAt])
+     */
+    private fun enqueueOut(lines: List<OutFile.Line>, session: String) {
+        // **换了一场: 框只留最近这一场的话** (2026-11-10): 原来 `readOutStream` 会把所有场的行都排进来,
+        // 而 `kept` 跨场不清 —— 上一场的几条会与这一场拼在同一个框里, 与门户"只画当前一场"对不上
+        if (session.isNotEmpty() && outboxSession.isNotEmpty() && session != outboxSession) {
+            outbox.clear()
+            outboxBusy = false
+            outboxGeneration += 1
+            outboxReleasedAt = 0L
+            outboxSession = session
+            boxView?.clearReplies()
+        } else if (outboxSession.isEmpty() && session.isNotEmpty()) {
+            outboxSession = session
+        }
+        // **不在这儿再合并一次**: 条数由宿主按 `burstEnabled` 定 (它合并在上游), 球再 `limitOf` 一遍
+        // 就会变成"球 1 条、门户 N 条" —— 同一条话两种形状 (方案 §3.2 第 3 条)
+        for (line in lines) {
+            outbox.addLast(
+                BallSay(
+                    // 文件那一行**不再兜「（文件）」** (2026-11-09 主人: "文件也可点击"): 名字与路径
+                    // 跟着走, 画成一颗可点的 chip —— 三个字既看不出是什么, 也无从点起
+                    text = line.text,
+                    gapMs = line.gapMs,
+                    sticker = if (line.kind == "sticker") line.sticker else "",
+                    image = if (line.kind == "image") line.rel else "",
+                    session = session,
+                    file = if (line.kind == "file") {
+                        line.name.ifEmpty { line.rel.substringAfterLast('/') }
+                    } else {
+                        ""
+                    },
+                    fileRel = if (line.kind == "file") line.rel else "",
+                    fileBytes = if (line.kind == "file") line.bytes else 0L,
+                ),
+            )
+        }
+        if (outboxBusy) return
+        val head = outbox.firstOrNull() ?: return
+        val now = System.currentTimeMillis()
+        val wait = OutFile.dueAt(outboxReleasedAt, head.gapMs, now) - now
+        if (wait > 0L) scheduleNext(wait) else drainOutbox()
     }
 
     /** 余额那份文件同一个盯法 ([BalanceFile.Watch]): 宿主一刷就叫醒, 当场改掉框里那一行 */
@@ -1088,6 +1197,10 @@ class OverlayService : Service() {
         snap = null
         closeMenu()
         closeChannel()
+        // 预览窗 (2026-11-09): 它比框大, 留下来就是一整块盖住别人屏幕的遮罩
+        BallPreview.close()
+        // 那个透明 Activity 的接收口跟着服务一起摘 (进程还活着时下一次 onCreate 会重新挂)
+        BallPicks.bind(null)
         // 服务不管怎么停 (我们自己关的、系统收的、进程要走之前那一轮) 都**先把窗摘掉再去引用**:
         // 服务停掉不会让这块窗自己消失, 而那只剩一个后果 —— 一颗没人管得了的球留在别人屏幕上
         // (2026-10-06 真机实测, 见 [hideBall])。正常那条路已经在 hideBall 里摘过了, 这里挡的是
@@ -1162,6 +1275,8 @@ class OverlayService : Service() {
         OverlayState.ballAlpha = 1f
         replace()
         reflowStrip()
+        // 预览窗是按旧屏算的宽高 (它是 MATCH_PARENT 里的一块定尺寸卡片): 转屏就关掉, 要看再点一次
+        BallPreview.close()
         layoutChannel()
         noteRects()
     }
@@ -2692,6 +2807,12 @@ class OverlayService : Service() {
             OverlayState.pendingSticker = null
             appendSticker(waiting)
         }
+        OverlayState.pendingMedia?.let { waiting ->
+            OverlayState.pendingMedia = null
+            boxView?.appendImage(waiting.bitmap, waiting.w, waiting.h, waiting.rel, waiting.name)
+        }
+        // 挑好的附件 (2026-11-09): 服务不在时攒下的那几份在这里补上
+        attachPicks(BallPicks.take())
         refresh(force = true)
     }
 
@@ -2704,7 +2825,10 @@ class OverlayService : Service() {
      * (2026-10-06 报的"点空白关掉之后再也打不开键盘输入"就是那一支)。清理与摘窗分开写, 两条路都干净
      */
     private fun closeChannel() {
+        // 预览窗是"框里那一格的放大", 框收掉它就没了落点 —— 一起关
+        BallPreview.close()
         boxRoot?.let { root -> runCatching { window?.removeView(root) } }
+        boxView?.clearAttachments()
         boxView = null
         boxRoot = null
         boxParams = null
@@ -2727,6 +2851,9 @@ class OverlayService : Service() {
         outbox.clear()
         outboxBusy = false
         outboxSession = ""
+        // 世代 +1: 已经排上的那一拍回来时看见它变了, 就不会把 busy 抹掉 (2026-11-08)
+        outboxGeneration += 1
+        outboxReleasedAt = 0L
         lastBlankTapAt = 0L
         noteActivity()
         refresh(force = true)
@@ -2857,23 +2984,84 @@ class OverlayService : Service() {
         }
 
         /**
-         * 框上那个 `＋`: 挑一张图发给她 (2026-11-07)
+         * 框上那个 `＋`: 挑图片或文件 (2026-11-09 与门户那颗 `+` 同功能)
          *
-         * 选图那道闸只有 Activity 收得到结果, 所以这里只起那个透明的 [PickMediaActivity] —— 它选完
-         * 自己把图落进收件箱再 finish, 这边一行都不用等, 框也不动 (输入里的字照旧在)
+         * 选择器那道闸只有 Activity 收得到结果, 所以这里只起那个透明的 [PickMediaActivity] (带
+         * `mode=ball`) —— 它选完自己落进 `<工作区>/lw-in/` 再交给 [BallPicks], 这边一行都不用等,
+         * 框也不动 (输入里的字照旧在)
          */
-        override fun onPickImage() {
+        override fun onPickAttach() {
             OverlayState.noteBoxActivity()
             noteActivity()
             runCatching {
                 startActivity(
                     Intent(this@OverlayService, PickMediaActivity::class.java)
+                        .putExtra(PickMediaActivity.EXTRA_MODE, PickMediaActivity.MODE_BALL)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 )
             }.onFailure { problem ->
-                hint("打不开选图: ${problem.message ?: problem}")
+                hint(getString(R.string.ball_attach_open_failed, problem.message ?: problem.toString()))
             }
         }
+
+        /** 框里那颗附件 chip 被点了: 弹预览窗 (图与文件都由预览窗自己分路) */
+        override fun onPreviewAttach(pick: LwIn.Pick) {
+            OverlayState.noteBoxActivity()
+            noteActivity()
+            preview(File(pick.path), pick.name, pick.bytes)
+        }
+
+        /** 附件 chip 右边那个 `×`: 这一份不发了 */
+        override fun onRemoveAttach(pick: LwIn.Pick) {
+            OverlayState.noteBoxActivity()
+            noteActivity()
+            boxView?.removeAttachment(pick)
+            boxView?.let { view ->
+                view.requestLayout()
+                view.post { runCatching { layoutChannel() } }
+            }
+        }
+
+        /** 她发来的那张图被点了: 按行里那段 `rel` 找盘上那一份, 交给预览窗 */
+        override fun onPreviewImage(rel: String, name: String) {
+            OverlayState.noteBoxActivity()
+            noteActivity()
+            val file = OutFile.asset(this@OverlayService, rel)
+            if (file == null) {
+                hint(getString(R.string.ball_preview_missing))
+                return
+            }
+            preview(file, name.ifEmpty { file.name }, file.length())
+        }
+
+        /** 她递来的那份文件被点了: 同一块预览窗 */
+        override fun onPreviewFile(rel: String, name: String) {
+            OverlayState.noteBoxActivity()
+            noteActivity()
+            val file = when {
+                rel.startsWith("in/") -> File(LwIn.dir(Workspace.resolve(this@OverlayService).directory), rel.removePrefix("in/"))
+                else -> OutFile.asset(this@OverlayService, rel)
+            }
+            if (file == null || !file.isFile) {
+                hint(getString(R.string.ball_preview_missing))
+                return
+            }
+            preview(file, name.ifEmpty { file.name }, file.length())
+        }
+    }
+
+    /**
+     * 弹那块悬浮预览窗 (2026-11-09 主人: "可以弹出预览窗口, 使用悬浮窗权限")
+     *
+     * 窗在 Service 里、走 `TYPE_APPLICATION_OVERLAY`: 主人正在别的应用里看着屏, 点一下也只多一块窗,
+     * **不跳 Activity**。窗口管理器不在 / 系统拒绝那一条由外面那一句 `hint` 说清
+     */
+    private fun preview(file: File, name: String, bytes: Long) {
+        val manager = window ?: return
+        BallPreview.show(this, manager, BallPreview.Request(file, name, bytes)) { line -> hint(line) }
+        // 预览窗开着时输入框不该自己收: 那一笔"没人碰"的账从这一刻重新起算
+        OverlayState.noteBoxActivity()
+        refresh(force = true)
     }
 
     /**
@@ -2893,11 +3081,25 @@ class OverlayService : Service() {
      */
     private fun ask(text: String): Boolean {
         noteActivity()
+        // **新的 user turn → 撤掉还没上屏的旧条** (2026-11-08, 方案 §3.4 的第一条闸)
+        // 判据就是"这一句真的排上了"这件事本身: 她那一轮剩下的几条对现在这句话已经没有意义了,
+        // 而过时的话比不说更糟。清队只在这里与 [closeChannel] 发生, `op=reply` 不再清 (见 [deliverReply])
+        if (outbox.isNotEmpty() || outboxBusy) {
+            outbox.clear()
+            outboxBusy = false
+            outboxGeneration += 1
+            outboxReleasedAt = 0L
+        }
         if (DshHost.status !is HostStatus.Running) hint(getString(R.string.ball_ask_no_host))
+        // **附件那一段** (2026-11-09, 与门户逐字相同): `[附件 N 个, 图片用 read_image 打开]` + 路径表
+        // —— 她与她那些 fs / 看图工具读得到, 而这一段只在正文末尾, 不参与她那句"说了什么"
+        val picks = boxView?.attachments().orEmpty()
+        val outgoing = text + BallAttach.block(picks.map { it.path })
+        if (picks.isNotEmpty()) note("channel line carries ${picks.size} attachment(s)")
         // **回复框在屏上就点名投它那一场** (2026-10-06 那条例外): 宿主那侧把 `to` 排在时间那笔账
         // 前面; 没有回复框时它是 null, 行为与从前一个字不差
         val to = OverlayState.replyTarget()
-        val seq = VoiceInbox.append(this, text, VoiceInbox.SOURCE_KEYBOARD, to = to)
+        val seq = VoiceInbox.append(this, outgoing, VoiceInbox.SOURCE_KEYBOARD, to = to)
         if (seq == null) {
             // 这一条**要说**: "发出去了"与"没发出去"对主人是两回事, 而屏幕上本来没有任何别的迹象
             hint(getString(R.string.ball_channel_failed))
@@ -2917,9 +3119,14 @@ class OverlayService : Service() {
         // **桌面对话那本账上的 `user` 那一笔** (2.7.8 批次 6): 从这块框里发出去的话, 桌面上那一格也要
         // 看得见 —— 于是"点组件说一句"与"点浮标说一句"在那一格里长得一样。写失败只记一行: 组件那一格
         // 少一条气泡不该把"这句话已经排上了"这件事实搅乱
-        if (runCatching { DesktopChatFile.append(this, DesktopChatFile.WHO_USER, text) }.getOrDefault(false)) {
+        if (runCatching {
+                DesktopChatFile.append(this, DesktopChatFile.WHO_USER, BallAttach.strip(outgoing))
+            }.getOrDefault(false)
+        ) {
             runCatching { WidgetHost.refreshChat(this) }
         }
+        // 发出去的那几份不再挂在输入框下面 (下一次 `+` 是另一批)
+        boxView?.clearAttachments()
         return true
     }
 
@@ -2933,14 +3140,31 @@ class OverlayService : Service() {
      * 通道没开着时那一句**不丢**: 记在 [OverlayState.pendingReply] 里 —— 而 [openChannel] 收尾那一步
      * 正好会把它补上, 所以这里两条路各自只画一次
      */
-    /** 输出队列 (2026-11-07): 她分几条说时一句一句放, 见 [BallOutbox] */
-    private val outbox = ArrayDeque<String>()
+    /** 输出队列 (2026-11-07): 她分几条说时一句一句放, 见 [BallOutbox]; 2026-11-08 起一条带着自己的 `gapMs` */
+    private val outbox = ArrayDeque<BallSay>()
 
     /** 正有一条在屏上等着收尾 (画完 + 停顿 + 念完) */
     private var outboxBusy = false
 
     /** 队列里这一批属于哪一场: 换了一场就说明是新一轮, 上一轮没播的条丢掉 */
     private var outboxSession = ""
+
+    /** 上一次真的往框里放东西的时刻 (墙上时钟): `gapMs` 是从这一刻起算的 (见 `OutFile.dueAt`) */
+    private var outboxReleasedAt = 0L
+
+    /**
+     * 队列的世代: 清队就 +1
+     *
+     * 已经 `postDelayed` 出去的那一拍会先看见世代变了 —— 否则清队之后它照旧回来把 `outboxBusy` 抹成
+     * false, 而那时可能已经有一条正在屏上等着收尾, 于是两条话叠在同一拍上
+     */
+    private var outboxGeneration = 0
+
+    /** 每场读到哪儿了 (`lw/out` 那一份; 球这一侧第一次见到一场时取文件尾, 只接新话) */
+    private val outWatermark = mutableMapOf<String, Int>()
+
+    /** 她说的话那份文件的变更通知 (与门户共用同一个 observer, 见 [OutWatch]) */
+    private var outWatch: (() -> Unit)? = null
 
     /**
      * 一条回答到了: **先排队, 不直接画** (2026-11-07 主人: "分条发送时要等上一条消息结束")
@@ -2956,45 +3180,96 @@ class OverlayService : Service() {
     private fun simSend(): SimSetting.Send =
         runCatching { SimSetting.plan(this).send }.getOrDefault(SimSetting.Send())
 
+    /**
+     * 宿主推来的一条回答 (`overlay op=reply`)
+     *
+     * **2026-11-08 改了两处, 都是 P1-a 的硬伤 (方案 §3.4「前置修复」)**:
+     *
+     * 1. **`op=reply` 不清队** —— 它是**这一轮的产出**, 不是新一轮。原来这里一见 `session !=
+     *    outboxSession` 就 `outbox.clear()`, 而 [deliverBurst] 又把 `outboxSession` 写成空串, 于是
+     *    `turn/end` 那一下推来的 `op=reply` 必然把还没轮到的那几条清掉 (探针读数: 3 条只出第 1 条)。
+     *    清队只发生在**新的 user turn** ([ask]) —— 那才是"过时的话"开始的地方
+     * 2. 队列里的一条带着自己的 `gapMs` ([BallSay]), 于是"门户与球同一份节奏"在数据结构上成立
+     */
     private fun deliverReply(text: String, session: String?) {
         val line = text.trim()
         if (line.isEmpty()) return
         val from = session?.trim().orEmpty()
-        if (from != outboxSession) {
-            // 新一轮: 上一轮还没轮到的那几条不说了 —— 过时的话比不说更糟
-            outbox.clear()
-            outboxBusy = false
-            outboxSession = from
-        }
-        val merged = BallOutbox.offer(outbox.toList(), line, BallOutbox.limitOf(simSend()))
+        // 只有"从没记过场"时才把这一条记上去: reply 不该改写队列属于谁 (那是新一轮的事)
+        if (outboxSession.isEmpty() && from.isNotEmpty()) outboxSession = from
+        val merged = BallOutbox.offer(outbox.toList(), BallSay(line, session = from), BallOutbox.limitOf(simSend()))
         outbox.clear()
         outbox.addAll(merged)
         drainOutbox()
     }
 
     /**
-     * 一条一条往框里放: 画完 -> 停 [BallOutbox.gapFor] 那一段 -> (开了朗读就等它念完) -> 放下一条
+     * 一条一条往框里放: 画完 -> 停那一段 -> (开了朗读就等它念完) -> 放下一条
+     *
+     * **节奏从哪来**: 队列里的一条自己带着 `gapMs` (`lw_say` 写进 jsonl 的那一份, 门户照同一份放),
+     * 没有的那几条 (老路径) 按刚放出去这一条的字数用 [BallOutbox.gapFor] 兜底。
      *
      * 主线程上只用 `postDelayed` 排拍子, 不 sleep 也不起线程 (框是 UI 的东西)
      */
     private fun drainOutbox() {
         if (outboxBusy || outbox.isEmpty()) return
-        val line = outbox.removeFirst()
+        val item = outbox.removeFirst()
+        deliverOne(item)
+        outboxReleasedAt = System.currentTimeMillis()
+        val next = outbox.firstOrNull() ?: return
+        // 下一条**自己**说它要等多久: 同一个 turn 里第二次 lw_say 接着上一条算, 不会重置成 0
+        val waitMs = if (next.gapMs >= 0L) {
+            next.gapMs
+        } else {
+            BallOutbox.gapFor(item.text, simSend(), kotlin.random.Random.nextFloat())
+        }
+        scheduleNext(waitMs)
+    }
+
+    /** 排下一拍: `waitMs` 之后放下一条 (世代变了就不放) */
+    private fun scheduleNext(waitMs: Long) {
+        val generation = outboxGeneration
         outboxBusy = true
-        deliverReplyNow(line, outboxSession.takeIf { it.isNotEmpty() })
-        handler.postDelayed({
-            if (LwSpeak.talking(this)) {
-                // 还在念: 隔一拍再看 —— 两条话叠在一起念是最难听的那一种
-                handler.postDelayed({ finishOutboxOne() }, BallOutbox.SPEAK_POLL_MS)
-            } else {
-                finishOutboxOne()
-            }
-        }, BallOutbox.gapFor(line, simSend(), kotlin.random.Random.nextFloat()))
+        handler.postDelayed({ releaseDue(0, generation) }, waitMs.coerceAtLeast(0L))
+    }
+
+    /**
+     * 该放下一条了 —— **还在念就隔一拍再看** (两条话叠在一起念是最难听的那一种)
+     *
+     * 只看 [LwSpeak.talking] (它认的是"真的在出声", 不是 [VoiceState.speaking]); 念得太久 (卡住的
+     * 引擎 / 一段很长的朗读) 也要放行: 最多等 [SPEAK_SPINS] 拍, 之后照常放下一条
+     */
+    private fun releaseDue(spins: Int, generation: Int) {
+        if (generation != outboxGeneration) return
+        if (LwSpeak.talking(this) && spins < SPEAK_SPINS) {
+            handler.postDelayed({ releaseDue(spins + 1, generation) }, BallOutbox.SPEAK_POLL_MS)
+            return
+        }
+        outboxBusy = false
+        drainOutbox()
     }
 
     private fun finishOutboxOne() {
         outboxBusy = false
         drainOutbox()
+    }
+
+    /**
+     * 队列里那一条真的落到屏上: 话 / 表情 / 图 / 文件 (四样都是 `lw_say` 的参数, 同一条流)
+     *
+     * 它只碰 [OverlayState.pendingReply] 与那块只读区, **一条都不碰输入框**: 不 setText、不
+     * clear、不 setSelection、不 requestFocus
+     */
+    private fun deliverOne(item: BallSay) {
+        when {
+            item.sticker.isNotEmpty() -> deliverStickerNow(item.sticker)
+            item.image.isNotEmpty() -> deliverImageNow(item.image, item.text)
+            item.fileRel.isNotEmpty() || item.file.isNotEmpty() -> {
+                deliverFileNow(item.file, item.fileRel, item.fileBytes, item.text)
+            }
+            item.say -> deliverSayNow(item.text)
+            else -> deliverReplyNow(item.text, item.session.takeIf { it.isNotEmpty() })
+        }
     }
 
     /**
@@ -3007,6 +3282,75 @@ class OverlayService : Service() {
         OverlayState.pendingReply = line
         OverlayState.pendingReplySession = from
         if (boxOnScreen) appendReply(line, from) else openChannel(focus = false)
+    }
+
+    /**
+     * 她发的一张图 (2026-11-08, 方案 §4.2 的"浮球"那一格; 2026-11-09 修了三处)
+     *
+     * 图是她自己那一份 (`lw/out/assets/…`, 宿主复制进来的), **不读相册也不读截屏原处**: 原处那张会被
+     * 删、会被下一次覆盖。读不动就说一句 `⚠` —— "贴了一张你没看见的图"是最难查的那种故障
+     *
+     * 三处都是 2026-11-09 真机读数逼出来的:
+     *
+     * 1. **上限与宿主对齐** ([BallMedia.MAX_BYTES] 20 MB): 原来借用了表情包那一档 2 MB, 而手机截屏
+     *    常 2~4 MB —— 图在那儿, 球上却只剩一句"图没取到"
+     * 2. **失败一定留一句话**: 原来框关着时那一支只 `openChannel`, 而 `pendingNote` 从未设 —— 屏上
+     *    弹出一块**空框**, 一个字都没有
+     * 3. **原尺寸一起带上去**: 那一格的高度在贴上去的瞬间就算好 (`BallMedia.imageBox`), 不再等
+     *    `adjustViewBounds` 现量
+     */
+    private fun deliverImageNow(rel: String, caption: String) {
+        val cap = caption.trim()
+        val file = OutFile.asset(this, rel)
+        val name = file?.name ?: rel.substringAfterLast('/')
+        // 解码上限跟着显示尺寸走 (2026-11-10 收到一半): 解大了既占内存又要在 ImageView 里再缩一次
+        val inner = (BallBox.widthFor(resources.displayMetrics.widthPixels) - dp(20)).coerceAtLeast(1)
+        val maxWidth = (inner * BallMedia.MAX_WIDTH_PERCENT / 100).coerceAtLeast(1)
+        val maxHeight = resources.displayMetrics.heightPixels * BallMedia.MAX_HEIGHT_PERCENT / 100
+        val bitmap = file?.let { BallMedia.decode(it, maxWidth, maxHeight) }
+        if (bitmap == null) {
+            // **先说话再开框**: 失败也要有一行读数, 绝不弹一块空框出去
+            note("image: $rel could not be decoded (${file?.length() ?: -1L} bytes)")
+            deliverNote(getString(R.string.ball_image_missing, name))
+            return
+        }
+        val size = file?.let { LwIn.imageSize(it) }
+        note("image: $rel box=${bitmap.width}x${bitmap.height} src=${size?.first}x${size?.second}")
+        if (boxOnScreen) {
+            appendImage(bitmap, size?.first ?: bitmap.width, size?.second ?: bitmap.height, rel, name, cap)
+        } else {
+            OverlayState.pendingReply = cap
+            OverlayState.pendingMedia = BallMedia.Pending(
+                bitmap = bitmap,
+                w = size?.first ?: bitmap.width,
+                h = size?.second ?: bitmap.height,
+                caption = cap,
+                rel = rel,
+                name = name,
+            )
+            openChannel(focus = false)
+        }
+    }
+
+    /**
+     * 她递来的一份文件 (2026-11-09): 只画文件名, **可点开预览窗**
+     *
+     * 以前这一条被压成「（文件）」三个字塞进只读区 —— 名字没了, 也就无从点起。现在文件名进媒体那一格
+     * (与门户那颗蓝字 chip 同一个意思), 说明那半句照旧落在只读区
+     */
+    private fun deliverFileNow(name: String, rel: String, bytes: Long, caption: String) {
+        val label = name.ifEmpty { rel.substringAfterLast('/') }.ifEmpty { getString(R.string.ball_file_fallback) }
+        val cap = caption.trim()
+        note("file: $label ($bytes bytes) rel=$rel")
+        if (boxOnScreen) {
+            appendFile(label, rel, bytes, cap)
+        } else {
+            // 框关着时文件那一格没有画面可攒 (只有名字), 攒成一句话就够 —— 开框之后它照样可点。
+            // 说明那半句由 `openChannel` 从 `pendingReply` 补, 这里**不再传一次** (会画两遍)
+            OverlayState.pendingReply = cap
+            openChannel(focus = false)
+            appendFile(label, rel, bytes, "")
+        }
     }
 
     /**
@@ -3032,6 +3376,17 @@ class OverlayService : Service() {
     private fun deliverSay(text: String) {
         val line = text.trim()
         if (line.isEmpty()) return
+        // 走队列: 正在播的那一批不被打断, 而队列空着时它就是立刻上屏 (与从前一样)
+        val merged = BallOutbox.offer(outbox.toList(), BallSay(line, say = true), BallOutbox.limitOf(simSend()))
+        outbox.clear()
+        outbox.addAll(merged)
+        drainOutbox()
+    }
+
+    /** 队列里那一句主动说的话真的落上去 */
+    private fun deliverSayNow(text: String) {
+        val line = text.trim()
+        if (line.isEmpty()) return
         OverlayState.pendingSay = line
         if (boxOnScreen) appendSay(line) else openChannel(focus = false)
     }
@@ -3045,20 +3400,21 @@ class OverlayService : Service() {
     }
 
     /**
-     * 她连发几条 (2026-11-07)
+     * 她连发几条 (`overlay op=burst`, 老路径)
      *
      * 几条**一次交给队列**, 由 [drainOutbox] 一条一条放 —— 于是"上一条说完再说下一条"这件事在
      * 分条与回答两条路上是**同一个实现**, 不是两套
      *
-     * 分条不属于任何一场会话: 账按"没点名"处理 (不动 `pendingReplySession`), 也不清掉正在排队的东西
+     * **不再动 `outboxSession`** (2026-11-08): 原来这里写成空串, 而紧接着 `turn/end` 推来的
+     * `op=reply` 一看 `session != ""` 就清队 —— 一轮三条只出第一条 (方案 §3.4 的探针读数)。
+     * 分条本来就不属于任何一场会话, 那就什么都别改
      */
     private fun deliverBurst(text: String) {
         val lines = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
         if (lines.isEmpty()) return
-        outboxSession = ""
         val limit = BallOutbox.limitOf(simSend())
         lines.forEach { line ->
-            val merged = BallOutbox.offer(outbox.toList(), line, limit)
+            val merged = BallOutbox.offer(outbox.toList(), BallSay(line), limit)
             outbox.clear()
             outbox.addAll(merged)
         }
@@ -3066,12 +3422,22 @@ class OverlayService : Service() {
     }
 
     /**
-     * 她贴的一张表情 (2026-11-07)
+     * 她贴的一张表情 (2026-11-07; 2026-11-08 起走队列, 与 `lw_say({sticker})` 同一个落点)
      *
      * 读不动的图**如实说一句** (走 [deliverNote] 那一条 `⚠`): "贴了一张你没看见的图"是最难查的那种
      * 故障 —— 宿主那边心跳一切正常, 屏幕上什么都没有
      */
     private fun deliverSticker(id: String) {
+        val name = id.trim()
+        if (name.isEmpty()) return
+        val merged = BallOutbox.offer(outbox.toList(), BallSay("", sticker = name), BallOutbox.limitOf(simSend()))
+        outbox.clear()
+        outbox.addAll(merged)
+        drainOutbox()
+    }
+
+    /** 队列里那一条表情真的贴上去 */
+    private fun deliverStickerNow(id: String) {
         val name = id.trim()
         if (name.isEmpty()) return
         OverlayState.pendingSticker = name
@@ -3089,6 +3455,77 @@ class OverlayService : Service() {
             return
         }
         view.appendSticker(bitmap)
+    }
+
+    /**
+     * 她发来的那张图真的画上去 (图上那句说明与它同一块只读区)
+     *
+     * **末尾那三行是 2026-11-09 的关键**: 图那一格的高度刚刚被改过, 而这一拍 `layoutChannel()` 量到的
+     * 还是旧高度 (悬浮窗是 `WRAP_CONTENT` 的, 真正的重排在下一帧)。原来只调一次 —— 真机读数就是
+     * "图落地了, 那一格是空的, 滚一下回复框才长出来" (滚动会走 `onScroll` → `refresh(true)` →
+     * `layoutChannel`, 于是"滚一下就好了")。现在显式 `requestLayout()` + 排一帧再摆一次
+     */
+    private fun appendImage(
+        bitmap: android.graphics.Bitmap,
+        w: Int,
+        h: Int,
+        rel: String,
+        name: String,
+        caption: String,
+    ) {
+        val view = boxView
+        if (view == null || !OverlayState.channel) return
+        view.appendImage(bitmap, w, h, rel, name)
+        if (caption.isNotEmpty()) view.appendReply(caption)
+        OverlayState.pendingMedia = null
+        OverlayState.pendingReply = null
+        OverlayState.replies = view.replyCount()
+        OverlayState.noteBoxActivity()
+        noteActivity()
+        view.requestLayout()
+        view.post { runCatching { layoutChannel() } }
+        layoutChannel()
+    }
+
+    /** 她递来的那份文件真的画上去: 名字那一格可点, 说明那半句照旧进只读区 */
+    private fun appendFile(name: String, rel: String, bytes: Long, caption: String) {
+        val view = boxView
+        if (view == null || !OverlayState.channel) return
+        view.appendFile(rel, name, bytes)
+        if (caption.isNotEmpty()) view.appendReply(caption)
+        OverlayState.replies = view.replyCount()
+        OverlayState.noteBoxActivity()
+        noteActivity()
+        view.requestLayout()
+        view.post { runCatching { layoutChannel() } }
+        layoutChannel()
+    }
+
+    /**
+     * 挑好的那几份挂到输入框下面 (2026-11-09)
+     *
+     * 框没开着就先张回来 (`focus = false`, 不抢焦点不弹键盘): 主人点完 `+` 一定看得见结果 ——
+     * "选了文件却什么都没发生"是最容易以为坏了的那一种
+     *
+     * 超过 [BallMedia.MAX_ATTACH] 时**只说一句**并停手 (与门户同一个数), 已经挂上的那几份照旧
+     */
+    private fun attachPicks(picks: List<LwIn.Pick>) {
+        if (picks.isEmpty()) return
+        if (!OverlayState.channel || boxView == null) openChannel(focus = false)
+        val view = boxView ?: return
+        var added = 0
+        for (pick in picks) {
+            if (view.attachments().size >= BallMedia.MAX_ATTACH) {
+                hint(getString(R.string.ball_attach_full, BallMedia.MAX_ATTACH))
+                break
+            }
+            view.addAttachment(pick)
+            added += 1
+        }
+        note("attach: $added pick(s) on the box")
+        view.requestLayout()
+        view.post { runCatching { layoutChannel() } }
+        layoutChannel()
     }
 
     /** 真画进框里: 通道开着才画 (没开就只留着那句话) */
@@ -3298,7 +3735,9 @@ class OverlayService : Service() {
         // "框没人碰了 1791438154137ms" = `now - 0`): [closeChannel] 把那一笔账清零, 而 `removeView`
         // 是下一拍才真的离开窗口树, 于是"刚摘下来的那一拍" boxOnScreen 还是真 —— 少了这个判断,
         // 它会立刻再判一次"闲置太久了"并关一次 (多一条假日志, 还多一次 removeView)
-        val boxIdle = if (boxOnScreen && OverlayState.boxActiveAt != 0L) {
+        // **预览窗开着就不算闲置** (2026-11-09): 主人正在看那张图 / 那份文件, 而框是它唯一的落脚点 ——
+        // 到点把框收掉, 预览窗倒还挂在屏上, 那一块就没有"我为什么还开着"的理由了
+        val boxIdle = if (boxOnScreen && OverlayState.boxActiveAt != 0L && !BallPreview.isOpen) {
             System.currentTimeMillis() - OverlayState.boxActiveAt
         } else {
             0L
@@ -3977,6 +4416,13 @@ class OverlayService : Service() {
 
         /** 与唤醒词服务那个观察者同一个节奏: 400 ms 一次, 只在变了的时候重画 */
         private const val TICK_MS = 400L
+
+        /**
+         * 等朗读念完最多等几拍 (`SPEAK_POLL_MS` 一拍)
+         *
+         * 220 ms × 300 ≈ 66 s: 一段很长的朗读也要放行, 而一个卡住的引擎不该把后面的话全堵住
+         */
+        private const val SPEAK_SPINS = 300
 
         private val BACKGROUND = 0xF21B1B1F.toInt()
         private val MENU_BACKGROUND = 0xF71B1B1F.toInt()

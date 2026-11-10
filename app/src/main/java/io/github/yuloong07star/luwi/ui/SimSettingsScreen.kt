@@ -1,5 +1,6 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.Manifest
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -29,6 +30,8 @@ import io.github.yuloong07star.luwi.scaffolds.SectionSmallTitle
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.SimSetting
+import io.github.yuloong07star.luwi.util.Capability
+import io.github.yuloong07star.luwi.util.PermissionGate
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -45,8 +48,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles
  * 「更多设置」那个弹窗 (2026-11-07 晚, 活动段末尾那一行点开的)
  *
  * 主人这一条要的是"功能与 QQ 桥接里的二代仿真一致" —— 所以这里把 `socialV2` 里那些**时机与
- * 节奏**搬了过来 (多久敲一次钟 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值 / 唤醒时带
- * 多少), 而**敲钟之后看什么**不在这里写: 那是探索每天自己加进 `router.json` 的 `checks`
+ * 节奏**搬了过来 (多久敲一次钟 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值)。
+ * **2026-11-10 去群味**: Luwi 只有单聊, 群里那 14 项 (什么算一次唤醒 / 等多久 / 带多少历史)
+ * 在单聊里没有语义, 已整段撤掉 (方案 `docs/Luwi-更多设置去群味-方案-2026-11-10.md`), 这一页只剩
+ * 真有读者的四段 —— 主动程度 / 开口节奏与分条 / 判断层 / 表情
+ *
+ * 而**敲钟之后看什么**不在这里写: 那是探索每天自己加进 `router.json` 的 `checks`
  * (主人: "检测的内容应由探索时加上"), 这一坨只把它们列出来、给一个开关与一个「忘掉」
  *
  * **形状是弹窗** (主人 2026-11-07 晚: "改成像选择权限那样的弹窗"): 一页参数不值得占一次跳转,
@@ -92,7 +99,7 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
         ) {
             LazyColumn(contentPadding = PaddingValues(0.dp), limitLandscapeWidth = false) {
 
-            /* ── 一、潜水与唤醒 ─────────────────────────────────────────── */
+            /* ── 一、主动程度 ───────────────────────────────────────────── */
             item { SectionSmallTitle(stringResource(R.string.settings_sim_wake_group)) }
             item {
                 Card {
@@ -143,94 +150,6 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
                             range = 0..60,
                             unit = stringResource(R.string.settings_sim_unit_minutes),
                             onChange = { plan = plan.copy(wake = plan.wake.copy(preSleepWaitMs = it * 60_000L)) },
-                            onCommit = { commit() },
-                        )
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_sim_trigger_name),
-                            summary = stringResource(R.string.settings_sim_trigger_name_summary),
-                            checked = plan.wake.nameTrigger,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(nameTrigger = on)))
-                            },
-                        )
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_sim_trigger_keywords),
-                            summary = stringResource(R.string.settings_sim_trigger_keywords_summary),
-                            checked = plan.wake.keywordTrigger,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(keywordTrigger = on)))
-                            },
-                        )
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_sim_trigger_question),
-                            summary = stringResource(R.string.settings_sim_trigger_question_summary),
-                            checked = plan.wake.questionTrigger,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(questionTrigger = on)))
-                            },
-                        )
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_sim_trigger_poke),
-                            summary = stringResource(R.string.settings_sim_trigger_poke_summary),
-                            checked = plan.wake.pokeTrigger,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(pokeTrigger = on)))
-                            },
-                        )
-                        SwitchPreference(
-                            title = stringResource(R.string.settings_sim_trigger_any),
-                            summary = stringResource(R.string.settings_sim_trigger_any_summary),
-                            checked = plan.wake.anyMessage,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(anyMessage = on)))
-                            },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_trigger_probability),
-                            summary = stringResource(
-                                R.string.settings_sim_trigger_probability_summary,
-                                (plan.wake.probability * 100).roundToInt(),
-                            ),
-                            value = (plan.wake.probability * 100).roundToInt(),
-                            range = 0..100,
-                            unit = "%",
-                            onChange = { plan = plan.copy(wake = plan.wake.copy(probability = it / 100f)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_wake_per_minute),
-                            summary = stringResource(
-                                R.string.settings_sim_wake_per_minute_summary,
-                                plan.wake.maxWakePerMinute,
-                            ),
-                            value = plan.wake.maxWakePerMinute,
-                            range = 1..20,
-                            unit = stringResource(R.string.settings_sim_unit_times),
-                            onChange = { plan = plan.copy(wake = plan.wake.copy(maxWakePerMinute = it)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_wake_per_hour),
-                            summary = stringResource(
-                                R.string.settings_sim_wake_per_hour_summary,
-                                plan.wake.maxWakePerHour,
-                            ),
-                            value = plan.wake.maxWakePerHour,
-                            range = 1..120,
-                            unit = stringResource(R.string.settings_sim_unit_times),
-                            onChange = { plan = plan.copy(wake = plan.wake.copy(maxWakePerHour = it)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_no_action),
-                            summary = stringResource(
-                                R.string.settings_sim_no_action_summary,
-                                plan.wake.noActionLimit,
-                            ),
-                            value = plan.wake.noActionLimit,
-                            range = 1..10,
-                            unit = stringResource(R.string.settings_sim_unit_times),
-                            onChange = { plan = plan.copy(wake = plan.wake.copy(noActionLimit = it)) },
                             onCommit = { commit() },
                         )
                         SwitchPreference(
@@ -395,84 +314,14 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
                 }
             }
 
-            /* ── 三、等待与静默 ─────────────────────────────────────────── */
-            item { SectionSmallTitle(stringResource(R.string.settings_sim_wait_group)) }
-            item {
-                Card {
-                    Column {
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_wait_default),
-                            summary = stringResource(
-                                R.string.settings_sim_wait_default_summary,
-                                plan.wait.defaultMs / 1000f,
-                            ),
-                            value = (plan.wait.defaultMs / 100).toInt(),
-                            range = 10..6000,
-                            step = 10,
-                            display = { it / 10f },
-                            unit = stringResource(R.string.settings_sim_unit_seconds),
-                            onChange = { plan = plan.copy(wait = plan.wait.copy(defaultMs = it * 100L)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_wait_quiet),
-                            summary = stringResource(
-                                R.string.settings_sim_wait_quiet_summary,
-                                plan.wait.quietMs / 1000f,
-                            ),
-                            value = (plan.wait.quietMs / 100).toInt(),
-                            range = 10..1200,
-                            step = 10,
-                            display = { it / 10f },
-                            unit = stringResource(R.string.settings_sim_unit_seconds),
-                            onChange = { plan = plan.copy(wait = plan.wait.copy(quietMs = it * 100L)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_wait_after_new),
-                            summary = stringResource(
-                                R.string.settings_sim_wait_after_new_summary,
-                                plan.wait.minQuietAfterNewMs / 1000f,
-                            ),
-                            value = (plan.wait.minQuietAfterNewMs / 100).toInt(),
-                            range = 0..1200,
-                            step = 10,
-                            display = { it / 10f },
-                            unit = stringResource(R.string.settings_sim_unit_seconds),
-                            onChange = { plan = plan.copy(wait = plan.wait.copy(minQuietAfterNewMs = it * 100L)) },
-                            onCommit = { commit() },
-                        )
-                    }
-                }
-            }
-
-            /* ── 四、判断层: 阈值这一半归这里, 盯什么归探索 ──────────────── */
+            /* ── 三、判断层: 阈值这一半归这里, 盯什么归探索 ──────────────── */
             item { SectionSmallTitle(stringResource(R.string.settings_sim_router_group)) }
             item {
                 Card {
                     Column {
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_router_game),
-                            summary = stringResource(
-                                R.string.settings_sim_router_game_summary,
-                                plan.router.gameMinutes,
-                            ),
-                            value = plan.router.gameMinutes,
-                            range = 5..600,
-                            step = 5,
-                            unit = stringResource(R.string.settings_sim_unit_minutes),
-                            onChange = { plan = plan.copy(router = plan.router.copy(gameMinutes = it)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_router_wish),
-                            summary = stringResource(R.string.settings_sim_router_wish_summary, plan.router.wishDays),
-                            value = plan.router.wishDays,
-                            range = 1..365,
-                            unit = stringResource(R.string.settings_sim_unit_days),
-                            onChange = { plan = plan.copy(router = plan.router.copy(wishDays = it)) },
-                            onCommit = { commit() },
-                        )
+                        // 游戏多久算久 / 记着的事提前几天提 (2026-11-10 主人: "那两个设置应该由探索或主动对话时
+                        // 自己决定, 而不需要加在设置里"): 那两把尺子已经不在这里, 她走 `lw_router op=rules` 或
+                        // 探索收尾的 `rules` 自己定 —— 这一页只剩"多久问一次"这一类由人拍的数
                         NumberRow(
                             title = stringResource(R.string.settings_sim_router_cooldown),
                             summary = stringResource(
@@ -530,6 +379,21 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
                 Card {
                     Column {
                         Note(stringResource(R.string.settings_sim_checks_note))
+                        // 事件型检测项要日历 (2026-11-10): 读不到时那几条永远不会命中, 而"到点没响"与
+                        // "压根没有这一条"在界面上长得一样 —— 所以这里明说一句, 不猜
+                        if (checks.any { it.kind == "event" }) {
+                            val noCalendar = remember(checks) {
+                                PermissionGate.refusal(
+                                    context,
+                                    Capability(
+                                        name = "日历",
+                                        why = "事件型检测项",
+                                        permissions = listOf(Manifest.permission.READ_CALENDAR),
+                                    ),
+                                ) != null
+                            }
+                            if (noCalendar) Note(stringResource(R.string.settings_sim_checks_calendar))
+                        }
                         if (checks.isEmpty()) {
                             Note(stringResource(R.string.settings_sim_checks_empty))
                         } else {
@@ -571,36 +435,38 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
                 }
             }
 
-            /* ── 五、唤醒时带多少 ───────────────────────────────────────── */
-            item { SectionSmallTitle(stringResource(R.string.settings_sim_context_group)) }
+            /* ── 四、表情 (2026-11-10, 主人: "加表情包图片上限设置") ──────── */
+            item { SectionSmallTitle(stringResource(R.string.settings_sim_sticker_group)) }
             item {
                 Card {
                     Column {
                         NumberRow(
-                            title = stringResource(R.string.settings_sim_context_messages),
+                            title = stringResource(R.string.settings_sim_sticker_max),
                             summary = stringResource(
-                                R.string.settings_sim_context_messages_summary,
-                                plan.context.wakeMessageLimit,
+                                R.string.settings_sim_sticker_max_summary,
+                                plan.sticker.maxMb,
                             ),
-                            value = plan.context.wakeMessageLimit,
-                            range = 1..100,
-                            unit = stringResource(R.string.settings_sim_unit_messages),
-                            onChange = { plan = plan.copy(context = plan.context.copy(wakeMessageLimit = it)) },
+                            value = plan.sticker.maxMb,
+                            range = SimSetting.STICKER_MB_RANGE,
+                            unit = stringResource(R.string.settings_sim_unit_mb),
+                            onChange = { plan = plan.copy(sticker = plan.sticker.copy(maxMb = it)) },
                             onCommit = { commit() },
                         )
+                        // 张数那一条 (2026-11-10 主人: "表情包加上数量限制"): 两个写入方都按它拦
                         NumberRow(
-                            title = stringResource(R.string.settings_sim_context_chars),
+                            title = stringResource(R.string.settings_sim_sticker_count),
                             summary = stringResource(
-                                R.string.settings_sim_context_chars_summary,
-                                plan.context.wakeMaxChars,
+                                R.string.settings_sim_sticker_count_summary,
+                                plan.sticker.maxCount,
                             ),
-                            value = plan.context.wakeMaxChars,
-                            range = 500..20000,
-                            step = 500,
-                            unit = stringResource(R.string.settings_sim_unit_chars),
-                            onChange = { plan = plan.copy(context = plan.context.copy(wakeMaxChars = it)) },
+                            value = plan.sticker.maxCount,
+                            range = SimSetting.STICKER_COUNT_RANGE,
+                            step = 10,
+                            unit = stringResource(R.string.settings_sim_unit_sheets),
+                            onChange = { plan = plan.copy(sticker = plan.sticker.copy(maxCount = it)) },
                             onCommit = { commit() },
                         )
+                        Note(stringResource(R.string.settings_sim_sticker_note))
                     }
                 }
             }

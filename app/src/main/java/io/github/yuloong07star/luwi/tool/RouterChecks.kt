@@ -46,6 +46,14 @@ internal object RouterChecks {
         val at: String?,
         val enabled: Boolean,
         val from: String?,
+        /**
+         * `event` 那一支的三个参数 (2026-11-10): 宿主 `routerCheckHit` 读的是同一份
+         *
+         * [beforeMinutes] 缺省 0 表示"宿主按 15 分钟算" (`routerEventHit` 的缺省), 这里只负责显示
+         */
+        val beforeMinutes: Int = 0,
+        val titleContains: String? = null,
+        val calendarIds: List<Long> = emptyList(),
     ) {
         /** 那行小字: 判法本身 (给人看的, 与宿主 `routerCheckHit` 同一套说法) */
         val how: String
@@ -56,6 +64,12 @@ internal object RouterChecks {
                 }
 
                 "time" -> at?.let { "每天 $it 之后" } ?: "到点"
+                // 事件型 (2026-11-10): "日历事件前 30 分钟 · 含「上班」"
+                "event" -> buildString {
+                    append("日历事件前 ").append(if (beforeMinutes > 0) beforeMinutes else 15).append(" 分钟")
+                    titleContains?.let { append(" · 含「").append(it).append("」") }
+                }
+
                 else -> kind
             }
     }
@@ -94,6 +108,13 @@ internal object RouterChecks {
                 at = (one["at"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
                 enabled = (one["enabled"] as? JsonPrimitive)?.booleanOrNull ?: true,
                 from = (one["from"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
+                // 事件型那三个 (2026-11-10): 读不动就按缺省 —— 宿主那边写进来的形状是这几个键
+                beforeMinutes = (whenOne["beforeMinutes"] as? JsonPrimitive)?.intOrNull ?: 0,
+                titleContains = (whenOne["titleContains"] as? JsonPrimitive)?.contentOrNull
+                    ?.takeIf { it.isNotBlank() },
+                calendarIds = (whenOne["calendarIds"] as? JsonArray)
+                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.toLongOrNull() }
+                    .orEmpty(),
             )
         }
     }

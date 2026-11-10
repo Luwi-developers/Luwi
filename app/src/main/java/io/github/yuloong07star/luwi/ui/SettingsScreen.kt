@@ -84,6 +84,7 @@ import io.github.yuloong07star.luwi.tool.ExploreStatus
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.ProactiveGate
 import io.github.yuloong07star.luwi.tool.ProactiveSchedule
+import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.Wishes
 import io.github.yuloong07star.luwi.tool.SchedulePanel
@@ -151,6 +152,7 @@ import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwPlugin
 import io.github.yuloong07star.luwi.tool.LwPower
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.LwTts
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
@@ -572,6 +574,7 @@ fun SettingsScreen() {
                         selected = settings.mode.coerceIn(0, themeModes.lastIndex),
                         onSelect = { ThemeStore.update(settings.copy(mode = it)) },
                     )
+                    SettingsPanel { PortalFaceItems() }
                 }
             }
 
@@ -844,6 +847,217 @@ fun SettingsScreen() {
             AboutPage.SOURCE -> SourceDialog(onDismissRequest = { about = null })
 
             null -> Unit
+        }
+    }
+}
+
+/**
+ * 对话层那张脸: 背景图与背景的不透明度 (2026-11-08 主人)
+ *
+ * 这几行只作用在门户那一层 (`presets/luwi-portal`), 与上面那一排深浅色是两笔账: 主题归整个应用,
+ * 背景与透明度归这一层
+ *
+ * **改完立刻推给页面**: 门户是 WebView 里的一层 DOM, 它的 CSS 变量由 `PortalBridge.portalLook()`
+ * 交过去; 所以这里写完文件还要叫一声 `reloadLook()` —— 门户收着时那一句只更新它的模块态, 下次挂载
+ * 自然用上新的
+ */
+@Composable
+private fun PortalFaceItems() {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    var revision by remember { mutableIntStateOf(0) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val face = remember(revision) { PortalFace.face(context) }
+    var alphaDraft by remember(revision) {
+        mutableIntStateOf((face.alpha * 100f).roundToInt().coerceIn(0, 100))
+    }
+
+    fun pushLook() {
+        PortalState.run?.invoke("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.reloadLook()")
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val next = withContext(Dispatchers.IO) { PortalFace.setWall(context, uri) }
+                if (next == null) {
+                    message = context.getString(R.string.settings_portal_wall_failed)
+                } else {
+                    message = null
+                    revision += 1
+                    pushLook()
+                }
+            }
+        }
+    }
+    // 头像走同一个选择器 (2026-11-10): 它与背景是两笔账, 换一样不该动另一样
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val next = withContext(Dispatchers.IO) { PortalFace.setAvatar(context, uri) }
+                if (next == null) {
+                    message = context.getString(R.string.settings_portal_avatar_failed)
+                } else {
+                    message = null
+                    revision += 1
+                    pushLook()
+                }
+            }
+        }
+    }
+    var editingName by rememberSaveable { mutableStateOf(false) }
+
+    // 头像与昵称 (2026-11-10 主人: "对话层的 luwi 图标和 luwi 名可在外观设置中修改")
+    ArrowPreference(
+        title = stringResource(R.string.settings_portal_avatar),
+        summary = if (face.avatar.isEmpty()) {
+            stringResource(R.string.settings_portal_avatar_none)
+        } else {
+            stringResource(R.string.settings_portal_avatar_ready)
+        },
+        onClick = {
+            haptic.contextClick()
+            avatarPicker.launch("image/*")
+        },
+    )
+    if (face.avatar.isNotEmpty()) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_portal_avatar_clear),
+            summary = null,
+            onClick = {
+                haptic.contextClick()
+                val next = PortalFace.clearAvatar(context)
+                message = if (next == null) context.getString(R.string.settings_portal_avatar_failed) else null
+                revision += 1
+                pushLook()
+            },
+        )
+    }
+    ArrowPreference(
+        title = stringResource(R.string.settings_portal_name),
+        summary = stringResource(
+            R.string.settings_portal_name_summary,
+            face.name.ifEmpty { "Luwi" },
+        ),
+        onClick = {
+            haptic.contextClick()
+            editingName = true
+        },
+    )
+    if (editingName) {
+        PortalNameDialog(
+            current = face.name,
+            onDismiss = { editingName = false },
+            onSave = { typed ->
+                editingName = false
+                val next = PortalFace.setName(context, typed)
+                if (next == null) {
+                    message = context.getString(R.string.settings_portal_avatar_failed)
+                } else {
+                    message = null
+                    revision += 1
+                    pushLook()
+                }
+            },
+        )
+    }
+
+    ArrowPreference(
+        title = stringResource(R.string.settings_portal_wall),
+        summary = if (face.wall.isEmpty()) {
+            stringResource(R.string.settings_portal_wall_none)
+        } else {
+            stringResource(R.string.settings_portal_wall_ready)
+        },
+        onClick = {
+            haptic.contextClick()
+            picker.launch("image/*")
+        },
+    )
+    // 清除那一行只在真有背景时出现: 没有背景时它是"点了什么都不会发生"的一行
+    if (face.wall.isNotEmpty()) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_portal_wall_clear),
+            summary = null,
+            onClick = {
+                haptic.contextClick()
+                val next = PortalFace.clearWall(context)
+                message = if (next == null) context.getString(R.string.settings_portal_wall_failed) else null
+                revision += 1
+                pushLook()
+            },
+        )
+    }
+    // 拖动只改草稿, 手抬起才落盘 (与探索那两条同一个口径), 落完推一次页面
+    ArrowSlider(
+        title = stringResource(R.string.settings_portal_alpha),
+        summary = stringResource(R.string.settings_portal_alpha_summary, alphaDraft),
+        value = alphaDraft.toFloat(),
+        onValueChange = { raw -> alphaDraft = raw.roundToInt().coerceIn(0, 100) },
+        valueRange = 0f..100f,
+        steps = 0,
+        unit = "%",
+        onValueChangeFinished = {
+            PortalFace.save(context, face.copy(alpha = alphaDraft / 100f))
+            pushLook()
+        },
+        onInputConfirm = { text ->
+            val typed = text.trim().toFloatOrNull()?.roundToInt()
+            if (typed != null) {
+                alphaDraft = typed.coerceIn(0, 100)
+                PortalFace.save(context, face.copy(alpha = alphaDraft / 100f))
+                pushLook()
+            }
+        },
+    )
+    message?.let { PlaceholderItems(it) }
+}
+
+/**
+ * 「修改昵称」那一下 (2026-11-10)
+ *
+ * 一个文本框就够: 名字是短的一行字, 不值得再占一页。**留空 = 回到 `Luwi`** —— 那句话写在
+ * summary 里, 于是"清空是不是就没了"这件事不用猜
+ */
+@Composable
+private fun PortalNameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    OverlayDialog(
+        show = true,
+        title = stringResource(R.string.settings_portal_name),
+        summary = stringResource(R.string.settings_portal_name_dialog),
+        defaultWindowInsetsPadding = false,
+        onDismissRequest = onDismiss,
+    ) {
+        var text by rememberSaveable { mutableStateOf(current) }
+        SuperTextField(
+            modifier = Modifier.padding(bottom = 16.dp),
+            value = text,
+            onValueChange = { typed -> text = typed.take(PortalFace.MAX_NAME_CHARS) },
+            label = stringResource(R.string.settings_portal_name_hint),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        )
+        PlaceholderItems(stringResource(R.string.settings_portal_name_limit))
+        Row(horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(
+                text = stringResource(R.string.button_cancel),
+                onClick = {
+                    haptic.contextClick()
+                    onDismiss()
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(20.dp))
+            TextButton(
+                text = stringResource(R.string.button_confirm),
+                onClick = {
+                    haptic.confirm()
+                    onSave(text)
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
         }
     }
 }
@@ -3250,12 +3464,38 @@ private fun ExploreOverview() {
             append(context.getString(R.string.settings_explore_running, clockStamp(it.deadline)))
         }
     }
+    // 检测项那一行 (2026-11-10, 方案 B): "偶尔没交"与"根本没在想"要能分开, 所以这一行说三件事 ——
+    // 现在盯着几件 / 上一场交了几条 / 连着几场没交. 一场都还没收尾时不画 (没有"上一场"可说)
+    val watched = remember { RouterChecks.count(context) }
+    val checksLine = remember {
+        ExploreStatus.read(context)
+            ?.takeIf { it.lastFinishAt > 0L }
+            ?.let { reading ->
+                val first = context.getString(
+                    R.string.settings_explore_checks,
+                    watched,
+                    reading.checksWritten ?: 0,
+                    scheduleStamp(reading.lastFinishAt),
+                )
+                if (reading.checksStreak > 0) {
+                    "$first · " + context.getString(
+                        R.string.settings_explore_checks_streak,
+                        reading.checksStreak,
+                    )
+                } else {
+                    first
+                }
+            }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
     ) {
         Text(text = overview, color = colorScheme.onSurfaceVariantActions)
+        checksLine?.let {
+            Text(text = it, color = colorScheme.onSurfaceVariantActions)
+        }
     }
 }
 
@@ -3616,6 +3856,9 @@ private fun ProactiveItems() {
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
     var editingTimes by rememberSaveable { mutableStateOf(false) }
+    var confirmingFull by rememberSaveable { mutableStateOf(false) }
+    // 「能做什么」那三档: 一行 + 一个弹窗 (2026-11-10 主人)
+    var pickingActing by rememberSaveable { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     // 她自己挑时机那一条 (2026-11-07): 缺省关着, 所以每次进这一页都现读一次 `router.json`
     var tickOn by remember { mutableStateOf(RouterTick.enabled(context)) }
@@ -3672,6 +3915,63 @@ private fun ProactiveItems() {
             }
         },
     )
+
+    // 主动场能做什么 (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md` §4):
+    // 落 `sim.json` 的 `proactive.acting`, 宿主那道三表硬闸读它, 改完 3 秒内生效.
+    // **三档并成一行** (主人 2026-11-10: "三权限合成一行, 点击那行后弹出弹窗选择"):
+    // 行上只报当前那一档, 三个选项在弹窗里 —— 一天不会改两次的东西不该占三行
+    val actingPlan = remember(revision) { SimSetting.plan(context).proactive }
+    val actingLabel = when {
+        actingPlan.act -> stringResource(R.string.settings_proactive_acting_act)
+        actingPlan.full -> stringResource(R.string.settings_proactive_acting_full)
+        else -> stringResource(R.string.settings_proactive_acting_remind)
+    }
+
+    fun saveActing(next: String) {
+        val current = SimSetting.plan(context)
+        if (SimSetting.save(context, current.copy(proactive = SimSetting.Acting(next)))) {
+            message = null
+        } else {
+            message = context.getString(R.string.settings_router_tick_failed)
+        }
+        revision += 1
+    }
+
+    ArrowPreference(
+        title = stringResource(R.string.settings_proactive_acting),
+        summary = stringResource(R.string.settings_proactive_acting_summary, actingLabel),
+        onClick = {
+            haptic.contextClick()
+            pickingActing = true
+        },
+    )
+    PlaceholderItems(stringResource(R.string.settings_proactive_acting_note))
+
+    if (pickingActing) {
+        ProactiveActingPicker(
+            current = actingPlan.tier,
+            onDismiss = { pickingActing = false },
+            onPick = { next ->
+                pickingActing = false
+                // 全放开还要再过一道确认: 她会自己建虚拟屏并点屏, 点错就点错了
+                if (next == SimSetting.ACTING_FULL) {
+                    confirmingFull = true
+                } else if (next != actingPlan.tier) {
+                    saveActing(next)
+                }
+            },
+        )
+    }
+
+    if (confirmingFull) {
+        ProactiveActingConfirm(
+            onDismiss = { confirmingFull = false },
+            onConfirm = {
+                confirmingFull = false
+                saveActing(SimSetting.ACTING_FULL)
+            },
+        )
+    }
 
     // 上一场那趟
     plan.last?.let { last ->
@@ -3815,6 +4115,100 @@ private fun ProactiveTimesDialog(current: String, onDismiss: () -> Unit, onSave:
                 onClick = {
                     haptic.confirm()
                     onSave(text)
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
+    }
+}
+
+/**
+ * 「主动对话能做什么」那三档的选择窗 (2026-11-10 主人: "三权限合成一行, 点击那行后弹出弹窗选择")
+ *
+ * 三行都是一样的设置项: 上面是档名, 下面是这一档能做什么。**点哪一档就是选哪一档** —— 弹窗不另设
+ * 「确定」, 少一次点; 选中「全放开」时由外面再接一道确认 (见 [ProactiveActingConfirm])
+ */
+@Composable
+private fun ProactiveActingPicker(current: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    val tiers = listOf(
+        SimSetting.ACTING_REMIND to Pair(
+            R.string.settings_proactive_acting_remind,
+            R.string.settings_proactive_acting_remind_summary,
+        ),
+        SimSetting.ACTING_ACT to Pair(
+            R.string.settings_proactive_acting_act,
+            R.string.settings_proactive_acting_act_summary,
+        ),
+        SimSetting.ACTING_FULL to Pair(
+            R.string.settings_proactive_acting_full,
+            R.string.settings_proactive_acting_full_summary,
+        ),
+    )
+    OverlayDialog(
+        show = true,
+        title = stringResource(R.string.settings_proactive_acting),
+        summary = stringResource(R.string.settings_proactive_acting_dialog),
+        defaultWindowInsetsPadding = false,
+        onDismissRequest = onDismiss,
+    ) {
+        Column {
+            tiers.forEach { (tier, text) ->
+                val picked = tier == current
+                ArrowPreference(
+                    title = stringResource(text.first) + if (picked) " · 现在" else "",
+                    summary = stringResource(text.second),
+                    onClick = {
+                        haptic.confirm()
+                        onPick(tier)
+                    },
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        TextButton(
+            text = stringResource(R.string.button_cancel),
+            onClick = {
+                haptic.contextClick()
+                onDismiss()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * 「全放开」那一下的确认 (方案 §4: 选 `full` 时弹一次, **默认按钮是取消**)
+ *
+ * 与 [ProactiveTimesDialog] 同一套壳; 两个按钮位置反过来 (取消在前, 在左边那一位), 于是"手快按一下"
+ * 落在取消上, 不是落在"她会自己点屏"上
+ */
+@Composable
+private fun ProactiveActingConfirm(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    OverlayDialog(
+        show = true,
+        title = stringResource(R.string.settings_proactive_acting_full),
+        summary = stringResource(R.string.settings_proactive_acting_full_dialog),
+        defaultWindowInsetsPadding = false,
+        onDismissRequest = onDismiss,
+    ) {
+        Row(horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(
+                text = stringResource(R.string.button_cancel),
+                onClick = {
+                    haptic.contextClick()
+                    onDismiss()
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(20.dp))
+            TextButton(
+                text = stringResource(R.string.button_confirm),
+                onClick = {
+                    haptic.confirm()
+                    onConfirm()
                 },
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.textButtonColorsPrimary(),

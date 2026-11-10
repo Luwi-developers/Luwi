@@ -1080,6 +1080,9 @@ object PrivilegedBridge {
         "notifications" -> appContext { LwNotifications.dispatch(it, request) }
         // 2.5.0 批次 7: 日程 (读日历 / 建一条 / 改一条 / 查空闲) 与快捷指令 (dsh 家里那几个 md)
         "calendar" -> appContext { LwCalendar.dispatch(it, request) }
+        // 判断层那一格 (2026-11-10): 结构化的一段日程, 不在模型能的 op 表里 —— 只有宿主
+        // `readCalendarWindow` 与 `RouterTick` 用. 不给它开一条工具, 免得"日程"这件事有两个入口
+        "calendarWindow" -> appContext { LwCalendar.window(it, request) }
                 "quick" -> appContext { LwQuick.dispatch(it, request) }
                 // 自动指令 (2.5.0 批次 8): 规则 / 设置 / 历史 / 现在能不能用, 都在这一条上
         "automation" -> appContext { LwAutomation.dispatch(it, request) }

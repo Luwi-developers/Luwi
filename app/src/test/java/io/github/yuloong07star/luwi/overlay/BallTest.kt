@@ -1410,6 +1410,8 @@ class BallTest {
     @Test
     fun `新回复的头一行是滚动的位置`() {
         assertEquals(0, BallBox.newestStart("只有一条回答", "只有一条回答"))
+        // 回复之间现在是单换行 (不带空白行, 2026-11-10): 位置仍是"第二条开头"
+        assertEquals(3, BallBox.newestStart("旧话\n新话", "新话"))
         assertEquals(4, BallBox.newestStart("旧话\n\n新话", "新话"))
         assertEquals(0, BallBox.newestStart("", ""))
     }

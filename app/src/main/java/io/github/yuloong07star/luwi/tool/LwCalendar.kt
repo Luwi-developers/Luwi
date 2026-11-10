@@ -6,11 +6,18 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.provider.CalendarContract
+import io.github.yuloong07star.luwi.automation.AutomationCalendar
 import io.github.yuloong07star.luwi.util.Capability
 import io.github.yuloong07star.luwi.util.PermissionGate
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -638,6 +645,57 @@ internal object LwCalendar {
                 " ${render(to, false, zone)}, each ${dayStart}-${dayEnd}, at least $minMinutes minutes:\n" +
                 "$rows",
         )
+    }
+
+    /* ── 判断层那一格 (2026-11-10, 方案 E) ──────────────────────────────── */
+
+    /**
+     * 判断层要的那一段日程: **结构化**, 不给人看
+     *
+     * 与 `op=events` 的分别: 那一支念的是人话 (给模型读), 这一支是宿主 `readCalendarWindow` 的输入。
+     * 所以它**永远不抛**: 没权限就把那句原因写进 `why`, 宿主按 `available: false` 让 event 那一条
+     * 这一拍不命中 —— 判断层不该因为日历读不到就停摆
+     *
+     * 不在 [OPERATIONS] 里: 它不是模型能调的那一档, 而是判断层与调度层自己用的读数 (2026-11-10)
+     */
+    fun window(context: Context, request: JsonObject): JsonObject {
+        val at = System.currentTimeMillis()
+        val zone = zone()
+        val from = request.stringOrNull("from")?.let { runCatching { instant(it, zone) }.getOrNull() }
+            ?: (at - 60 * 60 * 1000L)
+        val to = request.stringOrNull("to")?.let { runCatching { instant(it, zone) }.getOrNull() }
+            ?: (at + DAY_MS)
+        // 窗口夹进那 62 天: 调用方写歪了就先缩，不因为"范围太大"整条拒掉
+        val end = from + (to - from).coerceIn(0L, MAX_RANGE_DAYS * DAY_MS)
+        val limit = (request.intOrNull("limit") ?: MAX_LIMIT).coerceIn(1, MAX_LIMIT)
+        val ids = (request["calendarIds"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.toLongOrNull() }
+            .orEmpty()
+        val reading = AutomationCalendar.read(context, from, end, ids)
+        val occurrences = reading.occurrences
+        return buildJsonObject {
+            put("available", occurrences != null)
+            put("why", reading.refusal.orEmpty())
+            put("at", at)
+            put("from", from)
+            put("to", end)
+            put("events", buildJsonArray {
+                // `Instances` 那一次查询已经按 [from, end) 收过口了, 这里只排序与截断
+                occurrences.orEmpty().asSequence()
+                    .sortedBy { it.begin }
+                    .take(limit)
+                    .forEach { one ->
+                        add(buildJsonObject {
+                            put("id", one.eventId)
+                            put("calendarId", one.calendarId)
+                            put("title", one.title)
+                            put("startMs", one.begin)
+                            put("endMs", one.end)
+                            put("allDay", one.allDay)
+                        })
+                    }
+            })
+        }
     }
 
     /* ── 小工具 ─────────────────────────────────────────────────────────── */

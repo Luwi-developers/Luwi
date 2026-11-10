@@ -6,17 +6,23 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import io.github.yuloong07star.luwi.automation.AutomationCalendar
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
@@ -51,6 +57,28 @@ internal object RouterTick {
     /** 两次敲钟之间最短 / 最长各是多少毫秒 */
     const val MIN_GAP_MS = 25 * 60_000L
     const val MAX_GAP_MS = 55 * 60_000L
+
+    /* ── 准点那一拍 (2026-11-10, 方案 E) ──────────────────────────────────────
+     *
+     * 事件型检测项说的是"开始前 N 分钟", 而 25~55 分钟的随机间隔会让这句话抖掉大半 —— 所以有 event
+     * 检测项时按事件自己的时刻排一次。**提前量由应用自己算** (不读宿主写的键): `arm()` 是"投完收件箱
+     * 立刻"跑的, 那时宿主还没判断完, 它写下来的时刻赶不上这一次排闹钟
+     */
+
+    /** 提前量最多看多远: 两小时以内的事件才值得为它把闹钟提前 */
+    const val LEAD_WINDOW_MS = 2 * 60 * 60 * 1000L
+
+    /** 窗口**已经开着**却没说过时, 一分钟后再敲一次 (说过了就交回随机间隔) */
+    const val LEAD_SOON_MS = 60_000L
+
+    /** 排闹钟的下限: 已经到点的那一刻也不要排到"现在" */
+    const val LEAD_FLOOR_MS = 3_000L
+
+    /** 算提前量时往前看多远: 一天够盖住所有 `beforeMinutes` 的合理取值 */
+    private const val LEAD_LOOKAHEAD_MS = 24 * 60 * 60 * 1000L
+
+    /** 一次提前量的读法: [next] 是"那一刻" (0 = 没有), [open] 是"现在就在窗口里" */
+    data class Lead(val next: Long = 0L, val open: Boolean = false)
 
     /** 与自动指令 (41) / 探索 (42) / 主动对话 (43) 各占一个, 互不覆盖 */
     private const val REQUEST = 44
@@ -130,6 +158,86 @@ internal object RouterTick {
         return low + ((high - low) * bounded).toLong()
     }
 
+    /** 与宿主 `routerDayKey` 同一个口径 (`2026-11-10`, 本地时区) */
+    fun dayKeyOf(now: Long): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
+
+    /**
+     * 检测项 + 日程实例 -> 这一拍该盯的时刻 (纯函数)
+     *
+     * 与宿主 `routerEventHit` 同一套三条规矩: 全天事件不算、已经开始的 lead 不算、标题与日历要匹配
+     * (两边漂开的样子是"闹钟按点响了, 判断层却说不该响")。`said` 是 `router.json` 的 `checksSaid`:
+     * 一场会说过之后它在窗口里不再算"该敲", 于是不会每分钟响一次
+     */
+    fun leadAtOf(
+        checks: List<RouterChecks.Check>,
+        occurrences: List<AutomationCalendar.Occurrence>,
+        said: Map<String, String>,
+        now: Long,
+    ): Lead {
+        var next = 0L
+        var open = false
+        for (one in checks) {
+            if (!one.enabled || one.kind != "event") continue
+            val beforeMs = (if (one.beforeMinutes > 0) one.beforeMinutes else 15) * 60_000L
+            for (event in occurrences) {
+                if (event.allDay || event.begin <= now) continue
+                if (one.calendarIds.isNotEmpty() && event.calendarId !in one.calendarIds) continue
+                val wanted = one.titleContains
+                if (!wanted.isNullOrBlank() && !event.title.contains(wanted, ignoreCase = true)) continue
+                val leadAt = event.begin - beforeMs
+                if (leadAt <= now) {
+                    // 窗口已经开着: 没说过就补一敲, 说过了交给随机间隔
+                    if (said[one.id] != dayKeyOf(now) + "@" + event.begin) open = true
+                    continue
+                }
+                if (leadAt - now > LEAD_WINDOW_MS) continue
+                if (next == 0L || leadAt < next) next = leadAt
+            }
+        }
+        return Lead(next = next, open = open)
+    }
+
+    /**
+     * 下一次排多久 (纯函数)
+     *
+     * 三档: 窗口开着 → 一分钟后再来; 提前量落在两小时内 → 就按那一刻排; 其余 → 原来那 25~55 分钟的
+     * 随机 — **随机性不为这件事破掉**, 只是这一拍让给了事件
+     */
+    fun gapWithLead(roll: Float, minMs: Long, maxMs: Long, lead: Lead, now: Long): Long {
+        if (lead.open) return LEAD_SOON_MS
+        if (lead.next > now && lead.next - now <= LEAD_WINDOW_MS) {
+            return (lead.next - now).coerceAtLeast(LEAD_FLOOR_MS)
+        }
+        return gapFor(roll, minMs, maxMs)
+    }
+
+    /** `router.json` 的 `checksSaid` (只读; 读不到就是空表 —— 这一条坏了不该把闹钟也带走) */
+    private fun saidKeys(context: Context): Map<String, String> = runCatching {
+        val raw = file(context).takeIf { it.isFile }?.readText() ?: return emptyMap()
+        val said = json.parseToJsonElement(raw).jsonObject["checksSaid"] as? JsonObject
+            ?: return emptyMap()
+        said.entries.mapNotNull { (key, value) ->
+            val text = (value as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            key to text
+        }.toMap()
+    }.getOrDefault(emptyMap())
+
+    /**
+     * 现在有没有该盯的日程 (设备读数; 没有事件型检测项时一次日历都不碰)
+     *
+     * 读不到日历 (没权限 / 查询失败) 一律回空 Lead: 那一拍退回随机间隔, 不猜也不报错
+     */
+    private fun leadFor(context: Context, now: Long): Lead {
+        val wanted = runCatching {
+            RouterChecks.list(context).filter { it.enabled && it.kind == "event" }
+        }.getOrDefault(emptyList())
+        if (wanted.isEmpty()) return Lead()
+        val ids = wanted.flatMap { it.calendarIds }.distinct()
+        val reading = AutomationCalendar.read(context, now, now + LEAD_LOOKAHEAD_MS, ids)
+        val occurrences = reading.occurrences ?: return Lead()
+        return leadAtOf(wanted, occurrences, saidKeys(context), now)
+    }
+
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
     fun ensure(context: Context) {
         arm(context)
@@ -144,10 +252,15 @@ internal object RouterTick {
             return
         }
         val plan = runCatching { SimSetting.plan(context).wake }.getOrNull()
-        val next = System.currentTimeMillis() + gapFor(
+        val now = System.currentTimeMillis()
+        // 准点那一拍 (2026-11-10): 有事件型检测项就按"开始前 N 分钟"排, 没有就还是 25~55 分钟的随机
+        val lead = runCatching { leadFor(context, now) }.getOrDefault(Lead())
+        val next = now + gapWithLead(
             Random.nextFloat(),
             plan?.gapMinMs ?: MIN_GAP_MS,
             plan?.gapMaxMs ?: MAX_GAP_MS,
+            lead,
+            now,
         )
         val exact = runCatching { manager.canScheduleExactAlarms() }.getOrDefault(false)
         runCatching {

@@ -274,4 +274,75 @@ class PluginRowsTest {
         )
         assertEquals(null, PluginRows.nameOfRow(legacyRow, "not-there"))
     }
+
+    /** 老安装: 行挂在盘上了, 但 config 是旧的那两条 —— 新键必须补进去 (2026-11-08) */
+    @Test
+    fun `ensuredConfig adds the keys an old installation never had`() {
+        val old = """
+            # patch layer
+            - insert:
+                - id: mneme
+                  name: 'file:///x/index.js'
+                  config:
+                    memoryDir: '/data/user/0/pkg/files/dsh-home/memory'
+                    excludeAgentPresets: [ 'tavern' ]
+
+        """.trimIndent() + "\n"
+        val config = listOf(
+            "memoryDir: '/data/user/0/pkg/files/dsh-home/memory'",
+            "excludeAgentPresets: [ 'tavern' ]",
+            "documentMemoryEnabled: true",
+        )
+        val next = PluginRows.ensuredConfig(old, "mneme", config)
+        assertTrue(next.contains("documentMemoryEnabled: true"))
+        // 补在 config 那几行后面, 不能跑到 `- insert:` 之前
+        assertTrue(next.indexOf("config:") < next.indexOf("documentMemoryEnabled: true"))
+        // 幂等: 再对一次账一个字节都不动
+        assertEquals(next, PluginRows.ensuredConfig(next, "mneme", config))
+    }
+
+    /** 值被面板改过: 应用代写的那条覆盖回去, 面板加的别的键不动 */
+    @Test
+    fun `ensuredConfig rewrites a drifted value and keeps foreign keys`() {
+        val drifted = """
+            - insert:
+                - id: mneme
+                  name: 'file:///x/index.js'
+                  config:
+                    memoryDir: '/old'
+                    documentMemoryEnabled: false
+                    myOwnKey: 42
+
+        """.trimIndent() + "\n"
+        val next = PluginRows.ensuredConfig(
+            drifted,
+            "mneme",
+            listOf("memoryDir: '/new'", "documentMemoryEnabled: true"),
+        )
+        assertTrue(next.contains("memoryDir: '/new'"))
+        assertTrue(next.contains("documentMemoryEnabled: true"))
+        assertFalse(next.contains("documentMemoryEnabled: false"))
+        assertTrue(next.contains("myOwnKey: 42"))
+    }
+
+    /** 那一行压根没有 config: 现补一段 `config:` */
+    @Test
+    fun `ensuredConfig opens a config block when the row has none`() {
+        val bare = """
+            - insert:
+                - id: mneme
+                  name: 'file:///x/index.js'
+
+        """.trimIndent() + "\n"
+        val next = PluginRows.ensuredConfig(bare, "mneme", listOf("documentMemoryEnabled: true"))
+        assertTrue(next.contains("config:"))
+        assertTrue(next.contains("documentMemoryEnabled: true"))
+    }
+
+    /** 没有这一行就一个字节都不动 */
+    @Test
+    fun `ensuredConfig leaves a patch without that row alone`() {
+        val patch = "- insert:\n    - id: imagegen\n      name: 'file:///x/index.js'\n"
+        assertEquals(patch, PluginRows.ensuredConfig(patch, "mneme", listOf("documentMemoryEnabled: true")))
+    }
 }
