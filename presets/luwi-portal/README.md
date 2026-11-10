@@ -66,8 +66,17 @@ nextTask + router 的 checks) 摆在同一屏上
 ## 那张脸 (输入卡 / 权限 / 模型 / 命令 / 背景 / 玻璃)
 
 - **输入卡照 dsh 的 `InputBar`**: 28px 圆角 (`--dsw-radius-panel`)、`--dsw-specific-input-major`
-  的实底、`--dsw-elevation-soft` 的投影; 卡里是文本区 + 底部一行 —— 左边 `+` 与权限 chip、右边
-  模型 chip 与 34px 圆钮。**工作区选择不画**, 预设那一档也**已取消** (2026-11-08 主人)
+  的实底、`--dsw-elevation-soft` 的投影; 卡里的行序与 dsh 一致 —— **待发附件行 → 文本区 → 底部
+  一行** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框上方显示, 像 dsh 原生那样")。
+  底部一行左边 `+` 与表情钮、右边模型 chip 与 34px 圆钮。**工作区选择不画**, 预设那一档也
+  **已取消** (2026-11-08 主人)
+- **待发附件行** (`#lwp-attach-row`): 图与表情是 64px 缩略图 + 右上角 `×` (照 dsh 的
+  `ComposerAttachments`: 圆角 16 / `object-fit:cover` / `pointer:coarse` 时常显), 非图片文件是一颗
+  「名字 · 大小 · 状态」chip; 顺序就是挑选 / 点的顺序, `reading` 有扫光、`error` 红描边, 全部 ready
+  才允许发 (上限 6 个不变)
+- **点表情 = 进待发栏** (2026-11-10 主人确认): `stageSticker` 先 push 占位再取字节 (连点几张顺序
+  不翻), 落 `lw-in/` 后变成一颗 ready 的缩略图, 面板随即收起; **不再点一下就发**, 发不发由那颗发送钮
+  说了算。发送时仍走 `attachLines()` 那一段 (`read_image` 打开), 与图片同一条路
 - **`+`** = dsh 那个加号: 开命令菜单 (`remote.commands.list(sessionId)`), 选一条把 `/名字 ` 插进草稿
 - **权限 chip**: 名字走 dsh 的字典 (`permission.access` 的 `preset.fullAccess` → 「完全权限」),
   名单走 `remote.permissionPresets.catalog()`, 切换走宿主那条 `/permission <preset>` 命令。
@@ -146,12 +155,34 @@ nextTask + router 的 checks) 摆在同一屏上
 - 彻底撤: `PluginOverlay` 摘掉那一行, 或把键置 `off` —— dsh 一个字节没动
 - 脸回到出厂: 删 `$DSH_HOME/lw/face.json` 与 `$DSH_HOME/lw/face/` (或设置 → 外观里清掉背景)
 
+## 时间线: 按「轮」排 (2026-11-10)
+
+两路流 (dsh 的 user 节点 / 她的话那份 jsonl) **不再只按墙上时钟排** (方案
+`docs/Luwi-门户附件条与时间线-方案-2026-11-10.md`)。`nodesOf()` 把它们收成
+`users` / `rows` / `extras` 三份, 交给纯函数 `orderTimeline()`:
+
+| 口径 | 做法 |
+| :-- | :-- |
+| 轮内 | `user` → 她的行 (按 jsonl `seq`) → `turn-error` → 兜底正文 |
+| 轮边界 | 行按 `at` 归到最后一个 `turnTime < at` 的轮 (同一毫秒算**上一轮**: 宿主 turn end 补句贴在轮尾) |
+| 缺时间 | user 缺时间 → `maxKnown + 序号` 沉到最后 (dsh 追加, 它就是最新那条); 行缺 `at` → 最后一轮、按 `seq` 沉后 |
+| 时钟回卷 | `turnTime` 单调不减; 早于第一轮的行落「前奏桶」, user 相对顺序不翻 |
+| 兜底正文 | `luwi` 档**不兜** (宿主 turn end 已补一行, 两边同源); 非 luwi 档才兜, 且钉在 `assistantOwner` 那一轮 |
+
+配套的宿主改动: `lwOutAppend(..., atHint)` —— turn/end 补的那一句把 `at` 钉在**轮尾** (`event.time`),
+不取写盘那一刻 (异步补得慢会"比下一条用户消息还新", 门户拼轴就排到新消息后面)。`seq` 仍是唯一顺序,
+`at` 只做显示与拼轴 (`OutFile.kt` 那条口径不变)。
+
 ## 判据
 
 ```powershell
 node D:\apk\Luwi\tools\check-luwi-portal.mjs
+node D:\apk\Luwi\tools\check-portal-order.mjs
+node D:\apk\Luwi\tools\check-portal-sections.mjs
 ```
 
-查三件事: 包里该有的都在 (含依赖的 dsh 内部名字) / 挂得上 (两张表 + pack-host + 桥) / 两处写死的
-量对得上 (工作区名 `dsh-ball`、账本窗口 `10 * 60 * 1000` 在宿主与 Kotlin 各一份)
+`check-luwi-portal` 查: 包里该有的都在 (含依赖的 dsh 内部名字) / 挂得上 (两张表 + pack-host + 桥) /
+两处写死的量对得上 (工作区名 `dsh-ball`、账本窗口 `10 * 60 * 1000`) / 附件条在文本区之前 /
+表情只进待发栏。`check-portal-order` 把 `orderTimeline` 从源码原样截出来真跑 16 条 (12 条用例 +
+4 条源码结构: 缺时间 / 同毫秒 / 时钟回卷 / 兜底不改嫁)。
 

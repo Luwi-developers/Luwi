@@ -7461,8 +7461,12 @@ async function lwOutMark(path) {
  *
  * [prepare] 是"先拿 `seq` 再说"的那一步 (图要按 `<seq>-<name>.png` 落盘): 它抛错时**一个字节都不写**,
  * `seq` 也不推进 —— 于是门户那一侧既看不到空图, 也不会因为跳号卡在水位上
+ *
+ * [atHint] 是"这一行属于哪一刻"的提示 (2026-11-10): **turn end 补的那一句必须传轮尾时间**。不传就取
+ * 写盘那一刻, 而它是 `void` 异步写的 —— 补得慢一点, 这一句就比下一条 user 消息还新, 门户按时间把它
+ * 拼进时间轴时会排到新消息后面 (`at` 只做显示与拼轴, 顺序仍由 `seq` 保证, 见 `OutFile.kt`)
  */
-async function lwOutAppend(sessionId, fields, prepare) {
+async function lwOutAppend(sessionId, fields, prepare, atHint) {
   const path = lwOutPath(sessionId)
   if (path === null) throw new Error('this profile has no DSH_HOME, so there is nowhere to write what she says')
   const mark = await lwOutMark(path)
@@ -7472,7 +7476,8 @@ async function lwOutAppend(sessionId, fields, prepare) {
   // 会话第一行恒为 0 (§3.3): 打开一场旧会话时它是"从这一句开始", 不是"先说一句再等"
   const roll = seq === 1 ? 0 : Math.random()
   const gapMs = seq === 1 ? 0 : lwGapFor(mark.chars, send, roll)
-  const at = Math.max(Date.now(), mark.at + 1)
+  const base = Number.isFinite(atHint) ? atHint : Date.now()
+  const at = Math.max(base, mark.at + 1)
   const row = { seq, at, gapMs, ...(seq === 1 ? {} : { roll: Math.round(roll * 10_000) / 10_000 }), ...fields, ...extra }
   await appendFile(path, `${JSON.stringify(row)}\n`)
   mark.seq = seq
@@ -10035,7 +10040,14 @@ function startReadAloud(ctx) {
     const saidLines = turnOutCount.get(session.id) ?? 0
     turnOutCount.delete(session.id)
     if (saidLines === 0) {
-      void lwOutAppend(session.id, { kind: 'text', text: replyChannelText(speakable) })
+      // `at` 钉在**轮尾这一刻** (`event.time`), 不取写盘那一刻: 这一句是 `void` 异步补的, 补得慢一点
+      // 就会比下一条 user 消息还"新", 门户按时间拼轴时会把它排到新消息后面 (2026-11-10 主人报的乱序)
+      void lwOutAppend(
+        session.id,
+        { kind: 'text', text: replyChannelText(speakable) },
+        undefined,
+        Number.isFinite(event.time) ? event.time : undefined,
+      )
         .then((row) => {
           void writeDesktopChat('assistant', replyChannelText(speakable))
           if (row) console.log(`luwi-channel: the reply had no lw_say line, so it was added as #${row.seq}`)

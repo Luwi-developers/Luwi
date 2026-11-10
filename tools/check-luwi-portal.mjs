@@ -106,10 +106,13 @@ if (/kind === 'tool'|kind === 'reasoning'|turn-process/.test(client)) {
 }
 // **2026-11-08 起这条断言换成"哪一档才画 assistant"**: 原来只查"有没有 tool / reasoning", 而
 // `nodesOf()` 一旦按档分支, 那条就会变成假绿 (它拦不住"luwi 档又把正文画回来")
-if (client.includes('var assistantFallback') && client.includes('if (!spoke) {')) {
-  notes.push('ok   正文泡只在这一轮没说出时兜底画 (两档同一套)')
+// 2026-11-10: 兜底正文只给非 luwi 档 (luwi 档由宿主 turn end 往 jsonl 补一行, 两边逐字同源),
+// 并且钉在它自己那一轮 (`pinnedTo`) —— 新消息进来不再改嫁到最新那条 user 上
+if (client.includes('var assistantFallback') && client.includes('pinnedTo: assistantOwner')
+  && client.includes('var allowFallback = !luwiFlow() || outLines.length === 0')) {
+  notes.push('ok   正文泡只在这一轮没说出时兜底画 (luwi 档交给宿主补句, 非 luwi 档才兜)')
 } else {
-  failures.push('client.js: nodesOf() 里没有兜底那一段 —— luwi 档她忘调 lw_say 时屏上会一个字都没有')
+  failures.push('client.js: nodesOf() 里没有兜底那一段 / 或兜底没有按档收紧')
 }
 // 她说的话那份 jsonl: 取增量 / 两段水位 / 触发源 (方案 §3.2–3.4)
 expect('client.js', client, 'function loadOut')
@@ -231,11 +234,13 @@ if (client.includes('Number(outLines[s].at) >= lastUserTime) spoke = true')
 } else {
   failures.push('client.js: 兜底闸还只看已放出的行 —— 宿主补的那一行会让同一句画两遍')
 }
-// 2) 排序键: 时间读不到的那条不许排到最前 (刚发出去那条会被顶到顶部)
-if (client.includes('kept[q].sortAt = sortFloor') && client.includes('return a.sortAt - b.sortAt')) {
-  notes.push('ok   排序用 sortAt (缺时间的那条留在原位)')
+// 2) 排序: 按「轮」排 (orderTimeline) —— 缺时间的 user 沉到最后, 同毫秒算上一轮, 不再用 sortAt
+// running max (那一条会把刚发出去的消息排到她上一句回复上面)
+if (client.includes('return orderTimeline(users, rows, extras)') && !client.includes('sortAt')
+  && !client.includes('sortFloor')) {
+  notes.push('ok   排序走 orderTimeline 按轮排 (旧的 sortAt / running max 已拆)')
 } else {
-  failures.push('client.js: 排序还只看 time —— 刚发出去那条会跳到最上方, 回复后才落回')
+  failures.push('client.js: 排序还没改成按轮排 —— 缺时间 / 同毫秒时消息会跳到上一句回复上面')
 }
 // 跨工作区的那一场: sessions.retain 只认当前工作区, 所以注入里必须有 workspaces
 expect('client.js', client, 'function workspaceOf')
@@ -659,6 +664,56 @@ if (switchSource !== ''
   notes.push('ok   switchTo 按 source 分腿, 每次打一行 switch by=')
 } else {
   failures.push('client.js: switchTo 没按 source 分腿 (或少了那行 switch by= 日志)')
+}
+
+// ── 十一、附件条在输入框上方 / 表情先进待发栏 (2026-11-10) ─────────────────────
+//
+// 主人: "附件发图片和发表情包, 应该要在输入框上方显示, 像 dsh 原生那样". 两件都是结构, 不是样式:
+// 1) `#lwp-card` 的子节点顺序 = 附件行 -> 文本区 -> 工具行 (dsh 的 InputBar 就是这个顺序);
+// 2) 点表情只进待发栏 (`stageSticker`), 不调 `send()`, 发不发由那颗发送钮说了算
+
+const railAt = client.indexOf('card.appendChild(els.attachRow)')
+const inputAt = client.indexOf('card.appendChild(els.input)')
+if (railAt > 0 && inputAt > railAt) {
+  notes.push('ok   附件条 append 在文本区之前 (输入框上方)')
+} else {
+  failures.push('client.js: 附件条又挂到文本区后面了 —— 主人在输入框上方看不到待发附件')
+}
+
+expect('client.js', client, '#lwp-attach-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;')
+expect('client.js', client, 'margin-bottom:-6px')
+expect('client.js', client, '.lwp-attach-thumb{position:relative;flex:none;width:64px;height:64px;')
+expect('client.js', client, '.lwp-attach-thumb img{display:block;width:100%;height:100%;object-fit:cover}')
+expect('client.js', client, '.lwp-attach-x{position:absolute;top:3px;right:3px;')
+expect('client.js', client, 'function attachThumb')
+expect('client.js', client, 'function attachSrc')
+expect('client.js', client, "'/lw-out/in/' + encodeURIComponent")
+expect('client.js', client, "one.kind === 'image' ? attachThumb(one) : attachChip(one)")
+
+const stageSource = takeFunction('stageSticker')
+if (stageSource === '') {
+  failures.push('client.js: 抽不出 stageSticker (表情还是点一下就发?)')
+} else {
+  if (!stageSource.includes('send(')) {
+    notes.push('ok   点表情只进待发栏 (stageSticker 内不调 send)')
+  } else {
+    failures.push('client.js: stageSticker 里还在调 send —— 点一下就直接发出去了')
+  }
+  if (stageSource.includes('attach.push(one)') && stageSource.indexOf('attach.push(one)') < stageSource.indexOf('fetch(')) {
+    notes.push('ok   stageSticker 先 push 占位再取字节 (连点几张顺序不翻)')
+  } else {
+    failures.push('client.js: stageSticker 没有先占位 —— 连点几张时先后会随 fetch 完成顺序翻')
+  }
+}
+if (client.includes('sendSticker(')) {
+  failures.push('client.js: 旧的 sendSticker 还在 (表情仍会点一下立即发)')
+} else {
+  notes.push('ok   旧的 sendSticker 已删')
+}
+if (client.includes('cell.onclick = function () { stageSticker(name) }')) {
+  notes.push('ok   表情格子的 onclick 走 stageSticker')
+} else {
+  failures.push('client.js: 表情格子的 onclick 没有走 stageSticker')
 }
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────

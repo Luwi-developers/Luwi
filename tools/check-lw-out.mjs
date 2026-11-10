@@ -355,8 +355,13 @@ check('朗读走朗读流 (op=read), 新一轮先 op=cancel',
   /call\('speak', \{ op: 'read', text: segment \}\)/.test(host)
     && /call\('speak', \{ op: 'cancel' \}\)/.test(host)
     && /readAloudSegments/.test(host))
-check('她的那几行时间单调不减 (时间回卷也不会两处排序不同)',
-  /var floorAt = 0/.test(client) && /if \(at < floorAt\) kept\[m\]\.time = floorAt/.test(client))
+check('她的那几行时间单调不减 (宿主写 at 时取 max(base, 上一行 + 1))',
+  /const at = Math\.max\(base, mark\.at \+ 1\)/.test(host) && !/var floorAt = 0/.test(client))
+// 2026-11-10: turn end 补句的 `at` 钉在轮尾 (`event.time`), 不取写盘那一刻 —— 异步补得慢时它
+// 会"比下一条用户消息还新", 门户拼时间轴就把它排到新消息后面
+check('turn end 补的那一句 at 钉在轮尾 (不取写盘那一刻)',
+  /async function lwOutAppend\(sessionId, fields, prepare, atHint\)/.test(host)
+    && /Number\.isFinite\(event\.time\) \? event\.time : undefined/.test(host))
 // 状态点 (2026-11-10 主人: "旧的两处标识 新对话（绿）对话中（蓝）也加在那个点里"):
 // 它贴在头像右下角, 一顆点三态; 旧的两颗/那行都撤了
 check('状态点在头像右下角, 三态 (新对话 / 对话中 / 正在做), 旧标识都撤了',
@@ -405,8 +410,10 @@ check('冷启动按账本的 cwd 认工作区 (dsh 只加载当前工作区, 账
     && /ledger\.workspacePath/.test(client))
 check('同一场再挂一次不许清界面 (否则冷启动每 3 s 在气泡与空态之间跳)',
   /var same = id === sessionId/.test(client) && /if \(!same\) \{/.test(client))
-check('正文泡只在“这一轮没说出”时兜底画 (两档同一套, 不再按档一刀切)',
-  /var assistantFallback = ''/.test(client) && /if \(!spoke\) \{/.test(client)
+check('正文泡只在“这一轮没说出”时兜底画 (luwi 档交给宿主补句, 非 luwi 档才兜)',
+  /var assistantFallback = ''/.test(client)
+    && /var allowFallback = !luwiFlow\(\) \|\| outLines\.length === 0/.test(client)
+    && /pinnedTo: assistantOwner/.test(client)
     && /fallback: true/.test(client)
     && />= lastUserTime/.test(client))
 

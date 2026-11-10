@@ -717,9 +717,29 @@ window.__ModuleLoader__.load({
       '#lwp-root[data-ime="on"] #lwp-hero .lwp-hero-mark{animation:none}',
       '@media (prefers-reduced-motion:reduce){#lwp-hero .lwp-hero-mark{animation:none}}',
       '.lwp-empty{margin:auto;color:var(--dsw-alias-label-secondary,#9ca3af);font-size:13px;text-align:center;line-height:1.8}',
-      // 草稿里那张图: **单独一行**, 不在工具行里挤 (2026-11-08 真机: 挤在一行时两颗 chip 会粘住)
-      '#lwp-attach-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 10px}',
+      // 待发附件那一行 (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框上方显示, 像 dsh 原生
+      // 那样"): **在文本区上面**, 图与表情是 64px 缩略图 + 右上角 `×`, 非图片文件仍是名字 chip。
+      // dsh 的 `.rail` 是 `padding:2px 10px 0` + `margin-bottom:-6px` (卡片 gap 12 -> 视觉 6), 照抄
+      '#lwp-attach-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;padding:2px 10px 0;',
+      'margin-bottom:-6px}',
       '#lwp-attach-row[hidden]{display:none}',
+      '.lwp-attach-thumb{position:relative;flex:none;width:64px;height:64px;box-sizing:border-box;',
+      'padding:0;overflow:hidden;border:0.5px solid var(--dsw-alias-border-l2,rgba(15,23,42,.12));',
+      'border-radius:var(--dsw-radius-xl,16px);background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}',
+      '.lwp-attach-thumb img{display:block;width:100%;height:100%;object-fit:cover}',
+      // 还在读的那一颗: 一道扫光, 64px 的框不变 (解码前后不跳)
+      '.lwp-attach-thumb[data-state="reading"]::after{content:"";position:absolute;inset:0;',
+      'background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,.55),rgba(255,255,255,0));',
+      'animation:lwp-thumb-pass 1.1s ease-in-out infinite}',
+      '@keyframes lwp-thumb-pass{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}',
+      '@media (prefers-reduced-motion:reduce){.lwp-attach-thumb[data-state="reading"]::after{animation:none}}',
+      '.lwp-attach-thumb[data-state="error"]{border-color:var(--dsw-alias-state-error-primary,#b91c1c)}',
+      '.lwp-attach-thumb[data-state="error"] img{opacity:.4}',
+      '.lwp-attach-x{position:absolute;top:3px;right:3px;z-index:1;display:grid;place-items:center;',
+      'width:18px;height:18px;padding:0;border:0;border-radius:999px;line-height:1;font-size:12px;',
+      'background:var(--dsw-alias-button-contrast-fill,rgba(15,23,42,.62));color:#fff;cursor:pointer}',
+      '.lwp-attach-thumb[data-state="reading"] .lwp-attach-x{opacity:.5}',
+      // 非图片文件: 一颗 chip (名字 + 大小 + 状态), 点一下撤掉
       '#lwp-attach{font-size:12px;line-height:18px;padding:2px 10px;border-radius:999px;max-width:70vw;',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;',
       'color:var(--dsw-alias-label-secondary,#6b7280);background:rgba(15,23,42,.06)}',
@@ -1019,14 +1039,6 @@ window.__ModuleLoader__.load({
       var flowRows = []
       /** 下一次画流时是否强制贴底 (换会话 / 自己发了一句 / 整段重建之后) */
       var flowForceBottom = true
-      /**
-       * 兜底那一句的时间 (**一轮一个, 不每次渲染重新取 `Date.now()`**)
-       *
-       * 以前 `nodesOf()` 里写的是 `time: Date.now()`: 轮询每 3 s 走一次就换一个值, 签名跟着变,
-       * 于是整段拆建 —— 一轮还没说话时屏上每 3 秒被重画一遍, 贴图跟着重新解码, 抓到的就是
-       * 「贴图压在文字上」那一帧 (2026-11-09 主人发的图 1)。钉到这一轮第一条 user 节点上就没有这一拍
-       */
-      var fallbackAt = 0
       /** 增量渲染的计数 (真机读数与判据都看它, 见 tools/check-luwi-portal.mjs) */
       var flowStats = { rebuilds: 0, appends: 0, tailReplaces: 0 }
       /** 上一次打出去的那三个数: 变了才打一行 (真机验收读的就是这一行) */
@@ -1058,10 +1070,10 @@ window.__ModuleLoader__.load({
       /**
        * 草稿里那些文件 (2026-11-08 主人: `+` 就是上传文件的按钮, 图片与 docs 一样走这条)
        *
-       * 每一项: `{id, name, bytes, image, status, error}`。**全部 ready 才允许发**
+       * 每一项: `{kind, name, bytes, mediaType, data, status, error, path}` —— 顺序就是挑选 / 点的
+       * 顺序, 画在输入框上方 (`#lwp-attach-row`)。**全部 ready 才允许发**
        */
       var attach = []
-      var attachTimer = null
       /** 一条消息里最多带几个 (再多就该分几条发) */
       var MAX_ATTACH = 6
       /** 一份最大多少字节 (与 PortalBridge.STASH_MAX_BYTES 同一个数: 12 MB) */
@@ -1673,7 +1685,12 @@ window.__ModuleLoader__.load({
         return false
       }
 
-      /** 当前这一场的消息: user 节点 + 她说的话那份 jsonl, 按时间合并 */
+      /**
+       * 当前这一场的消息: user 节点 + 她说的话那份 jsonl, **按轮**合并 (2026-11-10)
+       *
+       * 两路流只按墙上时钟合并不够 (缺时间 / 同毫秒 / 宿主补句晚写都会把两条排反) —— 这里先把它们
+       * 收成 `users` / `rows` / `extras` 三份, 再交给 [orderTimeline] 按"轮"排
+       */
       function nodesOf() {
         if (chatTarget === null) return []
         var snapshot
@@ -1685,14 +1702,14 @@ window.__ModuleLoader__.load({
         if (!snapshot) return []
         var legacy = snapshot.legacy || {}
         var nodes = Array.isArray(legacy.nodes) ? legacy.nodes : []
-        var kept = []
+        var users = []
+        var rows = []
+        var extras = []
         var fingerprint = []
         var userSeqs = []
         // 这一轮到底该画正文还是画她说的话: 交给下面的"兜底"那一段判, 不在这里按档一刀切
         /** 这一轮的第一条 user 时刻 (兜底判据: 这之后有没有说出过东西) */
         var lastUserTime = 0
-        /** 这一轮最后那条 user 的**稳定身份** (兜底行挂在它身上, 见方案 §2.2) */
-        var lastUserId = ''
         /**
          * 同一条身份出现两次时给后出现的那条加一个序号
          *
@@ -1708,6 +1725,8 @@ window.__ModuleLoader__.load({
         }
         /** luwi 档里这一轮最后一句正文 (只在"一条都没说出"时兜底画) */
         var assistantFallback = ''
+        /** 兜底行属于哪一轮 (users 下标); -1 = 还没有 user 节点 */
+        var assistantOwner = -1
         // 每画一次就报一行 (诊断用, 认的是"节点里到底有什么"): 档 / 节点种类 / 是否画正文
         try {
           var kinds = []
@@ -1740,11 +1759,11 @@ window.__ModuleLoader__.load({
               stableId = node.seq === undefined || node.seq === null ? '' : 'seq:' + String(node.seq)
             }
             var userId = stableId === '' ? '' : uniqueId('user\u0001' + String(stableId))
-            if (userId !== '') lastUserId = userId
-            kept.push({
+            users.push({
               who: 'user',
               id: userId,
               time: node.time,
+              seq: node.seq,
               text: split.main,
               attach: split.names,
               hasImage: hasImageBlock(node.content),
@@ -1757,55 +1776,23 @@ window.__ModuleLoader__.load({
             // (2026-11-08 真机) 两档同一套规矩: 这一轮**说得出来**就只画她说的 (lw_say 那几条),
             // 说不出来 (忘了调工具 / 这一档压根不讲 lw_say) 才把正文最后一句兜底画上 —— 否则屏上
             // 要么一个字都没有 (luwi 档), 要么同一句画两遍 (非 luwi 档又调了 lw_say)
-            if (assistantSaid !== '') assistantFallback = assistantSaid
+            // 2026-11-10: 兜底行钉在**它自己那一轮**上 (`assistantOwner`), 新消息进来不再改嫁
+            if (assistantSaid !== '') {
+              assistantFallback = assistantSaid
+              assistantOwner = users.length - 1
+            }
           } else if (node.kind === 'turn-error' || node.kind === 'error') {
             var reason = node.error || {}
             var message = reason.message || node.message || '本轮运行失败'
-            kept.push({ who: 'error', time: node.time, text: String(message) })
+            extras.push({ who: 'error', time: node.time, seq: node.seq, text: String(message) })
             fingerprint.push(node.seq)
           }
         }
-        // 兜底: 这一轮没有比 user 节点更新的已放出行时, 把正文最后那句画上 (两档同一套)
-        //
-        // **一轮还在跑的时候不画** (2026-11-09 主人: "发送时 agent 发的信息会合并在一起"): 那一刻
-        // `assistant` 节点的正文是这一轮的**半成品全文** (流式、多段), 一个气泡装下全部, 读起来就是
-        // "几条话合并成一条", 而且每 3 s 还会长一截。跑着的那一轮只画她 `lw_say` 放出来的那几条,
-        // 末尾一行「正在做…」; 等这一轮结束仍然一条都没说, 才兜底画这一句
-        if (assistantFallback !== '' && !phaseThinking()) {
-          var spoke = false
-          // **已经取到、还没放出来的行也算"她说了"** (2026-11-10): 宿主在这一轮没写 `lw_say` 时会补一行到
-          // jsonl (球与门户同一份), 它可能还在 `gapMs` 那一拍里排队 —— 这时兜底再画一句就是同一句话画两遍
-          for (var s = 0; s < outLines.length; s += 1) {
-            if (Number(outLines[s].at) >= lastUserTime) spoke = true
-          }
-          if (!spoke) {
-            // 时间钉在这一轮那条 user 节点上 (读不到才用"第一次算出来的现在"): 同一轮里反复渲染
-            // 拿到的是同一个数, 签名不再每拍变一次 (见 [fallbackAt])
-            if (fallbackAt <= 0) {
-              fallbackAt = Number(lastUserTime) > 0 ? Number(lastUserTime) : Date.now()
-            }
-            kept.push({
-              who: 'assistant',
-              // 兜底行的身份挂在**它所依附的那条 user** 上 (方案 §2.2): 以前用 `fallbackAt` 时间,
-              // 而新一轮开始时它会被重置 → 上一轮那条的身份跟着变 → 前缀比到它就整块重建
-              id: lastUserId === '' ? '' : 'fallback\u0001' + lastUserId,
-              time: fallbackAt,
-              text: assistantFallback,
-              fallback: true,
-            })
-            if (shownPreset !== 'fallback') {
-              shownPreset = 'fallback'
-              console.log('[luwi-portal] 这一轮没有 lw_say, 正文兜底画了一句')
-            }
-          }
-        }
-
         streamKey = fingerprint.join(',')
         // 新的一条 user 节点 = 新一轮: 还没上屏的旧条不说了 (方案 §3.4 第一条闸)
         var userKeyNow = userSeqs.join(',')
         if (userKey !== '' && userKeyNow !== userKey) {
-          // 新一轮: 兜底那句重新记时, 并把视线拉回底部 (自己刚发了一句, 屏上得看见它)
-          fallbackAt = 0
+          // 新一轮: 把视线拉回底部 (自己刚发了一句, 屏上得看见它)
           flowForceBottom = true
           if (outQueue.length > 0) clearOut('a new turn started')
         }
@@ -1814,36 +1801,163 @@ window.__ModuleLoader__.load({
         for (var k = 0; k < outLines.length; k++) {
           var line = outLines[k]
           if (releasedIds[line.seq] !== true) continue
-          kept.push(outItemOf(line))
+          rows.push(outItemOf(line))
         }
-        // 她自己那几行的时间做成单调不减 (2026-11-09 主人: "发出来的和 ball 发出来的不一样"):
-        // `at` 来自宿主 `Date.now()`, 手机时间被改小过时它可能回卷; 一旦回卷, 同一份 jsonl 在门户
-        // 与球上排出来的顺序就会不同 —— 这里先把先后钉住, 再交给统一排序
-        var floorAt = 0
-        for (var m = 0; m < kept.length; m += 1) {
-          if (kept[m].who !== 'assistant') continue
-          var at = Number(kept[m].time) || 0
-          if (at < floorAt) kept[m].time = floorAt
-          else floorAt = at
-        }
-        // 排序键: **时间读不到的那条不许排到最前** (2026-11-09 主人: "用户发的消息也合并到最上方")。
-        // dsh 的节点是追加的, "没时间"的多半就是刚发出去、快照还没填 `time` 的那一条 —— 给它一个
-        // 单调的 `sortAt` (已知时间的最大值 + 1), 于是它留在原位; 等快照补齐 `time`, 顺序也不会跳。
-        // `time` 本身不动: 时间戳与 30 分钟分段仍然只看真实时间
-        var sortFloor = 0
-        for (var q = 0; q < kept.length; q += 1) {
-          var knownAt = Number(kept[q].time) || 0
-          if (knownAt > 0) {
-            sortFloor = Math.max(sortFloor, knownAt)
-            kept[q].sortAt = knownAt
-          } else {
-            sortFloor += 1
-            kept[q].sortAt = sortFloor
+        // 兜底正文 (2026-11-10 收紧):
+        // - `luwi` 档的正文只当过程, 宿主 turn end 已经往同一份 jsonl 补了一行 (球与门户逐字同源),
+        //   所以**不再兜底** —— 以前补句还没取回来时先画一句、补句一到再换, 就是"两句并存 / 顺序跳
+        //   一下"的根之一。唯一例外: 整场 jsonl 一条都没有 (宿主写不进去) 才兜一句
+        // - 非 luwi 档没有 lw_say 规矩, 正文就是她说的话; 兜底钉在**它自己那一轮** (`pinnedTo`),
+        //   新消息进来不再改嫁
+        if (assistantFallback !== '' && !phaseThinking()) {
+          var spoke = false
+          // **已经取到、还没放出来的行也算"她说了"** (补句可能还在 `gapMs` 那一拍里排队)
+          for (var s = 0; s < outLines.length; s += 1) {
+            if (Number(outLines[s].at) >= lastUserTime) spoke = true
+          }
+          var allowFallback = !luwiFlow() || outLines.length === 0
+          if (allowFallback && !spoke && assistantOwner >= 0) {
+            extras.push({
+              who: 'assistant',
+              // 兜底行的身份挂在**它所依附的那条 user** 上 (方案 §2.2), 而它所依附的是
+              // `assistantOwner` 那一轮的 user —— 不是"最新一条 user"
+              id: users[assistantOwner].id === '' ? '' : 'fallback\u0001' + users[assistantOwner].id,
+              time: Number(users[assistantOwner].time) || 0,
+              text: assistantFallback,
+              fallback: true,
+              pinnedTo: assistantOwner,
+            })
+            if (shownPreset !== 'fallback') {
+              shownPreset = 'fallback'
+              console.log('[luwi-portal] 这一轮没有 lw_say, 正文兜底画了一句')
+            }
           }
         }
-        kept.sort(function (a, b) {
-          return a.sortAt - b.sortAt
-        })
+        return orderTimeline(users, rows, extras)
+      }
+
+      /**
+       * 把两路流按「轮」排成一条 (2026-11-10, 方案 `docs/Luwi-门户附件条与时间线-方案-2026-11-10.md`)
+       *
+       * 输入三份 (调用方已按各自来源的顺序放好):
+       * - `users`: dsh 的 user / steering 节点, **按节点顺序**
+       * - `rows`: 她的话 (jsonl 里已放出的行), 按 `seq` 升序
+       * - `extras`: 兜底正文行 (带 `pinnedTo` = 它所属那一轮的 user 下标) 与 turn-error
+       *
+       * 四条口径:
+       * 1. **轮内**: user -> 她的行 (按 seq) -> error -> 兜底; 她的行不再跟 user 比时间
+       * 2. **轮边界**: 行按 `at` 归到最后一个 `turnTime < at` 的轮 (严格小于: 同一毫秒算上一轮,
+       *    免得上一轮的一句掉到刚发的新消息下面)
+       * 3. **缺时间**: user 的时间读不到时沉到 `maxKnown` 之后 (dsh 是追加的, 它就是最新那条);
+       *    她的行 `at` 读不到时归最后一轮、沉到已知行后面
+       * 4. **确定**: 最后按 `(桶, rank, seq, 原下标)` 排, 同毫秒不再靠插入顺序
+       *
+       * @param {object[]} users dsh 的 user / steering 节点 (按节点顺序)
+       * @param {object[]} rows 她的话 (按 seq)
+       * @param {object[]} extras 兜底正文行与 turn-error
+       * @returns {object[]} 排好的那一串 (显示用的 `time` 原样不动)
+       */
+      function orderTimeline(users, rows, extras) {
+        var i
+        // 第一遍: 已知时间的最大值 —— 缺时间的 user 要沉到它之后, 不能排到已知时间前面
+        var maxKnown = 0
+        for (i = 0; i < users.length; i += 1) {
+          var knownUser = Number(users[i].time) || 0
+          if (knownUser > maxKnown) maxKnown = knownUser
+        }
+        for (i = 0; i < rows.length; i += 1) {
+          var knownRow = Number(rows[i].time) || 0
+          if (knownRow > maxKnown) maxKnown = knownRow
+        }
+        for (i = 0; i < extras.length; i += 1) {
+          var knownExtra = Number(extras[i].time) || 0
+          if (knownExtra > maxKnown) maxKnown = knownExtra
+        }
+        // 轮的边界: 单调不减; 缺时间的一条给 `maxKnown + 序号` (它是最新那条)
+        var turnTime = []
+        var floor = 0
+        var missing = 0
+        for (i = 0; i < users.length; i += 1) {
+          var raw = Number(users[i].time) || 0
+          var stamp
+          if (raw > 0) {
+            stamp = raw
+            missing = 0
+          } else {
+            missing += 1
+            stamp = maxKnown + missing
+          }
+          if (stamp < floor) stamp = floor
+          floor = stamp
+          turnTime.push(stamp)
+        }
+        /**
+         * 一条时间落在哪一轮: 最后一个 `turnTime < at`; 落在第一轮之前 = 前奏 (主动场那种)
+         *
+         * 严格小于是有意的: 同一毫秒算**上一轮** (宿主的 turn end 补句就贴在轮尾, 补得慢时可能跟
+         * 下一条 user 消息同一个毫秒); 但 `at` 正好等于第一轮那一刻时归第一轮, 不沉到前奏去
+         */
+        function turnOf(at) {
+          if (turnTime.length === 0) return -1
+          var mark = Number(at) || 0
+          if (mark <= 0) return turnTime.length - 1
+          var found = -1
+          for (var b = 0; b < turnTime.length; b += 1) {
+            if (turnTime[b] < mark) found = b
+            else break
+          }
+          if (found < 0 && mark >= turnTime[0]) return 0
+          return found
+        }
+        /** 轮内的先后: user -> 她的行 -> error -> 兜底 */
+        function rankOf(item) {
+          if (item.who === 'user') return 0
+          if (item.who === 'error') return 2
+          if (item.fallback) return 3
+          return 1
+        }
+        function seqOf(item) {
+          var value = Number(item.seq)
+          return isFinite(value) ? value : 0
+        }
+        function sortBucket(list) {
+          var wrapped = []
+          for (var j = 0; j < list.length; j += 1) wrapped.push({ item: list[j], at: j })
+          wrapped.sort(function (a, b) {
+            var byRank = rankOf(a.item) - rankOf(b.item)
+            if (byRank !== 0) return byRank
+            var bySeq = seqOf(a.item) - seqOf(b.item)
+            if (bySeq !== 0) return bySeq
+            return a.at - b.at
+          })
+          var out = []
+          for (var k = 0; k < wrapped.length; k += 1) out.push(wrapped[k].item)
+          return out
+        }
+        var buckets = []
+        for (i = 0; i < users.length; i += 1) buckets.push([users[i]])
+        var prelude = []
+        for (i = 0; i < rows.length; i += 1) {
+          var where = turnOf(rows[i].time)
+          if (where < 0) prelude.push(rows[i])
+          else buckets[where].push(rows[i])
+        }
+        for (i = 0; i < extras.length; i += 1) {
+          var extra = extras[i]
+          var pin = Number(extra.pinnedTo)
+          var bucket = extra.pinnedTo !== undefined && isFinite(pin) && pin >= 0 && pin < buckets.length
+            ? pin
+            : turnOf(extra.time)
+          if (bucket < 0) prelude.push(extra)
+          else buckets[bucket].push(extra)
+        }
+        var kept = []
+        var head = sortBucket(prelude)
+        for (i = 0; i < head.length; i += 1) kept.push(head[i])
+        for (i = 0; i < buckets.length; i += 1) {
+          var one = sortBucket(buckets[i])
+          for (var m = 0; m < one.length; m += 1) kept.push(one[m])
+        }
         return kept
       }
       /**
@@ -2356,7 +2470,8 @@ window.__ModuleLoader__.load({
         img.src = '/lw-out/stickers/' + encodeURIComponent(stemOf(name))
         img.onerror = function () { cell.hidden = true }
         cell.appendChild(img)
-        cell.onclick = function () { sendSticker(name) }
+        // 点一下 = 进输入框上方的待发栏 (2026-11-10), 不直接发
+        cell.onclick = function () { stageSticker(name) }
         return cell
       }
 
@@ -2455,12 +2570,13 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 点一张表情 = 把这张图发出去
+       * 点一张表情 = **放进输入框上方的待发栏** (2026-11-10 主人: "发表情包, 应该要在输入框上方显示")
        *
-       * **不另造一种块**: 她那一侧 `image` 块就看得见这张图, 自己这一侧靠 `lw-in/` 那份落盘画回来 ——
-       * 一条路两处都成立。取不到字节就照实说一句, 不发一个空壳过去
+       * 与图片同一个落点 (`lw-in/`) 与同一条正文段: 她那一侧 `read_image` 打开, 自己这一侧靠那段路径
+       * 画回来。**先 push 占位再取字节** —— 连点几张时顺序就是手指点的顺序, 不会因为谁先 fetch 完而翻;
+       * 面板随即收起, 发送仍由那颗发送钮说了算 (发不出去就留一颗红框, 撤得掉)
        */
-      function sendSticker(name) {
+      function stageSticker(name) {
         if (typeof sessionId !== 'string' || sessionId === '') {
           showNote('先开一场对话', true)
           return
@@ -2469,6 +2585,20 @@ window.__ModuleLoader__.load({
           showNote('附件最多 ' + MAX_ATTACH + ' 个', true)
           return
         }
+        var one = {
+          kind: 'image',
+          name: String(name),
+          bytes: 0,
+          mediaType: mimeOfName(name),
+          data: '',
+          status: 'reading',
+          error: '',
+          path: '',
+          lastLogged: '',
+        }
+        attach.push(one)
+        renderAttach()
+        closeStickerPanel()
         fetch('/lw-out/stickers/' + encodeURIComponent(stemOf(name)), { cache: 'force-cache' })
           .then(function (res) {
             if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -2485,31 +2615,23 @@ window.__ModuleLoader__.load({
           .then(function (buffer) {
             var bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : null
             if (bytes === null || bytes.length === 0) throw new Error('这张表情是空的')
-            var one = {
-              kind: 'image',
-              name: name,
-              bytes: bytes.length,
-              mediaType: mimeOfName(name),
-              data: base64Of(bytes),
-              status: 'ready',
-              error: '',
-              path: '',
-              lastLogged: '',
-            }
-            // 同一份落进工作区 `lw-in/` —— 她读的与门户画的都是这一份; 没落好就不发
+            one.bytes = bytes.length
+            one.data = base64Of(bytes)
+            // 同一份落进工作区 `lw-in/` —— 她读的与门户画的都是这一份; 没落好就不许发
             var stash = call('portalStash', JSON.stringify({ name: one.name, data: one.data }))
             if (!stash || stash.ok !== true) {
               throw new Error(stash && stash.error ? String(stash.error) : '存不进去')
             }
             one.path = String(stash.path || '')
             one.name = String(stash.name || one.name)
-            attach.push(one)
+            one.status = 'ready'
             renderAttach()
-            closeStickerPanel()
-            send('queue')
           })
           .catch(function (error) {
-            showNote('这张表情发不出去: ' + describeError(error), true)
+            one.status = 'error'
+            one.error = describeError(error)
+            renderAttach()
+            showNote('这张表情没进来: ' + one.error, true)
           })
       }
 
@@ -3461,25 +3583,20 @@ window.__ModuleLoader__.load({
         reader.readAsArrayBuffer(file)
       }
 
-      /** 那一行读数重画 (每个文件一颗: 名字 + 大小 + 状态; 点一下撤掉) */
+      /**
+       * 待发附件那一行重画 (2026-11-10)
+       *
+       * 图与表情画成 64px 缩略图 (照 dsh 的 `ComposerAttachments`), 角上一颗 `×` 撤掉; 非图片文件
+       * 仍是一颗 chip (名字 + 大小 + 状态)。**顺序就是挑选 / 点的顺序** (`attach` 数组), 全部 ready
+       * 才允许发 —— 这一行在输入框上面, 发之前看得见自己贴了什么
+       */
       function renderAttach() {
         if (!els.attachRow) return
         els.attachRow.textContent = ''
         els.attachRow.hidden = attach.length === 0
         for (var i = 0; i < attach.length; i += 1) {
           var one = attach[i]
-          var size = sizeText(one.bytes)
-          var label = one.name + (size === '' ? '' : ' · ' + size)
-          if (one.status === 'reading') label += ' · 读着…'
-          else if (one.status === 'error') label += ' · 没成, 点一下撤掉'
-          else label += ' ×'
-          var chip = h('span', null, label)
-          chip.id = 'lwp-attach'
-          chip.setAttribute('data-state', one.status)
-          chip.title = one.status === 'error' ? one.error : (one.path === '' ? one.name : one.path)
-          chip.onclick = function (item) {
-            return function () { attachTap(item) }
-          }(one)
+          els.attachRow.appendChild(one.kind === 'image' ? attachThumb(one) : attachChip(one))
           // 一行读数: 真机上"文件进没进 prompt"只能看这一行 —— 变了才写, 不刷屏
           if (one.lastLogged !== one.status) {
             one.lastLogged = one.status
@@ -3487,9 +3604,65 @@ window.__ModuleLoader__.load({
               + (one.error === '' ? '' : ' (' + one.error + ')')
               + (one.path === '' ? '' : ' ' + one.path))
           }
-          els.attachRow.appendChild(chip)
         }
         updateSendGate()
+      }
+
+      /** 一张待发图 / 表情的缩略图 (64px 方框, 角上一颗 `×`; 读着的那一帧有扫光) */
+      function attachThumb(one) {
+        var box = h('div', 'lwp-attach-thumb')
+        box.setAttribute('data-state', one.status)
+        box.title = one.status === 'error'
+          ? (one.error === '' ? '没成' : one.error)
+          : (one.path === '' ? one.name : one.path)
+        var src = attachSrc(one)
+        if (src !== '') {
+          var img = document.createElement('img')
+          img.alt = ''
+          img.src = src
+          box.appendChild(img)
+        }
+        var x = h('button', 'lwp-attach-x', '×')
+        x.type = 'button'
+        x.setAttribute('aria-label', '撤掉 ' + String(one.name || '附件'))
+        x.onclick = function (event) {
+          // 缩略图本身不是钮, 点角上这一颗才撤 (与 dsh 的 `.remove` 同一个位置)
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          attachTap(one)
+        }
+        box.appendChild(x)
+        return box
+      }
+
+      /**
+       * 缩略图的 `src`
+       *
+       * 落过盘的那一份走宿主的只读路由 (`/lw-out/in/<名字>`, 与消息气泡里那张图同一串); 还在读的用
+       * 已经拿到的字节 (data URL), 免得解码前空一帧。两样都没有就留一个带扫光的空格子
+       */
+      function attachSrc(one) {
+        if (one.status === 'ready' && typeof one.path === 'string' && one.path !== '') {
+          return '/lw-out/in/' + encodeURIComponent(String(one.name || baseNameOf(one.path)))
+        }
+        if (typeof one.data === 'string' && one.data !== '') {
+          return 'data:' + (one.mediaType || mimeOfName(one.name)) + ';base64,' + one.data
+        }
+        return ''
+      }
+
+      /** 非图片文件那一颗 chip (名字 + 大小 + 状态), 点一下撤掉 */
+      function attachChip(one) {
+        var size = sizeText(one.bytes)
+        var label = one.name + (size === '' ? '' : ' · ' + size)
+        if (one.status === 'reading') label += ' · 读着…'
+        else if (one.status === 'error') label += ' · 没成, 点一下撤掉'
+        else label += ' ×'
+        var chip = h('span', null, label)
+        chip.id = 'lwp-attach'
+        chip.setAttribute('data-state', one.status)
+        chip.title = one.status === 'error' ? one.error : (one.path === '' ? one.name : one.path)
+        chip.onclick = function () { attachTap(one) }
+        return chip
       }
 
       /** 点一颗读数: 撤掉这个文件 */
@@ -3796,6 +3969,13 @@ window.__ModuleLoader__.load({
           els.input.style.height = 'auto'
           els.input.style.height = String(els.input.scrollHeight) + 'px'
         })
+        // 待发附件那一行 **在文本区上面** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框
+        // 上方显示, 像 dsh 原生那样") —— dsh 的 `InputBar` 里 `conversation.input.attachments` slot
+        // 就在 DraftEditor 之前, 所以卡里的行序照它: 附件行 -> 文本区 -> 底部工具行
+        els.attachRow = h('div')
+        els.attachRow.id = 'lwp-attach-row'
+        els.attachRow.hidden = true
+        card.appendChild(els.attachRow)
         card.appendChild(els.input)
 
         var row = h('div')
@@ -3863,12 +4043,6 @@ window.__ModuleLoader__.load({
           if (els.file) els.file.value = ''
         })
         tools.appendChild(els.file)
-
-        // 草稿里那些文件的读数 (名字 + 大小 + 状态), 全部传完才允许发 —— 单独一行, 在输入行上面
-        els.attachRow = h('div')
-        els.attachRow.id = 'lwp-attach-row'
-        els.attachRow.hidden = true
-        card.appendChild(els.attachRow)
 
         els.note = h('span', null, '')
         els.note.id = 'lwp-note'
