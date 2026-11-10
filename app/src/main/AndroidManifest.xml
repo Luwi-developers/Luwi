@@ -137,6 +137,13 @@
         android:protectionLevel="signature|dangerous" />
     <uses-permission android:name="io.github.yuloong07star.luwi.permission.PLUGIN" />
 
+    <!-- 连接接口 (2.8.1 B1): 别的应用问 Luwi 状态的那扇门。signature 级 = 只有和我同一张证书
+         签出来的应用绑得上, 不需要用户在弹窗里点任何东西; 第三方逐 scope 授权那一档还没开,
+         等它开了再把这一条降级, 而不是现在就留个口子 -->
+    <permission
+        android:name="io.github.yuloong07star.luwi.permission.LINK"
+        android:protectionLevel="signature" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -188,6 +195,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="runs the dsh agent host and its Web GUI in the background" />
+        </service>
+
+        <!-- 连接接口: 只有拿到 signature 级 LINK 权限的应用绑得上, 也就是和我们同签名那一档。
+             门在 permission 上, 服务这一层再验一次 uid 的签名并写审计 -->
+        <service
+            android:name=".link.LwLinkService"
+            android:exported="true"
+            android:permission="io.github.yuloong07star.luwi.permission.LINK">
+            <intent-filter>
+                <action android:name="io.github.yuloong07star.luwi.link.BIND" />
+            </intent-filter>
         </service>
 
         <!-- 浮在别的应用上面的输入窗: 长跑的前台服务, 类型跟 DshHostService 同一套
