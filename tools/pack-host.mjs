@@ -19,6 +19,9 @@ import { parseArgs } from 'node:util'
 
 import { applyMnemePatches, verifyHotMemory } from './pack-mneme-patches.mjs'
 
+/** fork 的安卓补丁存在性判据 (与打包同一步跑: 丢一条就不出包) */
+const patchGate = fileURLToPath(new URL('./check-host-patches.mjs', import.meta.url))
+
 /** Where the two release families are packed, relative to the checkout */
 const PACK_ROOT = 'dist/lw-host-pack'
 
@@ -454,6 +457,9 @@ if (values['tavern-root'] !== undefined && !withTavern) {
   throw new Error(`--tavern-root ${tavernRoot} is not a directory`)
 }
 if (!existsSync(join(dsh, 'pnpm-workspace.yaml'))) throw new Error(`${dsh} is not a dsh checkout`)
+// patch.md 第 5/6/7/8 组是安卓能跑的前提 (2026-11-10: 0.2.2 换基座冲掉过一次, 症状是 `spawn bash
+// EACCES`)。放在 install/build 之前: 几毫秒就能红, 不用等十分钟的构建
+run(process.execPath, [patchGate, '--dsh', dsh], dsh)
 if (values.install) {
   run('pnpm', ['install', '--frozen-lockfile'], dsh)
 } else if (!existsSync(join(dsh, 'node_modules', 'typescript'))) {
@@ -1073,52 +1079,23 @@ if (existsSync(flockShim)) {
   }
 }
 
-/* ── 安卓上两类"原子落盘"在应用沙盒里会失败 (2026-11-08 真机) ──────────────────────
+/* ── 附件落盘失败时带上根因 (2026-11-08 真机) ─────────────────────────────────
  *
- * 1. **硬链接**: SELinux 不许 app 在自己的 `files/` 里建硬链接 —— `link()` 直接 EACCES (真机实测:
- *    `ln a b` 都过不去)。后果是"新开一场会话"永远落不了盘: 宿主日志是
- *    `EACCES ... link .../session.v4.jsonl.zstd.<hash>.tmp -> .../session.v4.jsonl.zstd`,
- *    于是界面有一场空的、`prompt` 全被拒 (2026-11-08 晚那一串"发图没反应"就是它)。
- *    dsh 用 link 是为了"目标存在就失败"的原子创建; 退成 `rename()` 语义一样是"原子地把 tmp 变成
- *    finalPath", 只多一点覆盖的可能 (调用方已经先查过存在)。
- * 2. **目录 fsync**: `dsh-attachment-local` 落盘前要把目标目录的**每一层祖先** `open()` + `fsync()`
- *    一遍, 而 DAC 不让应用打开 `/data/user/0` 这种祖先目录 —— 附件上传于是必挂。这里让那一层
- *    "打不开就跳过" (安卓上反正证明不了目录项落盘)。
+ * 硬链接与祖先 fsync 两条安卓兼容 2026-11-10 起住在 dsh 源码里 (patch.md 第 5/8 组,
+ * 换基座冲掉过一次, 由 tools/check-host-patches.mjs 钉住)。**这里不再用文本替换包 link**:
+ * 源码里 `publishExclusive` / `publishCurrentExclusive` 已有独占拷贝退路, 在外面再包一层
+ * rename 反而会盖掉它, 把"不覆盖"降级成"覆盖"。
  *
- * 两处都**数替换处数**: 上游换形状就当场吵, 不静默失效; 上游哪天自己兼容了, 把这一段删掉。
+ * 只留这一条纯 Luwi 的诊断增强: 安卓上"存不下附件"的可能不止一种, 只回一句
+ * "Unable to persist attachment" 查不动。
  */
 const androidFsPatches = [
   {
-    name: 'session persistence (link)',
-    file: join(out, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
-    edits: [
-      [
-        'import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from "node:fs/promises";',
-        'import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename as lwRename, rm, stat, truncate } from "node:fs/promises";',
-      ],
-      [
-        'await link(tmp, finalPath);',
-        'try { await link(tmp, finalPath); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await lwRename(tmp, finalPath); }',
-      ],
-    ],
-  },
-  {
-    name: 'attachment store (link + dir fsync)',
+    name: 'attachment write failure cause',
     file: join(out, 'node_modules', '@deepseek-ai', 'dsh-attachment-local', 'lib', 'index.js'),
+    // 命中它说明上一次已经替换过 (旧文案是句号, 替换后是冒号)
+    marker: 'Unable to persist attachment: ',
     edits: [
-      [
-        'await link(source, target);',
-        'try { await link(source, target); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await rename(source, target); }',
-      ],
-      [
-        'await link(staged.path, target);',
-        'try { await link(staged.path, target); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await rename(staged.path, target); }',
-      ],
-      [
-        'const handle = await open(path, constants.O_RDONLY);',
-        'const handle = await open(path, constants.O_RDONLY).catch((lwError) => { if (lwError?.code === "EACCES" || lwError?.code === "EPERM") return null; throw lwError; });\n\t\t\tif (handle === null) return;',
-      ],
-      // 报错要带上根因: 安卓上"存不下附件"的可能不止一种, 只回一句 "Unable to persist attachment" 查不动
       [
         'throw new AttachmentError("Unable to persist attachment.", "ATTACHMENT_WRITE_FAILED", { cause: error });',
         'throw new AttachmentError("Unable to persist attachment: " + String(error), "ATTACHMENT_WRITE_FAILED", { cause: error });',
@@ -1135,7 +1112,7 @@ for (const patch of androidFsPatches) {
     continue
   }
   let text = readFileSync(patch.file, 'utf8')
-  if (text.includes('lwError')) {
+  if (text.includes(patch.marker)) {
     console.log(`pack-host: android fs patch (${patch.name}) already applied`)
     continue
   }
@@ -1152,6 +1129,9 @@ for (const patch of androidFsPatches) {
   writeFileSync(patch.file, text)
   console.log(`pack-host: android fs patch (${patch.name}) applied (${String(patch.edits.length)} edits)`)
 }
+
+// 产物层: 源码补了还要求树真的重建过 —— 用打好的两个库真跑一次 argv 与 rg 解析
+run(process.execPath, [patchGate, '--dsh', dsh, '--tree', out], dsh)
 
 const { files, bytes } = measure(join(out, 'node_modules'))
 console.log(`pack-host: ${String(packed.size)} tarball(s), ${String(files)} file(s), ${(bytes / 1024 / 1024).toFixed(1)} MB in ${out}`)

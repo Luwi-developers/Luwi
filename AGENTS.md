@@ -215,9 +215,10 @@
 - 改 Kotlin 先 `:app:compileDebugKotlin`; 它**不跑 manifest merger**, 改依赖或 sdk 版本要 `assembleDebug`
 - **装机只走 `tools/lw-install.ps1`**: 流式安装 → 失败退"推上去 + `pm install -i`" → 回写无障碍与通知 → 等 `dsh web:` 就绪
 - **Luwi 在前台时 MIUI 会拒装**: 先 `KEYCODE_HOME` 放后台再 `adb install -r -t -i com.miui.packageinstaller`, 不行就连着重试 (第 3 次过)
-- 迭代: 改 dsh → `build\lw-dsh-patches.diff` 进 submodule → `pack-host.mjs` → `push-host.mjs` → 重启 app
+- 迭代: 改 dsh 在 submodule 里直接提交 (同一步改 `third_party/deepseek-harness/patch.md`) → `pack-host.mjs` → `push-host.mjs` → 重启 app
 - 判据: `DshHost: dsh web:` = 树起来了; `DshWebView: shell` 的 `rootChildren` 非 0 = 渲染; `LwMain: resumed with host Running` = 没重载
 - **`packageDebug` 会在旧 APK 上原地改写**留空洞: **出包前先删 `app/build/outputs/apk/debug/app-debug.apk`**
 - host 树逐文件裁剪在 `pack-host.mjs` 末尾 (剔 win32/darwin、`.map`、`.d.ts`、测试), 判据 `tools/check-host-slim.mjs`, **别用事后重打 zip 的脚本**
+- **换基座后先跑 `node tools/check-host-patches.mjs`** (`pack-host` 打包时会自动跑源码层与产物层): 它钉住 `patch.md` 第 5/6/7/8 组 (bash/rg 指定、硬链接退路、附件祖先 fsync、`--allow-lan`); 2026-11-10 的 0.2.2 换基座就是悄悄丢了这四组, 症状是 `spawn bash EACCES` —— 删文件、跑 shell、搜文件全废。判据 `tools/check-host-patches.mjs`
 - **推送**: `git push` 不通; 走 `tools/lw-api-push.ps1`: blob → tree → commit → **最后才动 ref**, 每个对象比 SHA, 先 dry run 再 `-Apply -Tag`; `-input` 的 JSON 不能带 BOM; 提交正文末尾那个换行是对象里本来就有的
 - **后台 job 的回执为什么不能等**: harness 判一条后台 job 完成, 等的是**整棵进程树清空**; gradle 的常驻守护进程是这一树的子孙, 于是"构建 13:22 结束、回执 13:41 才到"这种延迟会出现 (实测那次是等下一次别人 `gradlew --stop` 把守护进程收掉)。`dev.ps1` 因此做两件事: ① 在 DSH 会话里 (`$env:DSH_SHELL`) 自动加 `--no-daemon` 并**跳过** assemble 前的 `--stop` (single-use daemon 构建完自己退, 树当场空; `--stop` 会把别人正用着的守护进程一起停掉); ② 用 `Start-Process` + `-RedirectStandardOutput` 跑 gradle (不再 `& gradlew | Tee-Object` —— 守护进程会继承那条管道), 且**不能加 `-Wait`** (`-Wait` 连子孙一起等), 只 `$proc.WaitForExit()`。代价: 输出不再流式 (全文本来就在 `logs\build\<时间>-<标签>.log`, stderr 追加在同名 `.log` 末尾), DSH 会话里的构建慢 10~20 s

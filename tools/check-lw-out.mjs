@@ -383,18 +383,23 @@ check('进门户自动开一场 (「开一场」那颗按钮撤了)',
   /function autoStart\(/.test(client) && /setTimeout\(autoStart, 800\)/.test(client)
     && !/lwp-start/.test(client))
 
-/* ── 十二、安卓上的原子落盘兼容 (2026-11-08 晚: 新会话落不了盘的根) ───────────── */
+/* ── 十二、安卓上的原子落盘兼容 (2026-11-08 晚: 新会话落不了盘的根; 2026-11-10 移回源码) ── */
 
 const packHost = await read('tools/pack-host.mjs')
-check('pack-host 带安卓 fs 兼容补丁 (硬链接退 rename + 目录 fsync 打不开就跳过)',
-  /androidFsPatches/.test(packHost) && /lwRename\(tmp, finalPath\)/.test(packHost) && /constants\.O_RDONLY\)\.catch/.test(packHost))
+check('pack-host 只留报错带根因这一条文本补丁 (link/fsync 已回源码, 外面再包 rename 会盖掉独占拷贝)',
+  /androidFsPatches/.test(packHost) && /Unable to persist attachment: /.test(packHost)
+    && !/lwRename\(tmp, finalPath\)/.test(packHost) && !/constants\.O_RDONLY\)\.catch/.test(packHost))
 check('补丁按"数替换处数"落地 (上游换形状就吵)',
   /expected exactly 1 occurrence/.test(packHost))
 const packedPersistence = await read('app/build/host-tree/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js')
 const packedAttachments = await read('app/build/host-tree/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js')
-check('打出来的树里已经带上那个补丁 (新会话才落得下盘)',
-  packedPersistence.includes('lwError') && packedAttachments.includes('lwError'),
-  'persistence=' + String(packedPersistence.includes('lwError')) + ' attachments=' + String(packedAttachments.includes('lwError')))
+check('打出来的树里带源码退路 (link 被拒时独占拷贝, 不再是 rename)',
+  packedPersistence.includes('COPYFILE_EXCL') && packedAttachments.includes('COPYFILE_EXCL')
+    && !packedPersistence.includes('lwRename'),
+  'persistence=' + String(packedPersistence.includes('COPYFILE_EXCL')) + ' attachments=' + String(packedAttachments.includes('COPYFILE_EXCL')))
+check('附件的祖先 fsync 打不开就跳过, 落盘失败带根因',
+  packedAttachments.includes('EACCES') && packedAttachments.includes('EPERM')
+    && packedAttachments.includes('Unable to persist attachment: '))
 
 /* ── 十三、档读自投影 (2026-11-08 晚: 非 luwi 档据此显示正文泡) ───────────── */
 
