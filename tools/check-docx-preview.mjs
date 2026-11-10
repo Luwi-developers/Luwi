@@ -155,6 +155,47 @@ check('pptx 自己解 OOXML: 按 sldIdLst 排页, 只收图片关系, 有上限'
   pptx.includes('MAX_SLIDES'),
 ], [true, true, true, true])
 
+/* ── 三之二、门户那一侧共用同一个渲染入口 (2026-11-09) ─────────────────────── */
+
+const xlsx = await read('presets/docx-preview/src/xlsx.js')
+check('导出了 renderOffice / isOfficeName (门户按包名 require 的就是这两个)', [
+  /export async function renderOffice\(bytes, name\)/.test(source),
+  /export function isOfficeName\(name\)/.test(source),
+  /const OFFICE_SUFFIXES = \['docx', 'pptx', 'xlsx'\]/.test(source),
+  // 门户取不到模块表时的退路
+  source.includes('window.__LW_OFFICE__'),
+], [true, true, true, true])
+check('三档后缀各走各的: docx 走 docx-preview, pptx / xlsx 自己解 OOXML', [
+  source.includes("if (suffix === 'docx')"),
+  source.includes("if (suffix === 'pptx')"),
+  source.includes("if (suffix === 'xlsx')"),
+  source.includes('这一份不是 Office 文件'),
+], [true, true, true, true])
+check('xlsx: 自己解 zip + sharedStrings, 三条上限都在', [
+  xlsx.includes("from 'jszip'"),
+  xlsx.includes("'xl/sharedStrings.xml'"),
+  xlsx.includes("'xl/workbook.xml'"),
+  /const MAX_SHEETS = 4/.test(xlsx),
+  /const MAX_ROWS = 200/.test(xlsx),
+  /const MAX_COLS = 26/.test(xlsx),
+  // Excel 自己写出来的 rels 是 `/xl/worksheets/sheet1.xml` (包内绝对路径): 拼到 base 后面就一层都读不到
+  xlsx.includes("clean.startsWith('/')"),
+  pptx.includes("clean.startsWith('/')"),
+], [true, true, true, true, true, true, true, true])
+check('xlsx 的表格样式只在 xlsx 那一档挂上 (docx / pptx 的样式一个字节不动)', [
+  /const SHEET_CSS = `/.test(source),
+  source.includes('${BASE_CSS}\\n${SHEET_CSS}'),
+  source.includes("h('div', 'lw-sheet-scroll'") || source.includes('lw-sheet-scroll'),
+], [true, true, true])
+check('字号与颜色落在 :host 上 (shadow root 里 body{} 那几条从来不生效)', [
+  /:host \{ display: block; font: 14px/.test(source),
+  /@media \(prefers-color-scheme: dark\) \{ :host \{ color: #e6e6e6; \} \}/.test(source),
+], [true, true])
+check('右栏那一档不动: 类型仍是 extension, 认的还是四条后缀', [
+  /priority: 'extension'/.test(source),
+  (patterns.match(/dsh-resource:\/\/file\//g) ?? []).length,
+], [true, 4])
+
 /* ── 三之二、老格式 (.doc / .ppt): 保留失败文字 + 交给系统打开 ──────────── */
 
 const hostScreen = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/HostScreen.kt')
@@ -194,6 +235,12 @@ check('两颗 Toast 的字符串两份都在', [
 
 /* ── 四、挂在哪一层 ────────────────────────────────────────────────────── */
 
+/**
+ * 从 Kotlin 里抓一张 `Row("名字", ...)` 表
+ *
+ * 只认到 `listOf` 为止: 那两张表都已经长成 `listOfNotNull(`, 写死带左括号的写法会一条都抓不到
+ * (这一条 2026-11-09 修 —— 判据红过一次, 红的是判据自己, 表里那两行一直都在)
+ */
 function tableOf(kotlin, marker) {
   const at = kotlin.indexOf(marker)
   if (at === -1) return []
@@ -203,10 +250,10 @@ function tableOf(kotlin, marker) {
 }
 
 check('覆盖层那张表里有它, 入口指向树里的 index.mjs', [
-  tableOf(overlay, 'private val PLUGINS = listOf(').includes(pkg.name),
+  tableOf(overlay, 'private val PLUGINS = listOf').includes(pkg.name),
   overlay.includes(`Row("${pkg.name}", "node_modules/${pkg.name}/index.mjs")`),
 ], [true, true])
-check('第二张表 (官方语音 bundle 开着时走的那张) 也有它', tableOf(overlay, 'private val OWN_PLUGINS = listOf(').includes(pkg.name), true)
+check('第二张表 (官方语音 bundle 开着时走的那张) 也有它', tableOf(overlay, 'private val OWN_PLUGINS = listOf').includes(pkg.name), true)
 check('它不在 PluginRows 里 (这一包没有配置要在面板上改)', rows.includes(pkg.name), false)
 check('pack-host 从 presets/docx-preview 拷进 node_modules/lw-docx-preview', [
   packer.includes("new URL('../presets/docx-preview', import.meta.url)"),

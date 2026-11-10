@@ -337,22 +337,30 @@ internal object CustomPresets {
         Log.i(TAG, "the profile manifest now carries $PACKAGE")
     }
 
-    /** 随包发的那份声明按行 id 补, 下线的那几条按行 id 删 (已有的一律不动) */
+    /** 随包发的那份声明按行 id 补, 下线的那几条按行 id 删 (已有的一律不动, 除非版本标记变了) */
     private fun ensurePatch(context: Context, profile: File) {
         val file = File(profile, "cordis.patch.yml")
         // profile 还不存在时从 dsh 自己那份模板起 (见 [PATCH_TEMPLATE])
         var patch = if (file.isFile) file.readText() else PATCH_TEMPLATE
         val before = patch
+        var refreshed = false
         // 模式预设: 正文随 host 树走 (lw-presets/), 我们只取开头那段 `- insert:`
         for ((row, staged) in PRESET_ROWS) {
-            if (hasRow(patch, row)) continue
             val source = File(File(DshHost.hostRoot(context), "lw-presets"), "$staged.patch.yml")
             val block = source.takeIf { it.isFile }?.readText()?.let(::insertBlock)
             if (block == null) {
                 Log.w(TAG, "the staged declaration ${source.absolutePath} is missing or has no `- insert:` block")
                 continue
             }
-            patch = appendBlock(patch, block)
+            if (!hasRow(patch, row)) {
+                patch = appendBlock(patch, block)
+                continue
+            }
+            // 2026-11-10: 正文变了要能到老机器 —— 老版本的"有这一行就不动"让所有预设改动都只对新装生效
+            if (!needsRefresh(rowEntry(patch, row), block)) continue
+            patch = refreshRow(patch, row, block)
+            refreshed = true
+            Log.i(TAG, "the preset declaration $row was refreshed to ${presetMarkerOf(block)}")
         }
         // **下线那两条真的从老机器的 patch 里删掉** (见 [LEGACY_ROWS]): 只停发的话, 已经装过的机器里
         // 那两段声明还在, 预设选择器里就一直看得见它们
@@ -366,6 +374,11 @@ internal object CustomPresets {
         // 老机器里那份注册表还指着上一版默认档: 改过去, **只改一次** (见 [retuneDefaultOnce])
         else patch = retuneDefaultOnce(context, patch)
         if (patch != before) {
+            // 换过整条声明时留一份改写前的 patch: 主人手改过的话, 唯一能翻回去的地方就在这
+            if (refreshed) {
+                val backup = File(profile, "cordis.patch.yml.bak-before-preset-refresh")
+                if (!backup.isFile) runCatching { backup.writeText(before) }
+            }
             file.parentFile?.mkdirs()
             file.writeText(patch)
             Log.i(TAG, "the preset declarations are in ${file.absolutePath}")
@@ -466,6 +479,45 @@ internal object CustomPresets {
         while (collapsed.isNotEmpty() && collapsed.last().isBlank()) collapsed.removeAt(collapsed.lastIndex)
         return collapsed.joinToString("\n") + "\n"
     }
+
+    /**
+     * 一段声明里的版本标记 (`# lw-preset: <版本>`), 没有就是 null (2026-11-10)
+     *
+     * 为什么要它: `ensurePatch` 原来"行在就不动", 于是**任何预设正文的改动都到不了老机器** ——
+     * `preset-luwi` 的人设就是这么卡在旧包里的。标记抬一版, spawn 时就把那条整条换掉;
+     * 用户自己手改过的 preset 会被覆盖, 但改写前那份 patch 留了备份 (见 [ensurePatch])
+     */
+    fun presetMarkerOf(text: String?): String? =
+        text?.let { Regex("(?m)^\\s*#\\s*lw-preset:\\s*(\\S+)\\s*$").find(it)?.groupValues?.get(1) }
+
+    /** patch 里某个行 id 所在的那一条顶层条目 (`- ` 起到下一条顶层 `- ` 之前), 没有就是 null */
+    fun rowEntry(patch: String, rowId: String): String? {
+        val lines = patch.lines()
+        var index = lines.indexOfFirst { it.startsWith("- ") }
+        while (index >= 0 && index < lines.size) {
+            var end = index + 1
+            while (end < lines.size && !lines[end].startsWith("- ")) end += 1
+            val entry = lines.subList(index, end)
+            if (entry.any { it.trimStart() == "- id: $rowId" }) return entry.joinToString("\n")
+            index = end
+        }
+        return null
+    }
+
+    /**
+     * 老行要不要按 staged 那份重写 (纯算术, 单测钉着)
+     *
+     * staged 没有标记 -> 一律不动 (还没迁到标记机制的声明照旧按"行在就不动"); 有标记且与现实不同
+     * (含"现有没有标记") -> 换
+     */
+    fun needsRefresh(current: String?, staged: String): Boolean {
+        val want = presetMarkerOf(staged) ?: return false
+        return presetMarkerOf(current) != want
+    }
+
+    /** 换掉一条声明: 先按行 id 整条删, 再把 staged 那份追加回去 (幂等: 内容一样时调用方不会走到这) */
+    fun refreshRow(patch: String, rowId: String, block: String): String =
+        appendBlock(withoutRow(patch, rowId), block)
 
     /**
      * 把注册表那行 `selectedDefault` 从上一版默认档改到 [DEFAULT_PRESET] (纯算术, 见 `CustomPresetsTest`)

@@ -17,6 +17,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
+import { applyMnemePatches, verifyHotMemory } from './pack-mneme-patches.mjs'
+
 /** Where the two release families are packed, relative to the checkout */
 const PACK_ROOT = 'dist/lw-host-pack'
 
@@ -740,7 +742,11 @@ console.log(
 // `lib/summarize.js` 的 summarize 签名、`lib/inject.js` 的 `text: (ctx) => {`), 上游仍然没有
 // 自己实现 `excludeAgentPresets`。0.12.0 新增了 `仓库地志`(choro) 与一批 lib 模块, 我们只裁
 // docs/test/src/scripts/lib.map, 别的不动
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.12.0' }
+// **2026-11-10 升到 0.13.0** (主人: "也更新一下mneme"): 0.13.0 是当天发的版本 (情绪归因
+// `affective_context` 那一批)。四处补丁的锚点在 0.13.0 上**逐字核对后仍各命中一次**
+// —— `tools/check-mneme-patches.mjs --from npm --version 0.13.0` 就是那次核对的可重跑版;
+// 0.13.0 新增了 `lib/attachment-text.js` (图片块占位), 只在 lib 内, 裁 .map 时不会碰到
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.13.0' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
@@ -782,57 +788,43 @@ for (const name of readdirSync(join(mnemeRoot, 'lib'))) {
 //   · 蒸馏入口按 `session.header.agentPreset` 早退
 //   · 注入入口按同一判据早退 (连热记忆与时间前缀一起不给)
 //
-// 三处锚点各要求**恰好命中一次**: 上游换个写法时构建当场失败, 而不是静默漏打. 上游自己实现同名键时
-// 整段跳过 (改用上游那一份), 免得两套语义打架. "用户自己装了一份 mneme" 时 `PluginRows` 会让位,
-// 这一层也就跟着不在 —— 那是"不覆盖主人装的东西"那条纪律的代价, 注释留在这里, 别当成 bug 去修
+// 三处锚点各要求**恰好命中一次**: 上游换个写法时构建当场失败, 而不是静默漏打. 2026-11-10 之前
+// 这里是"上游自己实现同名键就整段跳过", 后来发现那种连坐会让第四处 (热记忆) 的修复一起消失 ——
+// 现在每条补丁独立判断是否已应用, 上游只实现其中一处时, 另外几处照打. "用户自己装了一份 mneme"
+// 时 `PluginRows` 会让位, 这一层也就跟着不在 —— 那是"不覆盖主人装的东西"那条纪律的代价,
+// 注释留在这里, 别当成 bug 去修
+//
+// 2026-11-10 加第四处 (`hot-memory.js`, 只改一行, 理由写在下面那条 patch 上): 热记忆不再把"还没回答
+// 的当前轮"算成一整轮. 前三处按 preset 排除酒馆, 这一处与 preset 无关, 改的是所有会话的取数
 //
 // **默认值就是 `['tavern']`**, 不是空数组: 老设备上 profile 里那一行是旧版本写的 (`PluginRows` 的
 // `ensuredRow` 对已存在的行只改 `name:`, 不补 `config:`), 于是"配置里写排除谁"这一半在升级后不会自动
 // 出现 —— 补丁的缺省值兜住它, 配置行只当显式可见的那一份
-const mnemeExclusion = [
-  {
-    file: join(mnemeRoot, 'lib', 'config.js'),
-    anchor: 'autoSummarize: z.boolean().default(true),',
-    insert: "\n  excludeAgentPresets: z.array(z.string()).default(['tavern']),",
-  },
-  {
-    file: join(mnemeRoot, 'lib', 'summarize.js'),
-    anchor: 'async function summarize(session, triggerEvent, opts = {}) {',
-    insert: '\n    const excludedPresets = Array.isArray(config.excludeAgentPresets) ? config.excludeAgentPresets : [];'
-      + '\n    let presetName = null;'
-      + '\n    try { presetName = session?.header?.agentPreset ?? null } catch { presetName = null }'
-      + '\n    if (typeof presetName === "string" && excludedPresets.includes(presetName.trim())) return;',
-  },
-  {
-    file: join(mnemeRoot, 'lib', 'inject.js'),
-    anchor: 'text: (ctx) => {',
-    insert: '\n        let presetName = null;'
-      + '\n        try { presetName = ctx?.agent?.session?.header?.agentPreset ?? null } catch { presetName = null }'
-      + '\n        if (typeof presetName === "string" && Array.isArray(config.excludeAgentPresets)'
-      + '\n          && config.excludeAgentPresets.includes(presetName.trim())) return "";',
-  },
-]
-
-if (readFileSync(mnemeExclusion[0].file, 'utf8').includes('excludeAgentPresets')) {
-  console.log(`pack-host: ${mnemePlugin.name} already carries excludeAgentPresets, so the local patch was skipped`)
-} else {
-  let patched = 0
-  for (const patch of mnemeExclusion) {
-    const source = readFileSync(patch.file, 'utf8')
-    const hits = source.split(patch.anchor).length - 1
-    if (hits !== 1) {
-      throw new Error(
-        `${mnemePlugin.name}: expected exactly 1 occurrence of the exclusion anchor in ${patch.file},`
-          + ` found ${String(hits)}; the upstream layout changed, so the tavern exclusion has to be revisited`,
-      )
-    }
-    writeFileSync(patch.file, source.replace(patch.anchor, patch.anchor + patch.insert))
-    patched += 1
-  }
-  console.log(
-    `pack-host: patched ${String(patched)} of ${mnemePlugin.name}'s files so tavern sessions stay out of memory`,
+// 补丁表在 `tools/pack-mneme-patches.mjs`: 每条独立判断"是否已应用", 不再因为第一个文件命中
+// 就整段跳过 (2026-11-10 改 —— 那种连坐会让热记忆的修复静默丢失)
+const mnemePatch = applyMnemePatches(mnemeRoot)
+if (mnemePatch.failures.length > 0) {
+  const detail = mnemePatch.failures.map(one => `${one.id}: ${one.reason}`).join('; ')
+  throw new Error(
+    `${mnemePlugin.name}@${mnemePlugin.version} did not take every Luwi patch (${detail});`
+      + ' the upstream layout changed, so tools/pack-mneme-patches.mjs has to be revisited',
   )
 }
+// 文本替换成功不等于行为对: 热记忆必须真的把"还没回答的当前轮"挡在外面 (见 pack-mneme-patches.mjs)
+try {
+  await verifyHotMemory(mnemeRoot)
+} catch (error) {
+  throw new Error(
+    `${mnemePlugin.name}@${mnemePlugin.version}: hot memory still counts an unfinished round`
+      + ` (${error?.message ?? error})`,
+  )
+}
+console.log(
+  `pack-host: mneme patches applied ${String(mnemePatch.applied.length)},`
+    + ` already ${String(mnemePatch.already.length)}`
+    + `${mnemePatch.already.length > 0 ? ` (${mnemePatch.already.join(', ')})` : ''}`
+    + ', hot memory check ok',
+)
 
 const mnemeManifest = JSON.parse(readFileSync(join(mnemeRoot, 'package.json'), 'utf8'))
 const mnemeEntry = typeof mnemeManifest.main === 'string' ? mnemeManifest.main : 'index.js'
@@ -1006,6 +998,15 @@ for (const name of presets) {
 }
 console.log(`pack-host: staged the preset declarations in ${presetSeed}`)
 
+// 人格卡 (2026-11-10): 运行时读 `$DSH_HOME/lw/persona/xiaojingyu.md`, 而它的默认正文随插件走 ——
+// 设备上那份丢了 / 第一次启动时, 宿主插件从自己目录旁边这份播种 (见 host-plugin 的 ensurePersonaCard)
+// **落成 .txt 而不是 .md**: 下面 slimSkip 会把所有 `.md` 删掉, 这是它唯一能活下来的后缀
+cpSync(
+  fileURLToPath(new URL('../presets/luwi/persona/xiaojingyu.md', import.meta.url)),
+  join(out, 'node_modules', 'luwi-channel', 'persona.txt'),
+)
+console.log('pack-host: staged the persona card beside the plugin (node_modules/luwi-channel/persona.txt)')
+
 // sharp 随树装进来 (见 IMAGE_BACKEND), 这里不再覆盖任何东西 —— 以前那一步是把一个只认 PNG 的
 // 替身盖在 sharp 上, 代价是相册里的照片一律进不来
 
@@ -1070,6 +1071,86 @@ if (existsSync(flockShim)) {
     writeFileSync(flockShim, text.replace(anchor, `${anchor}\n    ${ANDROID_FLOCK_GUARD}`))
     console.log('pack-host: added the android branch to the flock shim (single-process host, no kernel lease)')
   }
+}
+
+/* ── 安卓上两类"原子落盘"在应用沙盒里会失败 (2026-11-08 真机) ──────────────────────
+ *
+ * 1. **硬链接**: SELinux 不许 app 在自己的 `files/` 里建硬链接 —— `link()` 直接 EACCES (真机实测:
+ *    `ln a b` 都过不去)。后果是"新开一场会话"永远落不了盘: 宿主日志是
+ *    `EACCES ... link .../session.v4.jsonl.zstd.<hash>.tmp -> .../session.v4.jsonl.zstd`,
+ *    于是界面有一场空的、`prompt` 全被拒 (2026-11-08 晚那一串"发图没反应"就是它)。
+ *    dsh 用 link 是为了"目标存在就失败"的原子创建; 退成 `rename()` 语义一样是"原子地把 tmp 变成
+ *    finalPath", 只多一点覆盖的可能 (调用方已经先查过存在)。
+ * 2. **目录 fsync**: `dsh-attachment-local` 落盘前要把目标目录的**每一层祖先** `open()` + `fsync()`
+ *    一遍, 而 DAC 不让应用打开 `/data/user/0` 这种祖先目录 —— 附件上传于是必挂。这里让那一层
+ *    "打不开就跳过" (安卓上反正证明不了目录项落盘)。
+ *
+ * 两处都**数替换处数**: 上游换形状就当场吵, 不静默失效; 上游哪天自己兼容了, 把这一段删掉。
+ */
+const androidFsPatches = [
+  {
+    name: 'session persistence (link)',
+    file: join(out, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js'),
+    edits: [
+      [
+        'import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from "node:fs/promises";',
+        'import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename as lwRename, rm, stat, truncate } from "node:fs/promises";',
+      ],
+      [
+        'await link(tmp, finalPath);',
+        'try { await link(tmp, finalPath); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await lwRename(tmp, finalPath); }',
+      ],
+    ],
+  },
+  {
+    name: 'attachment store (link + dir fsync)',
+    file: join(out, 'node_modules', '@deepseek-ai', 'dsh-attachment-local', 'lib', 'index.js'),
+    edits: [
+      [
+        'await link(source, target);',
+        'try { await link(source, target); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await rename(source, target); }',
+      ],
+      [
+        'await link(staged.path, target);',
+        'try { await link(staged.path, target); } catch (lwError) { if (lwError?.code !== "EACCES") throw lwError; await rename(staged.path, target); }',
+      ],
+      [
+        'const handle = await open(path, constants.O_RDONLY);',
+        'const handle = await open(path, constants.O_RDONLY).catch((lwError) => { if (lwError?.code === "EACCES" || lwError?.code === "EPERM") return null; throw lwError; });\n\t\t\tif (handle === null) return;',
+      ],
+      // 报错要带上根因: 安卓上"存不下附件"的可能不止一种, 只回一句 "Unable to persist attachment" 查不动
+      [
+        'throw new AttachmentError("Unable to persist attachment.", "ATTACHMENT_WRITE_FAILED", { cause: error });',
+        'throw new AttachmentError("Unable to persist attachment: " + String(error), "ATTACHMENT_WRITE_FAILED", { cause: error });',
+      ],
+    ],
+    // 同一个字符串在三个函数里各有一处, 三处都换
+    allowMany: true,
+  },
+]
+
+for (const patch of androidFsPatches) {
+  if (!existsSync(patch.file)) {
+    console.log(`pack-host: android fs patch (${patch.name}) skipped, no ${basename(patch.file)}`)
+    continue
+  }
+  let text = readFileSync(patch.file, 'utf8')
+  if (text.includes('lwError')) {
+    console.log(`pack-host: android fs patch (${patch.name}) already applied`)
+    continue
+  }
+  for (const [find, replace] of patch.edits) {
+    const hits = text.split(find).length - 1
+    if (hits !== 1 && !(patch.allowMany && hits > 0)) {
+      throw new Error(
+        `pack-host: ${patch.name}: expected exactly 1 occurrence of ${JSON.stringify(find.slice(0, 64))},`
+          + ` found ${String(hits)} — 上游换了形状, 这条安卓兼容要重新看`,
+      )
+    }
+    text = patch.allowMany ? text.split(find).join(replace) : text.replace(find, replace)
+  }
+  writeFileSync(patch.file, text)
+  console.log(`pack-host: android fs patch (${patch.name}) applied (${String(patch.edits.length)} edits)`)
 }
 
 const { files, bytes } = measure(join(out, 'node_modules'))

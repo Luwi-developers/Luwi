@@ -34,9 +34,36 @@ if (at < 0 || end < 0) {
   console.error('FAIL the router block is not in host-plugin/index.mjs any more')
   process.exit(1)
 }
-const { judgeRouter, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS } = new Function(
-  `${host.slice(at, end)}\nreturn { judgeRouter, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS }`,
+const { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS } = new Function(
+  `${host.slice(at, end)}\nreturn { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS }`,
 )()
+
+/* ── 两把"她自己定"的尺子 (2026-11-10) ─────────────────────────────────── */
+
+const rulesAt = host.indexOf('const ROUTER_RULE_RANGES')
+const rulesEnd = host.indexOf('async function writeRouterRules', rulesAt)
+if (rulesAt < 0 || rulesEnd < 0) {
+  console.error('FAIL the router rules block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const { normalizeRouterRules } = new Function(
+  `${host.slice(rulesAt, rulesEnd)}\nreturn { normalizeRouterRules }`,
+)()
+
+check('两把尺子原样收下', normalizeRouterRules({ gameMinutes: 120, wishDays: 30 }), {
+  gameMinutes: 120,
+  wishDays: 30,
+})
+check('越界夹回范围 (游戏 5..1440 / 提前 1..365)', normalizeRouterRules({ gameMinutes: 0, wishDays: 9999 }), {
+  gameMinutes: 5,
+  wishDays: 365,
+})
+check('坏值丢掉, 不认识的不收', normalizeRouterRules({ gameMinutes: '很久', wishDays: null, cooldownMs: 1 }), {})
+check('只给一个键时另一个不出现 (另一把尺子保持原样)', normalizeRouterRules({ gameMinutes: 80 }), {
+  gameMinutes: 80,
+})
+check('不是对象时回空', normalizeRouterRules(null), {})
+check('缺省仍是 100 分钟 / 60 天', [ROUTER_DEFAULTS.gameMinutes, ROUTER_DEFAULTS.wishDays], [100, 60])
 
 /* ── 一个固定的"现在": 2026-11-07 21:40 ─────────────────────────────────── */
 
@@ -44,12 +71,13 @@ const NOW = new Date(2026, 10, 7, 21, 40, 0).getTime()
 const HOUR = 60 * 60 * 1000
 const GAME = 'com.tencent.tmgp.sgame'
 
-/** 一个什么都不触发的底座 */
+/** 一个什么都不触发的底座 (`lastSpokenAt` 跟着 `now` 走: 换一个钟点时它仍该落在五小时前) */
 function base(over = {}) {
+  const now = Number(over?.now ?? NOW)
   return {
-    now: NOW,
+    now,
     quiet: { enabled: true, from: '23:00', to: '07:00' },
-    lastSpokenAt: NOW - 5 * HOUR,
+    lastSpokenAt: now - 5 * HOUR,
     usage: { today: [], foreground: null },
     wishes: [],
     signals: [],
@@ -367,6 +395,94 @@ check(
   })).kind,
   'rest',
 )
+
+/* ── 八、第三种判法: 日历事件 (2026-11-10, 方案 D) ──────────────────────── */
+
+/*
+ * `event` 说的是"日历里的事件开始前 N 分钟", 于是它比前两种多一个输入 (日历) 与一条新语义:
+ * **每一次发生一个键**. 这一节钉九件事: 命中 / 太远 / 已开始 / 全天 / 标题不匹配 / 读不到日历 /
+ * 点名的日历 / `at` 下界 / 同一场不重复与次日能再说
+ */
+
+const AT_10 = new Date(2026, 10, 7, 10, 0, 0).getTime()
+const MINUTE = 60 * 1000
+const calendarOf = (events) => ({ available: true, why: '', at: AT_10, events })
+const checkEvent = {
+  id: 'c3',
+  what: '出门前问一句带没带伞',
+  when: { kind: 'event', beforeMinutes: 30, titleContains: '上班' },
+  enabled: true,
+}
+const meeting = (minutesAhead, over = {}) => ({
+  id: 'e1', calendarId: '7', title: '上班', startMs: AT_10 + minutesAhead * MINUTE, allDay: false, ...over,
+})
+
+const eventHit = judgeRouter(base({
+  now: AT_10,
+  calendar: calendarOf([meeting(12)]),
+  checks: [checkEvent],
+}))
+
+check('事件 12 分钟后 + beforeMinutes 30 -> 命中', [eventHit.say, eventHit.kind], [true, 'check'])
+check('那一句事实里带标题与还剩几分钟', eventHit.brief,
+  '出门前问一句带没带伞 · 「上班」10:12 开始, 还有 12 分钟')
+check('去重键是"当天@开始那一刻"', eventHit.key, `2026-11-07@${AT_10 + 12 * MINUTE}`)
+
+check('事件 45 分钟后不判 (还没进窗口)', judgeRouter(base({
+  now: AT_10, calendar: calendarOf([meeting(45)]), checks: [checkEvent],
+})).say, false)
+
+check('已经开始的事件不判', judgeRouter(base({
+  now: AT_10, calendar: calendarOf([meeting(-2)]), checks: [checkEvent],
+})).say, false)
+
+check('全天事件不判 (那是 time 判法的事)', judgeRouter(base({
+  now: AT_10, calendar: calendarOf([meeting(12, { allDay: true })]), checks: [checkEvent],
+})).say, false)
+
+check('标题不匹配不判', judgeRouter(base({
+  now: AT_10, calendar: calendarOf([meeting(12, { title: '买菜' })]), checks: [checkEvent],
+})).say, false)
+
+check('读不到日历就不猜, 也不抛', judgeRouter(base({
+  now: AT_10,
+  calendar: { available: false, why: 'calendar access has not been granted', at: AT_10, events: [meeting(12)] },
+  checks: [checkEvent],
+})).say, false)
+
+check('点名的日历不在名单里就不判', judgeRouter(base({
+  now: AT_10,
+  calendar: calendarOf([meeting(12, { calendarId: '9' })]),
+  checks: [{ ...checkEvent, when: { ...checkEvent.when, calendarIds: ['7'] } }],
+})).say, false)
+
+check('`at` 那个下界对 event 也生效 (10:00 时 at=10:30 不判)', judgeRouter(base({
+  now: AT_10, calendar: calendarOf([meeting(12)]), checks: [{ ...checkEvent, at: '10:30' }],
+})).say, false)
+
+check('同一场会第二次不重复说 (checksSaid 命中了那个键)', judgeRouter(base({
+  now: AT_10,
+  calendar: calendarOf([meeting(12)]),
+  checks: [checkEvent],
+  checksSaid: { c3: eventHit.key },
+})).say, false)
+
+check('同一场会下一天 (开始时刻变了) 的键也变了, 于是能再说', (() => {
+  const tomorrow = AT_10 + 24 * HOUR
+  const hit = judgeRouter(base({
+    now: tomorrow,
+    calendar: { available: true, why: '', at: tomorrow, events: [meeting(12, { startMs: tomorrow + 12 * MINUTE })] },
+    checks: [checkEvent],
+    checksSaid: { c3: eventHit.key },
+  }))
+  return [hit.say, hit.key]
+})(), [true, `2026-11-08@${AT_10 + 24 * HOUR + 12 * MINUTE}`])
+
+check('前两种判法的键还是"当天", 没有日历的那一条直接回 null', [
+  routerCheckHit(checkUsage, base({ usage: usageGame }), NOW)?.key,
+  routerCheckHit(checkTime, base({}), NOW)?.key,
+  routerCheckHit(checkEvent, base({ now: AT_10 }), AT_10),
+], ['2026-11-07', '2026-11-07', null])
 
 /* ── 六、缺省与形状 ─────────────────────────────────────────────────────── */
 

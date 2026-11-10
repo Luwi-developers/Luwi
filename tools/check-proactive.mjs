@@ -18,7 +18,11 @@
  * 它**直接取 `host-plugin/index.mjs` 里那一段源码来跑** (不复制第二份), 所以测的是上线那一份
  */
 
-import { readFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { readFileSync, statSync } from 'node:fs'
+import { appendFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const root = new URL('../', import.meta.url)
 const read = (path) => readFile(new URL(path, root), 'utf8')
@@ -59,12 +63,47 @@ const section = host.slice(start, end)
 
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
-  `${section}\nreturn { proactiveStartLine, proactiveScreenGate, proactiveScreenRefusal,`
-    + ' proactiveSessionOf, proactiveRun, PROACTIVE_PRESET, PROACTIVE_SCREEN_DENIED,'
+  'readFileSync', 'statSync', 'appendFile',
+  `${section}\nreturn { proactiveStartLine, proactiveGate, proactiveScreenGate, proactiveActingRefusal,`
+    + ' proactiveScreenRefusal, proactiveSessionOf, proactiveActing, proactiveActingFrom,'
+    + ' proactiveActingLabel, proactiveActingCache, proactiveRun, PROACTIVE_PRESET,'
+    + ' PROACTIVE_SCREEN_DENIED, PROACTIVE_ACT_TABLE, PROACTIVE_COMMAND_DENIED,'
+    + ' PROACTIVE_ACTING_REMIND, PROACTIVE_ACTING_ACT, PROACTIVE_ACTING_FULL,'
+    + ' PROACTIVE_ACTING_TIERS, PROACTIVE_ACTING_CACHE_MS, PROACTIVE_AUDIT_FILE,'
     + ' PROACTIVE_STATE_FILE, PROACTIVE_WORKSPACE_NAME }',
 )(
-  () => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {}, async () => {},
+  () => '', async () => [], join, () => '', async () => {}, async () => {}, async () => {}, async () => {},
+  readFileSync, statSync, appendFile,
 )
+
+/* 一个临时的 DSH_HOME: 档位读的是 `$DSH_HOME/lw/sim.json`, 判据让它读真文件 (与上线同一条路)
+ *
+ * 2026-11-10: 不再用 `mkdtemp(tmpdir())` —— 某些沙箱里 Node 在 `%TEMP%` 下建随机名字会 EPERM,
+ * 而工作区的 `.lwtmp` 一定写得动. 名字带 pid, 多次跑不撞 */
+async function tempDir(prefix) {
+  const base = join(fileURLToPath(root), '.lwtmp')
+  await mkdir(base, { recursive: true })
+  for (let i = 0; i < 100; i += 1) {
+    const candidate = join(base, `${prefix}${process.pid}-${i}`)
+    try {
+      await mkdir(candidate)
+      return candidate
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+    }
+  }
+  throw new Error('no temporary directory under .lwtmp')
+}
+const home = await tempDir('lw-proactive-')
+process.env.DSH_HOME = home
+await mkdir(join(home, 'lw'), { recursive: true })
+
+/** 把 `sim.json` 写成某一档, 再把 3 s 缓存打掉 (判据不睡 3 秒) */
+async function useTier(payload) {
+  await writeFile(join(home, 'lw', 'sim.json'), JSON.stringify(payload))
+  api.proactiveActingCache.at = 0
+  api.proactiveActingCache.mtimeMs = -1
+}
 
 /* ── 一、排期骨架 (排期能起) ───────────────────────────────────────────── */
 
@@ -215,7 +254,7 @@ check('卡是空的时候也有一段缺省正文', (() => {
   return [line.includes('最新探索摘要'), line.includes('还没有')]
 })(), [true, true])
 
-/* ── 四、主动场不建虚拟屏 (13-4) ──────────────────────────────────────── */
+/* ── 四、三张表 × 三档的硬闸 (2026-11-10) ────────────────────────────── */
 
 check('startProactive 里没有一条建屏 / 选屏的路', [
   /lw_screen_create/u.test(startBody),
@@ -223,46 +262,163 @@ check('startProactive 里没有一条建屏 / 选屏的路', [
   /defaultDisplayId/u.test(startBody),
   /lw_screenshot/u.test(startBody),
 ], [false, false, false, false])
-check('那道闸挂上了', /ctx\.tools\.guard\(proactiveScreenGate\)/u.test(host), true)
+check('那道闸挂的是三表那一条', /ctx\.tools\.guard\(proactiveGate\)/u.test(host), true)
+check('旧名字 (proactiveScreenGate) 还留着, 不引新代码去挂它', [
+  /function proactiveScreenGate\(exec\)/u.test(section),
+  /ctx\.tools\.guard\(proactiveScreenGate\)/u.test(host),
+], [true, false])
+check('三张表都在 (A 屏 / B 写动 / C 命令)', [
+  api.PROACTIVE_SCREEN_DENIED.size,
+  api.PROACTIVE_ACT_TABLE.size, // 23 + lw_persona (2026-11-10) = 24
+  api.PROACTIVE_COMMAND_DENIED.has('lw_linux'),
+  api.PROACTIVE_COMMAND_DENIED.has('bash'),
+  api.PROACTIVE_COMMAND_DENIED.has('pwsh'),
+], [21, 24, true, true, true])
+check('三档字面量与设置页 / SimSetting 同一套', [
+  api.PROACTIVE_ACTING_REMIND, api.PROACTIVE_ACTING_ACT, api.PROACTIVE_ACTING_FULL,
+  api.PROACTIVE_ACTING_CACHE_MS,
+], ['remind', 'act', 'full', 3000])
 
 /** 一个主动场的模型调用 */
-const proactiveCall = (name) => ({
+const proactiveCall = (name, args) => ({
   name,
-  arguments: {},
+  arguments: args ?? {},
   agent: { id: 'proactive-1', session: { meta: { agentPreset: 'proactive' } } },
 })
-check('主动场里建虚拟屏被拒 (13-4 的正面)', [
-  typeof api.proactiveScreenGate(proactiveCall('lw_screen_create')),
-  api.proactiveScreenGate(proactiveCall('lw_screen_create')).includes('never creates a virtual screen'),
-], ['string', true])
-check('主动场里别的屏幕类工具也拒 (读屏 / 点屏 / 管理屏)', [
-  'lw_screenshot', 'lw_ui', 'lw_tap', 'lw_swipe', 'lw_screen_resize', 'lw_wait_text',
-].map((name) => typeof api.proactiveScreenGate(proactiveCall(name))), [
-  'string', 'string', 'string', 'string', 'string', 'string',
+/** 另一个会话里的同一个调用 */
+const otherCall = (name, args) => ({
+  name,
+  arguments: args ?? {},
+  agent: { id: 'ball-1', session: { meta: { agentPreset: 'custom' } } },
+})
+/** 一道闸的答案压成一个字: 放 / 拒 */
+const verdict = (reason) => (reason === undefined ? 'allow' : 'deny')
+
+/** 三档逐档跑一遍同样的那一批调用 */
+async function acrossTiers(calls) {
+  const rows = []
+  for (const tier of ['remind', 'act', 'full']) {
+    await useTier({ proactive: { acting: tier } })
+    rows.push(calls.map(([name, args]) => verdict(api.proactiveGate(proactiveCall(name, args)))))
+  }
+  return rows
+}
+
+check('A 表 (屏): remind 拒 / act 拒 / full 放 (9 格)', await acrossTiers([
+  ['lw_screen_create'], ['lw_screenshot'], ['lw_tap'],
+]), [['deny', 'deny', 'deny'], ['deny', 'deny', 'deny'], ['allow', 'allow', 'allow']])
+
+check('B 表 (写动): remind 拒 / act 放 / full 放', await acrossTiers([
+  ['lw_files', { op: 'write', path: 'a.txt', text: 'x' }], ['lw_launch', { package: 'x' }],
+  ['lw_notify', { text: 'x' }], ['lw_app_control', { op: 'forceStop', package: 'x' }],
+]), [['deny', 'deny', 'deny', 'deny'], ['allow', 'allow', 'allow', 'allow'], ['allow', 'allow', 'allow', 'allow']])
+
+check('B 表的只读那一面三档都放 (lw_files read / lw_system get / lw_clipboard get)', await acrossTiers([
+  ['lw_files', { op: 'read', path: 'a.txt' }], ['lw_system', { op: 'get' }], ['lw_clipboard', { op: 'get' }],
+]), [['allow', 'allow', 'allow'], ['allow', 'allow', 'allow'], ['allow', 'allow', 'allow']])
+
+// 2026-11-10 (方案 F): `lw_sticker` 原来不在表里 (= 三档都放), 而它的 `op=fetch` 会外发请求并落盘 ——
+// 列素材与贴一张都不动设备, 那一面算写动
+check('B 表里 lw_sticker: list / say 三档都放, fetch 只在 act / full', await acrossTiers([
+  ['lw_sticker', { op: 'list' }],
+  ['lw_sticker', { op: 'say', id: '开心.png' }],
+  ['lw_sticker', { op: 'fetch', url: 'https://example.com/a.png' }],
+]), [
+  ['allow', 'allow', 'deny'],
+  ['allow', 'allow', 'allow'],
+  ['allow', 'allow', 'allow'],
 ])
-check('主动场里读摘要的工具不受这道闸影响', [
-  api.proactiveScreenGate(proactiveCall('lw_files')),
-  api.proactiveScreenGate(proactiveCall('lw_calendar')),
-  api.proactiveScreenGate(proactiveCall('lw_notifications')),
-  api.proactiveScreenGate(proactiveCall('lw_remember')),
-], [undefined, undefined, undefined, undefined])
-check('别的会话里屏幕类工具照旧 (这道闸只认主动场)', [
-  api.proactiveScreenGate({
-    name: 'lw_screen_create',
-    agent: { id: 'ball-1', session: { meta: { agentPreset: 'custom' } } },
-  }),
-  api.proactiveScreenGate({ name: 'lw_screen_create', agent: { id: 'ball-2', session: {} } }),
-], [undefined, undefined])
-check('只凭会话 id 也认得出刚 create 出来的那一场', (() => {
+
+// 2026-11-10 (人格卡运行时读): 读三档都放; 写是改她自己的设定, 归写动 (remind 拒)
+check('B 表里 lw_persona: read 三档都放, write / reset 只在 act / full', await acrossTiers([
+  ['lw_persona', { op: 'read' }],
+  ['lw_persona', { op: 'write', text: 'x' }],
+  ['lw_persona', { op: 'reset' }],
+]), [
+  ['allow', 'deny', 'deny'],
+  ['allow', 'allow', 'allow'],
+  ['allow', 'allow', 'allow'],
+])
+
+check('op 取不到按写动处理 (fail-closed): remind 拒, act 放', await acrossTiers([
+  ['lw_files', {}], ['lw_system', {}], ['lw_clipboard', { op: 'set', text: 'x' }],
+]), [['deny', 'deny', 'deny'], ['allow', 'allow', 'allow'], ['allow', 'allow', 'allow']])
+
+check('C 表 (命令): remind 拒 / act 放 / full 放', await acrossTiers([
+  ['lw_linux', { op: 'run', command: 'id' }], ['bash', { command: 'id' }], ['pwsh', { command: 'id' }],
+  ['present', {}],
+]), [['deny', 'deny', 'deny', 'deny'], ['allow', 'allow', 'allow', 'allow'],
+  ['allow', 'allow', 'allow', 'allow']])
+
+check('三张表都不认识的工具一次都不碰会话身份 (读摘要 / 说话 / 看通知)', await (async () => {
+  await useTier({ proactive: { acting: 'remind' } })
+  return ['lw_calendar', 'lw_notifications', 'lw_wish', 'lw_say', 'lw_router', 'lw_take_photo']
+    .map((name) => verdict(api.proactiveGate(proactiveCall(name))))
+})(), ['allow', 'allow', 'allow', 'allow', 'allow', 'allow'])
+
+check('别的会话里同名工具照旧 (这道闸只认主动场)', await (async () => {
+  await useTier({ proactive: { acting: 'remind' } })
+  return ['lw_screenshot', 'lw_files', 'lw_linux']
+    .map((name) => verdict(api.proactiveGate(otherCall(name, { op: 'write' }))))
+})(), ['allow', 'allow', 'allow'])
+
+check('只凭会话 id 也认得出刚 create 出来的那一场', await (async () => {
+  await useTier({ proactive: { acting: 'remind' } })
   api.proactiveRun.session = 'proactive-9'
-  const viaId = api.proactiveScreenGate({
-    name: 'lw_screen_create',
-    agent: { id: 'proactive-9', session: {} },
-  })
+  const viaId = api.proactiveGate({ name: 'lw_screen_create', arguments: {}, agent: { id: 'proactive-9', session: {} } })
   api.proactiveRun.session = null
-  return typeof viaId
-})(), 'string')
-check('拒的那句话说得清这一档只提醒', api.proactiveScreenRefusal('lw_tap').includes('only reads summaries and speaks'), true)
+  return verdict(viaId)
+})(), 'deny')
+
+check('未知档位串 / 缺键一律按 remind (最保守)', await (async () => {
+  const got = []
+  for (const payload of [{ proactive: { acting: 'FULL' } }, { proactive: { acting: 'god' } }, {}, { proactive: {} }]) {
+    await useTier(payload)
+    got.push(verdict(api.proactiveGate(proactiveCall('lw_screenshot'))))
+  }
+  return got
+})(), ['deny', 'deny', 'deny', 'deny'])
+
+check('旧布尔值只读迁移: allowActing true → act, false → remind', [
+  api.proactiveActingFrom({ proactive: { allowActing: true } }),
+  api.proactiveActingFrom({ proactive: { allowActing: false } }),
+  api.proactiveActingFrom({ proactive: { acting: 'full', allowActing: false } }),
+], ['act', 'remind', 'full'])
+
+check('拒的回执分档: remind 说只提醒, act 撞屏说屏永远不碰', [
+  api.proactiveActingRefusal('lw_say', 'remind', 'act').includes('remind-only tier'),
+  api.proactiveActingRefusal('lw_tap', 'act', 'screen').includes('act tier'),
+  api.proactiveActingRefusal('lw_tap', 'act', 'screen').includes('screen'),
+  api.proactiveActingRefusal('lw_tap', 'remind', 'screen').includes('remind-only tier'),
+], [true, true, true, true])
+
+check('放行写一行审计 (A 表那次也记)', await (async () => {
+  await useTier({ proactive: { acting: 'full' } })
+  api.proactiveRun.session = 'proactive-audit'
+  api.proactiveGate(proactiveCall('lw_screenshot', { displayId: 0 }))
+  api.proactiveRun.session = null
+  await new Promise((done) => setTimeout(done, 60))
+  const path = join(home, 'lw', api.PROACTIVE_AUDIT_FILE)
+  const text = await readFile(path, 'utf8').catch(() => '')
+  return [text.includes('"tier":"full"'), text.includes('lw_screenshot'), text.includes('proactive-audit')]
+})(), [true, true, true])
+
+/* ── 四·五、开场正文按档位 (方案 §3.5) ────────────────────────────────── */
+
+check('三档的开场正文各含对应那句', (() => {
+  const remind = api.proactiveStartLine('看看今天', '/x.md', 'remind')
+  const act = api.proactiveStartLine('看看今天', '/x.md', 'act')
+  const full = api.proactiveStartLine('看看今天', '/x.md', 'full')
+  return [
+    remind.includes('只提醒'), remind.includes('不建虚拟屏'), remind.includes('不可屏幕控制'),
+    act.includes('允许动手'), act.includes('屏不碰'),
+    full.includes('全放开'), full.includes('建虚拟屏'),
+  ]
+})(), [true, true, true, true, true, true, true])
+check('档位串不认识时开场按只提醒讲', api.proactiveStartLine('', '', 'god').includes('只提醒'), true)
+check('档位的中文名与设置页那三行同一套字', [
+  api.proactiveActingLabel('remind'), api.proactiveActingLabel('act'), api.proactiveActingLabel('full'),
+], ['只提醒', '允许动手', '全放开'])
 
 /* ── 五、预设那一段 ───────────────────────────────────────────────────── */
 
@@ -315,6 +471,37 @@ needed('不可屏幕控制')
 needed('不可 App 控制')
 needed('固定新开')
 needed('不建虚拟屏')
+needed('允许动手')
+needed('全放开')
+needed('lw_say')
+
+// 2026-11-10 主人点出来的那一条: 主动场那份 persona 是 2026-11-05 写的, 比 lw_say 立起来早 ——
+// 它当时教的是 lw_overlay op=burst 与 lw_sticker op=say. 那两条现在都是底层通道 (luwi 档第 16 条),
+// 发言只走 lw_say, 所以这一段不许再教它们
+check('persona 不再教底层通道 (lw_overlay op=burst / lw_sticker op=say)', [
+  persona.includes('lw_overlay op=burst'),
+  /lw_sticker op=say/u.test(persona),
+  /op=burst/u.test(persona),
+], [false, false, false])
+// 2026-11-10 主人这一轮把口径说死了: 贴表情一律走 lw_say 的 sticker, lw_sticker 只留着 op=list
+// 找素材, 它的 op=say 是宿主底层 —— 这三件事必须同时出现在 persona 里, 少一条就会退回去
+check('persona 写死「表情只走 lw_say 的 sticker, lw_sticker 只 op=list」', [
+  persona.includes('lw_say({ sticker'),
+  persona.includes('op=list'),
+  persona.includes('op=say'),
+  persona.includes('底层'),
+], [true, true, true, true])
+check('persona 把 lw_speak / lw_overlay 标成底层通道', [
+  persona.includes('lw_speak'),
+  persona.includes('lw_overlay'),
+  persona.includes('你不直接调'),
+], [true, true, true])
+check('persona 一次说几句走 lw_say 的 lines 数组 (同一个意群只调一次)', [
+  persona.includes('lines 数组'),
+  persona.includes('只调一次'),
+  persona.includes('sticker'),
+  persona.includes('speak: true'),
+], [true, true, true, true])
 
 const rows = pluginRows(proactiveBlock)
 check('预设里装了 persona / agent-instructions / 只读检索 / compaction', [
@@ -336,7 +523,10 @@ check('README 写了四步启动顺序与"不建虚拟屏"', [
 
 /* ── 六、落位 ─────────────────────────────────────────────────────────── */
 
-check('pack-host 摆两份声明 (explore + proactive)', /const presets = \['explore', 'proactive'\]/u.test(pack), true)
+check('pack-host 摆的 preset 表里有主动对话 (与 luwi / explore 同一批)', [
+  /const presets = \[[^\]]*'proactive'/u.test(pack),
+  /const presets = \[[^\]]*'explore'/u.test(pack),
+], [true, true])
 check('Kotlin 那张 PRESET_ROWS 有主动对话那一对', [
   /ROW_PROACTIVE = "preset-proactive"/u.test(custom),
   /ROW_PROACTIVE to "proactive"/u.test(custom),
@@ -346,6 +536,8 @@ check('tools/README 列了这个判据', /check-proactive\.mjs/u.test(toolsReadm
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
+// 自取自清: 临时 home 在 `.lwtmp` 下, 跑完删掉
+await rm(home, { recursive: true, force: true })
 console.log('')
 console.log(`${checks - failures} / ${checks} 条通过${failures === 0 ? '' : ` (${failures} 条红)`}`)
 process.exit(failures === 0 ? 0 : 1)

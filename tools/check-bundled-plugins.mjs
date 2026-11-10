@@ -25,6 +25,9 @@
  */
 
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+
+import { MNEME_PATCHES, verifyHotMemory } from './pack-mneme-patches.mjs'
 
 const root = new URL('../', import.meta.url)
 const read = (path) => readFile(new URL(path, root), 'utf8')
@@ -52,7 +55,7 @@ const image = /const imagePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.ex
 const mneme = /const mnemePlugin = \{ name: '([^']+)', version: '([^']+)' \}/.exec(packer)
 
 check('生图插件仍按自己那份声明取进树', [image?.[1], image?.[2]], ['@dickpy/dsh-imagegen', '1.15.6'])
-check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.12.0'])
+check('记忆插件按自己那份声明取进树', [mneme?.[1], mneme?.[2]], ['@modusensus/dsh-mneme', '0.13.0'])
 
 // 2026-10-30 主人: "删除 ourfreemodel 这个随包插件" —— 三处接缝 (取包 / 挂行 / 贴 config) 一起撤,
 // 钉一条"它不在"的判据, 免得将来谁又把它按老文档加回去. 撤下的那一行还得从老设备上摘掉: OWNED 只管
@@ -72,7 +75,7 @@ check(
 check(
   '两个包都走 `npm pack` + 解 tarball (不装依赖树), 并且各自 import 一次',
   [
-    (packer.match(/'pack',\n\s+`\$\{imagePlugin\.name\}@\$\{imagePlugin\.version\}`/g) ?? []).length,
+    (packer.match(/'pack',\r?\n\s+`\$\{imagePlugin\.name\}@\$\{imagePlugin\.version\}`/g) ?? []).length,
     packer.includes('`npm pack produced no tarball for ${mnemePlugin.name}'),
     packer.includes('await import(pathToFileURL(join(mnemeRoot, mnemeEntry)).href)'),
     packer.includes('await import(pathToFileURL(join(imageRoot, imageEntry)).href)'),
@@ -172,20 +175,36 @@ check(
 // 酒馆一场存档就是一场 DSH 会话 (preset 是 `tavern`), 而 mneme 的 autoSummarize 在每场会话的
 // turn/end 上蒸馏写库 —— 主人报的"酒馆的对话进入记忆库了"就是这一条. 上游 0.9.0 没有"按 preset
 // 排除"的配置, 所以由 pack-host 打三处补丁 (config / 蒸馏 / 注入), 配置那一半由 PluginRows 写
-check(
-  'mneme 补丁: 三处锚点都在, 缺省排除 tavern, 且上游自己实现了就跳过 (不硬打第二套语义)',
-  [
-    [
-      'autoSummarize: z.boolean().default(true),',
-      'async function summarize(session, triggerEvent, opts = {}) {',
-      'text: (ctx) => {',
-    ].filter((anchor) => !packer.includes(anchor)),
-    packer.includes("excludeAgentPresets: z.array(z.string()).default(['tavern'])"),
-    packer.includes('already carries excludeAgentPresets'),
-    packer.includes('so tavern sessions stay out of memory'),
-  ],
-  [[], true, true, true],
-)
+// 2026-11-10: 补丁表搬到 `tools/pack-mneme-patches.mjs`, 四条各自独立判断"是否已应用" —— 上游哪天
+// 自己实现了 `excludeAgentPresets`, 只跳过它自己那处, 热记忆那处照打; 旧写法"第一个文件命中就
+// 整段跳过"会让热记忆的修复静默丢失
+const patchIds = MNEME_PATCHES.map(one => one.id)
+check('mneme 补丁表: 四条齐全, 各有独立的"已应用"标记与锚点', [
+  patchIds,
+  MNEME_PATCHES.every(one => typeof one.appliedWhen === 'string' && one.appliedWhen !== ''),
+  MNEME_PATCHES.every(one => typeof one.anchor === 'string' && one.anchor !== ''),
+], [
+  ['tavern-config', 'tavern-summarize', 'tavern-inject', 'hot-memory-unanswered'],
+  true,
+  true,
+])
+
+check('pack-host 用补丁表并做行为自检 (不再因某一处命中就整段跳过)', [
+  packer.includes('applyMnemePatches(mnemeRoot)'),
+  packer.includes('verifyHotMemory(mnemeRoot)'),
+  !packer.includes('already carries excludeAgentPresets'),
+], [true, true, true])
+
+// 2026-11-10 主人报的「每次回复都发两条意思一样的句子」: 热记忆把还没回答的当前轮算成一整轮 (A 空),
+// dsh 每个 step 都会重算运行时上下文, 于是同一 turn 里第二帧快照多出 "[短期上下文] Q: … / A: " ——
+// 快照一变就再跑一步, 模型看到"没人答"又答一遍. 补丁必须把那一行换掉, 不是加一行; 锚点要带行首换行,
+// 否则同一个调用在循环里那一份 (6 空格缩进) 也会命中, 构建当场红
+const hotPatch = MNEME_PATCHES.find(one => one.id === 'hot-memory-unanswered')
+check('热记忆那条是替换、不是追加, 且锚点带行首换行', [
+  hotPatch?.replace !== undefined,
+  hotPatch?.insert === undefined,
+  hotPatch?.anchor.startsWith('\n') === true,
+], [true, true, true])
 
 check(
   'profile 里那一行把 tavern 排除掉 (排除按 preset 判, 不碰别的会话)',
@@ -218,6 +237,14 @@ if (patchedMneme === null || treeManifest === null) {
   )
 } else {
   check('树里那份 mneme 真的带着 excludeAgentPresets', patchedMneme.includes('excludeAgentPresets'), true)
+  // 行为断言取代文本断言: 上游换写法、补丁换实现都不影响这条, 只看"没回答的当前轮会不会进块"
+  let hotError = ''
+  try {
+    await verifyHotMemory(fileURLToPath(new URL(`${treeMneme}/`, root)))
+  } catch (error) {
+    hotError = error?.message ?? String(error)
+  }
+  check('树里那份热记忆的行为对 (真跑 roundsFromEvents)', hotError, '')
 }
 
 /* ── 四、别人那几行别被顺手改了 ─────────────────────────────────────────── */

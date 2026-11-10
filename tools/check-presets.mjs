@@ -108,6 +108,19 @@ for (const needle of qqOnly) {
   expect(!body.includes(needle), `persona 正文里不该出现 QQ 的东西: ${needle}`)
 }
 
+// ⑤ 人格卡是运行时读的 (2026-11-10): prefix 里只有一个 `{{lw_persona}}`, 卡正文在卡文件里
+const personaPrefix = preset.slice(preset.indexOf('prefix: |-'), preset.indexOf('suffix: |-'))
+const placeholder = personaPrefix.split('{{lw_persona}}').length - 1
+expect(placeholder === 1, `persona 前缀里 \`{{lw_persona}}\` 应该恰好一次 (现在 ${placeholder} 次)`)
+for (const baked of ['蚌埠住了', '白饭 = token', '傲娇嘴硬']) {
+  expect(!personaPrefix.includes(baked), `人格卡正文不该再烘进 prefix: 「${baked}」`)
+}
+const card = await read('presets/luwi/persona/xiaojingyu.md')
+expect(card.includes('小鲸鱼'), '人格卡里应该写着小鲸鱼')
+expect(card.length >= 1500, `人格卡太短 (${card.length} 字), 不像一张卡`)
+expect(card.length <= 20000, `人格卡太长 (${card.length} 字), 超过 lw_persona 的 20000 字上限`)
+expect(preset.includes('# lw-preset:'), 'preset-luwi 缺少 `# lw-preset:` 版本标记 (老机器收不到正文更新)')
+
 // ④ 工具表与 explore 逐行一致
 const marker = '          - id: agent-instructions'
 const cut = (text) => {
@@ -124,6 +137,7 @@ expect(/ROW_LUWI to "luwi"/.test(kotlin), 'CustomPresets.PRESET_ROWS 里缺少 p
 expect(/const presets = \['luwi'/.test(pack), "pack-host.mjs 的 presets 数组应该以 'luwi' 开头")
 
 notes.push(`persona 正文 ${((preset.slice(preset.indexOf('prefix: |-'), preset.indexOf('suffix: |-'))).split('\n').length - 1)} 行`)
+notes.push('人格卡在运行时读 (`{{lw_persona}}` + `$DSH_HOME/lw/persona/xiaojingyu.md`)')
 notes.push(`工具表 ${luwiTools.split('\n').length} 行 (与 explore 逐行相同)`)
 
 if (failures.length > 0) {

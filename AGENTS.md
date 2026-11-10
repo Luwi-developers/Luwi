@@ -76,10 +76,13 @@
 - **`has-bg` 必须由 JS 加, 不能静态写进 index.html** —— 第一帧就全透明的页面在这台 vivo 上只画第一下 (判据 `check-tavern`)
 - 聊天页"首帧就对": 宿主把 `__THEME__` 填好 (`themedIndexPage`), 骨架 `.stSkeleton` 用中性灰, 页面自举 `/status` 一发 + 并发, **WebView 退出只摘不 `destroy()`** (`TavernWebViewCache`); 背景层始终在 Box 里, 别写成 `if (picture != null)` (会插节点重排)
 - 三处图标同一份 `tools/brand/luwi-mark.png`; **`0.46` 是唯一个数别改**, 球那处 `GLYPH_INK_RATIO = 0.65`
+- **对话层 (门户) 那张脸归设置 → 外观**: 「背景」「背景透明度」落 `$DSH_HOME/lw/face.json` + 一张 `lw/face/<名字>.jpg` (`tool/PortalFace.kt` 是唯一写者, 换图只留一张), 页面走 `PortalBridge.portalLook()` 取 data URL (缓存键是文件名), 改完调 `__LUWI_PORTAL__.reloadLook()`; **输入卡照 dsh 的 `InputBar`** (28px 圆角 / input-major 实底 / soft elevation), 底部一行是 **`+` (上传文件: 图片与 docs 都走这条) / 模型 chip** (**命令菜单与权限选择都撤了**, 2026-11-08 主人), **工作区与预设都不画** (2026-11-08 主人取消预设), **默认完全权限** (`danger-full-access`, 每场拨一次 + 首次写一次 `permission.defaultPreset`), **气泡与浮层只引用 dsh 的玻璃 token** (`--dsw-menu-surface-fill` + `--dsw-menu-backdrop-filter` + `--dsw-elevation-panel`), 不另抄数; 顶条**不显示会话标题**
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
+- **对话层头栏 (2026-11-10 主人)**: 左边是身份 (头像 + 昵称, 整块可点 = 开新对话), 右边两样 —— **历史**、**`⋯` 更多** (判断层 / 工作 收进抽屉的 `menu` 态, 面板顶上一行「‹ 返回」); 状态点是**头像右下角那一颗** (`#lwp-busy`), 一顆点三态: **绿 = 新对话 (空场) / 蓝 = 对话中 / 黄 = 正在做** (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`; 左上那颗会变蓝的点与流末尾「正在做…」都撤了)。**历史窗** (`#lwp-history`) 画的是 dsh 自己的会话表 (`ctx.sessions.list`): 搜索框 + 从新到旧 + 当前那场置顶 + 点一行走 `follow()` 恢复 + 底部「开始新的对话」, **不另建历史文件**; 纯函数 `historyRows(snapshot, query, currentId)` 由 `check-luwi-portal` 抽出来真跑。头像与昵称同样落 `lw/face.json` (`name` / `avatar`), 设置 → 外观里有「修改头像」「修改昵称」, 页面侧 `applyIdentity()` 一处改头栏与空态两处
 - 设置页两层分组 (`GroupTitle` / `SectionTitle`), 缺省只展开省电与常用六段, **新加一段天然收起** (判据 `SettingsSectionsTest` + `check-settings-sections.mjs`)
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出"); **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 事件驱动零轮询; **会话钩子必须带 `{ global: true }`**
+- **她说的话也由文件说了算** (2026-11-08, 方案 `docs/Luwi-对话层-最终方案-2026-11-08.md`): `lw_say` 是唯一发言工具, 只写 `$DSH_HOME/lw/out/<sessionId>.jsonl` (宿主单写者: `seq` 起来时 tail 取 max / `at` 单调 / `gapMs` 按 `sim.json` 的 `send` 段抽一次)。门户走 `PortalBridge.portalOut(id, next)` 的**两段水位**, 浮球走 `tool/OutFile.kt` 读同一份 —— **解析器只有那一处**, `OutWatch` 一个 `FileObserver` 两个听众; 节奏(含 `dueAt`)、条数、`seq` 三者两边必须一致。`luwi` 档在 `BALL_SILENT_PRESETS` 里 (正文不进框不念), 图走只读路由 `/lw-out` (`kind:'prefix'` + effect + **只认回环两头**)。判据 `tools/check-lw-out.mjs` (77 条) + `OutFileTest` / `BallOutboxTest`。**2026-11-10 补: 这一轮没写过 `lw_say` 时由宿主在 turn end 往同一份 jsonl 补一行** (有行就不再推 `op=reply`, 写不进去才退回), 球与门户因此逐字同源; 球换场先 `clearReplies`, 新会话第一条不整场跳过; **`BoxView.replies` 的 `inputType=TYPE_NULL` 会把换行压成空格, 必须显式 `setSingleLine(false)`** (否则几条回复糊成一行、只剩末尾一截); 回复之间用**单换行**合并 (`kept.joinToString("\n")`, 不留空白行)
 - **余额两条触发** (2026-11-01 深夜改口径): ①**每轮对话结束**覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷 —— 那时扣费刚结算, 数最准); ②**主人点「看余额」**: 先把上次那份立刻上屏, 同时写一个新请求记号 (同一 seq 只刷一次, 成功/失败共用 30 s 闸)。应用按 **`seq` 对得上**才上屏 (不再按"点下去 30 s 之内"), 框已经被关掉也会张回来; 9 s 没回音就把「正在取…」换成「再点一次」(只在一次都没上过屏时)。金额上屏只留两位小数 (`BalanceFile.moneyText` + 宿主 `money2`)
 - **余额那一行只有「余额 + 时间」** (2026-11-02 主人: "不要显示'当前不是最新''正在刷新'这样的句子, 只告诉我余额+时间"): 不挂 `ball_balance_stale` / `_refreshing` / `_retry` 三句 (键已删), 5 分钟窗口只决定要不要再发后台那一问; 连点几次 `showBalanceInfo` 就地改写, 屏上只留最近一份
 - **手势**: 单击开麦等 `BallFeel.thinkingTapMs()` (430 ms); 三击只对"真要开麦"几支排队; **半隐与半藏都关时没有"召出", 单击当场开语音**; **手势只有防误触一档** (`BallFeel.GUARD` 220/450/1500 ms), 灵敏度下拉已撤
@@ -90,6 +93,10 @@
 - **补 polyfill 要扫 `host-tree` 里所有 client bundle**, 不能只看 `dsh-web-frontend/dist`
 - **切后台回来不重载**: renderer 钉 `RENDERER_PRIORITY_BOUND`, `onRenderProcessGone` 返回 true 换新 (最多 3 次, `MAX_PAGE_REBUILDS`); **同一地址只 load 一次**; 判据 `tools/check-host-persistence.mjs`
 - **两块 WebView 键盘避让**用 `ui/KeyboardInsets.kt` 的 `rememberImeLift` (只认贴底键盘); `adjustResize` 在 targetSdk 37 下不管用
+- **门户盖着时键盘只抬输入卡与对话区** (2026-11-09 主人: "呼出键盘时不应整个界面上移"): WebView 尺寸不动, 宿主把 `ime - nav` 推给页面 (`__LUWI_PORTAL__.setKeyboard` → `--lwp-ime`), 只有 `#lwp-root` 的 padding-bottom 变 —— `#lwp-wall` 是 absolute inset:0, 包含块是 padding box, 所以背景图不动; 宿主另把 IME inset 从 WebView 里吃掉, 否则 Chromium 再缩一次可视视口就整页平移。**门户收起时仍缩 WebView** (dsh 不认识 `--lwp-ime`); 页面刷新那一档靠 `LuwiPortal.portalIme()` 挂载握手
+- **门户预览窗里的 Office 走 `renderOffice`** (2026-11-09): docx / pptx / xlsx 由 `lw-docx-preview` 那一包解 (与右栏同一个函数), 结果进 shadow root; `/lw-out` 认三个 openxmlformats MIME, 超 12 MB 回 413; 老格式 doc / ppt / xls 与 zip 仍交给系统应用
+- **球那一侧的图 / 文件 / 预览窗** (2026-11-09 主人: "发图片时 ball 没有显示图片 … 文件也可点击 … 使用悬浮窗权限"): 图的上限与宿主同一个数 (**20 MB**, `BallMedia.MAX_BYTES`, 原来借了表情包那档 2 MB — 截屏必挂), 那一格的高由 `BallMedia.imageBox` **先算好写进 LayoutParams** (不靠 `adjustViewBounds` 现量), 贴完还要 `requestLayout()` + 排一帧 `layoutChannel()` — 少这两条就是"图落地了那一格是空的, 滚一下回复框才长出来"; 读不动**一定留一句** `⚠ 图没取到` (不为失败开空框)。文件那一行**不再压成「（文件）」**: `BallSay.file/fileRel/fileBytes` 带上名字, 画成蓝字 chip。点图或点文件名 → `overlay/BallPreview.kt` (`TYPE_APPLICATION_OVERLAY`, 与球同一份授权, 不跳 Activity)。**预览窗与门户那一窗同一套** (2026-11-10 主人: "office 文件在 ball 打不开, 这个也修一下" + "门户和 ball 的预览弹窗应该要一样的"): 外壳照门户抄 (78% 屏高 / 圆角 28 / 左右 20dp / 浅色卡 / 标题行 + `×`); 图 / 文本 / **office** 三档走窗里那块 WebView, office 的渲染核心是 `app/src/main/assets/web/lw-office.js` —— 由 `tools/build-office-lite.mjs` 从**同一个** `presets/docx-preview/src/index.js` 打出来的 lite bundle (IIFE + react 空影子), 于是"门户能看、球不能看"不会再出现; 文件字节**不塞 base64**, 页面 `fetch('/file')` 由 `shouldInterceptRequest` 从盘上开流 (只认 `https://lw.local/file`, 其余 403); PDF 那一档仍走原生 `PdfRenderer` 第一页 (WebView 自己不解 PDF)。**显示上限 (2026-11-10 主人: "图太大了, 最大长宽都缩短到原来一半")**: 球那一格宽 = 内容宽的 50% (`BallMedia.MAX_WIDTH_PERCENT`) + 高 = 屏高的 18% (`MAX_HEIGHT_PERCENT`), 图按比例缩进这两个上限 (`FIT_CENTER`, 不裁); 门户 `.lwp-image` 宽 43% + 图高 30vh; 看全走预览窗 (门户/球都是 78vh, **预览窗不缩**)
+- **球的 `+` 与门户 `+` 是同一套** (2026-11-09): 多选图片与文件 → `tool/LwIn.put` 落 `<工作区>/lw-in/` (basename / 白名单 / 12 MB / 同名顺延 / 写完读回, **只有这一处实现**, `PortalBridge.portalStash` 也调它) → `overlay/BallPicks.kt` 交回服务 → 输入框下面一排 chip → 发送时正文末尾带 `BallAttach.block(...)` (与门户逐字相同), 桌面对话那一格用 `BallAttach.strip(...)` 去掉那段; 一次最多 6 个 (`BallMedia.MAX_ATTACH`)
 - **`AndroidView` 里 WebView 必须显式 `layoutParams` MATCH_PARENT**, 否则 viewport unit 解析成 0
 
 ## 别做的事
@@ -98,6 +105,7 @@
 - **不跑 `scrcpy-server`, 不抄 MAA-Meow 代码** (AGPL); 反射包装从 `Genymobile/scrcpy` 取并留 NOTICE
 - 不把 `SurfaceView` 塞进 WebView; 不给 Card 里的设置项再套 `padding(16.dp)`
 - 不为"让模型能操作屏幕"写 MCP server, 先写 dsh 原生工具
+- **新加的"会动设备"的工具必须同时补进主动场那张表** (`host-plugin` 的 `PROACTIVE_ACT_TABLE` / `PROACTIVE_COMMAND_DENIED`, 屏幕类补 `PROACTIVE_SCREEN_DENIED`) —— 三张表就是主动场的硬闸, 漏一个就是一条绕过去的路 (方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`, 判据 `tools/check-proactive.mjs`)。**2026-11-10 的 `lw_sticker` 就是照这一条补的**: 它原来在表外 (= 三档都放), 而新加的 `op=fetch` 会外发请求并落盘, 所以 `['lw_sticker', new Set(['list', 'say'])]` —— 只有 read 那两面三档都放。同一天的 `lw_persona` 同理: 读三档都放, `write` / `reset` 归写动 (act 以上)
 
 ## 特权通道
 
@@ -119,7 +127,7 @@
 
 ## dsh 工具
 
-- 全在 `host-plugin/index.mjs`, 现 68 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` / `lw_capabilities` / `lw_quickapp` …), 每个一次桥调用
+- 全在 `host-plugin/index.mjs`, 现 74 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` / `lw_capabilities` / `lw_quickapp` / `lw_persona` …), 每个一次桥调用 (人格卡这类纯宿主的读写不走桥)
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入一律写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 特权侧写死白名单 `LwSystemCommandTable.kt`
@@ -162,8 +170,12 @@
 - 自动指令: 规则 `$DSH_HOME/automations/<名字>.json`; **没有启用的规则就不注册**; 事件驱动不回退 UsageStats 轮询; 「且/或」收 2~5 个叶子**不许嵌套**; 命中后清新鲜标记 (**同一次只响一声**); 防骚扰: 静默 23:00-07:00 + 冷却 30 分钟 + 每天 5 次
 - **`task` 类直接执行** (2026-11-07: 那道「允许它自己动手」总闸撤了, `AutomationStore.Settings.allowActing` 与设置页那一行一起删; 旧 `settings.json` 里留着的键只是被忽略)
 - **探索没有手动开始**: 每天一个时刻由 `AlarmManager` (requestCode 42) 投一句话, 卡由 `lw_explore op=finish` 的 `nextTask` 演进 (上限 8000 字); **省电不拦探索**, 跳过只剩"上一场还在跑"; **宿主没在跑就先拉起来再投** (2.8.0 #9: 到点那一下 `startForegroundService` + 等就绪, 不再只记 skipped)
-- **收尾写三样** (2026-11-07 晚): 摘要 / `nextTask` / `checks` —— `checks` 是"接下来该盯什么", 最多 3 条 (判法只有 `usage` 与 `time`), 宿主写进 `$DSH_HOME/lw/router.json` 的 `checks`, 判断层当第三档候选 (分数 3, 排在未了的事之后、随口问一句之前)
+- **收尾写三样** (2026-11-07 晚): 摘要 / `nextTask` / `checks` —— `checks` 是"接下来该盯什么", 最多 3 条 (**判法三种**: `usage` / `time` / `event`), 宿主写进 `$DSH_HOME/lw/router.json` 的 `checks`, 判断层当第三档候选 (分数 3, 排在未了的事之后、随口问一句之前)。**2026-11-10 起从"允许交"收紧成"默认要交"**: persona (c) 写"至少交一条", 没有就在摘要的 `仍不确定的点` 里写明为什么; 任务卡每次覆盖都带宿主拼的固定尾注 (`EXPLORE_CARD_TAIL`), 开场正文也有那一句
+- **空手也留痕** (2026-11-10): `explore.json` 里多两笔 `lastFinish {at, ended, written, total, session}` 与 `checksStreak` (同一场重交不再 +1), 设置页探索段那一行读它们 —— "偶尔没交"与"根本没在想"要能分开
+- **事件型判法要日历, 准点那一拍由应用自己算** (2026-11-10): 宿主每拍问一次桥 `calendarWindow` (1.5 s 超时 / 60 s 缓存 / 读不到就 `available:false`, 那条判法这一拍不命中), 结构化数据由 `LwCalendar.window` 给 (**不进 `LwCalendar.OPERATIONS`**, 模型看不到这一档)。提前量**不由宿主写** —— `arm()` 是投完收件箱立刻跑的, 宿主那时刻还没判断完; 所以 `RouterTick.leadAtOf` 自己读 `router.json` 的 `checks` + `AutomationCalendar` 算"开始前 N 分钟", 有 event 项才碰日历。去重键 `routerCheckHit` 回 `{fact, key}`, event 的键是 `日期@startMs` (同一场周会下周还开)
 - **检测的内容由探索加, 时机与节奏由设置页给**: `$DSH_HOME/lw/sim.json` (见 `tool/SimSetting.kt`, 缺省值照 QQ 桥接的 `socialV2`) 管潜水/活跃、敲钟间隔、沉睡前观察、分条节奏、判断层阈值; 设置 → 活动 → 更多设置 就是它的界面, 那一页**没有手写检测项**的入口 (只有开关与忘掉) —— 判据 `tools/check-sim.mjs` / `check-router.mjs`
+- **表情单张上限也在那一页** (2026-11-10 主人: "在设置活动的更多设置版块里加表情包图片上限设置"): `sim.json` 的 `sticker.maxMb` (1~20, 缺省 2), 三处读同一个数 —— 宿主 `lw_sticker op=fetch` 的下载闸、`BallStickers.capBytes` 的解码闸、`PortalBridge` 加表情那条路。只改一处就会"存得下但画不出来"
+- **判断层那两把尺子归她** (2026-11-10 主人: "那两个设置应该由探索或主动对话时自己决定, 而不需要加在设置里"): 「游戏多久算久」「记着的事提前几天提」不再在更多设置里, 也不在 `sim.json` 里; 由探索收尾的 `rules` 或对话里的 `lw_router op=rules` 写 `router.json.rules` (游戏 5~1440 分钟 / 提前 1~365 天, 缺省 100/60)。**宿主 `simRouterRules` 不许再读这两键**, 否则老 `sim.json` 会一直盖住她的判断
 - 探索解锁: 开关是 `explore-schedule.json` 的 `unlock` (缺省关), 与「唤醒时自动解锁」是两个开关
 
 ## 随包插件
@@ -172,6 +184,7 @@
 - 随包 = `npm pack` **只取包本身不装依赖**; `PluginRows` 那行 **`name:` 必须写成 `file://` 形态**; 补上游写死 `~/.dsh/dsh-imagegen` 的路径要**数替换处数**
 - **随包插件一律"先看本体, 有就不装"**: 别人已挂载 (`mountsPackage`) 或解析到宿主树之外 (`isUserCopy`) 就让位, **不删别人的行、不写别人目录**
 - 第三个随包插件 `dsh-our-free-model` **已撤下**, 老设备挂载行由 `PluginRows` 的 `RETIRED` 表摘掉 (只摘指回宿主树那条)
+- **mneme 补丁四条, 表在 `tools/pack-mneme-patches.mjs`** (2026-11-10, 主人报「每次回复都发两条意思一样的句子」): 前三处按 preset 排除酒馆, 第四处管热记忆 —— 根因是 mneme 把**还没回答的当前轮**算进 `[短期上下文]` 的 `A:` (空), dsh 每个 step 都重算运行时上下文, 于是同一 turn 第二个 step 那一帧快照多出这一段, 快照一变就再跑一步, 模型看到「问了、还没人答」又答一遍; luwi 档正文不发言, 这条每轮必然踩中。第四处**替换** `hot-memory.js` 末尾那一行 (只收有来有回的轮次), 锚点必须带行首换行 —— 同一个调用在循环里还有一份, 不带换行会命中两次、构建当场红。**四条各自判断"是否已应用", 不许退回「第一个文件命中就整段跳过」** (那种连坐会让热记忆的修复静默丢失)。升级 mneme 前先跑 `node tools/check-mneme-patches.mjs --from npm --version <v>` (打上四处 + 真跑 `roundsFromEvents` 验行为), PASS 再改 `pack-host.mjs` 的版本号; 判据 `tools/check-bundled-plugins.mjs` (产物级那条是行为断言, 不是文本断言)。当前 0.13.0
 - `PluginOverlay` 每启一次写 `disabled: false`; CSS 覆盖层是 `presets/ui-fix` (**只写选择器, 不复制组件**); 挂插件要往 `PLUGINS` 与 `OWN_PLUGINS` 两张表各加一行
 
 ## LW 插件
@@ -207,3 +220,4 @@
 - **`packageDebug` 会在旧 APK 上原地改写**留空洞: **出包前先删 `app/build/outputs/apk/debug/app-debug.apk`**
 - host 树逐文件裁剪在 `pack-host.mjs` 末尾 (剔 win32/darwin、`.map`、`.d.ts`、测试), 判据 `tools/check-host-slim.mjs`, **别用事后重打 zip 的脚本**
 - **推送**: `git push` 不通; 走 `tools/lw-api-push.ps1`: blob → tree → commit → **最后才动 ref**, 每个对象比 SHA, 先 dry run 再 `-Apply -Tag`; `-input` 的 JSON 不能带 BOM; 提交正文末尾那个换行是对象里本来就有的
+- **后台 job 的回执为什么不能等**: harness 判一条后台 job 完成, 等的是**整棵进程树清空**; gradle 的常驻守护进程是这一树的子孙, 于是"构建 13:22 结束、回执 13:41 才到"这种延迟会出现 (实测那次是等下一次别人 `gradlew --stop` 把守护进程收掉)。`dev.ps1` 因此做两件事: ① 在 DSH 会话里 (`$env:DSH_SHELL`) 自动加 `--no-daemon` 并**跳过** assemble 前的 `--stop` (single-use daemon 构建完自己退, 树当场空; `--stop` 会把别人正用着的守护进程一起停掉); ② 用 `Start-Process` + `-RedirectStandardOutput` 跑 gradle (不再 `& gradlew | Tee-Object` —— 守护进程会继承那条管道), 且**不能加 `-Wait`** (`-Wait` 连子孙一起等), 只 `$proc.WaitForExit()`。代价: 输出不再流式 (全文本来就在 `logs\build\<时间>-<标签>.log`, stderr 追加在同名 `.log` 末尾), DSH 会话里的构建慢 10~20 s

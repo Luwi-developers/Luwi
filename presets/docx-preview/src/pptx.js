@@ -36,13 +36,17 @@ const MIME = {
 
 /**
  * 把一段相对的 zip 路径按 base 所在目录解析出来 (`..` 与 `.` 都处理)
+ *
+ * 以 `/` 开头的是包内绝对路径 (OPC 允许): 照根算 —— 拼到 base 后面会多出一层目录, 那一页就空着
  * @param {string} base zip 里的绝对路径 (作为基准)
  * @param {string} target 相对于 base 目录的路径
  * @returns {string} zip 里的绝对路径
  */
 function resolvePath(base, target) {
+  const clean = String(target).replaceAll('\\', '/')
+  if (clean.startsWith('/')) return clean.slice(1)
   const parts = base.split('/').slice(0, -1)
-  for (const segment of target.split('/')) {
+  for (const segment of clean.split('/')) {
     if (segment === '..') parts.pop()
     else if (segment !== '.' && segment !== '') parts.push(segment)
   }

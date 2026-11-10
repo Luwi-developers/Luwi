@@ -2,14 +2,20 @@
  * Office 文件的行内预览 (2.7.9 第 6 条 T9)
  *
  * 这一包在 T8 里只画一行 `hello docx`, 用来判 `priority: 'extension'` 抢不抢得过上游那个
- * `fallback`; 判过了之后正文在这里补齐。**认的只有 docx 与 pptx** —— xlsx / pdf / md / 图片 /
+ * `fallback`; 判过了之后正文在这里补齐。**右栏认的只有 docx 与 pptx** —— xlsx / pdf / md / 图片 /
  * 代码上游自己就能开, 一条都不要碰
  *
  * | 后缀 | 怎么读 | 保真 |
  * | :-- | :-- | :-- |
  * | `.docx` | `docx-preview` 转 HTML | 分页 / 表格 / 图片 / 页眉页脚 |
  * | `.pptx` | 自己解 OOXML, 每页抽文字与图片 | 只出内容, 不出版式 |
+ * | `.xlsx` | 自己解 OOXML, 每页抽格子 (**只给门户用**, 右栏不抢) | 只出内容, 不出版式 |
  * | `.doc` / `.ppt` | 这一档不认, 交给上游那行"读取失败" (T9c 换成"用系统应用打开") | — |
+ *
+ * **`renderOffice` 是这一包对外的渲染入口** (2026-11-09): 门户那张预览窗 (对话层里的文件,
+ * 与右栏那套 tab 不是一回事) 没有自己的渲染器, 而它要的就是同一件事 —— 所以按包名 require 这一包,
+ * 调 `renderOffice(bytes, name)` 拿 `{ style, body }`, 自己塞进一个 shadow root。两条用途共用一份
+ * 实现, 于是"右栏能看、门户不能看"这种事不会再出现
  *
  * **隔离与脚本**: 正文进 **shadow root**, 从不进宿主 DOM; 进之前过一遍 `dompurify` 去掉脚本与
  * `on*` 之类的事件属性。不用 iframe 了 —— 双指手势要落在我们自己的元素上才收得到 (见下一条)
@@ -26,20 +32,29 @@ import React from 'react'
 import DOMPurify from 'dompurify'
 import { renderDocx } from './docx.js'
 import { renderPptx } from './pptx.js'
+import { renderXlsx } from './xlsx.js'
 
 /** 类型 id: 正文在 keyed `sidebar.right.pane.tab` 里的 key 就是它 (不是 kind) */
 const ID = 'lw-docx-preview'
 /** 页面类型名 */
 const KIND = 'lw-office'
 
-/** 大小闸: 超过 10 MB 直接说"太大", 不去解 */
-const MAX_BYTES = 10 * 1024 * 1024
+/** 大小闸: 超过 10 MB 直接说"太大", 不去解 (门户那一侧也读这一个数) */
+export const MAX_BYTES = 10 * 1024 * 1024
 
 /** 认这四个后缀 —— 前两个能读, 后两个只能交给系统 (与 `patterns` 一一对应) */
 const CLAIMED = /\.(docx|pptx|doc|ppt)$/i
 
 /** 老格式: 这里读不了, 只能交给系统里的应用 */
 const LEGACY = /\.(doc|ppt)$/i
+
+/**
+ * `renderOffice` 认的后缀 (门户那一侧按这一张表问, 两边不会一个认一个不认)
+ *
+ * 与 [CLAIMED] 不是同一张: 右栏那套 tab 只抢 docx / pptx (xlsx 归上游 excel), 门户那张预览窗
+ * 没有上游可退, 所以三个都认
+ */
+const OFFICE_SUFFIXES = ['docx', 'pptx', 'xlsx']
 
 /** 地址形如 `dsh-resource://file/session/<sid>/<相对工作区的路径>` */
 const ADDRESS = 'dsh-resource://file/session/'
@@ -102,9 +117,13 @@ const definition = {
   title: titleOf,
 }
 
-/** 进 shadow root 的那层基础样式: 两档共用, 只求读得清 */
+/** 进 shadow root 的那层基础样式: 三档共用, 只求读得清 */
 const BASE_CSS = `
 :root, :host { color-scheme: light dark; }
+/* 正文是塞进 shadow root 的, 所以字号与颜色必须落在 :host 上 —— 写给 body 的那几条在这一层从来不生效 */
+:host { display: block; font: 14px/1.65 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
+  color: #1f2328; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) { :host { color: #e6e6e6; } }
 body { margin: 0; padding: 16px; font: 14px/1.65 system-ui, -apple-system, "Noto Sans CJK SC", sans-serif;
   color: #1f2328; background: #fff; overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #16181c; } }
@@ -114,6 +133,16 @@ body { margin: 0; padding: 16px; font: 14px/1.65 system-ui, -apple-system, "Noto
 .lw-slide p:last-child { margin-bottom: 0; }
 .lw-slide img { display: block; max-width: 100%; height: auto; margin: 10px 0 0; border-radius: 6px; }
 .lw-note { opacity: .7; }
+`
+
+/** 表格那一段只给 xlsx 用 (docx / pptx 那份样式一个字节都不动) */
+const SHEET_CSS = `
+.lw-sheet { border: 1px solid rgba(128,128,128,.35); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; }
+.lw-sheet-title { font-size: 12px; opacity: .55; margin: 0 0 8px; }
+.lw-sheet-scroll { overflow-x: auto; }
+.lw-sheet table { border-collapse: collapse; font-size: 12px; line-height: 1.5; }
+.lw-sheet td { border: 1px solid rgba(128,128,128,.28); padding: 3px 8px; vertical-align: top;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
 `
 
 /**
@@ -169,6 +198,76 @@ function sanitize(html) {
     ADD_DATA_URI_TAGS: ['img'],
     FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link'],
   })
+}
+
+/** 名字最后那一段后缀 (小写); 没有后缀时空串 */
+function suffixOf(name) {
+  const text = String(name ?? '')
+  const dot = text.lastIndexOf('.')
+  return dot > 0 ? text.slice(dot + 1).toLowerCase() : ''
+}
+
+/**
+ * 这一份是不是 `renderOffice` 能读的 Office 文件
+ * @param {string} name 文件名 (带后缀)
+ * @returns {boolean} docx / pptx / xlsx 为真
+ */
+export function isOfficeName(name) {
+  return OFFICE_SUFFIXES.includes(suffixOf(name))
+}
+
+/** 把一页页表格拼成正文 (样式在 SHEET_CSS 里) */
+function xlsxBody(sheets) {
+  return sheets
+    .map((sheet, index) => {
+      const title = sheet.name === '' ? `第 ${String(index + 1)} 页` : sheet.name
+      const head = `<p class="lw-sheet-title">${escapeHtml(title)}</p>`
+      if (sheet.rows.length === 0) {
+        return `<section class="lw-sheet">${head}<p class="lw-note">这一页没有内容</p></section>`
+      }
+      const body = sheet.rows
+        .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`)
+        .join('')
+      return `<section class="lw-sheet">${head}<div class="lw-sheet-scroll"><table>${body}</table></div></section>`
+    })
+    .join('')
+}
+
+/**
+ * Office 字节 -> 可以进 shadow root 的样式与正文 (2026-11-09)
+ *
+ * **两处用途共用这一份**: dsh 右栏那个 tab ([OfficeBody]) 与门户那张预览窗 (对话层里点文件名)。
+ * 门户没有自己的渲染器, 它按包名 require 这一包, 调这个函数拿 `{ style, body }` —— 于是两边读出来的
+ * 东西一字不差, 也不会出现"右栏能看、门户不能看"
+ *
+ * 三档失败各自照实说: 不是 zip / 超上限 (调用方先过 [MAX_BYTES]) / 这份文件读不了
+ * @param {Uint8Array} bytes 原生字节
+ * @param {string} name 文件名, 用来判是哪一档
+ * @returns {Promise<{ style: string, body: string }>} 样式与净化过的正文
+ * @throws 后缀不认识, 或这一份解不开时
+ */
+export async function renderOffice(bytes, name) {
+  const suffix = suffixOf(name)
+  if (suffix === 'docx') {
+    const rendered = await renderDocx(bytes)
+    // 顺序要紧: 我们那段"按宽度重排"必须在 docx-preview 自己那份之后
+    return { style: `${BASE_CSS}\n${rendered.css}\n${FIT_CSS}`, body: sanitize(rendered.html) }
+  }
+  if (suffix === 'pptx') {
+    const slides = await renderPptx(bytes)
+    return { style: BASE_CSS, body: sanitize(pptxBody(slides)) }
+  }
+  if (suffix === 'xlsx') {
+    const parsed = await renderXlsx(bytes)
+    const cut = parsed.truncated ? '<p class="lw-note">后面还有，没全列出</p>' : ''
+    return { style: `${BASE_CSS}\n${SHEET_CSS}`, body: sanitize(xlsxBody(parsed.sheets) + cut) }
+  }
+  throw new Error('这一份不是 Office 文件')
+}
+
+/** 门户那一侧取不到模块表时的退路 (见 renderOffice 的注释) */
+if (typeof window !== 'undefined') {
+  window.__LW_OFFICE__ = { renderOffice, isOfficeName, MAX_BYTES }
 }
 
 /** 宿主那条 RemoteResult 的失败: 只念它给的 code / message, 不自己编 */
@@ -239,16 +338,9 @@ function OfficeBody(props) {
           setState({ phase: 'failed', message: '文件太大（超过 10 MB），请在电脑上打开' })
           return
         }
-        if (/\.docx$/i.test(file.path)) {
-          const rendered = await renderDocx(bytes)
-          if (!cancelled) {
-            // 顺序要紧: 我们那段"按宽度重排"必须在 docx-preview 自己那份之后
-            setState({ phase: 'ready', style: `${BASE_CSS}\n${rendered.css}\n${FIT_CSS}`, body: sanitize(rendered.html) })
-          }
-          return
-        }
-        const slides = await renderPptx(bytes)
-        if (!cancelled) setState({ phase: 'ready', style: BASE_CSS, body: sanitize(pptxBody(slides)) })
+        // 渲染只有一处 (renderOffice): 右栏与门户那张预览窗读的是同一份实现
+        const rendered = await renderOffice(bytes, file.path)
+        if (!cancelled) setState({ phase: 'ready', style: rendered.style, body: rendered.body })
       } catch (error) {
         if (cancelled) return
         const reason = error instanceof Error ? error.message : String(error)

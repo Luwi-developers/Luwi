@@ -235,4 +235,47 @@ class CustomPresetsTest {
             bundles.split(",").map { it.trim().trimEnd() },
         )
     }
+
+    /** 有版本标记才认, 没有就是 null (老声明一条都不许因此被动) */
+    @Test
+    fun `presetMarkerOf 只认标记行`() {
+        val marked = "- insert:\n    - id: preset-luwi\n      # lw-preset: luwi-2026-11-10-live-persona\n      name: x\n"
+        assertEquals("luwi-2026-11-10-live-persona", CustomPresets.presetMarkerOf(marked))
+        assertNull(CustomPresets.presetMarkerOf("- insert:\n    - id: preset-luwi\n      name: x\n"))
+        assertNull(CustomPresets.presetMarkerOf(null))
+    }
+
+    /** 老安装升级: 老条目没有标记 -> 认成落后, 整条换成 staged 那份 */
+    @Test
+    fun `needsRefresh 认落后也认一致`() {
+        val staged = "- insert:\n    - id: preset-luwi\n      # lw-preset: v2\n      name: x\n"
+        val old = "- insert:\n    - id: preset-luwi\n      name: x\n"
+        val current = "- insert:\n    - id: preset-luwi\n      # lw-preset: v2\n      name: x\n"
+        assertTrue(CustomPresets.needsRefresh(old, staged))
+        assertFalse(CustomPresets.needsRefresh(current, staged))
+        // staged 没标记: 不碰 (老声明还没进标记机制)
+        assertFalse(CustomPresets.needsRefresh(old, old))
+    }
+
+    /** 换那一刀: 旧的整条没了, 新的整条在, 别的条目原样 */
+    @Test
+    fun `refreshRow 整条换掉`() {
+        val patch = """
+            - insert:
+                - id: preset-luwi
+                  # lw-preset: v1
+                  name: old
+            - insert:
+                - id: preset-proactive
+                  name: keep
+        """.trimIndent() + "\n"
+        val staged = "- insert:\n    - id: preset-luwi\n      # lw-preset: v2\n      name: new\n"
+        val next = CustomPresets.refreshRow(patch, "preset-luwi", staged)
+        assertFalse(next.contains("name: old"))
+        assertTrue(next.contains("# lw-preset: v2"))
+        assertTrue(next.contains("name: new"))
+        assertTrue(next.contains("- id: preset-proactive"))
+        // 幂等: 现在这条已经是 v2, 不该再换
+        assertFalse(CustomPresets.needsRefresh(CustomPresets.rowEntry(next, "preset-luwi"), staged))
+    }
 }

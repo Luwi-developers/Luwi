@@ -107,8 +107,44 @@ test('resolveWorkspaceSources: one namespace per device, repo/shadow excluded, b
   assert.deepEqual(source.budget, { maxFiles: 20000, maxBytes: 1024 * 1024 * 1024 })
 })
 
-test('resolveWorkspaceSources: disabled / legacy keys / bad root', async (t) => {
+test('resolveWorkspaceSources: 第三根源 lw/ 只带她说的话与人格卡 (方案 §7.1)', async (t) => {
   const root = await makeTemp(t)
+  const workspace = path.join(root, 'dsh')
+  await fs.mkdir(workspace, { recursive: true })
+  const lwRoot = path.join(root, 'lw')
+  await fs.mkdir(path.join(lwRoot, 'out'), { recursive: true })
+  const resolved = resolveWorkspaceSources({
+    workspace,
+    config: {},
+    deviceName: 'Luwi 手机',
+    lwRoot,
+    titleFor: () => 'dsh',
+  })
+  assert.equal(resolved.sources.length, 2)
+  const lw = resolved.sources[1]
+  assert.equal(lw.kind, 'lw')
+  assert.equal(lw.mirrorDir, 'lw/Luwi-手机')
+  assert.equal(lw.slug, 'lw')
+  // 本机配置 / 口令 / 随包素材一样都不同步
+  for (const name of ['sim.json', 'router.json', 'face.json', 'session-sync.json', 'stickers', 'ball-phase.json']) {
+    assert.ok(lw.exclude.includes(name), name)
+  }
+  assert.equal(lw.useBaseline, false)
+  // 没有 lwRoot 时不出这一根 (单测与没有 lw 目录的宿主都走这条路)
+  const without = resolveWorkspaceSources({ workspace, config: {}, deviceName: 'Luwi 手机', titleFor: () => 'dsh' })
+  assert.equal(without.sources.length, 1)
+  // 显式关掉也不出
+  const off = resolveWorkspaceSources({
+    workspace,
+    config: { lw: false },
+    deviceName: 'Luwi 手机',
+    lwRoot,
+    titleFor: () => 'dsh',
+  })
+  assert.equal(off.sources.length, 1)
+})
+
+test('resolveWorkspaceSources: disabled / legacy keys / bad root', async (t) => {  const root = await makeTemp(t)
   const workspace = path.join(root, 'dsh')
   await fs.mkdir(workspace, { recursive: true })
   assert.deepEqual(resolveWorkspaceSources({ workspace, config: { enabled: false } }).sources, [])

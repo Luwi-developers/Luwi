@@ -31,6 +31,8 @@ function check(name, got, want) {
 }
 
 const host = await read('host-plugin/index.mjs')
+const overlay = await read('app/src/main/java/io/github/yuloong07star/luwi/overlay/OverlayService.kt')
+const boxView = await read('app/src/main/java/io/github/yuloong07star/luwi/overlay/BoxView.kt')
 
 /* ── 抽那一段纯函数 ─────────────────────────────────────────────────────── */
 
@@ -120,13 +122,49 @@ check(
 
 check('startReadAloud 里调了 ballReplyPolicy', host.includes('ballReplyPolicy(session, spoken)'), true)
 check('推给球用的是 policy.text', host.includes('reportReply(replyChannelText(speakable), session.id)'), true)
-check('念出来用的也是 policy.text', host.includes("call('speak', { op: 'speak', text: speakable })"), true)
+// 2026-11-10 起朗读走朗读流: `lwSpeakLine` 把这一句按 6 句一段排进应用的队列 (op=read),
+// 念的仍然是 policy.text 那一份 —— 不再直连 op=speak
+check('念出来用的也是 policy.text', host.includes('lwSpeakLine(speakable, 0)'), true)
 check('挑空了就不念', host.includes('if (policy.speak !== true) {'), true)
 check(
   '老的「无条件推」那一条已经不在了',
   host.includes('reportReply(replyChannelText(spoken), session.id)'),
   false,
 )
+
+/* ── 四、显示同源 (2026-11-10) ────────────────────────────────────────────── */
+//
+// 球与门户读同一份 jsonl; turn end 只在"这一轮一条 lw_say 都没有"时补一行, 而且补进 jsonl,
+// 不再另开一条 op=reply 的显示通道。回复区本身必须是换行多行的 (TYPE_NULL 会把它压成单行)
+
+check('这一轮说过话就不再推 op=reply (球上不再多一句)', [
+  host.includes('const saidLines = turnOutCount.get(session.id) ?? 0'),
+  host.includes('if (saidLines === 0) {'),
+  host.includes("lwOutAppend(session.id, { kind: 'text', text: replyChannelText(speakable) })"),
+  !/const speakable = policy\.text\s*\n\s*reportReply\(/u.test(host),
+], [true, true, true, true])
+check('lw_say 落行记一笔, 新一轮清零', [
+  host.includes('noteTurnOut(session, written.length)'),
+  host.includes('const turnOutCount = new Map()'),
+  host.includes('turnOutCount.delete(session.id)'),
+], [true, true, true])
+check('落不了盘才退回球那条老通道', [
+  /\.catch\(\(error\) => \{[\s\S]{0,400}?reportReply\(replyChannelText\(speakable\), session\.id\)/.test(host),
+], [true])
+check('球换场先清框 (框里只回一场的话)', [
+  overlay.includes('session != outboxSession'),
+  overlay.includes('boxView?.clearReplies()'),
+  boxView.includes('fun clearReplies()'),
+], [true, true, true])
+check('回复区是换行的多行框 (TYPE_NULL 之后显式 setSingleLine(false))', [
+  boxView.includes('inputType = InputType.TYPE_NULL'),
+  /inputType = InputType\.TYPE_NULL[\s\S]{0,400}?setSingleLine\(false\)/.test(boxView),
+  boxView.includes('maxLines = BallBox.REPLY_LINES'),
+], [true, true, true])
+check('回复之间只换行、不留空白行 (kept 用单 \\n 合并)', [
+  /kept\.joinToString\("\\n"\)/.test(boxView),
+  !/kept\.joinToString\("\\n\\n"\)/.test(boxView),
+], [true, true])
 
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)

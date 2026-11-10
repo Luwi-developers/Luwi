@@ -1377,6 +1377,8 @@ function applyInner(ctx, config = {}) {
       deviceName: resolved.deviceName,
       repoDir,
       shadowRoot,
+      // 第三根源 (2026-11-08, 方案 §7.1): `$DSH_HOME/lw` 里她说的话与人格卡正文
+      lwRoot: join(dirname(sessionRoot), 'lw'),
       titleFor: (root) => workspaceTitleOf(root),
     })
     workspaceSources = resolvedSources.sources
@@ -3069,7 +3071,10 @@ function applyInner(ctx, config = {}) {
   // 只报名字 (slug + title), 一个文件都不进去, 与"不共享工作区文件"并不冲突。
   function workspaceCardEntries() {
     if (workspaceSources.length > 0) {
-      return workspaceSources.map(source => ({ slug: source.slug, title: source.title }))
+      // 第三根源 (`kind: 'lw'`) 不是工作区: 名片里不报它, 否则对端会多出一个叫 lw 的空分组
+      return workspaceSources
+        .filter(source => source.kind !== 'lw')
+        .map(source => ({ slug: source.slug, title: source.title }))
     }
     const entries = []
     const seen = new Set()

@@ -192,6 +192,63 @@ export function slugSegment(value, maxLength = 60, fallback = 'workspace') {
 }
 
 /**
+ * 第三根源: `$DSH_HOME/lw` 里**只挑三样** (2026-11-08, 方案 §7.1)
+ *
+ * 她说的话 (`lw/out`) 与人格卡正文 (`lw/persona`) 不在会话存储里, 也不在工作区里 —— 只做前两根
+ * 镜像的话, 换一台设备看到的是一张空对话: 她说过的话、发过的图全没。
+ *
+ * **不能整目录镜像**: `sim.json` / `router.json` / `face.json` 是**本机配置**, 两台机器互推会把设置
+ * 在对方那边覆盖掉, 而它们不在会话存储里, 冲突时也没有 "keep both" 可谈; `session-sync.json` 里
+ * 还有远端口令, 更不能出门。所以这里用排除表把不相干的都挡在外面 (排除表是黑名单, 于是以后新加的
+ * 文件默认会同步 —— 这条写在明处, 加文件时记得回来看一眼)。
+ *
+ * `deps.lwRoot` 不给就不生成这一根 (单测与"没有 lw 目录的宿主"都走这条路)。
+ * @param {object} deps 依赖 (见 [resolveWorkspaceSources])
+ * @param {string} device 设备段
+ * @returns {object|null} 源; 不需要或目录不在时 null
+ */
+export function resolveLwSource(deps, device) {
+  const raw = deps.lwRoot
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const root = path.resolve(raw)
+  try {
+    if (!statSync(root).isDirectory()) return null
+  } catch {
+    return null
+  }
+  return {
+    label: `lw: ${device}`,
+    title: 'lw',
+    slug: 'lw',
+    // **这一条是给引擎看的**: 名片那一侧只报工作区, 不把 `lw` 报成一个工作区 (见 index.mjs)
+    kind: 'lw',
+    device,
+    root,
+    mirrorDir: `lw/${device}`,
+    // 本机配置 / 口令 / 随包素材: 一样都不同步
+    exclude: [
+      'sim.json',
+      'router.json',
+      'face.json',
+      'face',
+      'ball-phase.json',
+      'session-sync.json',
+      'explore.json',
+      'explore-schedule.json',
+      'usage.json',
+      'signals.jsonl',
+      'desktop-chat.json',
+      'proactive-gate.json',
+      'peer-workspaces',
+      'stickers',
+    ],
+    maxFileBytes: WORKSPACE_DEFAULTS.MAX_FILE_BYTES,
+    useBaseline: false,
+    budget: { maxFiles: 4000, maxBytes: 256 * 1024 * 1024 },
+  }
+}
+
+/**
  * 解析工作区源 (新形制)。**缺省是开的** (配对之后"先同步所有工作区"就是这个意思);
  * `workspace.enabled: false` 才关掉。老的 `remote`/`branch`/`repoDir`/`trashDir` 不再生效,
  * 只回一条 problems 让人知道为什么。
@@ -204,6 +261,7 @@ export function slugSegment(value, maxLength = 60, fallback = 'workspace') {
  * @param {string} [deps.deviceId] - 本机设备 id (设备名空时兜底)。
  * @param {string} [deps.repoDir] - 同步仓库工作树 (要算进排除表)。
  * @param {string} [deps.shadowRoot] - 影子根 (要算进排除表)。
+ * @param {string} [deps.lwRoot] - `$DSH_HOME/lw` (第三根源; 不给就不生成)。
  * @param {(root: string) => string|undefined} [deps.titleFor] - 由工作区根取注册表标题。
  * @returns {{sources: object[], problems: string[]}} 源清单与提醒。
  */
@@ -262,8 +320,11 @@ export function resolveWorkspaceSources(deps = {}) {
     const rel = relativeInside(root, path.resolve(candidate))
     if (rel !== undefined && !exclude.includes(rel)) exclude.push(rel)
   }
+  // 第三根源 (`$DSH_HOME/lw`): 她说的话与人格卡正文, 见 [resolveLwSource]
+  const lw = config.lw === false ? null : resolveLwSource(deps, device)
 
   return {
+    // **工作区那一根排第一** (别处有按 sources[0] 认"这一台的工作区"的地方), 第三根源跟在后面
     sources: [{
       label: `workspace: ${name}`,
       title,
@@ -276,7 +337,7 @@ export function resolveWorkspaceSources(deps = {}) {
       // 工作区文件没有"旧对话"这回事
       useBaseline: false,
       budget: { maxFiles, maxBytes },
-    }],
+    }, ...(lw === null ? [] : [lw])],
     problems,
   }
 }

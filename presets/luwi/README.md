@@ -2,6 +2,12 @@
 
 一句话：**二代仿真那套「像人一样说话 + 发言走工具」的规矩，装在这台会操作手机的 agent 上。**
 
+> **2026-11-10 补人设**: 她是 DeepSeek 那条小鲸鱼 (小鲸鱼 / 蓝色大肥鱼), 傲娇嘴硬、心软藏着、正事靠谱;
+> 叫他主人, 但**不演女仆 / 服从**。**人格卡是运行时读的**: prefix 里只有守则与 `{{lw_persona}}`,
+> 卡落在 `$DSH_HOME/lw/persona/xiaojingyu.md` (设备上 `lw_persona op=write` 改, 下一次请求就生效);
+> 卡源是 `persona/xiaojingyu.md` (= 包内默认, 由 pack-host 拷成 `lw-presets/persona.md`);
+> 旧的 `persona/card.md` 原样留着可切回。来由与取舍见 `docs/Luwi-小鲸鱼人格-Luwi适配-2026-11-10.md`。
+
 `presets/luwi/cordis.patch.yml` 是正文，随 host 树落进 `lw-presets/luwi.patch.yml`，
 由 `CustomPresets.kt` 在 host spawn 之前追加进 profile patch（与 `explore` / `proactive` 同一条路）。
 
@@ -16,7 +22,7 @@
 - **不是**另一套会话引擎：persona 与工具表都是 dsh 原生的，一行 dsh 代码都不动
 
 **注意边界**：这套「正文不发言」只在门户里成立。门户关掉、回到 dsh 原生界面时，看到的是正文 ——
-所以 persona 第三条要求正文只写过程（`（点开设置，看到亮度条）`），不是成品的人话。
+所以 persona 第 14 条要求正文只写过程（`（点开设置，看到亮度条）`），不是成品的人话。
 
 ## 与二代仿真的四条差异（都有理由）
 
@@ -32,12 +38,26 @@
 
 ## 发言通道
 
-| 工具 | 落到哪 | 谁看得到 |
-| :-- | :-- | :-- |
-| `lw_say`（`text` 或 `lines`） | `$DSH_HOME/lw/out/<sessionId>.jsonl` | 门户按 `gapMs` 逐条画；球在时同时推一份给浮球 |
-| `lw_say`（`image`） | 同上（`kind: image`）+ 图存 `out/assets/<sessionId>/` | 门户画图片泡，点开看原图（`/lw-out/assets/…`，同源，不走 base64） |
-| `lw_sticker op=say` | 同上（`kind: sticker`） | 同上 |
-| `lw_speak op=speak` | 出声，不落盘 | 耳朵 |
+**一个工具，一份数据，两个渲染器**（2026-11-08 主人：发球 = 发对话层）。`lw_say` 一次调用只写
+`$DSH_HOME/lw/out/<sessionId>.jsonl` 这一份，门户（`portalOut`）与浮球（`tool/OutFile.kt`）**读同一份**
+—— 一条 `seq`、一个 `gapMs`、同一个条数。不是"门户开着就只发一处"，也不是"推两份可能漂移的副本"。
+
+| 参数 | 落成什么 | 门户 | 浮球 |
+| :-- | :-- | :-- | :-- |
+| `text` / `lines` | 一行一条 `kind:"text"` | 一个泡 | 框里那一行 |
+| `sticker` | `kind:"sticker"` | 一行「（表情：名字）」 | 贴同一张（`BallStickers`） |
+| `image` | `kind:"image"` + 图存 `out/assets/<sessionId>/` | 图片泡（`/lw-out/…` 同源，不走 base64） | 框里那张图 |
+| `speak: true` | 不落新行，只标这一行要念 | 不念（门户不出声） | 念完才放下一条（`SPEAK_POLL_MS`） |
+
+`lw_sticker` / `lw_speak` / `lw_overlay op=say|burst` 全部退成**底层通道**（宿主内部与老路径用），
+模型那一侧只留 `lw_say`（persona 守则第 13–16 条就是这么写的）。
+
+**节奏只有一份**：`gapMs` 由宿主按本机 `sim.json` 的 `send` 段抽一次算出来（算式与 `BallOutbox.gapFor`
+逐行相同，`roll` 也落盘），两个界面都照那一份放 —— 同一句话不许有两种速度。
+
+**正文不进框、不念**：`BALL_SILENT_PRESETS` 里有 `luwi`，所以那一轮的正文（过程笔记）既不会被画进浮球
+那块 650 px 的框，也不会被念出来；要出声就给 `lw_say` 加 `speak: true`。
+
 | `lw_overlay op=say` | 浮球气泡 | 只在球上，**不是回答** |
 | 你发给她 | dsh 原生（`beginSubmission` 的 `attachments`） | 门户与 dsh 原生界面都能看 |
 

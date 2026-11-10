@@ -17,13 +17,14 @@
 
 import { connect } from 'node:net'
 
-import { readFileSync, watch } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 
@@ -161,6 +162,22 @@ export function apply(ctx) {
     warn(ctx, `the cwd prompt variable was not registered: ${error?.message ?? error}`)
   }
 
+  // 人格卡 (2026-11-10): 卡在 `$DSH_HOME/lw/persona/xiaojingyu.md`, 预设 prefix 里引用
+  // `{{lw_persona}}`; dsh 每一步组提示词都求值一次, 所以设备上改完卡, 下一次请求就是新人设
+  // (不重装、不重启). 播种放在注册之前: 第一次启动时变量第一次求值就要读得到东西
+  try {
+    ensurePersonaCard()
+  } catch (error) {
+    warn(ctx, `the persona card was not seeded: ${error?.message ?? error}`)
+  }
+  try {
+    ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.variable('lw_persona', personaFor)
+    })
+  } catch (error) {
+    warn(ctx, `the persona card variable was not registered: ${error?.message ?? error}`)
+  }
+
   // 「看余额」那一档 (2026-10-16): 账号缝里那个数只有宿主拿得到, 落成文件应用才看得见 ——
   // **只有应用点「看余额」写出来的那个请求记号能触发它** (见 startBalance), 宿主自己不按节拍刷
   try {
@@ -188,12 +205,13 @@ export function apply(ctx) {
     warn(ctx, `the explore budget was not started: ${error?.message ?? error}`)
   }
 
-  // 主动对话那一场的屏幕闸 (2.8.0 B4-a 的 13-4): 那一场只提醒, 屏幕类工具一律拒 —— 主动场不建
-  // 虚拟屏这一条就不只靠提示词了; 名单外的工具一次都不碰会话身份
+  // 主动对话那一场的三表硬闸 (2.8.0 B4-a 的 13-4, 2026-11-10 扩成三表三档): A 屏 / B 写动 /
+  // C 命令按 `sim.json` 的 `proactive.acting` 判, 缺省 `remind` 全拒 —— "那一场能做什么"不再只靠
+  // 提示词; 三张表都不认识的名字一次都不碰会话身份
   try {
-    ctx.tools.guard(proactiveScreenGate)
+    ctx.tools.guard(proactiveGate)
   } catch (error) {
-    warn(ctx, `the proactive screen guard was not registered: ${error?.message ?? error}`)
+    warn(ctx, `the proactive guard was not registered: ${error?.message ?? error}`)
   }
   // 重启之后把上一场主动对话的记号接回来: 那道闸在旧会话里继续生效 (读不到就当没有)
   void proactiveStateRestore()
@@ -216,6 +234,30 @@ export function apply(ctx) {
     startPluginTools(ctx)
   } catch (error) {
     warn(ctx, `the plugin tools were not registered: ${error?.message ?? error}`)
+  }
+
+  // 她发过的图 (2026-11-08, 方案 §4.3): 门户那一侧读 `/lw-out/assets/…`, 只读、只回环、只认那几张图。
+  // `webServer` 是**可选**服务, 用 `ctx.inject` 起子 fiber —— 没有 HTTP 服务的 profile 上这一整块安静地
+  // 不发生, 主行照跑; 路由的注册随这个子 fiber 撤销 (重复注册会抛, 所以必须走 effect + 收 disposer)
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          // `kind` 是必填: `'prefix'` 才匹配 p 与 p/<anything>
+          const off = webCtx.webServer.register({ kind: 'prefix', path: LW_OUT_ROUTE, handler: serveLwOut })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-out.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/out route was not registered: ${error?.message ?? error}`)
   }
 }
 
@@ -798,10 +840,131 @@ const VIDEO_MODE_DENIED = new Set([
   'lw_take_photo',
 ])
 
+/**
+ * 包内默认人格卡的位置: 与插件同一个目录 (pack-host 把它拷成 `node_modules/luwi-channel/persona.txt`)
+ *
+ * 为什么是 `.txt`: pack-host 的 slim 会把所有 `.md` 删掉, 这是它唯一能活下来的后缀
+ *
+ * 放在这一节外面是刻意的: `tools/check-persona-live.mjs` 把下面那段源码整段抽出来真跑, `new Function`
+ * 里没有 `import.meta`, 所以路径在这里算好、当参数传进去
+ */
+const PERSONA_PACKED = join(dirname(fileURLToPath(import.meta.url)), 'persona.txt')
+
 /** `$DSH_HOME` 底下的一条路径, 没设 DSH_HOME 时回 null (那台机器上没有应用那一侧) */
 function homePath(...parts) {
   const home = process.env.DSH_HOME
   return home ? join(home, ...parts) : null
+}
+
+/* ── 人格卡 (2026-11-10): 运行时读, 设备上改一步就生效 ────────────────────
+ *
+ * 主人口径: 人设不能烘在 APK 里 —— 改一句要重新出包, 那就不叫"能改". 所以:
+ *   · 卡落在 `$DSH_HOME/lw/persona/xiaojingyu.md`, 设备上用 `lw_persona` 改
+ *   · 预设 prefix 里只有 `{{lw_persona}}` 一个变量, dsh 每一步组提示词时都求值
+ *     (SystemPrompt.assemble 逐条调 provider, 见 dsh 的 system-prompt)
+ *   · 读文件按 mtime + size 缓存; 读不到退包内默认 (`lw-presets/persona.md`), 再退四行
+ *   · provider **永不抛、永不返回 undefined**: 抛一次就是整台机器的对话都起不来
+ *
+ * 别的档 (探索 / 主动) 也挂在这个 provider 上, 但只有 `luwi` 的 prefix 引用这个变量;
+ * 保险起见还是按 preset 闸一道, 免得哪天别的模板也引用它
+ */
+
+/** 卡的文件名 (在 `$DSH_HOME/lw/persona/` 下) */
+const PERSONA_CARD_FILE = 'xiaojingyu.md'
+
+/** 卡最长多少字: 再长就是把每一步的上下文烧掉, 而 2 万字已经写得下很细的人设 */
+const PERSONA_MAX_CHARS = 20_000
+
+/** 包内默认卡的位置见文件上方 [PERSONA_PACKED] (为判据抽出这一段时它当参数传进来) */
+
+/** 卡与包内默认都读不到时的四行: 宁可只剩骨架, 也不让人设整段消失 */
+const PERSONA_FALLBACK = [
+  '你是 Luwi, DeepSeek 那条蓝白小鲸鱼, 住在这台手机里.',
+  '叫他主人 —— 这是称呼, 不是女仆设定.',
+  '说话短, 傲娇嘴硬, 正事靠谱; 不确定就说不确定, 绝不编.',
+  '看屏是为了知道他在干什么, 不是把屏上的字念出来.',
+].join('\n')
+
+/** 卡在哪: `$DSH_HOME/lw/persona/xiaojingyu.md`, 没设 DSH_HOME 回 null */
+function personaCardPath() {
+  return homePath('lw', 'persona', PERSONA_CARD_FILE)
+}
+
+/** 读到的原文 -> 交给模型的那段 (trim; 超长截断并写明) */
+function personaTextOf(raw) {
+  const text = String(raw ?? '').trim()
+  if (text === '') return ''
+  if (text.length <= PERSONA_MAX_CHARS) return text
+  return `${text.slice(0, PERSONA_MAX_CHARS)}\n\n〔已截断: 人格卡上限 ${PERSONA_MAX_CHARS} 字〕`
+}
+
+/** 上一次读到的 (path + mtime + size -> 文本), 免得每一步都重读两三 KB */
+const personaCache = { key: '', text: '' }
+
+/** 读设备上的卡; 读不到回空串 (调用方再退包内默认) */
+function readPersonaCard() {
+  const path = personaCardPath()
+  if (path === null) return ''
+  let info
+  try {
+    info = statSync(path)
+  } catch {
+    return ''
+  }
+  if (!info.isFile() || info.size === 0) return ''
+  const key = `${path}:${info.mtimeMs}:${info.size}`
+  if (personaCache.key === key) return personaCache.text
+  try {
+    const text = personaTextOf(readFileSync(path, 'utf8'))
+    personaCache.key = key
+    personaCache.text = text
+    return text
+  } catch {
+    return personaCache.text
+  }
+}
+
+/** 包内那份默认卡 (host 树里的 `lw-presets/persona.md`) */
+function packedPersonaText() {
+  try {
+    return personaTextOf(readFileSync(PERSONA_PACKED, 'utf8'))
+  } catch {
+    return ''
+  }
+}
+
+/** 这一步的人设: 设备卡 -> 包内默认 -> 四行兜底; 非 luwi 档一个字都不给 */
+function personaFor(context) {
+  try {
+    const session = context?.agent?.session
+    const preset = session?.meta?.agentPreset ?? session?.agentPreset
+    if (typeof preset === 'string' && preset !== '' && preset !== 'luwi') return ''
+    return readPersonaCard() || packedPersonaText() || PERSONA_FALLBACK
+  } catch (error) {
+    console.warn(`luwi-channel: the persona card could not be read: ${error?.message ?? error}`)
+    return PERSONA_FALLBACK
+  }
+}
+
+/** 第一次启动 / 卡被删掉: 从包内默认播种 (不覆盖已有内容) */
+function ensurePersonaCard() {
+  const path = personaCardPath()
+  if (path === null) return
+  try {
+    if (statSync(path).size > 0) return
+  } catch {
+    // 没有这一份: 往下播种
+  }
+  const packed = PERSONA_PACKED
+  try {
+    const text = readFileSync(packed, 'utf8').trim()
+    if (text === '') return
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${text}\n`, 'utf8')
+    console.log(`luwi-channel: the persona card was seeded from ${packed}`)
+  } catch (error) {
+    console.warn(`luwi-channel: the persona card was not seeded: ${error?.message ?? error}`)
+  }
 }
 
 /**
@@ -3861,11 +4024,14 @@ const TOOLS = [
       + ' op=finish also takes `nextTask`: the task for the NEXT exploration, one short paragraph,'
       + ' decided from this run, the previous summary and the memory you already have. The host'
       + ' writes it over the task card, so the next scheduled run starts from it - leave it out and'
-      + ' the card stays as it is. `checks` is the other half of finishing: at most three things the'
-      + ' judgement layer should watch from now on, each one a sentence plus one computable shape'
-      + ' ({"what":"凌晨还在刷短视频","when":{"kind":"usage","package":"com.example","minutes":45},"at":"00:30"}),'
-      + ' and only what you have evidence for - the settings page lists them and the owner may switch'
-      + ' one off. If this run turned up nothing new, hand none in rather than inventing one.',
+      + ' the card stays as it is. `checks` is the other half of finishing: at least one thing the'
+      + ' judgement layer should watch from now on (at most three), each one a sentence plus one'
+      + ' computable shape, and only what you have evidence for - the settings page lists them and the'
+      + ' owner may switch one off. When this run really turned up nothing worth watching, say that in'
+      + ' the summary\'s 仍不确定的点 section instead of handing in an invented one. `rules` is for the'
+      + ' two scales the owner no longer sets in the app: {"gameMinutes":120,"wishDays":30} - how long a'
+      + ' game counts as long and how many days ahead a remembered date is brought up. Send it only'
+      + ' when this run gives you a reason to move one; leave it out and the current values stay.',
     parameters: {
       op: {
         type: 'string',
@@ -3892,14 +4058,25 @@ const TOOLS = [
       checks: {
         type: 'array',
         items: { type: 'object', additionalProperties: true },
-        description: 'finish only: at most 3 things the judgement layer should watch from now on,'
-          + ' each one a sentence plus one way to compute it. Only what you have evidence for -'
-          + ' a screen you saw, a summary that mentioned it. Two shapes:'
-          + ' {what:"凌晨还在刷短视频", when:{kind:"usage", package:"com.example", minutes:45}, at:"00:30"}'
-          + ' or {what:"出门前问一句带没带伞", when:{kind:"time"}, at:"07:40"}. "at" (HH:mm) means'
-          + ' not judged before that hour. They land in router.json checks and the settings page'
-          + ' lists them (the owner can switch one off or drop it). Temporal state (battery, the'
-          + ' current page) does not belong here - use memory_save for facts about him',
+        description: 'finish only: at least one (at most 3) thing the judgement layer should watch'
+          + ' from now on, each one a sentence plus one way to compute it. Only what you have'
+          + ' evidence for - a screen you saw, a summary that mentioned it. Three shapes:'
+          + ' {what:"凌晨还在刷短视频", when:{kind:"usage", package:"com.example", minutes:45}, at:"00:30"},'
+          + ' {what:"出门前问一句带没带伞", when:{kind:"time"}, at:"07:40"}, or'
+          + ' {what:"开会前提醒一句", when:{kind:"event", beforeMinutes:30, titleContains:"周会"}}'
+          + ' (a calendar event that starts within that many minutes; all-day events and events that'
+          + ' already began do not count). "at" (HH:mm) means not judged before that hour. They land'
+          + ' in router.json checks and the settings page lists them (the owner can switch one off or'
+          + ' drop it). Temporal state (battery, the current page) does not belong here - use'
+          + ' memory_save for facts about him',
+      },
+      rules: {
+        type: 'object',
+        additionalProperties: true,
+        description: 'finish only, optional: the two judgement scales the owner no longer sets in the'
+          + ' app - {"gameMinutes":120,"wishDays":30}. gameMinutes is how long a game counts as long'
+          + ' (5..1440), wishDays is how many days ahead a remembered date is brought up (1..365).'
+          + ' Send only the key you want to move; the other one keeps its value',
       },
     },
     output: {
@@ -4437,19 +4614,38 @@ const TOOLS = [
   defineTool({
     name: 'lw_sticker',
     description:
-      'The stickers she can put on the floating ball (her own little pictures). op=list shows the files '
-      + 'in $DSH_HOME/lw/stickers (png / gif / webp, at most 2 MB each); op=say puts one of them into the '
-      + "ball's text channel, above the reply. Use it sparingly - one picture, and when it lands, do not "
-      + 'write a sentence explaining the picture; no sticker is better than a forced one.',
+      'The stickers she has (her own little pictures): op=list shows the files in $DSH_HOME/lw/stickers '
+      + '(png / gif / webp, each one under the size limit set in 设置 → 活动 → 更多设置 → 表情) - use it '
+      + 'to find a file name. op=fetch saves ONE picture from the web into that same folder, which is '
+      + 'how she builds up her own set: give url (https only, at most that same size limit) and '
+      + 'optionally name (letters, digits, _ or Chinese characters, at most 24, no dots or slashes); '
+      + 'the type follows the bytes, not the link, and the name is overwritten if it is already there. '
+      + 'Fetching does NOT put anything in the conversation. **Putting a sticker '
+      + 'into the conversation does not happen here**: pass that file name to lw_say\'s sticker '
+      + 'parameter, which is the one channel she speaks through (it references the file, it does not '
+      + 'copy it). op=say is the host\'s own low-level path (the ball\'s reply box) and is not for you '
+      + 'to call.',
     parameters: {
       op: {
         type: 'string',
         required: true,
-        description: 'list or say',
+        description: 'list, fetch (save one picture from the web) or say for the host\'s low-level'
+          + ' ball channel',
+        enum: ['list', 'fetch', 'say'],
       },
       id: {
         type: 'string',
         description: 'For op=say: the sticker file name, exactly as op=list printed it',
+      },
+      url: {
+        type: 'string',
+        description: 'For op=fetch: an https link to one picture (png / jpg / gif / webp, no bigger'
+          + ' than the sticker size limit in 更多设置)',
+      },
+      name: {
+        type: 'string',
+        description: 'For op=fetch: what to save it as, without the extension (letters, digits, _ or'
+          + ' Chinese characters, at most 24). Left out, the last part of the link is used',
       },
     },
     output: {
@@ -4463,11 +4659,78 @@ const TOOLS = [
       const folder = join(home, 'lw', 'stickers')
       if (op === 'list') {
         const names = await readdir(folder).then(
-          (list) => list.filter((one) => /\.(png|gif|webp|jpg|jpeg)$/i.test(one)).sort(),
+          (list) => list.filter((one) => STICKER_FILE_OK.test(one)).sort(),
           () => [],
         )
         if (names.length === 0) return `no stickers yet: put png / gif / webp files into ${folder}`
         return `${names.length} sticker(s) in ${folder}:\n${names.map((one) => `- ${one}`).join('\n')}`
+      }
+      if (op === 'fetch') {
+        const url = String(args?.url ?? '').trim()
+        if (!url) throw new Error('op=fetch needs url: an https link to one picture')
+        if (!url.startsWith('https://')) throw new Error(`only https links can be fetched: ${url}`)
+        // 单张多大、最多几张都是主人自己定的 (设置 → 活动 → 更多设置 → 表情): 与画它那一侧读同一格
+        const limits = await readLwStickerLimits()
+        const cap = limits.maxBytes
+        const capMb = Math.round(cap / (1024 * 1024))
+        const response = await fetch(url, {
+          redirect: 'follow',
+          signal: AbortSignal.timeout(STICKER_FETCH_TIMEOUT_MS),
+        })
+        if (!response.ok) throw new Error(`that link answered HTTP ${response.status}: ${url}`)
+        const announced = Number(response.headers.get('content-length') ?? 0)
+        if (Number.isFinite(announced) && announced > cap) {
+          throw new Error(
+            `that picture is ${(announced / (1024 * 1024)).toFixed(1)} MB, over the ${capMb} MB limit`,
+          )
+        }
+        const bytes = Buffer.from(await response.arrayBuffer())
+        if (bytes.length === 0) throw new Error(`that link answered an empty body: ${url}`)
+        if (bytes.length > cap) {
+          throw new Error(
+            `that picture is ${(bytes.length / (1024 * 1024)).toFixed(1)} MB, over the ${capMb} MB limit`,
+          )
+        }
+        const ext = stickerExtOf(bytes)
+        if (ext === '') {
+          throw new Error(`that is not a png / jpg / gif / webp: the bytes do not say which one (${url})`)
+        }
+        const stem = stickerNameOf(args?.name, url)
+        if (stem === '') {
+          throw new Error('that is not a sticker name: letters, digits, _ or Chinese characters only,'
+            + ' at most 24, and no dots or slashes - give one with name')
+        }
+        const target = `${stem}.${ext}`
+        await mkdir(folder, { recursive: true })
+        const held = []
+        for (const one of await readdir(folder).then((list) => list, () => [])) {
+          if (!STICKER_FILE_OK.test(one)) continue
+          const info = await stat(join(folder, one)).catch(() => null)
+          held.push({ name: one, at: Number(info?.mtimeMs ?? 0), size: Number(info?.size ?? 0) })
+        }
+        // 张数上限也读设置 (2026-11-10"表情包加上数量限制"): 已经在目录里的同名文件只是换一张, 不占新格子
+        if (!held.some((one) => one.name === target) && held.length >= limits.maxCount) {
+          const oldest = held.slice().sort((a, b) => a.at - b.at).slice(0, 5).map((one) => one.name)
+          throw new Error(`the sticker folder already holds ${held.length} files (the limit is`
+            + ` ${limits.maxCount} in 更多设置 → 表情) - the oldest are ${oldest.join(', ')};`
+            + ' delete a few with lw_files, then fetch again')
+        }
+        const used = held.filter((one) => one.name !== target).reduce((sum, one) => sum + one.size, 0)
+        if (used + bytes.length > STICKER_DIR_MAX_BYTES) {
+          throw new Error(`the sticker folder would go over ${STICKER_DIR_MAX_BYTES / (1024 * 1024)} MB`
+            + ' - delete a few pictures first')
+        }
+        const temporary = temporaryName(join(folder, target))
+        await writeFile(temporary, bytes)
+        await rename(temporary, join(folder, target))
+        const saved = await stat(join(folder, target)).catch(() => null)
+        if (saved === null || saved.size !== bytes.length) {
+          throw new Error(`the picture did not land in ${folder} (the write was not read back)`)
+        }
+        console.log(`luwi-channel: one sticker was saved as ${target} (${bytes.length} bytes)`)
+        return `saved ${target} (${Math.max(1, Math.round(bytes.length / 1024))} KB) into ${folder}`
+          + ` - op=list shows it; lw_say {sticker:"${target}"} puts it in the conversation (this call`
+          + ' did not)'
       }
       if (op === 'say') {
         const id = String(args?.id ?? '').trim()
@@ -4478,7 +4741,264 @@ const TOOLS = [
         reportSticker(id)
         return `the sticker ${id} is on its way to the ball (it shows above the reply, one at a time)`
       }
-      throw new Error(`op has to be list or say, not "${op}"`)
+      throw new Error(`op has to be list, fetch or say, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_say',
+    description:
+      'The one channel she speaks through (Luwi 2026-11-08: 发球 = 发对话层). One call puts what she '
+      + 'says on both surfaces at once - the conversation portal draws a bubble and the floating ball '
+      + 'shows the same line, from one file, with one seq and one pace - so never say the same thing '
+      + 'twice and never call this twice for one thought. '
+      + 'Use text for one line (that is the whole call most of the time), lines for two to six when she '
+      + 'really has that much to say: they are spoken one after another, at the pace set in this '
+      + "phone's own settings (设置 → 活动 → 更多设置). "
+      + 'image puts one picture into the same stream: give the absolute path of a png / jpg / jpeg / '
+      + 'webp / gif on this phone (at most 20 MB). It is copied into her own folder, so tidying the '
+      + 'album later does not take it away. One picture per call, sentence plus picture, and never a '
+      + 'picture where a sentence would do. '
+      + 'sticker puts one of her own little pictures instead (a file name inside '
+      + '$DSH_HOME/lw/stickers, list them with lw_sticker op=list); do not then explain the picture. '
+      + 'file hands over one document instead: give the absolute path of a pdf / txt / md / json / csv / '
+      + 'log / doc(x) / xls(x) / ppt(x) / zip on this phone (at most 20 MB). It is copied into her own '
+      + 'folder and drawn as a blue file name the user can tap to preview - so do not paste the contents '
+      + 'into the reply, the name is the whole message. '
+      + 'speak: true also reads that line out loud, when read-aloud is switched on in the app. '
+      + 'The reply body - the text written beside a tool call - is NOT a way to speak in this preset: '
+      + 'the portal does not draw it, the ball does not show it and it is not read aloud. Keep it to '
+      + 'short process notes like "(点开设置, 看到亮度条)". Every turn says at least one line through '
+      + 'this tool, even if it is just 嗯.',
+    parameters: {
+      text: {
+        type: 'string',
+        description: 'One line, one thought. Most calls are just this.',
+      },
+      lines: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Two to six lines when she really has that much to say (each entry is one line, '
+          + 'one bubble). Do not also pass text.',
+      },
+      image: {
+        type: 'string',
+        description: 'For a picture: the absolute path of a png / jpg / jpeg / webp / gif file on this '
+          + 'phone. It is COPIED into her own folder - the album copy can change or go away and this '
+          + 'picture still stays in the conversation',
+      },
+      sticker: {
+        type: 'string',
+        description: 'For a sticker: the file name inside $DSH_HOME/lw/stickers, exactly as '
+          + 'lw_sticker op=list printed it (no path, no ..). It is only REFERENCED, not copied - '
+          + 'swapping that file swaps the sticker',
+      },
+      file: {
+        type: 'string',
+        description: 'For a document: the absolute path of a pdf / txt / md / json / csv / log / doc(x) / '
+          + 'xls(x) / ppt(x) / zip file on this phone (at most 20 MB)',
+      },
+      speak: {
+        type: 'boolean',
+        description: 'true also reads this line aloud (设置 → 自动朗读回答 关着时什么都不念)',
+      },
+      voice: {
+        type: 'string',
+        description: 'Only when the spoken line has to differ from the shown one (numbers, links, a list '
+          + 'turned into speech): what to say out loud, at most 200 characters. Leave it out and the '
+          + 'rules clean the shown line for the ear - that is the normal case. '
+          + 'One paragraph per call, not one word.',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args, exec) {
+      const session = sessionIdOf(exec)
+      if (session === null) throw new Error('this call has no conversation to speak into')
+      const send = await readLwSend()
+      const list = Array.isArray(args?.lines)
+        ? args.lines.map((one) => String(one ?? '').trim()).filter(Boolean)
+        : []
+      let texts = list.length > 0 ? list : [String(args?.text ?? '').trim()].filter(Boolean)
+      // 分条关掉时**在宿主这一侧就并成一条**: 两个界面永远是同一个条数 (不留给球那一侧再合并一次,
+      // 那会让球 1 条、门户 N 条, 同一条话两种形状)
+      if (send.burstEnabled !== true && texts.length > 1) texts = [texts.join('\n')]
+      if (texts.length > 6) texts = texts.slice(0, 6)
+      const sticker = String(args?.sticker ?? '').trim()
+      if (sticker !== '' && (sticker.includes('/') || sticker.includes('\\') || sticker.includes('..'))) {
+        throw new Error(`that is not a sticker file name: ${sticker}`)
+      }
+      const image = String(args?.image ?? '').trim()
+      const file = String(args?.file ?? '').trim()
+      if (texts.length === 0 && sticker === '' && image === '' && file === '') {
+        throw new Error('lw_say needs text, lines, sticker, image or file - something has to be said')
+      }
+      // 一次只递一样媒体: 图与文件同时给说明这一遍想错了, 落哪一行都不对
+      if (image !== '' && file !== '') {
+        throw new Error('one call carries either an image or a file, not both')
+      }
+      // 图片落成 `image` 行: 有字就是"一句话带一张图", 没字就是纯图 (两种都只占一行一个泡)
+      const images = image === '' ? [] : [image].slice(0, LW_IMAGE_MAX_PER_CALL)
+      const files = file === '' ? [] : [file]
+      const written = []
+      const problems = []
+      for (let index = 0; index < texts.length; index += 1) {
+        const text = texts[index]
+        const fields = { kind: 'text', text }
+        const last = index === texts.length - 1
+        const withImage = images.length > 0 && last
+        const withFile = files.length > 0 && last
+        try {
+          const row = await lwOutAppend(session, fields, withImage
+            ? async (seq) => {
+              const art = await lwOutImage(session, seq, images[0])
+              return art === null ? {} : { kind: 'image', ...art }
+            }
+            : withFile
+              ? async (seq) => {
+                const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
+                return art === null ? {} : { kind: 'file', ...art }
+              }
+              : undefined)
+          written.push(row)
+        } catch (error) {
+          problems.push(`line ${index + 1}: ${error?.message ?? error}`)
+          break
+        }
+      }
+      // 只有图 / 只有文件 / 只有表情: 文字那一圈是空的, 就落一行媒体
+      if (written.length === 0 && problems.length === 0) {
+        try {
+          if (images.length > 0) {
+            written.push(await lwOutAppend(session, { kind: 'image' }, async (seq) => {
+              const art = await lwOutImage(session, seq, images[0])
+              return art === null ? {} : art
+            }))
+          } else if (files.length > 0) {
+            written.push(await lwOutAppend(session, { kind: 'file' }, async (seq) => {
+              const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
+              return art === null ? {} : art
+            }))
+          } else {
+            written.push(await lwOutAppend(session, { kind: 'sticker', sticker, text: '[…]' }))
+          }
+        } catch (error) {
+          problems.push(error?.message ?? String(error))
+        }
+      }
+      if (written.length === 0) {
+        throw new Error(`nothing reached the conversation: ${problems.join('; ') || 'nothing to say'}`)
+      }
+      noteTurnOut(session, written.length)
+      // 图与文件会占地方, 清理规则与发图一起交 (§4.5): 超过 10 场或 512 MB 就从最旧的整场删
+      if (images.length > 0 || files.length > 0) void lwOutSweep()
+      // 一次说好几句时, 朗读等它们按各自 `gapMs` 上完屏再开口 (见 lwSpeakLine 的 [waitMs])
+      const spokenWait = written.reduce((sum, row) => sum + Math.max(0, Number(row.gapMs) || 0), 0)
+      // 念的是"这一段稿子", 不是"那一行字" (2026-11-10, 方案 §4.2/§4.3):
+      // 缺省由规则把显示那句洗成口语; 模型显式给 `voice` 就用它的说法
+      const shownText = texts.join(' ')
+      const voice = String(args?.voice ?? '').trim()
+      const script = readAloudScript(shownText, voice)
+      if (voice !== '' && script !== shownText.trim()) {
+        console.log(`luwi-channel: lw_say: the spoken line differs from the shown one (seq ${written[0].seq})`)
+      }
+      const spoken = args?.speak === true && script !== ''
+        ? await lwSpeakLine(script, spokenWait)
+        : ''
+      const range = written.length === 1
+        ? `#${written[0].seq}`
+        : `#${written[0].seq}-#${written[written.length - 1].seq}`
+      const gaps = written.map((row) => `${row.gapMs}ms`).join(' / ')
+      const head = `said ${written.length} line(s) ${range} into the conversation (gapMs ${gaps})`
+        + `${spoken === '' ? '' : `, ${spoken}`}`
+      return problems.length === 0 ? head : `${head}\nproblem: ${problems.join('; ')}`
+    },
+  }),
+  defineTool({
+    name: 'lw_persona',
+    description:
+      'Read or rewrite the personality card this assistant runs on. The card is a plain text file on '
+      + 'the phone ($DSH_HOME/lw/persona/xiaojingyu.md) and the system prompt reads it on every model '
+      + 'request, so a write takes effect on the NEXT request - no rebuild, no restart. op=read returns '
+      + 'the whole card with its size and update time; op=write replaces it with text (1 to 20000 '
+      + 'characters; the old card is kept as xiaojingyu.bak.md); op=reset restores the card this build '
+      + 'ships. **Only write when the owner asked for it in this conversation** - never rewrite your own '
+      + 'persona on your own initiative, and never copy screen text or messages into it.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'read the card, write a new one, or reset it to the default this build ships',
+        enum: ['read', 'write', 'reset'],
+      },
+      text: {
+        type: 'string',
+        description: 'For op=write: the whole new card, 1 to 20000 characters',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args, exec) {
+      const op = String(args?.op ?? '').trim()
+      const path = personaCardPath()
+      if (path === null) return 'no persona card on this profile: DSH_HOME is not set'
+      if (op === 'read') {
+        const text = readPersonaCard() || packedPersonaText()
+        if (text === '') return 'the persona card is empty and this build carries no default'
+        let when = 'unknown'
+        try {
+          when = new Date(statSync(path).mtimeMs).toISOString()
+        } catch {
+          when = 'unknown'
+        }
+        return `${text}\n\n---\n${text.length} chars, updated ${when}`
+      }
+      if (op === 'write' || op === 'reset') {
+        const raw = op === 'reset' ? packedPersonaText() : String(args?.text ?? '').trim()
+        if (raw === '') {
+          return op === 'reset'
+            ? 'refused: this build carries no default card to restore'
+            : 'refused: the persona card cannot be empty'
+        }
+        if (raw.length > PERSONA_MAX_CHARS) {
+          return `refused: the persona card is longer than ${PERSONA_MAX_CHARS} characters (${raw.length})`
+        }
+        const before = readPersonaCard()
+        const backup = join(dirname(path), 'xiaojingyu.bak.md')
+        try {
+          mkdirSync(dirname(path), { recursive: true })
+          if (before !== '') writeFileSync(backup, `${before}\n`, 'utf8')
+          const tmp = temporaryName(path)
+          await writeFile(tmp, `${raw}\n`, 'utf8')
+          await rename(tmp, path)
+          const back = readFileSync(path, 'utf8').trim()
+          if (back !== raw) throw new Error('the card read back differently from what was written')
+          personaCache.key = ''
+          personaCache.text = ''
+        } catch (error) {
+          return `refused: the persona card was not written (${error?.message ?? error})`
+        }
+        try {
+          const audit = homePath('lw', 'persona', 'audit.jsonl')
+          if (audit !== null) {
+            await appendFile(audit, `${JSON.stringify({
+              at: Date.now(),
+              op,
+              chars: raw.length,
+              session: sessionIdOf(exec),
+            })}\n`, 'utf8')
+          }
+        } catch (error) {
+          console.warn(`luwi-channel: the persona audit line was not written: ${error?.message ?? error}`)
+        }
+        const what = op === 'reset' ? 'restored the packaged card' : 'saved'
+        return `${what}: ${raw.length} chars; it takes effect on the next model request`
+      }
+      return `unknown op "${op}" (read / write / reset)`
     },
   }),
   defineTool({
@@ -4488,16 +5008,27 @@ const TOOLS = [
       + 'judgement over the phone\'s own numbers (how long a game has been running today, the things '
       + 'she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts one '
       + 'sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
+      + 'op=rules sets how long a game counts as long (gameMinutes) and how many days ahead a promise '
+      + 'is brought up (wishDays) - the owner no longer has those two rows in settings (2026-11-10), '
+      + 'so use this op when your own judgement says the scale should change. '
       + 'It never opens a conversation by itself - op=judge only answers.',
     parameters: {
       op: {
         type: 'string',
         required: true,
-        description: 'judge, say or status',
+        description: 'judge, say, status or rules',
       },
       text: {
         type: 'string',
         description: 'For op=say: the sentence to put on the ball',
+      },
+      gameMinutes: {
+        type: 'number',
+        description: 'For op=rules: how long a game counts as long, in minutes (5..1440)',
+      },
+      wishDays: {
+        type: 'number',
+        description: 'For op=rules: how many days ahead a remembered date is brought up (1..365)',
       },
     },
     output: {
@@ -4517,6 +5048,11 @@ const TOOLS = [
         reportSay(text)
         return `said it on the ball: ${text}`
       }
+      if (op === 'rules') {
+        const written = await writeRouterRules({ gameMinutes: args?.gameMinutes, wishDays: args?.wishDays })
+        if (written.error) throw new Error(written.error)
+        return JSON.stringify(written.rules)
+      }
       if (op === 'status') {
         const state = (await readRouterJson(routerStatePath())) ?? {}
         const inputs = await readRouterInputs()
@@ -4527,9 +5063,16 @@ const TOOLS = [
           // 探索交来的检测项 (2026-11-07 晚): 看一眼"现在盯着什么"就是这一段
           checks: inputs?.checks ?? [],
           checksSaid: inputs?.checksSaid ?? {},
+          // 事件型检测项那一格 (2026-11-10): 没有日历权限时这一行是唯一能看见的原因
+          calendar: {
+            available: inputs?.calendar?.available === true,
+            why: String(inputs?.calendar?.why ?? ''),
+            at: Number(inputs?.calendar?.at ?? 0) || 0,
+            count: Array.isArray(inputs?.calendar?.events) ? inputs.calendar.events.length : 0,
+          },
         })
       }
-      throw new Error(`op has to be judge, say or status, not "${op}"`)
+      throw new Error(`op has to be judge, say, status or rules, not "${op}"`)
     },
   }),
   defineTool({
@@ -6657,6 +7200,856 @@ function readAloudText(markdown) {
   return text.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').replace(/^ | $/gm, '').trim()
 }
 
+/* ── 朗读稿 (2026-11-10, 方案 `docs/Luwi-朗读与显示分离-方案-2026-11-09.md` §4.3) ──
+ *
+ * 三级, 由便宜到贵:
+ *  ① **原样**: 已经是纯口语 (短句、无符号) → 直接用, 零处理
+ *  ② **规则洗** (默认, 宿主侧, 不花 token): [readAloudText] 之上再补三步
+ *  ③ **显式 `voice`** (模型出手): 念数字、念链接、把列表换成口语、改称呼; 只在第 ② 级读起来会怪时才用
+ *
+ * 这一条只管 ①②③ 的**格式**: 给了 `voice` 就拿它当稿子 (不再替模型改词), 洗法与 ② 同一套
+ */
+
+/** 一段最多几句 (方案 §4.3 第 2 级第 4 步: 超过就分段合成) */
+const READ_ALOUD_SENTENCES_PER_SEGMENT = 6
+
+/** `voice` 的字数上限 (方案 §9 第 3 条: 念长了没人听) */
+const READ_ALOUD_VOICE_MAX = 200
+
+/** 一眼就知道"要不要洗": 有这些符号或文件名就不是纯口语 */
+const READ_ALOUD_DIRTY = /[`*_#>|\[\]()（）]|https?:\/\/|\.[A-Za-z0-9]{1,5}\b/u
+
+/**
+ * 那一段稿子念什么 (纯函数)
+ *
+ * @param {string} text 屏上那一句 (原来的行为: 念的就是它)
+ * @param {string} voice 模型显式给的念法 (可空)
+ * @returns {string} 要念的稿子; 空串 = 不念
+ */
+function readAloudScript(text, voice) {
+  const asked = String(voice ?? '').trim().slice(0, READ_ALOUD_VOICE_MAX)
+  const source = asked !== '' ? asked : String(text ?? '')
+  if (source.trim() === '') return ''
+  // ① 已经是纯口语: 一个字节都不动 (零处理那一条)
+  if (!READ_ALOUD_DIRTY.test(source)) return source.trim()
+  // ② 第 1 步: Markdown 残留 (与回执那条同一份规则, 不另写一套)
+  let said = readAloudText(source)
+  // ② 第 2 步: 括号补充整段丢 —— 「(点开设置, 看到亮度条)」是给眼睛的.
+  //    整段换成空串而不是空格: 中文句子里"你好(笑)呀"念成"你好 呀"会多出一拍
+  said = said.replace(/（[^）]*）/gu, '').replace(/\([^)]*\)/gu, '')
+  // ② 第 3 步: 文件条目念成"一份文档"/"一张图", 不念文件名与扩展名
+  said = said.replace(/[^\s，。！？、；：""''）]+\.(?:png|jpe?g|webp|gif)\b/giu, '一张图')
+  said = said.replace(/[^\s，。！？、；：""''）]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md|json|csv|log|zip)\b/giu, '一份文档')
+  return said.replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * 一段稿子切成几段 (纯函数): 按句末标点断句, 一段最多 6 句
+ *
+ * 为什么要切: 合成是联网的, 一段越长等得越久; 先念第一段, 后面几段在队列里排着 (§4.7)
+ */
+function readAloudSegments(script) {
+  const text = String(script ?? '').trim()
+  if (text === '') return []
+  const sentences = text.match(/[^。！？!?…\n]+[。！？!?…]*/gu) ?? [text]
+  const segments = []
+  let current = []
+  for (const one of sentences) {
+    const piece = one.trim()
+    if (piece === '') continue
+    current.push(piece)
+    if (current.length >= READ_ALOUD_SENTENCES_PER_SEGMENT) {
+      segments.push(current.join(''))
+      current = []
+    }
+  }
+  if (current.length > 0) segments.push(current.join(''))
+  return segments.filter((one) => one.trim() !== '')
+}
+
+/* ── 对话层: 她说的话落在 `$DSH_HOME/lw/out/<sessionId>.jsonl` (2026-11-08) ──
+ *
+ * 口径 (方案 §3.2–3.3, 主人 2026-11-08): **发球 = 发对话层** —— `lw_say` 一次调用同时落两处,
+ * **一份数据两个渲染器**:
+ *
+ * ```
+ * $DSH_HOME/lw/out/<sessionId>.jsonl     宿主单写者, 一行一条
+ *   ├─ 门户 (presets/luwi-portal)        ui/PortalBridge.kt 的 portalOut() 读增量
+ *   └─ 浮球 (OverlayService)             tool/OutFile.kt 读同一份 (唯一解析器)
+ * ```
+ *
+ * 三条纪律写在这里, 因为它们都是"一处写坏, 两边一起错":
+ *
+ * 1. `seq` 起来时先 tail 一遍取 max 再往后数 —— 进程重启后从 1 重来, 门户的水位就永远等不到新行,
+ *    一句话都显示不出来, 还得靠删文件才能恢复
+ * 2. `at = max(now, 上一条 at + 1)` —— 门户拿它跟 dsh 快照的墙上时钟拼一条时间轴, 校时/手动改时间
+ *    会让墙上时钟倒退, 而这一份必须天生单调
+ * 3. `gapMs` 由**本机 `sim.json` 的 `send` 段**抽一次算出来 (算式与 `BallOutbox.gapFor` 逐行相同),
+ *    门户与球都照那一份放 —— 同一句话不许有两种速度
+ */
+
+/** 文件名里只允许这些字符, 与应用那侧 `tool/OutFile.kt` 的 `safeId()` 逐字相同 (谁都不许单边改) */
+const LW_OUT_BAD_CHARS = /[^0-9A-Za-z._-]/g
+
+/**
+ * 一场会话的 out 文件名 (不带 `.jsonl`)
+ *
+ * 会话 id 是 dsh 给的 (`20261108-ab12cd` 这种), 但**不能当路径用**: 门户与球都要按同一个规则算出
+ * 同一个文件名, 所以只做"换成下划线"这一种映射, 两边各写一份、判据比对
+ */
+function lwOutId(sessionId) {
+  const raw = String(sessionId ?? '').trim()
+  return raw === '' ? '' : raw.replace(LW_OUT_BAD_CHARS, '_').slice(0, 96)
+}
+
+/** 那个目录: `$DSH_HOME/lw/out` (图在它底下的 `assets/`; 没有 DSH_HOME 时 null) */
+function lwOutDir() {
+  const home = process.env.DSH_HOME
+  return home ? join(home, 'lw', 'out') : null
+}
+
+/** 一场一张文件; id 空 / 没有 DSH_HOME 时 null */
+function lwOutPath(sessionId) {
+  const id = lwOutId(sessionId)
+  const dir = lwOutDir()
+  return dir === null || id === '' ? null : join(dir, `${id}.jsonl`)
+}
+
+/**
+ * `sim.json` 的 `send` 段缺省值, 与 `SimSetting.Default` 同一组数 (判据 `check-lw-out.mjs` 钉住)
+ *
+ * 那一页是主人的设置 (设置 → 活动 → 更多设置), 门户与球都照它放; 写死一份在宿主只是为了"文件还没
+ * 写出来 / 键缺了"时仍然有同一套手感
+ */
+const LW_SEND_DEFAULTS = Object.freeze({
+  burstEnabled: true,
+  burstMaxMessages: 6,
+  gapMinMs: 1000,
+  gapMaxMs: 3000,
+  perCharMs: 20,
+  longGapProbability: 0.2,
+  longGapMinMs: 5000,
+  longGapMaxMs: 10000,
+  maxMessageChars: 600,
+})
+
+/**
+ * 读一次「更多设置」的 `send` 段 (逐键兜底, 越界夹进范围)
+ *
+ * 与 `SimSetting.planFrom` 同一套读法: 缺键取缺省、坏值取缺省、数值夹进范围。一次 turn 里最多调
+ * 几回, 文件只有几百字节, 所以不缓存 —— 缓存会让"刚在设置页调完条间停顿"在下一次调用里失效
+ */
+async function readLwSend() {
+  const home = process.env.DSH_HOME
+  const sim = home ? ((await readRouterJson(join(home, 'lw', 'sim.json'))) ?? {}) : {}
+  const raw = sim?.send !== null && typeof sim?.send === 'object' ? sim.send : {}
+  const num = (value, fallback, low, high) => {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return fallback
+    return Math.min(high, Math.max(low, number))
+  }
+  return {
+    burstEnabled: raw.burstEnabled === undefined ? LW_SEND_DEFAULTS.burstEnabled : raw.burstEnabled !== false,
+    burstMaxMessages: Math.round(num(raw.burstMaxMessages, LW_SEND_DEFAULTS.burstMaxMessages, 1, 6)),
+    gapMinMs: Math.round(num(raw.gapMinMs, LW_SEND_DEFAULTS.gapMinMs, 200, 60_000)),
+    gapMaxMs: Math.round(num(raw.gapMaxMs, LW_SEND_DEFAULTS.gapMaxMs, 200, 60_000)),
+    perCharMs: Math.round(num(raw.perCharMs, LW_SEND_DEFAULTS.perCharMs, 0, 500)),
+    longGapProbability: num(raw.longGapProbability, LW_SEND_DEFAULTS.longGapProbability, 0, 1),
+    longGapMinMs: Math.round(num(raw.longGapMinMs, LW_SEND_DEFAULTS.longGapMinMs, 200, 60_000)),
+    longGapMaxMs: Math.round(num(raw.longGapMaxMs, LW_SEND_DEFAULTS.longGapMaxMs, 200, 60_000)),
+    maxMessageChars: Math.round(num(raw.maxMessageChars, LW_SEND_DEFAULTS.maxMessageChars, 60, 4_000)),
+  }
+}
+
+/**
+ * 表情那两条上限 (设置 → 活动 → 更多设置 → 表情): 单张多大、最多几张
+ *
+ * `sticker.maxMb` 三处读同一格: 这里 (下载闸)、`BallStickers.capBytes` (解码闸)、门户那条加表情的路;
+ * `sticker.maxCount` 两个**写入方**读它 (她的 `op=fetch` 与门户里主人加的那条)。逐键兜底与
+ * `SimSetting.planFrom` 同一套: 缺键取缺省、坏值取缺省、越界夹进范围
+ */
+async function readLwStickerLimits() {
+  const home = process.env.DSH_HOME
+  const sim = home ? ((await readRouterJson(join(home, 'lw', 'sim.json'))) ?? {}) : {}
+  const raw = sim?.sticker !== null && typeof sim?.sticker === 'object' ? sim.sticker : {}
+  const clamp = (value, range, fallback) => {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return fallback
+    return Math.min(range[1], Math.max(range[0], Math.round(number)))
+  }
+  const mb = clamp(raw?.maxMb, STICKER_MB_RANGE, Math.round(STICKER_MAX_BYTES / (1024 * 1024)))
+  return {
+    maxBytes: mb * 1024 * 1024,
+    maxCount: clamp(raw?.maxCount, STICKER_COUNT_RANGE, STICKER_MAX_COUNT),
+  }
+}
+
+/**
+ * 一行话上屏前要等多久 —— **与 `BallOutbox.gapFor` 同一个算式, 逐行照抄** (改了要一起改)
+ *
+ * `roll` 由宿主抽一次 (写进 jsonl 的 `roll` 字段), 于是两个渲染器照同一份放, 也留得下"为什么这一条
+ * 等了 5.5 秒"的读数: 两成概率落进长停顿那一档, 其余按**上一行**的字数算
+ */
+function lwGapFor(chars, send, roll) {
+  const bounded = Math.min(1, Math.max(0, roll))
+  if (bounded < send.longGapProbability) {
+    const low = Math.min(send.longGapMinMs, send.longGapMaxMs)
+    const high = Math.max(send.longGapMinMs, send.longGapMaxMs)
+    return Math.round(low + (high - low) * bounded)
+  }
+  const low = Math.min(send.gapMinMs, send.gapMaxMs)
+  const high = Math.max(send.gapMinMs, send.gapMaxMs)
+  return Math.round(Math.min(high, Math.max(low, low + chars * send.perCharMs)))
+}
+
+/**
+ * 一行话的"字数": 与 `BallOutbox.gapFor` 里的 `text.length` 是同一个量 (UTF-16 码元)
+ *
+ * **只有 `kind:"text"` 的行才计字** (方案 §3.2): 表情 / 图片 / 语音没有正文, 按 0 字算 —— 于是下一行
+ * 的间隔落在 `gapMinMs` 那一档, 而不是被 `[…]` 这四个字符顶上去
+ */
+function lwOutChars(row) {
+  if (String(row?.kind ?? 'text') !== 'text') return 0
+  return typeof row?.text === 'string' ? row.text.length : 0
+}
+
+/**
+ * 每份 jsonl 的写水位: `{ seq, at, chars }`
+ *
+ * **进程起来时先 tail 一遍取 max(seq)** (见文件顶那条纪律 1): 只放内存里自增, 重启后从 1 重来,
+ * 门户的水位就永远等不到新行。最后一行可能是半截 JSON (一面 append 一面读), 解不开就跳过 ——
+ * 跳过是安全的, 因为这里只往后数, 而那一行本来就还没写完
+ */
+const lwOutMarks = new Map()
+
+/** 那份文件现在的写水位 (第一次用时从文件尾读出来) */
+async function lwOutMark(path) {
+  const known = lwOutMarks.get(path)
+  if (known !== undefined) return known
+  const mark = { seq: 0, at: 0, chars: 0 }
+  await mkdir(dirname(path), { recursive: true })
+  let text = ''
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    text = ''
+  }
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let row = null
+    try {
+      row = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const seq = Number(row?.seq ?? 0) || 0
+    if (seq <= mark.seq) continue
+    mark.seq = seq
+    mark.at = Number(row?.at ?? 0) || 0
+    mark.chars = lwOutChars(row)
+  }
+  lwOutMarks.set(path, mark)
+  return mark
+}
+
+/**
+ * 落一行 (追加写, 返回落进去的那一行)
+ *
+ * 调用方拿到的就是**两个渲染器会读到的那一份**: `seq` / `at` / `gapMs` / `roll` 都在里面, 于是
+ * "球出了、门户没有"这件事在数据层就不成立
+ *
+ * [prepare] 是"先拿 `seq` 再说"的那一步 (图要按 `<seq>-<name>.png` 落盘): 它抛错时**一个字节都不写**,
+ * `seq` 也不推进 —— 于是门户那一侧既看不到空图, 也不会因为跳号卡在水位上
+ */
+async function lwOutAppend(sessionId, fields, prepare) {
+  const path = lwOutPath(sessionId)
+  if (path === null) throw new Error('this profile has no DSH_HOME, so there is nowhere to write what she says')
+  const mark = await lwOutMark(path)
+  const send = await readLwSend()
+  const seq = mark.seq + 1
+  const extra = typeof prepare === 'function' ? ((await prepare(seq)) ?? {}) : {}
+  // 会话第一行恒为 0 (§3.3): 打开一场旧会话时它是"从这一句开始", 不是"先说一句再等"
+  const roll = seq === 1 ? 0 : Math.random()
+  const gapMs = seq === 1 ? 0 : lwGapFor(mark.chars, send, roll)
+  const at = Math.max(Date.now(), mark.at + 1)
+  const row = { seq, at, gapMs, ...(seq === 1 ? {} : { roll: Math.round(roll * 10_000) / 10_000 }), ...fields, ...extra }
+  await appendFile(path, `${JSON.stringify(row)}\n`)
+  mark.seq = seq
+  mark.at = at
+  mark.chars = lwOutChars(row)
+  return row
+}
+
+/**
+ * 念一段稿子 (方案 §3.2 表格里 `speak: true` 那一格)
+ *
+ * **念不念由设置页说**: 「自动朗读回答」关着时什么都不出声, 而"关掉朗读"不该让这一句消失 —— 它已经
+ * 落盘了, 屏幕上照常画。念这件事是**浮球那一侧的事**: 它画完一行后要看 `LwSpeak.talking`, 所以这里
+ * 只负责把合成交给应用 (声音从应用的 TTS 出来, 与球那块窗没关系)
+ *
+ * 2026-11-10 起走朗读流 (`op=read`, 见 `docs/Luwi-朗读与显示分离-方案-2026-11-09.md`):
+ * 稿子按 6 句一段切开、一段一段排进应用的队列, **立刻返回** —— 显示流永不等合成。游标与打断都归
+ * 应用那本账 (`op=cancel` 是"念完当前段即停")
+ *
+ * [waitMs] 是"那几条还没上完屏": 一次说 2~6 条时每条各有自己的 `gapMs`, 而朗读只能一次念一段 ——
+ * 立刻开口就会**耳朵比眼睛快** (2026-11-09 主人: "发出来的和 ball 发出来的不一样")。所以这里先把
+ * 那几条的间隔加完再念, 念的时候屏上已经齐了
+ *
+ * 返回给模型看的那半句话 ("read aloud" / "read-aloud is off"), 读不动的错不往上抛: 一句话已经说出去了
+ */
+async function lwSpeakLine(script, waitMs) {
+  const segments = readAloudSegments(script)
+  if (segments.length === 0) return ''
+  const wait = Math.max(0, Number(waitMs) || 0)
+  try {
+    const state = await call('speak', { op: 'status' })
+    if (state?.readAloud === false) return 'read-aloud is off, so nothing was spoken'
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    for (const segment of segments) await call('speak', { op: 'read', text: segment })
+    const more = segments.length > 1 ? ` in ${segments.length} segments` : ''
+    return wait > 0 ? `read aloud${more} (after the lines landed)` : `read aloud${more}`
+  } catch (error) {
+    console.warn(`luwi-channel: speaking a line failed: ${error?.message ?? error}`)
+    return 'the line was written but speaking it failed'
+  }
+}
+
+/* ── 图怎么到 WebView: 一条只读路由 (方案 §4.3) ────────────────────────────── */
+
+/**
+ * 那条路由的前缀
+ *
+ * 门户跑在 `http://127.0.0.1:<port>`, `file://` 读不到 app 沙盒; base64 塞大字符串又慢又占内存 ——
+ * 所以在宿主自己的 HTTP 上开一条只读路由。**门户那一侧拼的也是这一串** (`/lw-out/` + 行里的 `rel`),
+ * 两处必须逐字相同
+ */
+const LW_OUT_ROUTE = '/lw-out'
+
+/** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */
+const LW_OUT_IMAGE_TYPES = Object.freeze({
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+})
+
+/** 能在门户里当文本预览的那几种 (预读上限见 `LW_OUT_TEXT_MAX`) */
+const LW_OUT_TEXT_TYPES = Object.freeze({
+  txt: 'text/plain; charset=utf-8',
+  md: 'text/plain; charset=utf-8',
+  csv: 'text/plain; charset=utf-8',
+  log: 'text/plain; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+})
+
+/**
+ * 门户那张预览窗里要自己解的 Office (2026-11-09 主人: "docx，pptx 等办公文件能在预览界面里显示")
+ *
+ * 宿主这里只把字节原样交出去, 解的是页面那一侧 (`lw-docx-preview` 的 `renderOffice`: docx-preview
+ * 对 docx, 自己解 OOXML 对 pptx / xlsx)。**doc / ppt / xls 那三个老二进制格式不在这一张表里** ——
+ * 页面解不开, 走的是"交给系统里的应用"那条窄通道, 不在这里假装读得出来
+ */
+const LW_OUT_OFFICE_TYPES = Object.freeze({
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+})
+
+/**
+ * 只服务这几张表里有的类型 (2026-11-09 主人: "点击文件名后弹出预览窗口")
+ *
+ * 图与文本之外还认 `pdf` 与三个 Office —— pdf 交给 WebView 自己画; Office 的字节原样给页面,
+ * 门户那一侧自己解 (解不动就照实说, 见 `openPreview`)。zip 这类仍然取不到: 没有能看的东西
+ */
+const LW_OUT_TYPES = Object.freeze({
+  ...LW_OUT_IMAGE_TYPES,
+  ...LW_OUT_TEXT_TYPES,
+  pdf: 'application/pdf',
+  ...LW_OUT_OFFICE_TYPES,
+})
+
+/** 文本预览一次最多回多少字节 (页面里只显示这么多, 再多也不是"看一眼") */
+const LW_OUT_TEXT_MAX = 256 * 1024
+
+/**
+ * Office 一次最多回多少字节
+ *
+ * 页面那一侧的解码闸是 10 MB (`presets/docx-preview` 的 `MAX_BYTES`); 这里留一指宽, 多出来的
+ * 那部分由页面说"太大", 而超出这张表的直接 413 —— **不把几十 MB 读进内存再说不行**
+ */
+const LW_OUT_OFFICE_MAX = 12 * 1024 * 1024
+
+/** 上面那三个 MIME 的集合 (热路径上只判一次, 不做字符串比较) */
+const LW_OUT_OFFICE_SET = new Set(Object.values(LW_OUT_OFFICE_TYPES))
+
+/** 回环的两头都认这几种写法 (Linux 上 127.0.0.1 可能以 `::ffff:` 那种形态出现) */
+function lwLoopback(address) {
+  const text = String(address ?? '')
+  return text === '127.0.0.1' || text === '::1' || text === '::ffff:127.0.0.1'
+}
+
+/**
+ * 主人从门户传上来的那一片 (`<工作区>/lw-in`)
+ *
+ * 与 `PortalBridge.portalStash` 落的**同一个目录** (那一侧是 `Workspace.resolve().directory + lw-in`):
+ * 宿主进程的 `HOME` 与 cwd 都是工作区根 (与 [channelWorkspace] 同一条约定), 所以这里只取根下一个名字
+ */
+function lwInDir() {
+  const root = process.env.HOME || process.cwd()
+  return root ? join(root, 'lw-in') : null
+}
+
+/**
+ * `/lw-out/assets/…` 的处理: 只读, 只回环, 只认 `assets/` 下面那几张图
+ *
+ * **它没有鉴权, 这条写在明处**: 路由与 GUI 同一个端口。所以两道判据都查同一件事 —— 连接的两头都得是
+ * 回环。打开「局域网访问」(`--host 0.0.0.0 --allow-lan`) 时, 同网段任何设备只要猜到
+ * `/lw-out/assets/<sessionId>/<seq>-<name>.png` 就能拉走她发过的所有图, 而图里可能是刚截的屏;
+ * 而门户自己走的是 127.0.0.1, 这一道对它没有任何影响
+ */
+async function serveLwOut(req, res) {
+  const reply = (status, body, headers) => {
+    res.writeHead(status, headers ?? { 'Cache-Control': 'no-store' })
+    res.end(req.method === 'HEAD' ? '' : body)
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    // `/lw-out/` 这个前缀不给任何写方法
+    reply(405, 'only GET and HEAD', { 'Cache-Control': 'no-store', Allow: 'GET, HEAD' })
+    return
+  }
+  if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+    // 对局域网上的人来说这条前缀就是不存在 (一个字都不解释)
+    reply(404, 'not found')
+    return
+  }
+  let pathname = ''
+  try {
+    pathname = decodeURIComponent(new URL(String(req.url ?? '/'), 'http://127.0.0.1').pathname)
+  } catch {
+    reply(400, 'bad path')
+    return
+  }
+  const prefix = `${LW_OUT_ROUTE}/`
+  if (!pathname.startsWith(prefix)) {
+    reply(404, 'not found')
+    return
+  }
+  const rel = pathname.slice(prefix.length)
+  /**
+   * 回一段字节
+   *
+   * 文本类只给前 [LW_OUT_TEXT_MAX] 字节, 并带一个 `X-Lw-Truncated` 头 —— 门户照它说"后面还有,
+   * 没全显示"; 图与 pdf 原样回。文件名带 `seq`, 天然不变, 于是缓存可以给满
+   */
+  const serveFile = (type, body) => {
+    // Office: 超过 12 MB 直接 413 —— 页面按"文件太大"照实说, 不把几十 MB 读进来再解
+    if (LW_OUT_OFFICE_SET.has(type) && body.length > LW_OUT_OFFICE_MAX) {
+      reply(413, 'too large', { 'Cache-Control': 'no-store', 'X-Lw-Too-Large': '1' })
+      return
+    }
+    const isText = type.startsWith('text/') || type.startsWith('application/json')
+    const cut = isText && body.length > LW_OUT_TEXT_MAX
+    const slice = cut ? body.subarray(0, LW_OUT_TEXT_MAX) : body
+    const headers = {
+      'Content-Type': type,
+      'Content-Length': String(slice.length),
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    }
+    if (cut) headers['X-Lw-Truncated'] = '1'
+    reply(200, slice, headers)
+  }
+  if (rel.startsWith('stickers/')) {
+    // 她贴在球上那张小图 (2026-11-08): 行里只有表情的**名字** (`开心`), 没有扩展名 —— 所以这里按
+    // 裸名字在 `lw/stickers` 里找一个; 找不到就 404, 门户那侧退回那行「（表情：名字）」
+    const wanted = rel.slice('stickers/'.length)
+    const dir = lwOutDir()
+    if (dir === null || wanted === '' || wanted.includes('..') || wanted.includes('\\') || wanted.includes('/')) {
+      reply(404, 'not found')
+      return
+    }
+    const folder = join(dirname(dir), 'stickers')
+    const direct = join(folder, wanted)
+    let target = null
+    const directType = LW_OUT_IMAGE_TYPES[wanted.slice(wanted.lastIndexOf('.') + 1).toLowerCase()]
+    if (directType !== undefined && existsSync(direct)) {
+      target = direct
+    } else {
+      const names = await readdir(folder).catch(() => [])
+      const found = names.find((one) => {
+        const dot = one.lastIndexOf('.')
+        if (dot <= 0) return false
+        if (one.slice(0, dot) !== wanted) return false
+        return LW_OUT_IMAGE_TYPES[one.slice(dot + 1).toLowerCase()] !== undefined
+      })
+      if (found !== undefined) target = join(folder, found)
+    }
+    if (target === null) {
+      reply(404, 'not found')
+      return
+    }
+    const type = LW_OUT_IMAGE_TYPES[target.slice(target.lastIndexOf('.') + 1).toLowerCase()]
+    const body = await readFile(target).catch(() => null)
+    if (body === null) {
+      reply(404, 'not found')
+      return
+    }
+    serveFile(type, body)
+    return
+  }
+  if (rel.startsWith('in/')) {
+    // 主人从门户 `+` 传上来的那一份 (2026-11-09): 落在工作区 `lw-in/`, 名字就是 basename。
+    // 要这一条是因为会话里只留 attachment 引用 —— 门户拿不回自己发过的那些字节, 于是自己发过的
+    // 图与文件都从这一条画回来
+    const wanted = rel.slice('in/'.length)
+    const root = lwInDir()
+    if (root === null || wanted === '' || wanted.includes('..') || wanted.includes('\\') || wanted.includes('/')) {
+      reply(404, 'not found')
+      return
+    }
+    const dot = wanted.lastIndexOf('.')
+    const type = dot > 0 ? LW_OUT_TYPES[wanted.slice(dot + 1).toLowerCase()] : undefined
+    if (type === undefined) {
+      reply(404, 'not found')
+      return
+    }
+    const absolute = resolve(join(root, wanted))
+    if (!absolute.startsWith(`${resolve(root)}${sep}`)) {
+      reply(404, 'not found')
+      return
+    }
+    const info = await stat(absolute).catch(() => null)
+    if (info === null || !info.isFile()) {
+      reply(404, 'not found')
+      return
+    }
+    const body = await readFile(absolute).catch(() => null)
+    if (body === null) {
+      reply(404, 'not found')
+      return
+    }
+    serveFile(type, body)
+    return
+  }
+  if (!rel.startsWith('assets/') || rel.includes('..') || rel.includes('\\') || rel.includes('\u0000')) {
+    reply(404, 'not found')
+    return
+  }
+  const dot = rel.lastIndexOf('.')
+  const type = dot > 0 ? LW_OUT_TYPES[rel.slice(dot + 1).toLowerCase()] : undefined
+  if (type === undefined) {
+    reply(404, 'not found')
+    return
+  }
+  const dir = lwOutDir()
+  if (dir === null) {
+    reply(404, 'not found')
+    return
+  }
+  const root = `${resolve(join(dir, 'assets'))}${sep}`
+  const absolute = resolve(join(dir, rel))
+  if (!absolute.startsWith(root)) {
+    reply(404, 'not found')
+    return
+  }
+  const info = await stat(absolute).catch(() => null)
+  if (info === null || !info.isFile()) {
+    // 被清理规则删掉的那几张也走这里: 门户的 onerror 照实画「图没取到」
+    reply(404, 'not found')
+    return
+  }
+  const body = await readFile(absolute).catch(() => null)
+  if (body === null) {
+    reply(404, 'not found')
+    return
+  }
+  serveFile(type, body)
+}
+
+/* ── 她会占多少地方: 按场封顶 + 总字节兜底 (方案 §4.5) ────────────────────── */
+
+/** 留最近几场 (jsonl 与它的 `assets/<id>/` 同进同出) */
+const LW_OUT_KEEP_SESSIONS = 10
+
+/** 再叠一条总字节上限兜底 (`keepInboxBytes` 那个思路) */
+const LW_OUT_MAX_BYTES = 512 * 1024 * 1024
+
+/**
+ * 清一次 `lw/out`: 只删**最旧那几场**的 jsonl 与它的图目录, 且只在超过上限时动手
+ *
+ * 删掉之后 jsonl 里那些 `rel` 会 404, 而门户的 `onerror` 已经画「图没取到」—— 那正是要的: "她说过的
+ * 图没了"与"图没传上来"是两件事, 界面上得分得开 (所以不把 onerror 改成静默)
+ */
+async function lwOutSweep() {
+  const dir = lwOutDir()
+  if (dir === null) return
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  const sessions = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+    const path = join(dir, entry.name)
+    const info = await stat(path).catch(() => null)
+    if (info === null) continue
+    sessions.push({ id: entry.name.slice(0, -'.jsonl'.length), path, at: info.mtimeMs, bytes: info.size })
+  }
+  if (sessions.length === 0) return
+  sessions.sort((a, b) => b.at - a.at)
+  const assetsDir = join(dir, 'assets')
+  const sizeOf = async (path) => {
+    const info = await stat(path).catch(() => null)
+    if (info === null) return 0
+    if (info.isFile()) return info.size
+    if (!info.isDirectory()) return 0
+    const inner = await readdir(path, { withFileTypes: true }).catch(() => [])
+    let total = 0
+    for (const one of inner) total += await sizeOf(join(path, one.name))
+    return total
+  }
+  let total = 0
+  for (const one of sessions) total += one.bytes + (await sizeOf(join(assetsDir, one.id)))
+  const doomed = []
+  for (let index = 0; index < sessions.length; index += 1) {
+    const one = sessions[index]
+    const bytes = one.bytes + (await sizeOf(join(assetsDir, one.id)))
+    const overCount = index >= LW_OUT_KEEP_SESSIONS
+    const overBytes = total > LW_OUT_MAX_BYTES
+    if (!overCount && !overBytes) continue
+    doomed.push(one)
+    total -= bytes
+  }
+  for (const one of doomed) {
+    await rm(join(assetsDir, one.id), { recursive: true, force: true }).catch(() => {})
+    await rm(one.path, { force: true }).catch(() => {})
+    lwOutMarks.delete(one.path)
+    console.warn(`luwi-channel: lw/out dropped the oldest session ${one.id} (keeping ${LW_OUT_KEEP_SESSIONS})`)
+  }
+}
+
+/* ── 她发的那一张图 (方案 §4.2–4.3) ──────────────────────────────────────── */
+
+/** 认的扩展名 (写侧只认这几个, 一律按小写重写) */
+const LW_IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif'])
+
+/** 单张上限: 超过就拒收, 并说清是哪一张、多大 */
+const LW_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+/**
+ * 她能递过来的那些文档 (2026-11-09 主人: "agent 也可以发文件, 只显示文件名")
+ *
+ * 与门户 `<input accept>` 那一串对齐, 少去 `apk` —— 那不是"给她看的东西"; 落盘与图片同一条路
+ * (`assets/<id>/<seq>-<name>`), 于是预览也走同一条只读路由
+ */
+const LW_FILE_EXTS = new Set([
+  'pdf', 'txt', 'md', 'json', 'csv', 'log',
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip',
+])
+
+/** 一份文件的上限: 与图同一个数, 再大就不该走对话层 */
+const LW_FILE_MAX_BYTES = 20 * 1024 * 1024
+
+/** 一次最多一张 (persona 那一条也是这么写的, 这里兜住"模型硬塞") */
+const LW_IMAGE_MAX_PER_CALL = 1
+
+/**
+ * 从文件头读出宽高 (png / gif / jpeg / webp), 读不出回 null
+ *
+ * **为什么不引 `sharp`**: 这个宿主是随包发到手机上的 dsh 树, 里面没有那个原生模块。宽高只用来让
+ * 门户按比例留位, 于是自己读二十几个字节就够, 不必为它加一个依赖
+ */
+function lwImageSize(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 16) return null
+  if (buffer.readUInt32BE(0) === 0x89504e47) {
+    return { w: buffer.readUInt32BE(16), h: buffer.readUInt32BE(20) }
+  }
+  if (buffer.toString('ascii', 0, 4) === 'GIF8') {
+    return { w: buffer.readUInt16LE(6), h: buffer.readUInt16LE(8) }
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2
+    while (offset + 9 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset += 1
+        continue
+      }
+      const marker = buffer[offset + 1]
+      if (marker === 0xff) {
+        offset += 1
+        continue
+      }
+      if (marker === 0xd8 || marker === 0xd9 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+        offset += 2
+        continue
+      }
+      const length = buffer.readUInt16BE(offset + 2)
+      const isFrame = marker >= 0xc0 && marker <= 0xcf
+        && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+      if (isFrame) return { w: buffer.readUInt16BE(offset + 7), h: buffer.readUInt16BE(offset + 5) }
+      if (length < 2) break
+      offset += 2 + length
+    }
+    return null
+  }
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
+    const kind = buffer.toString('ascii', 12, 16)
+    if (kind === 'VP8X' && buffer.length >= 30) {
+      return { w: 1 + buffer.readUIntLE(24, 3), h: 1 + buffer.readUIntLE(27, 3) }
+    }
+    if (kind === 'VP8 ' && buffer.length >= 30) {
+      return { w: buffer.readUInt16LE(26) & 0x3fff, h: buffer.readUInt16LE(28) & 0x3fff }
+    }
+    if (kind === 'VP8L' && buffer.length >= 25) {
+      const bits = buffer.readUInt32LE(21)
+      return { w: 1 + (bits & 0x3fff), h: 1 + ((bits >> 14) & 0x3fff) }
+    }
+  }
+  return null
+}
+
+/* ── 她攒的表情 (2026-11-10) ────────────────────────────────────────────────
+ *
+ * 主人 2026-11-07: "能让 luwi 发表情包更具人味"; 2026-11-10 补上中间那一环 —— 一条把网上的图
+ * **下进 `lw/stickers`** 的路。原来 `lw_sticker` 只有 list / say, 素材全靠主人自己往目录里放;
+ * 而 `lw_download` 落的是系统下载目录 (共享存储), 拿不到 app 私有目录
+ */
+
+/** 表情单张上限的**缺省** (设置 → 活动 → 更多设置 → 表情 能改, 与 `SimSetting.Default.STICKER_MAX_MB` 同一个数) */
+const STICKER_MAX_BYTES = 2 * 1024 * 1024
+
+/** 那一页给的范围 (MB): 与 `SimSetting.STICKER_MB_RANGE` 逐字相同 */
+const STICKER_MB_RANGE = [1, 20]
+
+/** 目录里最多几张的**缺省** (设置里能改) 与它的范围: 与 `SimSetting` 那两个数同一个口径 */
+const STICKER_MAX_COUNT = 200
+const STICKER_COUNT_RANGE = [20, 500]
+
+/** 目录体积上限 (张数那一条由设置给): 两份加起来是"别把 app 私有目录撑满"的最后一道 */
+const STICKER_DIR_MAX_BYTES = 40 * 1024 * 1024
+
+/** 一趟下载最多等多久 */
+const STICKER_FETCH_TIMEOUT_MS = 8000
+
+/** 目录里认的那几种 (与 `lw_say` 的 sticker、门户那份白名单同一个集合) */
+const STICKER_FILE_OK = /\.(png|gif|webp|jpg|jpeg)$/i
+
+/** 名字认的字符: 与 `lw_say` 那条"带路径的名字不认"同一纪律 */
+const STICKER_NAME_OK = /^[\w\u4e00-\u9fa5-]{1,24}$/u
+
+/**
+ * 一张图的真身是什么 (按**魔数**判, 不信 URL 后缀)
+ *
+ * 后缀是调用方随手写的, 而解码器只认字节 —— 一张 `.png` 名义的 jpeg 落进目录之后, `BallStickers`
+ * 照着 `.png` 去解会得到空图, 而盘上看不出哪里错了
+ *
+ * @returns `png` / `jpg` / `gif` / `webp`, 认不出来回空串
+ */
+function stickerExtOf(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return ''
+  if (buffer.readUInt32BE(0) === 0x89504e47) return 'png'
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'jpg'
+  if (buffer.toString('ascii', 0, 4) === 'GIF8') return 'gif'
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'webp'
+  return ''
+}
+
+/**
+ * 这一张叫什么 (纯函数): 名字里的扩展名不要, 只留 `[\w 汉字 -]`, 最多 24 字
+ *
+ * @param rawName 调用方给的名字 (可选)
+ * @param url 下载地址: 名字缺省时取它的 basename
+ * @returns 合法的名字; 不合法 (带斜杠 / 点 / 空格 / 太长) 回空串, 由调用方拒掉
+ */
+function stickerNameOf(rawName, url) {
+  let raw = String(rawName ?? '').trim()
+  if (raw === '') {
+    let pathname = ''
+    try {
+      pathname = new URL(String(url ?? '')).pathname
+    } catch {
+      return ''
+    }
+    raw = pathname.split('/').filter(Boolean).pop() ?? ''
+    try {
+      raw = decodeURIComponent(raw)
+    } catch {
+      // 百分号写坏了就按原样去筛, 反正下面那一道还会拦
+    }
+  }
+  const dot = raw.lastIndexOf('.')
+  const stem = (dot > 0 ? raw.slice(0, dot) : raw).trim()
+  return STICKER_NAME_OK.test(stem) ? stem : ''
+}
+
+/**
+ * 把模型给的那一份**复制**进 `out/assets/<sessionId>/<seq>-<name>.<ext>`, 返回行里要写的那几个字段
+ *
+ * 复制不能引用: 相册那张会被删、截屏那个文件会被下一次覆盖, 而她说过的那张图得一直在 (方案 §4.2)。
+ *
+ * 写侧三条规矩 (§4.2, 读侧那几条挡不住写侧):
+ * 1. 只取 `basename`, 拒 `..` 与 NUL, 扩展名只认白名单且一律小写重写
+ * 2. 目标必须真的落在 `assets/` 下面 —— 用 canonical path 复核一次, 不靠拼字符串
+ * 3. 同名已存在就顺延 `-2` / `-3`, **不覆盖**: seq 相同而图不同意味着上游写错了, 覆盖会把上一张吃掉
+ *
+ * [exts] 是这一类认的扩展名, [kind] 只用来写报错 (`image` / `file`)。图片多回 `w/h` 与 `thumb`
+ * (门户按比例留位), 文件多回 `name` 与 `bytes` (门户只写文件名)
+ */
+async function lwOutPayload(sessionId, seq, sourcePath, exts, kind) {
+  const raw = String(sourcePath ?? '').trim()
+  if (raw === '') return null
+  if (raw.includes('\u0000')) throw new Error(`that ${kind} path holds a NUL byte`)
+  const id = lwOutId(sessionId)
+  const dir = lwOutDir()
+  if (dir === null || id === '') {
+    throw new Error(`this profile has no DSH_HOME, so the ${kind} has nowhere to go`)
+  }
+  const source = isAbsolute(raw) ? raw : resolve(raw)
+  const name = basename(source)
+  if (name === '' || name === '.' || name === '..' || name.includes('..')) {
+    throw new Error(`that is not a ${kind} file name: ${name}`)
+  }
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  if (!exts.has(ext)) {
+    throw new Error(`only ${[...exts].join(' / ')} can be sent, not ${JSON.stringify(name)}`)
+  }
+  const info = await stat(source).catch(() => null)
+  if (info === null || !info.isFile()) throw new Error(`there is no file at ${source}`)
+  const limit = kind === 'image' ? LW_IMAGE_MAX_BYTES : LW_FILE_MAX_BYTES
+  if (info.size > limit) {
+    const mb = (info.size / (1024 * 1024)).toFixed(1)
+    const cap = Math.round(limit / (1024 * 1024))
+    throw new Error(`${name} is ${mb} MB, over the ${cap} MB limit - she cannot send it`)
+  }
+  const stem = name.slice(0, dot).replace(LW_OUT_BAD_CHARS, '_').slice(0, 48) || kind
+  const assetsDir = join(dir, 'assets')
+  const sessionDir = join(assetsDir, id)
+  await mkdir(sessionDir, { recursive: true })
+  let target = join(sessionDir, `${seq}-${stem}.${ext}`)
+  for (let n = 2; existsSync(target); n += 1) target = join(sessionDir, `${seq}-${stem}-${n}.${ext}`)
+  const assetsRoot = resolve(assetsDir) + sep
+  if (!(resolve(target) + '').startsWith(assetsRoot)) {
+    throw new Error(`the ${kind} would land outside lw/out/assets, so it was not copied`)
+  }
+  await copyFile(source, target)
+  // 写完读回: 字节数 > 0 才算这一份真的在了 —— 失败不落半行 (§4.2 第三条)
+  const written = await stat(target).catch(() => null)
+  if (written === null || written.size <= 0) throw new Error(`the copy of ${name} came out empty`)
+  const rel = `assets/${id}/${basename(target)}`
+  if (kind !== 'image') return { rel, name, bytes: written.size }
+  const buffer = await readFile(target)
+  const size = lwImageSize(buffer)
+  if (size === null || size.w <= 0 || size.h <= 0) {
+    throw new Error(`could not read the size of ${name}, so it was not sent`)
+  }
+  // 缩略图就是原图: 宿主这一侧没有能重编码的模块, 门户与球都按 `max-width` 收 (读侧不认 `w/h` 也不出错)
+  return { rel, thumb: rel, w: size.w, h: size.h }
+}
+
+/** 一张图: 上面那份的马甲 (扩展名与上限都是图片那一套) */
+async function lwOutImage(sessionId, seq, sourcePath) {
+  return lwOutPayload(sessionId, seq, sourcePath, LW_IMAGE_EXTS, 'image')
+}
+
 /* ── 推给浮标的那一句 (2.8.0: 球是门户) ──────────────────────────────────── */
 
 /**
@@ -6719,8 +8112,32 @@ function stripThinking(text) {
   return stop > 40 ? cut.slice(0, stop + 1) : `${cut}…`
 }
 
-/** 跑完不推球的那几种会话: 它们的产出不是"对主人说的一句话" */
-const BALL_SILENT_PRESETS = new Set(['explore'])
+/**
+ * 跑完不推球的那几种会话: 它们的产出不是"对主人说的一句话"
+ *
+ * **`luwi` 也在这里** (2026-11-08, 方案 §3.1): 那一档的正文只是过程 (`（点开设置, 看到亮度条）`),
+ * 真正说的话走 `lw_say` —— 于是这一轮结束时不推正文、也不念正文, 念由 `lw_say({speak:true})` 那一句
+ * 自己带。不这么办的话, `stripThinking` 认不出括号过程行, 会把它画进那块 650 px 的框里, 开着自动
+ * 朗读时还会念出来 —— persona 第 14 条要的"正文只写过程"就整个失效
+ */
+const BALL_SILENT_PRESETS = new Set(['explore', 'luwi'])
+
+/**
+ * 这一轮她真的往显示流里说了几条 (`lw_say` 落的行)
+ *
+ * 只服务一件事: **turn end 还要不要补那一句**。已经说过 (计数 > 0) 就不再推 `op=reply` —— 球与门户
+ * 读的是同一份 jsonl, 再推一遍就是"球多出来一句" (2026-11-10 主人报的那条)。`turn/start` 清零,
+ * 进程重启丢了就丢了 (最多多补或少补一句, 不影响已落盘的行)
+ */
+const turnOutCount = new Map()
+
+/** `lw_say` 真的落了行时记一笔 (一次可能落好几行) */
+function noteTurnOut(sessionId, lines) {
+  const id = typeof sessionId === 'string' ? sessionId : ''
+  const count = Number(lines) || 0
+  if (id === '' || count <= 0) return
+  turnOutCount.set(id, (turnOutCount.get(id) ?? 0) + count)
+}
 
 /* ── 判断层: 这一刻要不要开口 (2026-11-07, 球是门户) ─────────────────────── */
 
@@ -6807,19 +8224,78 @@ function routerInsideQuiet(minutes, from, to) {
   return start < end ? (minutes >= start && minutes < end) : (minutes >= start || minutes < end)
 }
 
+/** `event` 不给 `beforeMinutes` 时按多少分钟算 (与设置页那条说明同一个数) */
+const ROUTER_EVENT_BEFORE_DEFAULT = 15
+
+/** 标题筛: 缺省放行, 大小写不敏感包含 (纯函数) */
+function routerTitleMatches(wanted, title) {
+  const needle = String(wanted ?? '').trim().toLowerCase()
+  if (needle === '') return true
+  return String(title ?? '').toLowerCase().includes(needle)
+}
+
+/** 日历筛: 缺省放行; 点名的几本按数字比 (纯函数) */
+function routerCalendarWanted(wanted, calendarId) {
+  if (!Array.isArray(wanted) || wanted.length === 0) return true
+  const id = String(calendarId ?? '')
+  return wanted.some((one) => String(one ?? '').trim() === id)
+}
+
+/**
+ * 事件型那一条 (2026-11-10): 日历里的事件**开始前多少分钟**
+ *
+ * 三条规矩都是刻意的:
+ *
+ * - `calendar.available !== true` 一律不判 —— 读不到日历时不猜
+ * - **全天事件不参与**: "今天生日"不是"30 分钟后开始", 那种事该走 `time` 判法
+ * - 已经开始的也不算: `0 < startMs - now <= beforeMinutes`
+ *
+ * @returns `{ fact, key }`, 没有落在窗口里的事件回 null
+ */
+function routerEventHit(when, input, now) {
+  const calendar = input?.calendar
+  if (!calendar || calendar.available !== true) return null
+  const beforeMinutes = Number(when?.beforeMinutes ?? ROUTER_EVENT_BEFORE_DEFAULT)
+  if (!Number.isFinite(beforeMinutes) || beforeMinutes <= 0) return null
+  const events = (Array.isArray(calendar.events) ? calendar.events : [])
+    .filter((one) => one && one.allDay !== true && Number(one.startMs) > now)
+    .sort((a, b) => Number(a.startMs) - Number(b.startMs))
+  for (const one of events) {
+    const startMs = Number(one.startMs)
+    if (startMs - now > beforeMinutes * 60000) continue
+    if (!routerTitleMatches(when?.titleContains, one.title)) continue
+    if (!routerCalendarWanted(when?.calendarIds, one.calendarId)) continue
+    const start = new Date(startMs)
+    const clock = `${String(start.getHours()).padStart(2, '0')}:${String(start.getMinutes()).padStart(2, '0')}`
+    const minutes = Math.max(1, Math.ceil((startMs - now) / 60000))
+    const title = String(one.title ?? '').trim() || '那件事'
+    return {
+      fact: `「${title}」${clock} 开始, 还有 ${minutes} 分钟`,
+      // 每一次发生一个键: 同一场周会下周还开, 不该被"今天提过了"永久挡住 (2026-11-10)
+      key: `${routerDayKey(now)}@${startMs}`,
+    }
+  }
+  return null
+}
+
 /**
  * 探索交给判断层的一条"盯着什么"命中了没有 (纯函数)
  *
  * 主人 2026-11-07 晚: **检测的内容由探索时加上** —— 探索每天跑一趟, 它看得见手机上真有什么,
- * 而设置页里那个人想不出来。所以 `checks` 只收两种能算出来的判法:
+ * 而设置页里那个人想不出来。所以 `checks` 收三种能算出来的判法:
  *
  *   - `{ kind: 'usage', package, minutes }` 某个应用今天用满多少分钟 (不给 package 就是"任意一个游戏")
  *   - `{ kind: 'time' }` 每天到了 `at` 之后
+ *   - `{ kind: 'event', beforeMinutes, titleContains, calendarIds }` 日历事件开始前多少分钟
+ *     (2026-11-10): 窗口由 `input.calendar` 给 (宿主每拍问一次桥), 读不到就一律不判
  *
- * @returns 命中时那句事实 (给 brief 用), 没命中回空串
+ * 命中时除了那句事实, 还要给一把"这一件事今天算说过没有"的尺子 —— usage / time 一天一个键,
+ * event **一次发生一个键** (`日期@startMs`)
+ *
+ * @returns `{ fact, key }`, 没命中回 null
  */
 function routerCheckHit(check, input, now) {
-  if (!check || check.enabled === false) return ''
+  if (!check || check.enabled === false) return null
   const when = check?.when ?? {}
   const kind = String(when.kind ?? '')
   const at = String(check?.at ?? '')
@@ -6827,12 +8303,13 @@ function routerCheckHit(check, input, now) {
     const [hour, minute] = at.split(':')
     const h = Number(hour)
     const m = Number(minute)
-    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) return ''
-    if (routerMinutesOfDay(now) < h * 60 + m) return ''
+    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) return null
+    if (routerMinutesOfDay(now) < h * 60 + m) return null
   }
+  const day = routerDayKey(now)
   if (kind === 'usage') {
     const wanted = Number(when.minutes ?? 0) || 0
-    if (wanted <= 0) return ''
+    if (wanted <= 0) return null
     const pkg = String(when.package ?? '')
     const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
     const matched = today.filter((one) => (
@@ -6842,14 +8319,18 @@ function routerCheckHit(check, input, now) {
     ))
     const ms = matched.reduce((sum, one) => sum + (Number(one?.ms ?? 0) || 0), 0)
     const minutes = Math.floor(ms / 60000)
-    if (minutes < wanted) return ''
-    return `${matched.length === 1 ? String(matched[0]?.label || pkg) + ' ' : ''}今天 ${minutes} 分钟`
+    if (minutes < wanted) return null
+    return {
+      fact: `${matched.length === 1 ? String(matched[0]?.label || pkg) + ' ' : ''}今天 ${minutes} 分钟`,
+      key: day,
+    }
   }
   if (kind === 'time') {
-    if (!at) return ''
-    return `现在 ${routerClockText(now)}`
+    if (!at) return null
+    return { fact: `现在 ${routerClockText(now)}`, key: day }
   }
-  return ''
+  if (kind === 'event') return routerEventHit(when, input, now)
+  return null
 }
 
 /**
@@ -6932,20 +8413,21 @@ function judgeRouter(input) {
     })
   }
   // **探索交来的检测项** (2026-11-07 晚, 主人: "检测的内容应由探索时加上"): 分数排在"未了的事"
-  // 之后、"随口问一句"之前 —— 它是她自己看出来的规律, 不如主人亲口交代的事硬, 但比没话找话要紧
-  const saidToday = routerDayKey(now)
+  // 之后、"随口问一句"之前 —— 它是她自己看出来的规律, 不如主人亲口交代的事硬, 但比没话找话要紧。
+  // 去重键跟着命中一起回来 (2026-11-10): 事件型那一条是"一次发生一个键", 不是"一天一个键"
   for (const one of Array.isArray(input?.checks) ? input.checks : []) {
-    const fact = routerCheckHit(one, input, now)
-    if (!fact) continue
+    const hit = routerCheckHit(one, input, now)
+    if (!hit) continue
     const id = String(one?.id ?? '')
     if (!id) continue
-    if (String((input?.checksSaid ?? {})[id] ?? '') === saidToday) continue
+    if (String((input?.checksSaid ?? {})[id] ?? '') === hit.key) continue
     candidates.push({
       kind: 'check',
       score: 3,
       to: 'ball',
       id,
-      brief: `${String(one?.what ?? '那件事')} · ${fact}`,
+      key: hit.key,
+      brief: `${String(one?.what ?? '那件事')} · ${hit.fact}`,
     })
   }
   if (candidates.length === 0) {
@@ -6966,12 +8448,14 @@ function judgeRouter(input) {
   if (candidates.length === 0) return { say: false, why: 'nothing worth saying' }
   candidates.sort((a, b) => b.score - a.score)
   const best = candidates[0]
-  // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到
+  // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到。
+  // `key` 是同一件事的"说过没有"那把尺子 (2026-11-10): 事件型那一条一次发生一个键
   return {
     say: true,
     kind: best.kind,
     to: best.to,
     ...(best.id ? { id: best.id } : {}),
+    ...(best.key ? { key: best.key } : {}),
     brief: best.brief,
     why: best.brief,
   }
@@ -8488,7 +9972,7 @@ function startReadAloud(ctx) {
   // sessionId -> 这一轮最后那条助手正文,一轮里会有好几条, 后一条顶掉前一条
   const pending = new Map()
   onSessionEvent(ctx, (session, event) => {
-    if (event.type !== 'assistant/message' && event.type !== 'turn/end') return
+    if (event.type !== 'assistant/message' && event.type !== 'turn/end' && event.type !== 'turn/start') return
     if (session.meta?.origin === 'subagent') return
     // **对端投影的回答不念、也不推进回复框** (2026-10-14 真机): 那不是在跟球说话, 而这个钩子当初
     // 只见过"本机跑出来的一轮"。真机上是这么炸的: 投影带上回答之后, 对端那句长回答被推去念 →
@@ -8498,6 +9982,17 @@ function startReadAloud(ctx) {
     // `speak`, 而模型正文只是思考 (预设要求 text 为空) —— 万一它还是写了收尾总结, 也不能被当成
     // "球的回答"念出来/画进框里
     if (session.agentPreset === 'tavern') return
+    if (event.type === 'turn/start') {
+      // **新一轮 = 上一轮的朗读到此为止** (2026-11-10, 方案 §4.5): 只置标志 + 清队, 正在念的那一段
+      // 念完才停 —— 切半句比多说一句更糟。这里不 await: 它是 emit 钩子, 而"停下"不该挡住这一轮
+      pending.delete(session.id)
+      // 这一轮的"她说了几条"从零开始 (turn end 的补句闸看它)
+      turnOutCount.delete(session.id)
+      void call('speak', { op: 'cancel' }).catch((error) => {
+        ctx.logger?.debug?.(`the pending read-aloud was not cancelled: ${error?.message ?? error}`)
+      })
+      return
+    }
     if (event.type === 'assistant/message') {
       // 被打断的那条不作数: 它后面还可能跟着真正的回答
       if (event.data.interrupted === true) {
@@ -8518,7 +10013,9 @@ function startReadAloud(ctx) {
     const text = pending.get(session.id)
     pending.delete(session.id)
     if (text === undefined || event.data.reason?.kind !== 'completed') return
-    const spoken = readAloudText(text)
+    // 念的是"这一轮的稿子" (2026-11-10): [readAloudScript] 内部先过 [readAloudText] 那套 Markdown 规则,
+    // 再补括号 / 文件名那两步 —— 这里不再自己洗一遍, 两套规则不许分叉
+    const spoken = readAloudScript(text)
     if (!spoken) return
     // **推给球与「自动朗读」是两件事** (2026-10-15 真机: 朗读关着时主人"完成了也没有回复框"):
     // 把回答推回浮标那块框从来不是"念出来"的附属品 —— 问一句、看一眼回答, 与要不要出声无关,
@@ -8532,7 +10029,23 @@ function startReadAloud(ctx) {
       return
     }
     const speakable = policy.text
-    reportReply(replyChannelText(speakable), session.id)
+    // **这一轮已经用 `lw_say` 说过话就不再推一遍** (2026-11-10): 球与门户读同一份 jsonl, `op=reply`
+    // 再来一句整轮的话就是"球上多一句 / 合成一句" —— 只有一条都没说时才补, 而且补进 jsonl,
+    // 于是两边看到的是同一行 (写不进去才退回球那条老通道)
+    const saidLines = turnOutCount.get(session.id) ?? 0
+    turnOutCount.delete(session.id)
+    if (saidLines === 0) {
+      void lwOutAppend(session.id, { kind: 'text', text: replyChannelText(speakable) })
+        .then((row) => {
+          void writeDesktopChat('assistant', replyChannelText(speakable))
+          if (row) console.log(`luwi-channel: the reply had no lw_say line, so it was added as #${row.seq}`)
+        })
+        .catch((error) => {
+          // 落不了盘 (没有 DSH_HOME / 盘满): 退回球那条老通道, 至少问一句能看见一眼回答
+          ctx.logger?.warn?.(`the fallback reply was not written: ${error?.message ?? error}`)
+          reportReply(replyChannelText(speakable), session.id)
+        })
+    }
     // 设置页那个「自动朗读回答」关掉之后就不念 —— 开关在应用那一侧 (它与音色/语速放在一起),
     // 所以这里先问一句。**读不到设定时照念**: 桥出错不该让这个功能静默消失, 只记一行
     void call('speak', { op: 'status' })
@@ -8557,11 +10070,14 @@ function startReadAloud(ctx) {
           })
         }
         // 不 await: 这是 emit 钩子, 念多久都不该把会话的事挡在后面
-        return call('speak', { op: 'speak', text: speakable })
+        // 2026-11-10 起走朗读流 (op=read): 按 6 句一段排进应用的队列, 排队即返回 ——
+        // 这一段真的念到哪儿由应用那本账记 (`status` 的 readCursor / readWaiting)
+        return lwSpeakLine(speakable, 0)
       })
-      .then((answer) => {
-        if (!answer || answer.spoken) return
-        voiceReading.error = `the engine did not report finishing: ${answer.detail}`
+      .then((said) => {
+        if (said === null || said === undefined || said === '') return
+        if (!said.includes('failed')) return
+        voiceReading.error = `speaking failed: ${said}`
         ctx.logger?.warn?.(voiceReading.error)
       })
       .catch((error) => {
@@ -8799,14 +10315,136 @@ function simRouterRules(sim) {
     const number = Number(value)
     if (Number.isFinite(number) && number >= 0) out[key] = number
   }
-  put('gameMinutes', sim?.router?.gameMinutes)
-  put('wishDays', sim?.router?.wishDays)
   put('cooldownMs', sim?.router?.cooldownMs)
   put('chatChance', sim?.router?.chatChance)
   put('chatAfterMs', sim?.router?.chatAfterMs)
   put('ignoredCooldownMs', sim?.router?.ignoredCooldownMs)
   put('preSleepWaitMs', sim?.wake?.preSleepWaitMs)
   return out
+}
+
+/**
+ * 判断层里那两把"由她自己定"的尺子 (2026-11-10 主人: "那两个设置应该由探索或主动对话时自己决定")
+ *
+ * 以前它们写在「更多设置」页、落 `sim.json`; 现在那一页没有了, 只剩 `router.json.rules` 这一处写点:
+ * 探索收尾的 `rules` 或对话里的 `lw_router op=rules`。**范围写死在这里**: 模型给 0 或 99999 都夹回来,
+ * 缺省仍由 [ROUTER_DEFAULTS] 给 (100 分钟 / 60 天)
+ */
+const ROUTER_RULE_RANGES = Object.freeze({
+  gameMinutes: { min: 5, max: 1_440 },
+  wishDays: { min: 1, max: 365 },
+})
+
+/**
+ * 把一份 `{gameMinutes, wishDays}` 收干净 (纯函数)
+ *
+ * 不认识的键丢掉, 坏值丢掉, 越界夹进范围; 一个能用的都没有时回 `{}` —— 调用方据此决定"什么都不写"
+ * (写一个空对象会把已有的两把尺子清掉, 那不是"没交")
+ */
+function normalizeRouterRules(input) {
+  const out = {}
+  if (!input || typeof input !== 'object') return out
+  for (const [key, range] of Object.entries(ROUTER_RULE_RANGES)) {
+    const raw = input[key]
+    if (raw === undefined || raw === null || raw === '') continue
+    const number = Math.round(Number(raw))
+    if (!Number.isFinite(number)) continue
+    out[key] = Math.min(range.max, Math.max(range.min, number))
+  }
+  return out
+}
+
+/**
+ * 把两把尺子写进 `router.json.rules` (读-改-写, 保留那份文件里别的键)
+ *
+ * 与 `exploreChecksWrite` 同一个形状: 先读整份再写回, 于是探索的 `checks`、判断层的 `last` 不会被这一下
+ * 抹掉。一次只写交上来的那几个键 —— 只给 `gameMinutes` 时 `wishDays` 保持原样
+ */
+async function writeRouterRules(rules) {
+  const clean = normalizeRouterRules(rules)
+  if (Object.keys(clean).length === 0) return { rules: {}, written: 0, error: 'no gameMinutes / wishDays to write' }
+  const path = routerStatePath()
+  if (!path) return { rules: {}, written: 0, error: 'this profile has no DSH_HOME' }
+  const state = (await readRouterJson(path)) ?? {}
+  const existing = state?.rules && typeof state.rules === 'object' ? state.rules : {}
+  const merged = { ...existing, ...clean }
+  await writeRouterJson(path, { ...state, v: 1, rules: merged })
+  return { rules: merged, written: Object.keys(clean).length }
+}
+
+/**
+ * 判断层的日历窗口: 现在前后各看多远
+ *
+ * 往前一小时是给"刚开完会"那类事后判法留的位置 (这一批只做 `beforeMinutes`, 窗口不必跟着改),
+ * 往后一天够盖到明早 —— 再远就不该由"每一拍问一次桥"来承担
+ */
+const ROUTER_CALENDAR_BEHIND_MS = 60 * 60 * 1000
+const ROUTER_CALENDAR_AHEAD_MS = 24 * 60 * 60 * 1000
+
+/** 桥这一趟最多等多久: 判断层每一拍都要过这里, 它慢等于判断层慢 */
+const ROUTER_CALENDAR_TIMEOUT_MS = 1500
+
+/** 同一份日历读数在内存里留多久 (一拍一次本来就用不上缓存, 留着是给"准点那一拍"连发) */
+const ROUTER_CALENDAR_TTL_MS = 60 * 1000
+
+/** 缓存: `{ at, value }` —— `at` 用真钟, 不看调用方给的 `now` */
+let routerCalendarCache = { at: 0, value: null }
+
+/** 上一拍读到了没有 (只在变化时记一行日志, 不每拍刷屏) */
+let routerCalendarAvailable = null
+
+/**
+ * 这一刻的日历 (宿主问应用一次桥, 读不到就 fail-open)
+ *
+ * 为什么是"每拍问一次"而不是另造一份文件: 日历的写者是系统与别人的日历应用, 宿主抄一份进来就得回答
+ * "谁写、谁读、什么时候过期"这三个问题 —— 桥本来就是"宿主问、应用答"这一条路, 问一次最便宜。
+ * 读不到 (没权限 / 桥不通 / 超时) 一律回 `available: false`: 这一拍 event 类不命中, 但别的档照旧
+ */
+async function readCalendarWindow(now = Date.now()) {
+  const stamp = Date.now()
+  const cached = routerCalendarCache.value
+  if (cached !== null && stamp - routerCalendarCache.at < ROUTER_CALENDAR_TTL_MS) return cached
+  let value
+  try {
+    const pending = call('calendarWindow', {
+      from: now - ROUTER_CALENDAR_BEHIND_MS,
+      to: now + ROUTER_CALENDAR_AHEAD_MS,
+      limit: 200,
+    })
+    // 超时那一支会把这条 promise 丢掉, 但它的失败必须有落点 —— 否则是一个 unhandled rejection
+    pending.catch(() => {})
+    const answer = await Promise.race([
+      pending,
+      new Promise((_resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`the app did not answer within ${ROUTER_CALENDAR_TIMEOUT_MS}ms`)),
+          ROUTER_CALENDAR_TIMEOUT_MS,
+        )
+        // 定时器不许把进程按住: 宿主空闲时也要退得掉
+        if (typeof timer?.unref === 'function') timer.unref()
+      }),
+    ])
+    value = {
+      available: answer?.available === true,
+      why: String(answer?.why ?? ''),
+      at: Number(answer?.at) || now,
+      events: Array.isArray(answer?.events) ? answer.events : [],
+    }
+  } catch (error) {
+    value = { available: false, why: String(error?.message ?? error), at: now, events: [] }
+  }
+  if (routerCalendarAvailable !== value.available) {
+    routerCalendarAvailable = value.available
+    if (value.available) {
+      console.log('luwi-channel: the calendar is readable, so event checks can fire')
+    } else {
+      console.warn(
+        `luwi-channel: the calendar is not readable (${value.why}), so event checks do not fire`,
+      )
+    }
+  }
+  routerCalendarCache = { at: stamp, value }
+  return value
 }
 
 /**
@@ -8817,6 +10455,9 @@ function simRouterRules(sim) {
  *
  * 2026-11-07 晚又多了两样: `sim.json` (「更多设置」的阈值, 盖在同一份规则表上) 与
  * `router.json` 的 `checks` / `checksSaid` (探索交来的检测项与"今天提过了"那笔账)
+ *
+ * 2026-11-10 再添一格 `calendar`: 事件型检测项要的是"日历里下一件事什么时候开始", 而它只在设备上 ——
+ * 一次 1.5 s 上限的桥调用, 读不到就是 `available: false`, 判断层照旧跑
  */
 async function readRouterInputs() {
   const home = process.env.DSH_HOME
@@ -8859,6 +10500,8 @@ async function readRouterInputs() {
     rules: { ...(state?.rules ?? {}), ...simRouterRules(sim) },
     checks: Array.isArray(state?.checks) ? state.checks : [],
     checksSaid: state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {},
+    // 事件型检测项的唯一输入 (2026-11-10): 读不到就是 available: false, 那条判法不命中
+    calendar: await readCalendarWindow(Date.now()),
   }
 }
 
@@ -8910,7 +10553,7 @@ function routerStartLine(decision) {
   ].join('\n')
 }
 
-/** 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那一条"今天提过了" */
+/** 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那一条"这一次说过了" */
 async function routerMarkSaid(decision) {
   const home = process.env.DSH_HOME
   if (!home) return
@@ -8918,8 +10561,10 @@ async function routerMarkSaid(decision) {
   const day = routerDayKey(now)
   const state = (await readRouterJson(routerStatePath())) ?? {}
   const saidBefore = (state?.checksSaid && typeof state.checksSaid === 'object') ? state.checksSaid : {}
+  // 键来自判断那一侧 (usage / time 是当天, event 是 `日期@startMs`): 这里只负责照抄
+  const saidKey = typeof decision?.key === 'string' && decision.key !== '' ? decision.key : day
   const checksSaid = decision?.kind === 'check' && decision?.id
-    ? { ...saidBefore, [String(decision.id)]: day }
+    ? { ...saidBefore, [String(decision.id)]: saidKey }
     : saidBefore
   await writeRouterJson(routerStatePath(), {
     ...state,
@@ -9217,9 +10862,10 @@ function startBallPhase(ctx) {
  * 三件事的边界:
  *  - **固定新开** (B4-a ⑤): 每一行 `source:"proactive"` 都走 `controller.create`, 不查浮标那本
  *    10 分钟的账, 也不接主人此刻正看着的那一场
- *  - **主动场不建虚拟屏** (13-4): `startProactive` 一条建屏的路都不走 (`lw_screen_create` 也不在
- *    它手里), 而且这一场的屏幕类工具由 [proactiveScreenGate] 一律拒 —— 那是提示词层之外的一层
- *    硬闸. 权限里另外三条 (shell / 文件写 / App 控制) 仍在提示词层 (D9 的口径)
+ *  - **主动场能做什么是三档硬闸** (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`):
+ *    [proactiveGate] 拿三张表 (A 屏 / B 写动 / C 命令) 与 `sim.json` 的 `proactive.acting` 对, 缺省
+ *    `remind` 全拒. 这一层不再靠提示词 —— 与 QQ 桥接把群会话的唤醒条件钳死是同一个做法.
+ *    13-4 的"主动场不建虚拟屏"现在只在 `remind` / `act` 两档成立, `full` 档按主人 2026-11-10 的决定放开
  *  - **账分开记**: `$DSH_HOME/lw/proactive.json` 给设置页 (B4-c) 读; 30 分钟闸与静默时段归 B4-b
  *
  * 判据在 `tools/check-proactive.mjs`: 它用 `new Function` 把下面那几段纯函数抽出来真跑
@@ -9237,20 +10883,53 @@ const PROACTIVE_STATE_FILE = 'proactive.json'
 /**
  * 这一场主动对话的账 (内存里这一份是活的, `proactive.json` 是它的镜子)
  *
- * 它在第一句投进去**之前**就写好 —— [proactiveScreenGate] 认的正是这一场, 晚一步那些屏幕类工具
+ * 它在第一句投进去**之前**就写好 —— [proactiveGate] 认的正是这一场, 晚一步那些屏幕类工具
  * 就可能在开场第一轮被放进来
  */
-const proactiveRun = { session: null, workspace: '', startedAt: 0, preset: null, presetWhy: null }
+// 这一场开在哪一档 (读数用; 判定每次都现读 `sim.json`, 见 [proactiveActing])
+const proactiveRun = {
+  session: null, workspace: '', startedAt: 0, preset: null, presetWhy: null, acting: 'remind',
+}
 
 /** 这次进程里开过几场 (读数) */
 let proactiveStarts = 0
 
+/* ── 主动场的三张表 + 三档 (2026-11-10) ─────────────────────────────────────
+ *
+ * 方案: `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`
+ *
+ * 借 QQ 桥接 `groupAtOnly` 那一手: "主动场能做什么"从提示词变成硬闸. 闸分三张表, 档分三档, 档位由
+ * 主人在设置 → 活动 → 主动对话里选, 落 `$DSH_HOME/lw/sim.json` 的 `proactive.acting`:
+ *
+ *   A 屏   | remind 拒 | act 拒 | full 放
+ *   B 写动 | remind 拒 | act 放 | full 放   (按 op 判: 只读 op 三档都放)
+ *   C 命令 | remind 拒 | act 放 | full 放
+ *
+ * 读不到 / 值不认识一律按 `remind` (最保守). 判定每次读文件, 带 3 s + mtime 缓存, 所以改完 ≤3 s
+ * 生效、不需要重启 host
+ */
+
+/** 三档的字面量 (与设置页那三行、`SimSetting.Acting` 是同一套) */
+const PROACTIVE_ACTING_REMIND = 'remind'
+const PROACTIVE_ACTING_ACT = 'act'
+const PROACTIVE_ACTING_FULL = 'full'
+const PROACTIVE_ACTING_DEFAULT = PROACTIVE_ACTING_REMIND
+const PROACTIVE_ACTING_TIERS = new Set([
+  PROACTIVE_ACTING_REMIND, PROACTIVE_ACTING_ACT, PROACTIVE_ACTING_FULL,
+])
+
+/** 档位缓存的寿命: 3 s (方案 §3.4) —— 再短就会让"刚改完"落不到下一次调用上 */
+const PROACTIVE_ACTING_CACHE_MS = 3_000
+
+/** 审计文件: `$DSH_HOME/lw/proactive-act.jsonl` (放行一次写一行, 方案 §6) */
+const PROACTIVE_AUDIT_FILE = 'proactive-act.jsonl'
+
 /**
- * 主动场里一律拒的屏幕类工具
+ * A 表: 屏 —— 建屏 / 读屏 / 在屏上动手
  *
  * 名单是"屏幕这一类"的黑名单, 与视频模式那一张同一个形状: 管理屏 (建 / 改 / 转 / 放) + 读屏
  * (截图 / 树 / OCR / 等字) + 在屏上动手 (点 / 滑 / 打 / 键 / 手势 / 滚). **以后新加的屏幕类工具,
- * 谁加谁负责把它补进这张表** —— 13-4 要的是"主动场一条虚拟屏都不建", 漏一个就是一条绕过去的路
+ * 谁加谁负责把它补进这张表** —— 漏一个就是一条绕过去的路
  */
 const PROACTIVE_SCREEN_DENIED = new Set([
   // 管理屏: 建虚拟屏那一条是 13-4 的正面
@@ -9262,11 +10941,158 @@ const PROACTIVE_SCREEN_DENIED = new Set([
   'lw_tap', 'lw_swipe', 'lw_type', 'lw_key', 'lw_key_combo', 'lw_gesture', 'lw_pinch', 'lw_scroll',
 ])
 
-/** 主动场里碰到屏幕类工具的回执: 说清"这一档只提醒", 出口是让主人自己动手 */
-function proactiveScreenRefusal(name) {
-  return `refused: ${name} needs a screen, and a proactive conversation never creates a virtual`
-    + ' screen and never drives one. It only reads summaries and speaks: say what needs doing and'
-    + ' let the owner do it.'
+/**
+ * B 表: 写动 —— 会改设备或外发的东西, **按 op 判, 不整条拒**
+ *
+ * 值 = 这一条工具"只读那一面"的 op 名单 (空集 = 它没有只读那一面, 一调就是动手):
+ *  - `lw_files` 只有 `write` 算写动, `list` / `read` 三档都放 (方案 §3.1)
+ *  - 取不到 op / op 不认识 → 不在名单里 → 按"写动"处理 (= fail-closed), 不猜
+ *
+ * 方案那 19 类之外多补了三条**同样会动设备**的 (`lw_media` 放歌 / `lw_open_file` 交给别的应用打开 /
+ * `lw_keep_awake` 改常亮), 理由与"谁加谁负责补表"同一条; `lw_take_photo` 按方案 §8 第 3 条三档都放
+ * (快门在主人手上, 它只是把相机叫起来)
+ */
+const PROACTIVE_ACT_TABLE = new Map([
+  // 文件与剪贴板: 只有写那一面算写动
+  ['lw_files', new Set(['list', 'read'])],
+  // 人格卡 (2026-11-10): 读三档都放; 写是改她自己的设定, 归"写动", 要 act / full
+  ['lw_persona', new Set(['read'])],
+  ['lw_clipboard', new Set(['get'])],
+  // 设备状态: 只有读那一面放行
+  ['lw_system', new Set(['get'])],
+  ['lw_volume', new Set(['get'])],
+  ['lw_power', new Set(['state'])],
+  ['lw_lock', new Set(['state'])],
+  ['lw_keep_awake', new Set(['status'])],
+  // 各家自己那套只读 op
+  ['lw_automation', new Set(['list', 'read', 'status', 'history'])],
+  ['lw_plugin', new Set(['list', 'read', 'audit'])],
+  ['lw_skill', new Set(['scan'])],
+  ['lw_sync', new Set(['status'])],
+  // 她的表情 (2026-11-10): 列素材与贴一张都不动设备, `fetch` 会外发请求并落盘 —— 那一面算写动
+  ['lw_sticker', new Set(['list', 'say'])],
+  // 没有只读那一面: 一调就是动手
+  ['lw_app_control', new Set()],
+  ['lw_launch', new Set()],
+  ['lw_intent', new Set()],
+  ['lw_download', new Set()],
+  ['lw_share', new Set()],
+  ['lw_notify', new Set()],
+  ['lw_mode', new Set()],
+  ['lw_quickapp', new Set()],
+  ['lw_vibrate', new Set()],
+  ['lw_media', new Set()],
+  ['lw_open_file', new Set()],
+])
+
+/**
+ * C 表: 命令 —— 执行类
+ *
+ * `lw_linux` 现在就装得上; 后面那一批 dsh 工具名是"合并预设"之后才会出现的 (方案 §3.1 的 C 表与
+ * §6 最后一条: 两套名字一起认, 免得合并之后闸门看不见它们)
+ */
+const PROACTIVE_COMMAND_DENIED = new Set([
+  'lw_linux',
+  'bash', 'pwsh', 'fs', 'write', 'edit', 'apply_patch', 'jobs', 'web',
+  'subagent', 'subagent_fork', 'workflow', 'plan', 'todo', 'present',
+])
+
+/** 档位缓存 (3 s + mtime: 时间没到不 stat, mtime 没变不解析) */
+const proactiveActingCache = { at: 0, mtimeMs: -1, value: PROACTIVE_ACTING_DEFAULT }
+
+/**
+ * `sim.json` 的内容 → 档位串 (纯函数)
+ *
+ * 缺键 / 不认识的串 / 类型不对一律 `remind`. 旧的布尔值 (`allowActing`) 做一次性**只读**迁移:
+ * `true → act`, `false → remind` —— 不写回文件, 下一次应用保存 `sim.json` 时它才正式换成 `acting`
+ */
+function proactiveActingFrom(root) {
+  const section = root?.proactive !== null && typeof root?.proactive === 'object' ? root.proactive : null
+  // 不做大小写归一: 与 `SimSetting.planFrom` 逐字同一套 (那边也只认三个小写字面量), 两边判得一致
+  const raw = typeof section?.acting === 'string' ? section.acting.trim() : ''
+  if (PROACTIVE_ACTING_TIERS.has(raw)) return raw
+  if (section?.allowActing === true) return PROACTIVE_ACTING_ACT
+  if (section?.allowActing === false) return PROACTIVE_ACTING_REMIND
+  return PROACTIVE_ACTING_DEFAULT
+}
+
+/**
+ * 这一次判定用哪一档 (同步: `ctx.tools.guard` 只收同步函数)
+ *
+ * 3 s 缓存 + mtime 双判: 3 s 内直接给上一次的答案; 过了 3 s 才 stat 一次, mtime 没变就不重读 ——
+ * 判据里"改 `sim.json` 不重启 host 也生效"靠的就是这个上限
+ */
+function proactiveActing() {
+  const home = process.env.DSH_HOME
+  if (!home) return PROACTIVE_ACTING_DEFAULT
+  const path = join(home, 'lw', 'sim.json')
+  const now = Date.now()
+  if (now - proactiveActingCache.at < PROACTIVE_ACTING_CACHE_MS) return proactiveActingCache.value
+  proactiveActingCache.at = now
+  let mtimeMs = -1
+  try {
+    mtimeMs = statSync(path).mtimeMs
+  } catch {
+    mtimeMs = -1
+  }
+  if (mtimeMs === proactiveActingCache.mtimeMs) return proactiveActingCache.value
+  let root = null
+  try {
+    root = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    root = null
+  }
+  proactiveActingCache.mtimeMs = mtimeMs
+  proactiveActingCache.value = proactiveActingFrom(root)
+  return proactiveActingCache.value
+}
+
+/** 档位的中文名 (开场注入与日志用, 与设置页那三行同一个说法) */
+function proactiveActingLabel(acting) {
+  if (acting === PROACTIVE_ACTING_ACT) return '允许动手'
+  if (acting === PROACTIVE_ACTING_FULL) return '全放开'
+  return '只提醒'
+}
+
+/**
+ * 拒的回执
+ *
+ * 两句话分开 (方案 §3.4): `remind` 说"这一场只提醒", `act` 撞到屏说"屏永远不碰". 出口都指给主人
+ * 自己动手, 不是"换一条路重试"
+ */
+function proactiveActingRefusal(name, acting, table) {
+  if (table === 'screen' && acting === PROACTIVE_ACTING_ACT) {
+    return `refused: ${name} needs a screen, and a proactive conversation in the act tier never`
+      + ' touches the screen - it may write files, open apps and run commands, but looking at the'
+      + ' screen and tapping on it stays with the owner. Say what needs doing and let him do it.'
+  }
+  return `refused: this proactive conversation is in the remind-only tier, so ${name} is not`
+    + ' available to it - it reads and speaks, nothing else. Say what needs doing and let the'
+    + ' owner do it.'
+}
+
+/** 放行时记一行审计 (`$DSH_HOME/lw/proactive-act.jsonl`; 只记摘要, 不记正文) */
+function proactiveAudit(acting, name, args) {
+  // 路径就地算 (不用外面的 homePath): 这一段要能被判据原样抽出来跑, 少一个外部依赖就少一次失真
+  const home = process.env.DSH_HOME
+  if (!home) return
+  const path = join(home, 'lw', PROACTIVE_AUDIT_FILE)
+  let summary = '{}'
+  try {
+    summary = JSON.stringify(args ?? {})
+  } catch {
+    summary = '{}'
+  }
+  const line = `${JSON.stringify({
+    at: new Date().toISOString(),
+    tier: acting,
+    name,
+    args: summary.length > 300 ? `${summary.slice(0, 300)}…` : summary,
+    session: proactiveRun.session,
+  })}\n`
+  void appendFile(path, line, 'utf8').catch((error) => {
+    console.warn(`luwi-channel: the proactive audit line was not written: ${error?.message ?? error}`)
+  })
 }
 
 /**
@@ -9284,28 +11110,78 @@ function proactiveSessionOf(exec) {
 }
 
 /**
- * 主动场的屏幕闸 (B4-a 的 13-4)
+ * 主动场的三表硬闸 (2026-11-10, 取代原来只有 A 表的那一道)
  *
- * 与视频模式那道闸同一个挂法 (`ctx.tools.guard`): 名字不在名单里就一次都不碰会话身份, 在名单里
- * 才问"这是不是主动场". 回一句理由就把这次调用拒掉.
+ * 与视频模式那道闸同一个挂法 (`ctx.tools.guard`): 三张表都不认识的名字一次都不碰会话身份 ——
+ * 于是"读摘要 / 说话 / 看通知"这些一条都不受影响. 认识的才问"这是不是主动场", 再按档位判.
+ * **同步**: guard 只收同步函数, 所以档位读的是带缓存的同步路径 (见 [proactiveActing])
+ */
+function proactiveGate(exec) {
+  const name = typeof exec?.name === 'string' ? exec.name : ''
+  if (name === '') return undefined
+  const screen = PROACTIVE_SCREEN_DENIED.has(name)
+  const act = PROACTIVE_ACT_TABLE.has(name)
+  const command = PROACTIVE_COMMAND_DENIED.has(name)
+  if (!screen && !act && !command) return undefined
+  if (!proactiveSessionOf(exec)) return undefined
+  const acting = proactiveActing()
+  if (screen) {
+    if (acting !== PROACTIVE_ACTING_FULL) return proactiveActingRefusal(name, acting, 'screen')
+    proactiveAudit(acting, name, exec?.arguments)
+    return undefined
+  }
+  if (act) {
+    const op = typeof exec?.arguments?.op === 'string' ? exec.arguments.op.trim() : ''
+    // 只读那一面三档都放; op 取不到 / 不认识就不在名单里 → 按写动处理 (fail-closed)
+    if (op !== '' && PROACTIVE_ACT_TABLE.get(name).has(op)) return undefined
+    if (acting === PROACTIVE_ACTING_REMIND) return proactiveActingRefusal(name, acting, 'act')
+    proactiveAudit(acting, name, exec?.arguments)
+    return undefined
+  }
+  if (acting === PROACTIVE_ACTING_REMIND) return proactiveActingRefusal(name, acting, 'command')
+  proactiveAudit(acting, name, exec?.arguments)
+  return undefined
+}
+
+/**
+ * 旧名字 (B4-a 的 13-4): 只判 A 表
+ *
+ * 留着是因为 `docs/` 与几份判据还按这个名字讲过那一条; 新代码一律挂 [proactiveGate]. 它按**当前
+ * 档位**判, 所以 `full` 档下它也不拒屏 —— 名字老, 口径不落后
  */
 function proactiveScreenGate(exec) {
   const name = typeof exec?.name === 'string' ? exec.name : ''
   if (!PROACTIVE_SCREEN_DENIED.has(name)) return undefined
   if (!proactiveSessionOf(exec)) return undefined
-  return proactiveScreenRefusal(name)
+  const acting = proactiveActing()
+  if (acting === PROACTIVE_ACTING_FULL) return undefined
+  return proactiveActingRefusal(name, acting, 'screen')
+}
+
+/** 旧名字 (B4-a 的 13-4) 的回执: 与 [proactiveActingRefusal] 的 A 表那一条同一句 */
+function proactiveScreenRefusal(name) {
+  return proactiveActingRefusal(name, proactiveActing(), 'screen')
 }
 
 /**
  * 主动对话的开场正文 (纯函数)
  *
  * 应用投进来的那一行是 `proactive-card.md` 的正文 (没有就投缺省那句); 这里再补上这四件:
- * **启动顺序 / 上一份探索摘要在哪 / 这一档的权限 / 可以沉默**. 理由与探索那条一样 —— 模型没有
+ * **启动顺序 / 上一份探索摘要在哪 / 这一档能动什么 / 可以沉默**. 理由与探索那条一样 —— 模型没有
  * 别的办法知道最新那份摘要在哪, 而"没有值得说的"必须是一个被允许的答案
+ *
+ * 2026-11-10: 权限那一段**按档位生成** (方案 §3.5). 三档各一句, 与宿主那道硬闸 [proactiveGate]
+ * 逐格对应 —— 注入说"能做什么", 闸决定"真能不能", 两边说法必须一致
  */
-function proactiveStartLine(text, summaryPath) {
+function proactiveStartLine(text, summaryPath, acting) {
   const asked = String(text ?? '').trim()
     || '最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口'
+  const tier = PROACTIVE_ACTING_TIERS.has(acting) ? acting : PROACTIVE_ACTING_DEFAULT
+  const permission = tier === PROACTIVE_ACTING_FULL
+    ? '这一场全放开: 能写文件 / 开应用 / 跑命令, 也能建虚拟屏、截图、点、滑; 但动手前先说一句你要做什么.'
+    : tier === PROACTIVE_ACTING_ACT
+      ? '这一场允许动手: 能写文件 / 开应用 / 跑命令; 屏不碰 —— 要看要点的事让主人自己来.'
+      : '这一场只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.'
   return [
     '这是到点自己开的一场主动对话, 不是主人刚说的话.',
     '',
@@ -9315,7 +11191,7 @@ function proactiveStartLine(text, summaryPath) {
     // 不存在的工具 —— "记着的事"才是这一档真正读得到的东西
     '启动顺序: 最新探索摘要 -> 记着的事 (lw_wish op=list) -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
     `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
-    '默认只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.',
+    permission,
     '没有值得说的就保持沉默, 一条话都不要写.',
   ].join('\n')
 }
@@ -9358,7 +11234,7 @@ async function proactiveStateWriteNow() {
 /**
  * 宿主重启之后把这一场的记号接回来
  *
- * 只是为了让 [proactiveScreenGate] 在旧会话里继续生效: 预设那一栏本来也认 (`session.meta.agentPreset`),
+ * 只是为了让 [proactiveGate] 在旧会话里继续生效: 预设那一栏本来也认 (`session.meta.agentPreset`),
  * 但刚 create 出来、头还没落盘的那一瞬只有这一个记号. 读不到 / 没有 run 就当没有, 不写任何东西
  */
 async function proactiveStateRestore() {
@@ -9415,8 +11291,9 @@ async function chooseProactivePreset(ctx) {
  *
  * **固定新开** (B4-a ⑤): 不扫会话表, 不挑浮标那一场, 每一行都 `controller.create`.
  *
- * **不建虚拟屏** (13-4): 这里没有一条建屏 / 选屏的路; 会话起来之后那一场的屏幕类工具由
- * [proactiveScreenGate] 拒. 所以这一场从头到尾碰不到虚拟屏
+ * **能做什么按档位** (13-4, 2026-11-10 扩成三档): 这里没有一条建屏 / 选屏的路; 会话起来之后那一场
+ * 三张表的工具由 [proactiveGate] 按 `sim.json` 的 `proactive.acting` 判 —— `remind` / `act` 两档
+ * 从头到尾碰不到虚拟屏, `full` 档才放开 (主人 2026-11-10 的决定)
  */
 async function startProactive(ctx, options = {}) {
   const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'inbox'
@@ -9428,6 +11305,8 @@ async function startProactive(ctx, options = {}) {
   const preset = await chooseProactivePreset(ctx)
   const startedAt = Date.now()
   const summaryPath = await exploreLatestSummary()
+  // 这一场开在哪一档: 与开场注入、那道闸读的是同一个函数 (3 s 缓存, 不重启也生效)
+  const acting = proactiveActing()
   const request = {
     ...ballCreatePlace(workspace),
     ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
@@ -9451,6 +11330,7 @@ async function startProactive(ctx, options = {}) {
   proactiveRun.startedAt = startedAt
   proactiveRun.preset = presetId ?? null
   proactiveRun.presetWhy = presetWhy
+  proactiveRun.acting = acting
   proactiveStarts += 1
   await proactiveStateWrite()
   try {
@@ -9458,7 +11338,7 @@ async function startProactive(ctx, options = {}) {
       ctx,
       controller,
       sessionId,
-      { text: proactiveStartLine(options?.text, summaryPath) },
+      { text: proactiveStartLine(options?.text, summaryPath, acting) },
       { images: [] },
     )
   } catch (error) {
@@ -9468,7 +11348,7 @@ async function startProactive(ctx, options = {}) {
   }
   console.log(
     `luwi-channel: proactive conversation ${sessionId} started in ${proactiveRun.workspace}`
-      + ` (via ${via}, preset ${presetId ?? 'the registry default'}, no virtual screen)`,
+      + ` (via ${via}, preset ${presetId ?? 'the registry default'}, tier ${acting})`,
   )
   return {
     started: true,
@@ -9478,7 +11358,9 @@ async function startProactive(ctx, options = {}) {
     presetWhy,
     summary: summaryPath,
     via,
-    screen: false,
+    acting,
+    // 这一档有没有屏: 只有 `full` 才有 (`remind` / `act` 都碰不到)
+    screen: acting === PROACTIVE_ACTING_FULL,
   }
 }
 
@@ -9516,6 +11398,23 @@ const EXPLORE_TASK_FILE = 'explore-card.md'
 const EXPLORE_TASK_CHARS = 8000
 const EXPLORE_STATE_FILE = 'explore.json'
 const EXPLORE_SUMMARY_DIR = 'explore'
+
+/**
+ * 任务卡末尾那段**宿主固定尾注** (2026-11-10, 方案 A)
+ *
+ * 为什么要有它: `exploreTaskWrite` 每次收尾都**整份覆盖**那张卡 (只写模型交的 `nextTask`), 于是
+ * "手改一次只对下一场有效" —— 卡里那句"收尾要交三样"会被下一次覆盖抹掉。尾注由宿主每次拼回去,
+ * 模型改不掉、主人删了也会在下一场回来 (与"主人关掉的检查项不会被偷偷打开"是同一套纪律)
+ *
+ * 它与另外两处一句话**不重复措辞**: 卡里是"给自己的作业", 开场正文里是"硬提醒", persona 里是"规矩"
+ */
+const EXPLORE_CARD_TAIL = [
+  '',
+  '## 收尾三样',
+  '- nextTask: 下一场先看什么, 一段话',
+  '- checks: 至多 3 条"接下来该盯着什么", 每条一句人话加一种判法 (usage / time / event)',
+  '- 没有值得盯的就写明为什么没有 —— 空白与"想过但没有"在盘上是两件事, 别为凑数编',
+].join('\n')
 
 /** 摘要正文上限 (超出截断并在 frontmatter 记 `truncated: true`) 与只留最近多少份 */
 const EXPLORE_SUMMARY_CHARS = 8000
@@ -9566,9 +11465,10 @@ function exploreSummaryName(startedAt) {
 /**
  * 探索开场那一段正文 (纯函数)
  *
- * 三件事写进同一段: 这一趟要做什么 (正文, 缺省"自由探索这台手机")、**预算那两行** (步数用完只提醒,
- * 到点那一轮会被取消)、以及**上一份摘要的路径** —— 第 17 条 persona 要它先读那份, 而模型没有别的
- * 办法知道最新那份在哪 (宿主替它算, 不麻烦它再列一次目录)
+ * 四件事写进同一段: 这一趟要做什么 (正文, 缺省"自由探索这台手机")、**预算那两行** (步数用完只提醒,
+ * 到点那一轮会被取消)、**收尾要交什么** (2026-11-10: 那一句在任务卡里会被覆盖, 在这一段里永远不会),
+ * 以及**上一份摘要的路径** —— 第 17 条 persona 要它先读那份, 而模型没有别的办法知道最新那份在哪
+ * (宿主替它算, 不麻烦它再列一次目录)
  */
 function exploreStartLine(text, run, summaryPath) {
   const asked = String(text ?? '').trim() || '自由探索这台手机'
@@ -9578,6 +11478,7 @@ function exploreStartLine(text, run, summaryPath) {
     `预算: ${Number(run?.minutes) || EXPLORE_MINUTES_DEFAULT} 分钟 / `
       + `${Number(run?.stepLimit) || EXPLORE_STEPS_DEFAULT} 步, 由宿主数`
       + ' —— 到步会收到一句插话 (只提醒, 不拒调用), 到点那一轮会被取消并收到"立刻收尾";',
+    '收尾: nextTask + 至多 3 条 checks (没有就写明为什么)',
     `上一份摘要: ${String(summaryPath ?? '') || '还没有 (这是第一场)'}`,
   ].join('\n')
 }
@@ -9617,6 +11518,18 @@ let exploreScreens = []
 
 /** 这次进程里是否已经从文件读过 (没读过时写盘保留文件里那一份, 不拿空数组盖掉) */
 let exploreScreensLoaded = false
+
+/**
+ * 上一场交了几条检测项 (2026-11-10, 方案 B): `explore.json` 的 `lastFinish` 与 `checksStreak`
+ *
+ * 为什么要记这一笔: `checksWritten === 0` 时原来只 `return`, 盘上什么都没有 —— "偶尔没交"与
+ * "她根本没在想"在读数上一模一样。记下来之后设置页那一行才答得出这件事
+ *
+ * `session` 也进 `lastFinish`: 同一场被交两次 (2026-10-17 真机上量到的那条形态) 不该让 streak 连着 +2
+ */
+let exploreLastFinish = null
+let exploreChecksStreak = 0
+let exploreChecksLoaded = false
 
 /** 一块屏的一行账 (纯函数) */
 function exploreScreenEntry(displayId, sessionId, at, boot = '') {
@@ -9711,6 +11624,23 @@ function exploreScreensFromRecord(record) {
     })
   }
   return out.slice(-EXPLORE_SCREENS_KEPT)
+}
+
+/**
+ * `explore.json` 里那一笔收尾账 (纯函数): 形状不对就当没有
+ *
+ * 设置页那一行读的是它, 所以坏值一律按"没有这一场"处理 —— 少一行读数, 不显示一个编出来的数
+ */
+function exploreFinishFromRecord(record) {
+  const row = record?.lastFinish
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) return null
+  return {
+    at: Number(row?.at) || 0,
+    ended: typeof row?.ended === 'string' ? row.ended : '',
+    written: Math.max(0, Number(row?.written) || 0),
+    total: Math.max(0, Number(row?.total) || 0),
+    session: typeof row?.session === 'string' ? row.session : '',
+  }
 }
 
 /**
@@ -9851,12 +11781,17 @@ function exploreTaskPath() {
 /**
  * 把下一场探索的任务写进那张卡 (收尾时调; 原子写)
  *
- * 与应用那侧 `ExploreTask` 同一个文件: 应用只读 (与主人手改), 这里只在收尾时覆盖
+ * 与应用那侧 `ExploreTask` 同一个文件: 应用只读 (与主人手改), 这里只在收尾时覆盖。
+ *
+ * 写进去的是**模型交的正文 + 宿主固定尾注** ([EXPLORE_CARD_TAIL]): 正文先扣掉尾注那几行, 否则
+ * 8000 字的预算一满, 应用 `ExploreTask.read` 的 `.take(MAX_CHARS)` 会从尾部把尾注切掉 —— 那样
+ * "每次覆盖都带上"就成了半句话都留不下
  */
 async function exploreTaskWrite(text) {
   const path = exploreTaskPath()
   if (path === null) return { path: '', chars: 0, error: 'this host has no DSH_HOME' }
-  const body = String(text ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
+  const budget = Math.max(0, EXPLORE_TASK_CHARS - EXPLORE_CARD_TAIL.length - 1)
+  const body = `${String(text ?? '').trim().slice(0, budget)}${EXPLORE_CARD_TAIL}`
   const temporary = temporaryName(path)
   try {
     await mkdir(dirname(path), { recursive: true })
@@ -9925,6 +11860,11 @@ async function exploreStateWriteNow() {
     screens: exploreScreensLoaded
       ? exploreScreens
       : (Array.isArray(base.screens) ? base.screens : []),
+    // 收尾交了几条检测项 (2026-11-10, 方案 B): 与屏账同一条纪律 —— 没读过就不拿 null 盖掉文件里那份
+    lastFinish: exploreChecksLoaded ? exploreLastFinish : (base.lastFinish ?? null),
+    checksStreak: exploreChecksLoaded
+      ? exploreChecksStreak
+      : (Math.max(0, Number(base.checksStreak ?? 0) || 0)),
     // 设置页要看的那四项 (2.7.9 T5): 它们原来只在内存里, 也就是只在 `lw_explore op=status`
     // 里出现; 写进这份文件之后应用那一侧不用问模型也看得见 (F20)
     status: {
@@ -9945,6 +11885,31 @@ async function exploreStateWriteNow() {
 }
 
 /**
+ * 记一笔"这一场交了几条检测项" (2026-11-10, 方案 B)
+ *
+ * 两条规则: 交了 > 0 条 → streak 归零; 一条都没有 → streak + 1。**同一场重交不算新的一场**
+ * (2026-10-17 真机上量到的那条形态: 到点先取消再 followup, 模型会再交一次), 判据是 `session`
+ *
+ * 写盘走的是那条串行链 (`exploreStateWrite`), 于是它不会与摘要那一次写撞同一个临时名
+ */
+async function exploreRecordChecks(sessionId, ended, outcome) {
+  const written = Math.max(0, Number(outcome?.written ?? 0) || 0)
+  const total = Math.max(0, Number(outcome?.total ?? 0) || 0)
+  const session = String(sessionId ?? '')
+  const sameRun = session !== '' && String(exploreLastFinish?.session ?? '') === session
+  exploreLastFinish = { at: Date.now(), ended: String(ended ?? ''), written, total, session }
+  exploreChecksStreak = written > 0 ? 0 : (sameRun ? exploreChecksStreak : exploreChecksStreak + 1)
+  exploreChecksLoaded = true
+  await exploreStateWrite()
+  if (written === 0) {
+    console.log(
+      `luwi-channel: this exploration handed in no check (${exploreChecksStreak} run(s) in a row)`,
+    )
+  }
+  return outcome
+}
+
+/**
  * 宿主起来时把那一场接回来 (`run` 还在且没 over): 只按文件重挂预算, 不做别的
  *
  * **屏账先回来** (2.8.0 B2-a): 没有 `run` 也要回 —— 上一场留下的屏还要能在下一次收尾时按场次关掉
@@ -9953,6 +11918,10 @@ async function exploreStateRestore() {
   const record = await exploreStateRead()
   exploreScreens = exploreScreensFromRecord(record)
   exploreScreensLoaded = true
+  // 收尾账也回来 (2026-11-10): 不回来就只记得这一次进程里的那几场, 重启后 streak 从零开始
+  exploreLastFinish = exploreFinishFromRecord(record)
+  exploreChecksStreak = Math.max(0, Number(record?.checksStreak ?? 0) || 0)
+  exploreChecksLoaded = true
   const run = record?.run
   if (run === null || typeof run !== 'object') return false
   if (typeof run.session !== 'string' || run.session === '') return false
@@ -10371,44 +12340,85 @@ function routerCheckId(what) {
   return `c${hash.toString(16)}`
 }
 
+/** `event` 那一支的上下限 (与 persona / 工具说明写的是同一套数) */
+const ROUTER_EVENT_BEFORE_MIN = 1
+const ROUTER_EVENT_BEFORE_MAX = 1440
+const ROUTER_EVENT_TITLE_CHARS = 20
+const ROUTER_EVENT_CALENDARS_MAX = 5
+
+/**
+ * 一条检测项 -> 写进 `router.json` 的那一行 (纯函数); 参数坏的整条丢掉, 回 null
+ *
+ * **坏参数不写一半** (沿用 2026-11-07 那条规矩): 判断层里一条算不出来的检查项等于每拍白算一次。
+ * `event` 那三种参数 (beforeMinutes / titleContains / calendarIds) 的边界与 `lw_explore` 的说明、
+ * explore 那份 persona 逐字对齐 —— 三处漂开就会出现"她交了、宿主拒了、设置页看不见"
+ */
+function exploreCheckRow(one) {
+  const what = String(one?.what ?? '').trim().slice(0, ROUTER_CHECK_CHARS)
+  if (!what) return null
+  const when = one?.when && typeof one.when === 'object' ? one.when : {}
+  const kind = String(when.kind ?? '').trim()
+  if (kind !== 'usage' && kind !== 'time' && kind !== 'event') return null
+  const row = { what, when: { kind } }
+  if (kind === 'usage') {
+    const minutes = Number(when.minutes ?? 0)
+    if (!Number.isFinite(minutes) || minutes <= 0) return null
+    row.when.minutes = Math.min(1440, Math.round(minutes))
+    const pkg = String(when.package ?? '').trim()
+    if (pkg) row.when.package = pkg
+  }
+  if (kind === 'event') {
+    // `afterMinutes` 是下一轮的扩展位 (方案 §10 第 3 条): 这一批见到就整条丢掉, 不猜"两个都算还是算一个"
+    if (when.afterMinutes !== undefined && when.afterMinutes !== null) return null
+    const before = when.beforeMinutes === undefined || when.beforeMinutes === null
+      ? ROUTER_EVENT_BEFORE_DEFAULT
+      : Number(when.beforeMinutes)
+    if (!Number.isInteger(before) || before < ROUTER_EVENT_BEFORE_MIN || before > ROUTER_EVENT_BEFORE_MAX) {
+      return null
+    }
+    row.when.beforeMinutes = before
+    const title = String(when.titleContains ?? '').trim()
+    if (title !== '') {
+      if (Array.from(title).length > ROUTER_EVENT_TITLE_CHARS) return null
+      row.when.titleContains = title
+    }
+    const ids = Array.isArray(when.calendarIds) ? when.calendarIds : []
+    const kept = ids.map((id) => String(id ?? '').trim()).filter((id) => /^-?\d+$/.test(id))
+    // 写歪的整条丢: 半份日历名单会让"这本日历上的事"悄悄变成"所有日历"
+    if (kept.length !== ids.length) return null
+    if (kept.length > ROUTER_EVENT_CALENDARS_MAX) return null
+    if (kept.length > 0) row.when.calendarIds = kept
+  }
+  const at = String(one?.at ?? '').trim()
+  if (at) {
+    const [hour, minute] = at.split(':')
+    const h = Number(hour)
+    const m = Number(minute)
+    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) return null
+    row.at = at
+  }
+  if (kind === 'time' && !row.at) return null
+  return row
+}
+
 /**
  * 探索交来的检测项写进 `router.json` (2026-11-07 晚, 主人: "检测的内容应由探索时加上")
  *
- * 只收两种判法 (`usage` / `time`), 参数坏的那一条**整条丢掉**而不是写一半 —— 判断层里一条算不出来
- * 的检查项等于每拍白算一次。写的时候保留那份文件里别的键 (判断层的账与应用那一侧写的东西)
+ * 判法三种 (`usage` / `time` / `event`, 2026-11-10 起), 参数坏的那一条交给 [exploreCheckRow] 丢掉。
+ * 写的时候保留那份文件里别的键 (判断层的账与应用那一侧写的东西)
  */
 async function exploreChecksWrite(list) {
   const path = routerStatePath()
   if (!path) return { written: 0, total: 0, error: 'this profile has no DSH_HOME' }
   const clean = []
   for (const one of Array.isArray(list) ? list : []) {
-    const what = String(one?.what ?? '').trim().slice(0, ROUTER_CHECK_CHARS)
-    if (!what) continue
-    const when = one?.when && typeof one.when === 'object' ? one.when : {}
-    const kind = String(when.kind ?? '').trim()
-    if (kind !== 'usage' && kind !== 'time') continue
-    const row = { what, when: { kind } }
-    if (kind === 'usage') {
-      const minutes = Number(when.minutes ?? 0)
-      if (!Number.isFinite(minutes) || minutes <= 0) continue
-      row.when.minutes = Math.min(1440, Math.round(minutes))
-      const pkg = String(when.package ?? '').trim()
-      if (pkg) row.when.package = pkg
-    }
-    const at = String(one?.at ?? '').trim()
-    if (at) {
-      const [hour, minute] = at.split(':')
-      const h = Number(hour)
-      const m = Number(minute)
-      if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 24 || m < 0 || m > 59) continue
-      row.at = at
-    }
-    if (kind === 'time' && !row.at) continue
-    clean.push(row)
+    const row = exploreCheckRow(one)
+    if (row !== null) clean.push(row)
   }
-  if (clean.length === 0) return { written: 0, total: 0 }
   const state = (await readRouterJson(path)) ?? {}
   const existing = Array.isArray(state?.checks) ? state.checks : []
+  // 一条都没交 / 全被丢时也要如实报"现在盯着几件": 回 0 会让收尾那句回执说"盯着 0 件"
+  if (clean.length === 0) return { written: 0, total: existing.length }
   const day = routerDayKey(Date.now())
   const merged = [...existing]
   for (const one of clean) {
@@ -10425,6 +12435,23 @@ async function exploreChecksWrite(list) {
   const kept = merged.slice(-ROUTER_CHECKS_MAX)
   await writeRouterJson(path, { ...state, v: 1, checks: kept })
   return { written: clean.length, total: kept.length }
+}
+
+/**
+ * 探索交来的两把尺子写进 `router.json.rules` (2026-11-10)
+ *
+ * 与 [exploreChecksWrite] 同一条路: 读整份 `router.json` 再写回, 保留 checks / last 那些键。没交 /
+ * 交的全是坏值时回 `null` (调用方据此不回这一项, 而不是回一个空对象)
+ */
+async function exploreRulesWrite(rules) {
+  if (!rules || typeof rules !== 'object') return null
+  const written = await writeRouterRules(rules)
+  if (written.error) {
+    console.warn(`luwi-channel: the judgement scales were not written: ${written.error}`)
+    return null
+  }
+  console.log(`luwi-channel: the judgement scales now say ${JSON.stringify(written.rules)}`)
+  return written.rules
 }
 
 /** 收尾: 交摘要 (唯一的出口) */
@@ -10457,7 +12484,10 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     if (fresh) {
       const task = askedNext === '' ? null : await exploreTaskWrite(askedNext)
       if (task?.error) console.warn(`luwi-channel: the next task card was not written: ${task.error}`)
-      const checks = await exploreChecksWrite(askedChecks)
+      // 空手也留痕 (2026-11-10): 这一场交了几条与连续几场没交, 与"说过了"那笔账一起落盘
+      const checks = await exploreRecordChecks(saved.session, 'already', await exploreChecksWrite(askedChecks))
+      // 两把尺子也允许在"已经落过了"这条路上补交一次 (第二次 finish 常是子代理发的)
+      const rules = await exploreRulesWrite(args?.rules)
       // ⑥ 上一次收尾如果桥不通、屏没关成, 这一次补上 (账是幂等的, 已经关掉的行不会再调桥)
       await exploreReleaseScreens('finish', saved.session)
       return {
@@ -10468,6 +12498,7 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
         truncated: false,
         nextTask: task,
         checks,
+        ...(rules === null ? {} : { rules }),
       }
     }
     return { saved: false, why: 'no exploration is running, so there is nothing to finish' }
@@ -10490,13 +12521,15 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     else if (task !== null) {
       console.log(`luwi-channel: the next exploration's task card now says ${task.chars} characters`)
     }
-    const checks = await exploreChecksWrite(askedChecks)
+    // 空手也留痕 (2026-11-10): 写进 router.json 之后立刻记一笔本场的读数
+    const checks = await exploreRecordChecks(finishing, ended, await exploreChecksWrite(askedChecks))
     if (checks.written > 0) {
       console.log(`luwi-channel: the judgement layer now watches ${checks.total} thing(s)`)
     }
+    const rules = await exploreRulesWrite(args?.rules)
     exploreState.finished += 1
     console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
-    return { saved: true, ...saved, nextTask: task, checks }
+    return { saved: true, ...saved, nextTask: task, checks, ...(rules === null ? {} : { rules }) }
   } finally {
     // ⑥ finish 走 finally: 摘要 / 写卡哪一步失败都不许把屏留下, 归还自己的错也不许盖掉摘要的答案
     await exploreReleaseScreens(ended, finishing)
@@ -10601,7 +12634,7 @@ function exploreFinishText(outcome) {
     : outcome.checks.error
       ? `checks: they were NOT written (${outcome.checks.error})`
       : outcome.checks.written === 0
-        ? 'checks: none were usable (each one needs what + a usage or time shape)'
+        ? 'checks: none were usable (each one needs what + a usage / time / event shape)'
         : `checks: ${outcome.checks.written} written, the judgement layer now watches ${outcome.checks.total}`
   if (outcome.already === true) {
     return [

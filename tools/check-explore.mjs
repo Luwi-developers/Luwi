@@ -65,14 +65,30 @@ const end = host.indexOf('/* ── 余额 (2026-10-16')
 if (start < 0 || end < 0 || end < start) throw new Error('the explore section is not in host-plugin/index.mjs')
 const section = host.slice(start, end)
 
+/**
+ * 抽出来的那一段读不到模块级的 `ROUTER_EVENT_BEFORE_DEFAULT` (它在判断层那一段里), 于是手递一个值
+ *
+ * 两处必须一致 —— 漂开的样子是"探索交了一条 event, 宿主按另一个缺省判"; 下面有一条判据钉着它
+ */
+const EVENT_BEFORE_DEFAULT = 15
+
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
+  'ROUTER_EVENT_BEFORE_DEFAULT',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
+    + ' exploreCheckRow, EXPLORE_CARD_TAIL,'
     + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
     + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
     + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
-)(() => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {}, async () => {})
+)(
+  () => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {},
+  async () => {}, EVENT_BEFORE_DEFAULT,
+)
+
+check('event 缺省 15 分钟, 这一侧与宿主那一个数一致', [
+  new RegExp(`const ROUTER_EVENT_BEFORE_DEFAULT = ${EVENT_BEFORE_DEFAULT}\\b`, 'u').test(host),
+], [true])
 
 /* ── 一、预设那一段 ────────────────────────────────────────────────────── */
 
@@ -147,8 +163,11 @@ needed('nextTask')
 needed('lw_automation')
 needed('schedule_create')
 // 2026-11-07 晚: 收尾第三样 —— "接下来该盯什么"由探索交给判断层 (主人: 检测的内容应由探索时加上)
+// 2026-11-10 (方案 C): 从"允许交"收紧成"默认要交", 判法三种; 实在没有就在摘要里写明为什么
 needed('checks:')
-needed('这一趟没看出新的就不交')
+needed('至少交一条你最有把握的')
+needed('为什么没有')
+needed('{"kind":"event"')
 needed('画像里"看到的"与"推断的"分开写')
 
 const toolFace = host.slice(host.indexOf("name: 'lw_explore'"), host.indexOf("name: 'lw_events_subscribe'"))
@@ -290,6 +309,13 @@ check('nextTask 的参数表与说明都在 (下一场任务卡)', [
   /nextTask:/u.test(toolFace),
   toolFace.includes('NEXT exploration'),
 ], [true, true])
+check('finish 还收两把尺子 (2026-11-10: 游戏线 / 提前天数由探索自己定)', [
+  /rules: \{/u.test(toolFace),
+  toolFace.includes('gameMinutes'),
+  /async function exploreRulesWrite\(rules\)/u.test(section),
+  /exploreRulesWrite\(args\?\.rules\)/u.test(section),
+  !/settings_sim_router_game/u.test(host),
+], [true, true, true, true, true])
 check('工具说明里写清"宿主自己按排期开, 这条工具不开"', [
   toolFace.includes('never starts one') || toolFace.includes('never starts'),
   toolFace.includes('daily start time'),
@@ -340,7 +366,12 @@ check(
 const pack = await read('tools/pack-host.mjs')
 const custom = await read('app/src/main/java/io/github/yuloong07star/luwi/host/CustomPresets.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
-check('pack-host 摆的就是探索与主动对话那两份 (手机/视频两条 2026-10-18 下线)', /const presets = \['explore', 'proactive'\]/u.test(pack), true)
+// 2026-11-10: pack-host 那份表多了 `luwi` (默认档也要随树走), 所以不再逐字比一句话 ——
+// 认的是"探索与主动对话都在这一份表里" (手机/视频那两条 2026-10-18 下线)
+check('pack-host 摆的表里有探索与主动对话', [
+  /const presets = \[[^\]]*'explore'/u.test(pack),
+  /const presets = \[[^\]]*'proactive'/u.test(pack),
+], [true, true])
 check('Kotlin 那张 PRESET_ROWS 里有探索那一对', /ROW_EXPLORE to "explore",/u.test(custom), true)
 const exploreBranch = host.slice(
   host.indexOf("if (line.source === 'explore')"),
@@ -917,6 +948,141 @@ check('⑩ 30 s 窗口与三种情形各有单测 (第一次弹 / 窗口内丢 /
     await read('app/src/test/java/io/github/yuloong07star/luwi/ui/ScreenErrorOnceTest.kt'),
   ),
 ], [true, true])
+
+/* ── 十八、三种判法与空手留痕 (2026-11-10, 方案 B / D) ─────────────────── */
+
+/*
+ * 主人这一条要的是"探索交检测项"从**允许**变成**会发生**, 而两半都能在 PC 上钉住:
+ *
+ * 1. `exploreCheckRow` 是那一层的纯函数 —— 三种判法各收什么, 坏参数为什么整条丢
+ * 2. 空手也留痕: `lastFinish` / `checksStreak` 真的写进 `explore.json`, 同一场重交不连 +2
+ */
+
+check('三种判法各收一条 (usage / time / event)', [
+  api.exploreCheckRow({ what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, at: '21:00' }),
+  api.exploreCheckRow({ what: '出门前问一句', when: { kind: 'time' }, at: '07:40' }),
+  api.exploreCheckRow({
+    what: '上班前提醒带门卡',
+    when: { kind: 'event', beforeMinutes: 30, titleContains: '上班' },
+  }),
+], [
+  { what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, at: '21:00' },
+  { what: '出门前问一句', when: { kind: 'time' }, at: '07:40' },
+  { what: '上班前提醒带门卡', when: { kind: 'event', beforeMinutes: 30, titleContains: '上班' } },
+])
+
+check('event 缺 beforeMinutes 时按 15 记, 没给的字段不写空键', api.exploreCheckRow({
+  what: '开会前提醒',
+  when: { kind: 'event' },
+}), { what: '开会前提醒', when: { kind: 'event', beforeMinutes: 15 } })
+
+check('event 的坏参数整条丢 (0 / 1441 / 21 字标题 / 6 本日历 / afterMinutes / 歪日历 id)', [
+  api.exploreCheckRow({ what: 'a', when: { kind: 'event', beforeMinutes: 0 } }),
+  api.exploreCheckRow({ what: 'a', when: { kind: 'event', beforeMinutes: 1441 } }),
+  api.exploreCheckRow({
+    what: 'a',
+    when: { kind: 'event', titleContains: '一二三四五六七八九十一二三四五六七八九十一' },
+  }),
+  api.exploreCheckRow({ what: 'a', when: { kind: 'event', calendarIds: ['1', '2', '3', '4', '5', '6'] } }),
+  api.exploreCheckRow({ what: 'a', when: { kind: 'event', afterMinutes: 10 } }),
+  api.exploreCheckRow({ what: 'a', when: { kind: 'event', calendarIds: ['1', 'x'] } }),
+], [null, null, null, null, null, null])
+
+check('20 字的标题收 (边界在 20 这一头), 5 本日历收', api.exploreCheckRow({
+  what: 'a',
+  when: {
+    kind: 'event',
+    beforeMinutes: 5,
+    titleContains: '一二三四五六七八九十一二三四五六七八九十',
+    calendarIds: ['1', '2', '3', '4', '5'],
+  },
+}), {
+  what: 'a',
+  when: {
+    kind: 'event',
+    beforeMinutes: 5,
+    titleContains: '一二三四五六七八九十一二三四五六七八九十',
+    calendarIds: ['1', '2', '3', '4', '5'],
+  },
+})
+
+check('不认识的 kind / 空的 what / time 没有 at 一律丢', [
+  api.exploreCheckRow({ what: 'a', when: { kind: 'weekday' } }),
+  api.exploreCheckRow({ what: '   ', when: { kind: 'time' }, at: '07:40' }),
+  api.exploreCheckRow({ what: 'a', when: { kind: 'time' } }),
+], [null, null, null])
+
+check('任务卡尾注那三行在, 而且正文预算扣掉了它', [
+  api.EXPLORE_CARD_TAIL.includes('收尾三样'),
+  api.EXPLORE_CARD_TAIL.includes('至多 3 条'),
+  api.EXPLORE_CARD_TAIL.includes('为什么没有'),
+  /const budget = Math\.max\(0, EXPLORE_TASK_CHARS - EXPLORE_CARD_TAIL\.length - 1\)/.test(section),
+  /\$\{String\(text \?\? ''\)\.trim\(\)\.slice\(0, budget\)\}\$\{EXPLORE_CARD_TAIL\}/.test(section),
+], [true, true, true, true, true])
+
+check('开场正文里也有那一句 (那一句永远不会被覆盖)', api.exploreStartLine(
+  '看看新装了什么',
+  run(false, 0, 60, now),
+  '/x/lw/explore/20261018-2130.md',
+).includes('收尾: nextTask + 至多 3 条 checks (没有就写明为什么)'), true)
+
+const checksHome = await mkdtemp(join(tmpdir(), 'lw-explore-checks-'))
+const previousChecksHome = process.env.DSH_HOME
+process.env.DSH_HOME = checksHome
+
+/** 一份能真写盘的那一段 (只多给一个临时名) */
+function checksBook() {
+  return new Function(
+    'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'temporaryName',
+    'ROUTER_EVENT_BEFORE_DEFAULT',
+    `${section}\nreturn { exploreRecordChecks, exploreFinishFromRecord, exploreStateRestore,`
+      + ' streakOf: () => exploreChecksStreak, lastFinishOf: () => exploreLastFinish }',
+  )(
+    readFile, readdir, join, dirname, mkdir, writeFile, rename, rm,
+    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT,
+  )
+}
+
+const book = checksBook()
+const stateFile = join(checksHome, 'lw', 'explore.json')
+const readBook = async () => JSON.parse(await readFile(stateFile, 'utf8'))
+
+await book.exploreRecordChecks('s1', 'finish', { written: 2, total: 3 })
+const afterFirst = await readBook()
+await book.exploreRecordChecks('s2', 'finish', { written: 0, total: 3 })
+await book.exploreRecordChecks('s2', 'already', { written: 0, total: 3 })
+const afterSame = await readBook()
+await book.exploreRecordChecks('s3', 'finish', { written: 0, total: 3 })
+const afterThird = await readBook()
+
+check('交了就归零, 没交就 +1, 同一场重交不再 +1', [
+  afterFirst.checksStreak, afterFirst.lastFinish.written, afterFirst.lastFinish.session,
+  afterSame.checksStreak, afterThird.checksStreak, afterThird.lastFinish.written,
+], [0, 2, 's1', 1, 2, 0])
+
+check('那两笔账写在同一份 explore.json 里, 版本号与它自己的键都在', [
+  afterThird.v, typeof afterThird.lastFinish.at, afterThird.lastFinish.ended,
+], [1, 'number', 'finish'])
+
+// 宿主重启: 换一个实例从文件把账读回来 (它是"连着的场数"跨进程的唯一来源)
+const restarted = checksBook()
+const restoredChecks = await restarted.exploreStateRestore()
+check('重启之后 streak 与上一场读数都回来了', [
+  restoredChecks, restarted.streakOf(), restarted.lastFinishOf()?.written, restarted.lastFinishOf()?.session,
+], [false, 2, 0, 's3'])
+
+await restarted.exploreRecordChecks('s4', 'finish', { written: 1, total: 4 })
+check('交了一条之后重新归零', [restarted.streakOf(), restarted.lastFinishOf()?.written], [0, 1])
+
+check('那一笔读数形状不对就当没有 (设置页少一行, 不显示编出来的数)', [
+  book.exploreFinishFromRecord({ lastFinish: null }),
+  book.exploreFinishFromRecord({ lastFinish: 'not-a-row' }),
+  book.exploreFinishFromRecord({ lastFinish: { at: 'x', written: -3, total: 2 } }),
+], [null, null, { at: 0, ended: '', written: 0, total: 2, session: '' }])
+
+await rm(checksHome, { recursive: true, force: true })
+if (previousChecksHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = previousChecksHome
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 

@@ -87,8 +87,11 @@ check('段标题是竖排 (SectionTitle 里 Column 而不是并肩的 Row)', [
   /SettingsSectionHeader/u.test(sectionTitle),
 ], [true, true])
 
-// 二十段里第一段 (酒馆) 的内容由 LuwiTavern 画, 所以这一份里只数得到 19 个面板
-check('每一段都套了 SettingsPanel (本页 19 段, 酒馆那段在 LuwiTavern)', count(screen, /SettingsPanel \{/gu), 19)
+// 二十段里第一段 (酒馆) 的内容由 LuwiTavern 画, 所以这一份里只数得到 19 个"一段一张卡"的;
+// **活动那一段本身是三张卡** (探索 / 主动对话 / 知道的事) 再加 1, 外观段 2026-11-10 起多一张
+// 「对话层」卡 (头像 / 昵称 / 背景 / 透明度), 于是这一份里现在数得到 20 个
+check('每一段都套了 SettingsPanel (本页 20 个面板: 19 段 + 活动段那三张额外的一张)',
+  count(screen, /SettingsPanel \{/gu), 20)
 
 check('每段底下一条细线', count(screen, /SettingsHairline\(\)/gu) >= 1, true)
 
