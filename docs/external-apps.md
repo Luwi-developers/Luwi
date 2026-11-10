@@ -69,3 +69,23 @@
 
 - `app/src/test/java/io/github/yuloong07star/luwi/channel/ExternalAppsTest.kt`：解析与 handoff 门槛
 - 这一层不许出现下载与建屏调用（`lw_external` 的源码里没有 `Download` 与 `VirtualScreen`）
+
+## 真机验证（2026-11-10，k40 / M2012K10C ares / Android 13 SDK 33）
+
+登记表放在 `files/dsh-home/lw/external-apps.json`，四条：`termux`（com.termux）、`notes`（com.miui.notes，
+`sendAction` 走 ACTION_SEND）、`settings`（显式组件 `com.android.settings/.Settings`）、`missing`
+（`com.example.notinstalled`，故意不装，用来量负面路径）。
+
+| op | 读数 |
+|---|---|
+| `list` | 四条都出来：termux、notes、settings 标"装了"，missing 标"没装" |
+| `probe` | 三个装了；missing 回 unsupported；并报出 termux 与 notes 能收 `ACTION_SEND` 文本，settings 只能开 |
+| `open notes` | 真的跳到备忘录：`dumpsys window` 的 `mCurrentFocus=Window{... com.miui.notes/com.miui.notes.ui.activity.EditActivity}` |
+| `handoff hello → notes` | 「hello」五个字符作为 `EXTRA_TEXT` 交出去，系统回报已交 |
+
+同一轮还验了两件负面事实：`missing` 没有被猜成别的包，`handoff` 只收纯文本。
+
+验证方式说明：`third_party/deepseek-harness` 在本机是空目录（私有子模块未初始化），打不出带新 host 的
+APK，所以这一轮是「新装应用侧 APK + 把 `lw_external` 的 46 行工具块与 55 行 `formatExternal` 移植进
+手机上已解包的旧 `luwi-channel/index.mjs`（原文件备份为 `index.mjs.bak`）」。**仓库里的 host 代码路径尚未
+被端到端跑过**，等用主分支打出的包再复验一次。
