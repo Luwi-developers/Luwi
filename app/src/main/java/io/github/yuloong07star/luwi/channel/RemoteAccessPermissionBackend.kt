@@ -59,8 +59,14 @@ object RootAccessBackend : RemoteAccessPermissionBackend {
 
     override val backend = RemoteBackend.ROOT
 
-    /** Always worth trying: a device without root fails the attempt in a moment */
-    override fun isAvailable(): Boolean = true
+    /**
+     * Only when the root manager has already said yes
+     *
+     * 以前这里恒为 true: 反正没 root 的设备试一下也就失败了. 代价是**首启会弹一个 su 授权**,
+     * 而报告里第一条就是这个 (2.8.0 首装, 还没给任何权限就先问 root). root 对这个应用是可选
+     * 的加分项, 不该在没有用户表态之前去要: 用户真要用 root, 在设置里授权一次, 这里就变 true
+     */
+    override fun isAvailable(): Boolean = rootState() == true
 
     /** What the root manager last decided, which is unknown until something has been run */
     override fun isGranted(): Boolean = rootState() == true

@@ -76,9 +76,12 @@ object PrivilegedChannel {
             application = context.applicationContext
             if (routes.isNotEmpty()) return
             val app = context.applicationContext
+            // Shizuku 先试: 它是这个应用的主推通道, 而且不需要 su
+            // root 放后面只在已经授权过时才进 (见 RootAccessBackend.isAvailable):
+            // 首启先弹一个 su 授权, 对没用过 root 的人是惊吓, 也换不来什么
             routes = listOf(
-                Route(RootServiceConnector(app), RootAccessBackend),
                 Route(ShizukuServiceConnector(app), ShizukuAccessBackend),
+                Route(RootServiceConnector(app), RootAccessBackend),
             )
         }
     }

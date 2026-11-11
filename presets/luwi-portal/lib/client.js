@@ -3251,7 +3251,9 @@ window.__ModuleLoader__.load({
         if (!els.send || sending) return
         var text = els.input ? String(els.input.value || '').trim() : ''
         var ready = attach.length > 0 && attachReady()
-        els.send.disabled = (text === '' && !ready) || sessionId === null
+        // 没有会话时不再把发送钮锁上: 它的禁用态只是 0.4 透明度, 看着还能点, 点了又什么都没发生,
+        // 于是用户以为界面坏了. 现在让它能点, 由 send() 用一句话说清"先开一场对话"
+        els.send.disabled = text === '' && !ready
       }
 
       function kv(key, value) {
@@ -3727,7 +3729,11 @@ window.__ModuleLoader__.load({
       function send(mode) {
         if (sending) return
         var text = String(els.input.value || '').trim()
-        if (sessionId === null) return
+        if (sessionId === null) {
+          // 以前这里是直接 return: 发送钮看着是能点的, 点了什么都不发生, 用户以为坏了
+          showNote('还没有对话: 先点「历史」开一场, 或者先在 dsh 里选一个工作区', true)
+          return
+        }
         // 带图的那一路: 文字可以为空 (只发一张图), 但图必须已经落好盘
         if (attach.length > 0) {
           if (!attachReady()) {
