@@ -9,8 +9,12 @@
 
 - **2.7.10 冻结**: `D:\apk\archive\releases\Luwi-2.7.10-frozen-20261030-r2.apk`, 250,390,159 字节, sha256
   `F89348B9…`, 2026-11-01 周日发, 一字节都不许改
-- 发布只认 `archive\releases\` 副本 (`app-debug.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
-- 只发 debug 包; 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定) —— **换 key = 全员卸载重装**,
+- 发布只认 `archive\releases\` 副本 (`app-release.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
+- 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包), `debuggable=false`;
+  **签名仍是那把旧 debug key** (`CN=Android Debug`) —— 换 key 会让 2.7.10 装不上 2.8.0, 只能卸载重装,
+  `files/dsh-home` (会话 / 凭据 / 设置) 跟着丢; 换 key 归 2.9.0, 且必须走 `apksigner` 的 v3 lineage
+  (`tools/lw-make-release-keystore.ps1` 已备好那把 `CN=Luwi Release` 的新 key, key 与口令都不进仓库)
+- 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定 / 不可调试) —— **换 key = 全员卸载重装**,
   并跑 `python tools/apk-bytes.py <apk>` 验无归属区间 (最大那条只应几 KB)
 - 公告: 对外只叫 `Luwi`, 不写 DSH / LW; 未上真机的项不进公告
 - 发版闸带「分支漂移」: tag 后新起的 agent 分支, tip 未进 main 的必须在 `tools/branch-drift-allow.json` 写 why;
@@ -329,7 +333,8 @@
 - 迭代: submodule 里提交 (同一步改 `third_party/deepseek-harness/patch.md`) → `pack-host.mjs` → `push-host.mjs` → 重启 app
 - 判据: `DshHost: dsh web:` = 树起来; `DshWebView: shell` 的 `rootChildren` 非 0 = 渲染; `LwMain: resumed with host Running`
   = 没重载
-- **出包前先删 `app/build/outputs/apk/debug/app-debug.apk`** —— `packageDebug` 会在旧包上原地改写留空洞
+- **出包前先删旧 APK**: `app/build/outputs/apk/<变体>/app-<变体>.apk` (发布包是 `release/app-release.apk`) ——
+  打包任务会在旧包上原地改写留空洞
 - host 树裁剪在 `pack-host.mjs` 末尾 (剔 win32/darwin、`.map`、`.d.ts`、测试), 判据 `tools/check-host-slim.mjs`,
   **别用事后重打 zip 的脚本**
 - **换基座后先跑 `node tools/check-host-patches.mjs`**: 钉 `patch.md` 第 5/6/7/8 组 (bash/rg 指定、硬链接退路、附件

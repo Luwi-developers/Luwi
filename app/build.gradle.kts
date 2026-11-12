@@ -289,10 +289,35 @@ android {
      *
      * 所以这里点名 `D:\apk\.android\debug.keystore`: 谁跑、在哪个用户下跑, 签出来的都是同一把。
      * 换机器时用 `LW_DEBUG_KEYSTORE` 指过去 (它必须仍是**同一把旧 key**, 否则真机装不上)
+     *
+     * 2026-11-12: 加一条绝对路径兜底 —— 工单工作树在 `D:\apk\.lwtmp\sa\work\<单名>` 下, `../.android`
+     * 会落到 `.lwtmp\sa\work\.android` (不存在), 于是同一个仓库在工位里出不了包。**先挑存在的那份**,
+     * 挑不到就退回原来的相对路径 (报错信息仍对着它), 签名身份不变
      */
-    val debugKeystore = providers.environmentVariable("LW_DEBUG_KEYSTORE")
-        .orElse(providers.environmentVariable("ANDROID_SDK_HOME").map { "$it/.android/debug.keystore" })
-        .getOrElse(rootProject.file("../.android/debug.keystore").absolutePath)
+    val debugKeystoreCandidates = listOfNotNull(
+        providers.environmentVariable("LW_DEBUG_KEYSTORE").orNull,
+        providers.environmentVariable("ANDROID_SDK_HOME").map { "$it/.android/debug.keystore" }.orNull,
+        rootProject.file("../.android/debug.keystore").absolutePath,
+        "D:/apk/.android/debug.keystore",
+    )
+    val debugKeystore = debugKeystoreCandidates.firstOrNull { File(it).isFile } ?: debugKeystoreCandidates.first()
+
+    /**
+     * 签名: 2.8.0 的发布包**仍然用这把旧 debug keystore** 签 (2026-11-12, #36 第二次派单)
+     *
+     * 先把账说清: 这一版要解决的是"发布包带 `application-debuggable`"这个调试口子 (issue #50),
+     * 不是换 key。换 key 的代价是包名相同而签名不同 —— 安卓只回 INSTALL_FAILED_UPDATE_INCOMPATIBLE,
+     * 只能卸载重装, 而卸载会带走 files/dsh-home (会话 / 凭据 / 设置), 用户数据就这么丢了
+     *
+     * 所以 2.8.0 只做两件事: 发布包改走 release 变体 (不带 debuggable), 签名照旧走上面那把
+     * `D:\apk\.android\debug.keystore` (CN=Android Debug, 证书摘要 652084a9…) —— 2.7.10 能被 2.8.0
+     * 直接覆盖安装, 数据一个字节都不动
+     *
+     * **换 key 推到 2.9.0**, 并且只能走 APK Signature Scheme v3 的签名轮换 (lineage, 用旧 key 签字
+     * 授权新 key, 每版都带同一份 lineage), 那一版才既换掉 key 又保住"覆盖安装不丢数据"
+     * 新 key 已经生成好了 (`D:\apk\.android\luwi-release.jks`, CN=Luwi Release), 生成与体检见
+     * tools/lw-make-release-keystore.ps1
+     */
     signingConfigs {
         getByName("debug") {
             storeFile = file(debugKeystore)
@@ -345,30 +370,36 @@ android {
     }
 
     buildTypes {
-        // 1.2.0: 发的就是 debug 包 (同一个 debug keystore, 才能覆盖安装、会话与记忆不丢), 而 R8 与
-        // 资源裁剪对哪个 build type 都适用 —— 所以把优化开在 debug 上, 不必改发 release 包。
+        // 1.2.0: debug 也吃 R8 与资源裁剪 —— 那时候发的是 debug 包, 而优化对哪个 build type 都适用
         // 关掉优化时 dex 是 69.6 MiB (十一个 classes*.dex), 那是这一版最大的一笔
+        // 2.8.0 #36 起正式包改走 release 变体 (下面那一段), dev 循环仍然走 debug, 两边的优化与规则同一份
         debug {
             optimization {
                 enable = true
             }
-            // 默认只有 release 才吃 proguard-rules.pro, 而这一版**发的是 debug 包**, 所以显式挂上。
-            // 那份规则里最要紧的一条是特权进程的入口类名 (见文件里的注释)
+            // 默认只有 release 才吃 proguard-rules.pro; dev 包也要跑同一套 (它与正式包只差 debuggable
+            // 与签名), 所以显式挂上 —— 那份规则里最要紧的一条是特权进程的入口类名 (见文件里的注释)
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
         }
         release {
+            // 2.8.0 #36: 发的换成 release 变体, 于是它要接过 debug 那一份的账 —— R8 与资源裁剪开着,
+            // 规则文件也是同一份 (那份里最要紧的一条是特权进程的入口类名, 见 proguard-rules.pro)
+            // 关掉优化时 dex 69.6 MiB, 那是这一版最大的一笔, 正式包不能这么发
             optimization {
-                enable = false
+                enable = true
             }
-            // 2026-10-18: release 变体从前没有挂签名, assembleRelease 会直接出
-            // app-release-unsigned.apk —— 装到设备上是 INSTALL_PARSE_FAILED_NO_CERTIFICATES
-            // ("该安装包未包含任何证书"). 这里挂上与 debug 同一把 key (D:\apk\.android\debug.keystore),
-            // 于是就算谁误跑了 release, 出来的包也签过名, 且与已发出去的 debug 包同签名能覆盖升级.
-            // 这不是"改发 release": 发版仍然只认 assembleDebug 的 app-debug.apk,
-            // 发布前的闸在 tools\lw-release-check.ps1
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // `application-debuggable` 这一行由 build type 给: release 本来就不带, 这里写明是判据
+            // (tools/lw-release-check.ps1 会拿 aapt2 dump badging 再核一次), 谁把这条改成 true 都看得见
+            isDebuggable = false
+            // 签名仍是那把旧 debug key (理由见上面 signingConfigs 前那一段): 2.8.0 要能被 2.7.10 覆盖安装,
+            // 用户数据不能靠卸载重装来换一个"好看的证书主体"
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -437,9 +468,21 @@ android {
 // onVariants runs, so this matches them as they appear rather than naming one now; the app
 // reports a missing or stale archive on its own, and `assembleDebug --dry-run` shows
 // `merge<variant>Assets` in the graph if this ever needs rechecking
+//
+// 2.8.0 #36: 发布包改走 release 变体之后, 第一次真的跑到 lintVital (它只跟 release 走), 而 lint
+// 的模型任务是**直接读源集里那两个生成目录**的 —— 没连边就被 Gradle 判成 implicit dependency
+// (`:app:generateReleaseLintVitalReportModel` uses output of `:app:zipHostTree`), 整趟构建当场红
+// 于是把 lint 那几个读 assets 的任务也一起连上, 别只连 merge<variant>Assets
 androidComponents {
     onVariants { variant ->
-        tasks.matching { it.name == "merge${variant.name.replaceFirstChar(Char::uppercaseChar)}Assets" }
+        val cap = variant.name.replaceFirstChar(Char::uppercaseChar)
+        val assetReaders = setOf(
+            "merge${cap}Assets",
+            "generate${cap}LintVitalReportModel",
+            "generate${cap}LintModel",
+            "lintVitalAnalyze${cap}",
+        )
+        tasks.matching { it.name in assetReaders }
             .configureEach {
                 dependsOn(zipHostTree)
                 dependsOn(copySeedAssets)
