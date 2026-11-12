@@ -213,6 +213,27 @@ internal class PortalBridge(private val context: Context) {
         }.toString()
     }
 
+    /**
+     * 「Luwi」工作区那个目录 (2.8.0 #37): 门户在"一个工作区都没有"时靠它把目录备好
+     *
+     * 为什么不让 dsh 自己去建: 它那条首启缺省工作区落在 `<系统 Documents>/deepseek-harness/default-workspace`,
+     * 安卓上 `system Documents directory is unavailable` 必失败, 于是首启停在空态。工作区目录本来就由
+     * 应用三档解析 (见 `Workspace.resolve`), 这里只是把同一份事实交给门户: 目录在不在, 以及要不要建
+     *
+     * @param make 目录不在时建它 (`mkdirs`), 只在人点了「选工作区」之后才传 true
+     * @returns `{path, exists}` —— `path` 是绝对路径, `exists` 是建完之后它真的是个目录
+     */
+    @JavascriptInterface
+    fun portalWorkspace(make: Boolean): String {
+        val directory = channelWorkspace()
+        var exists = directory.isDirectory
+        if (!exists && make) exists = directory.mkdirs() || directory.isDirectory
+        return JSONObject().apply {
+            put("path", directory.absolutePath)
+            put("exists", exists)
+        }.toString()
+    }
+
     /** 门户开着还是收起了: 菜单那一项靠它换方向 */
     @JavascriptInterface
     fun portalVisible(on: Boolean) {
@@ -566,6 +587,9 @@ internal class PortalBridge(private val context: Context) {
     /** 球那一场所在的工作区 (`dsh-ball`), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
     private fun ballWorkspace(): File = File(Workspace.resolve(context).directory, BALL_WORKSPACE)
 
+    /** 「Luwi」那条通道工作区 (探索 / 主动场那条, 与宿主 `EXPLORE_WORKSPACE_NAME` 同一个名字) */
+    private fun channelWorkspace(): File = File(Workspace.resolve(context).directory, CHANNEL_WORKSPACE)
+
     private fun readJson(file: File): JSONObject? = runCatching {
         if (!file.isFile) null else JSONObject(file.readText())
     }.getOrNull()
@@ -573,6 +597,9 @@ internal class PortalBridge(private val context: Context) {
     private companion object {
         /** 工作区名: 宿主那一侧是 `BALL_WORKSPACE_NAME`, 判据脚本会比对这两个量 */
         const val BALL_WORKSPACE = "dsh-ball"
+
+        /** 「Luwi」那条通道工作区: 宿主那一侧是 `EXPLORE_WORKSPACE_NAME`, 两处同一个字面量 */
+        const val CHANNEL_WORKSPACE = "Luwi"
 
         /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (10 分钟) */
         const val VOICE_SESSION_MS = 10 * 60 * 1000L

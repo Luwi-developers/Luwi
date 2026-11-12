@@ -2552,9 +2552,10 @@ window.__ModuleLoader__.load({
       /* ── 选工作区 (2026-11-12 #37) ────────────────────────────────────────────
        *
        * 首启 / `pm clear` 之后 dsh 那一边可能一个工作区都还没有, 而这一层盖住了它整个界面:
-       * 没有入口就没有任何一句话发得出去 —— 所以空态摆一颗「选工作区」, 点开是这一份列表:
-       * 一条工作区都没认出来时**先问宿主把默认那个备好** (`workspace/initializeDefault`,
-       * dsh 自己开屏也在做同一件事), 备好之后 3 s 内列表里就有它
+       * 没有入口就没有任何一句话发得出去 —— 所以空态摆一颗「选工作区」, 点开是这一份列表。
+       * 一条工作区都没认出来时**请应用把 `Luwi` 那条目录备好** (桥上的 `portalWorkspace`),
+       * 再让 dsh 认它 (`workspaces.create`): 那条路不碰系统 Documents —— dsh 自己那条首启
+       * 缺省工作区在安卓上必失败 (`system Documents directory is unavailable`)
        */
 
       /** 把那一窗按现在的工作区表重画 (窗开着才会被调到) */
@@ -2648,16 +2649,27 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 一个工作区都没有: 请宿主把默认那个备好
+       * 一个工作区都没有: 把「Luwi」那条目录备好, 再让 dsh 认它
        *
-       * 走的是 `ctx.get('workspaces').initializeDefault()` —— 就是 dsh 开屏自己那条 (同一份
-       * `workspace/initializeDefault`), 这一层只是按人的一下点击再叫一次, 失败只在窗里说一句
+       * **不走 `initializeDefault`** (2.8.0 #37): 它那条首启缺省工作区是
+       * `<系统 Documents>/deepseek-harness/default-workspace`, 安卓上必失败
+       * (`system Documents directory is unavailable`), 首启于是停在空态、一句也发不出去。
+       * 工作区目录本来就由应用三档解析 (`Workspace.resolve`), 桥上的 `portalWorkspace(true)`
+       * 把它备好, 这里只负责让 dsh 认这一份 (`workspaces.create({path})`, 幂等 —— 已注册就把
+       * 原来那条还回来)
        */
       function ensureWorkspaces() {
         if (workspaceItems().length > 0) return
+        var made = call('portalWorkspace', true)
+        var path = made && typeof made.path === 'string' ? made.path : ''
+        if (path === '' || made.exists !== true) {
+          pickNote = '这台还没有工作区目录, 先建一个'
+          renderPick()
+          return
+        }
         var service = workspaceService()
-        if (!service || typeof service.initializeDefault !== 'function') {
-          pickNote = '还没有工作区, 这一版建不起来'
+        if (!service || typeof service.create !== 'function') {
+          pickNote = '这一版没有工作区服务, 建不起来'
           renderPick()
           return
         }
@@ -2665,7 +2677,7 @@ window.__ModuleLoader__.load({
         renderPick()
         var pending = null
         try {
-          pending = service.initializeDefault()
+          pending = service.create({ path: path })
         } catch (error) {
           pickNote = '没建起来: ' + describeError(error)
           renderPick()
