@@ -84,6 +84,21 @@ export function apply(ctx) {
   hostCtx = ctx
   for (const tool of TOOLS) ctx.tools.register(tool)
 
+  // 首启那一刻就把**已有的**「Luwi」工作区认出来 (2.8.0 #37)
+  //
+  // 客户端开屏那一拍要看见 ≥1 个工作区: 看见了就直接落进去, 看不见它就去问系统 Documents ——
+  // 安卓上那条必失败 (`system Documents directory is unavailable`), 界面上是一张空态, 一句也发不
+  // 出去。**只认已有**: 目录不在时什么都不做, 于是门户那颗「选工作区」才有出场的时机
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['workspaceRegistry'], (workspaceCtx) => {
+      void adoptExploreWorkspace(workspaceCtx)
+        .then((workspace) => {
+          console.log(`luwi-channel: the existing explore workspace at boot is ${workspace?.path ?? '(not adopted)'}`)
+        })
+        .catch((error) => warn(ctx, `the existing workspace could not be adopted at boot: ${error?.message ?? error}`))
+    })
+  }
+
   // 两道闸 (批次 3, 需求 17 与需求 3): 视频模式里屏幕类工具一律拒; 相机与视频模式同时只许一场会话用。
   // 名单外的工具在这道闸里只多一次 Set 查找 (见 [cameraAndModeGate])
   try {
@@ -8726,6 +8741,54 @@ async function ensureChannelWorkspace(ctx, name, state) {
   return { path: directory, id: state.id }
 }
 
+/**
+ * 把一条**已经存在**的通道工作区注册上, **不建目录** (2.8.0 #37)
+ *
+ * 与 [ensureChannelWorkspace] 只差一条: 目录不在时什么都不做。`pm clear` 之后 `$DSH_HOME` 是空的,
+ * 而 `/sdcard/DSH/Luwi` 还在 —— 客户端开屏那一刻只要在列表里看见它, 就直接落进那一场, 用不着去问
+ * 系统 Documents (安卓上那条必失败, 日志就是 `system Documents directory is unavailable`, 界面停在
+ * 空态, 一句也发不出去)
+ *
+ * **首页那颗「选工作区」的出场时机也在这条上**: 目录被人挪走时这里保持什么都不做, 工作区列表才是
+ * 空的, 于是门户那颗按钮才有出场的时机 (见 `presets/luwi-portal/lib/client.js` 的 pickWanted)
+ *
+ * @param registry 宿主的工作区注册表 (`ctx.workspaceRegistry`)
+ * @param name 目录名 (`Luwi`)
+ * @param state 这条通道自己的读数 (与 [ensureChannelWorkspace] 同一个形状)
+ */
+async function adoptExistingChannelWorkspace(registry, name, state) {
+  const directory = channelWorkspace(name)
+  state.path = directory
+  let isDirectory = false
+  try {
+    isDirectory = (await stat(directory)).isDirectory()
+  } catch (_missing) {
+    isDirectory = false
+  }
+  if (!isDirectory) {
+    state.registered = null
+    state.why = `there is no ${directory} to adopt, so the first launch has to ask which workspace to use`
+    return null
+  }
+  if (!registry || typeof registry.create !== 'function') {
+    state.registered = null
+    state.why = 'this profile has no workspace registry, so the existing workspace stays unregistered'
+    return null
+  }
+  try {
+    const entity = await registry.create(directory)
+    state.registered = true
+    state.why = null
+    state.id = String(entity?.id ?? '')
+    return { path: directory, id: state.id }
+  } catch (error) {
+    state.registered = false
+    state.why = `the existing workspace could not be registered: ${error?.message ?? error}`
+    warn(hostCtx, state.why)
+    return null
+  }
+}
+
 /** 浮标那条: 目录 `dsh-ball`, 读数记在 [ballWorkspaceState] 上 (判据钉着这个函数名) */
 async function ensureBallWorkspace(ctx) {
   return ensureChannelWorkspace(ctx, BALL_WORKSPACE_NAME, ballWorkspaceState)
@@ -11862,6 +11925,20 @@ async function ensureExploreWorkspace(ctx) {
   return ensureChannelWorkspace(ctx, EXPLORE_WORKSPACE_NAME, exploreWorkspaceState)
 }
 
+/**
+ * 探索那条的**只认已有**那条路 (2.8.0 #37): 目录不在时不建
+ *
+ * 启动那一下用它, 投递那一下仍用 [ensureExploreWorkspace]。区别就在"目录不在时": 启动时替人把
+ * 目录建出来, 等于把「还没有工作区」这件事实抹掉 —— 门户那颗「选工作区」永远不会出现, 而首启
+ * 该做的是**认出现有的那一份** (`/sdcard/DSH/Luwi`), 不是造一份新的
+ *
+ * @param ctx 宿主上下文 (`workspaceRegistry` 从它那里取; 取不到就只记读数)
+ */
+async function adoptExploreWorkspace(ctx) {
+  const registry = ctx?.workspaceRegistry ?? ctx?.get?.('workspaceRegistry') ?? hostCtx?.get?.('workspaceRegistry')
+  return adoptExistingChannelWorkspace(registry, EXPLORE_WORKSPACE_NAME, exploreWorkspaceState)
+}
+
 /** 这一档的读数 (给 `lw_explore op=status`, 也是"省电探针抛错"的唯一落点) */
 const exploreState = {
   preset: null,
@@ -12828,7 +12905,10 @@ function startExploreClock(ctx) {
       // 宿主起来就把探索那条工作区注册上 (2.7.9 T5, 与 dsh-ball 同一条幂等注册路): 于是「Luwi」
       // 不必等第一次探索成功才出现在会话列表里; 顺带把 status 那四项写进读数文件, 设置页才有得看。
       // **放在 restore 之后**: 这一步的写会覆盖 `run`, 抢在 restore 前面就把"上一场"抹掉了
-      void ensureExploreWorkspace(ctx)
+      //
+      // 2026-11-12 #37: 这一下改成"只认已有"(`adoptExploreWorkspace`), 不再建目录 —— 目录不在时
+      // 让门户那颗「选工作区」出场, 而不是替人把一份空工作区造出来
+      void adoptExploreWorkspace(ctx)
         .then((workspace) => {
           // 一行证据: 工作区不必等第一次探索成功才出现 (2.7.9 T5), 而这一行就是"它真的在"
           console.log(`luwi-channel: the explore workspace at startup is ${workspace?.path ?? '(not registered)'}`)

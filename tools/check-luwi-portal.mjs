@@ -834,6 +834,33 @@ if (failTableSource === '' || imageFailSource === '') {
   }
 }
 
+// ── 十三、首启没有工作区时首页给「选工作区」(2026-11-12 #37) ────────────────────
+//
+// `pm clear` 之后 dsh 那一边可能一个工作区都没有, 而门户把它整个界面盖住了: 没有入口就一句
+// 话都发不出去。空态那颗「选工作区」后面只两条路 —— 一条是这一窗的行怎么画 (工作区表 ->
+// 名字 / 路径 / 当前那一条), 一条是选中之后落进那个工作区。第一条是纯函数, 抽出来真跑
+
+const pickRowsSource = takeFunction('pickRows')
+const workspaceTitleSource = takeFunction('workspaceTitle')
+if (pickRowsSource === '' || workspaceTitleSource === '') {
+  failures.push('client.js: 抽不出 pickRows / workspaceTitle (选工作区那一窗的行画不出来)')
+} else {
+  const pickRows = new Function(`${workspaceTitleSource}\n${pickRowsSource}\nreturn pickRows`)()
+  const rows = pickRows([
+    { workspaceId: 'w1', title: '球', path: '/sdcard/DSH/dsh-ball', sessionIds: [] },
+    // 没起过名: 用路径最后一节当名字, 不能是一行空白
+    { workspaceId: 'w2', title: '  ', path: '/sdcard/DSH/work/', sessionIds: [] },
+    // 没有 id 的那一条不是工作区: 画出来也点不动
+    { title: '空壳', path: '/sdcard/DSH/ghost', sessionIds: [] },
+  ], 'w2')
+  const shape = rows.map(row => `${row.id}|${row.title}|${row.current ? 'on' : 'off'}`).join(',')
+  if (shape === 'w1|球|off,w2|work|on') {
+    notes.push('ok   选工作区: 名字缺省取路径末节, 当前那一条标出来 (没 id 的行不画)')
+  } else {
+    failures.push(`pickRows 画错了: ${shape}`)
+  }
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

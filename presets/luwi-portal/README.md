@@ -68,8 +68,8 @@ nextTask + router 的 checks) 摆在同一屏上
 - **输入卡照 dsh 的 `InputBar`**: 28px 圆角 (`--dsw-radius-panel`)、`--dsw-specific-input-major`
   的实底、`--dsw-elevation-soft` 的投影; 卡里的行序与 dsh 一致 —— **待发附件行 → 文本区 → 底部
   一行** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框上方显示, 像 dsh 原生那样")。
-  底部一行左边 `+` 与表情钮、右边模型 chip 与 34px 圆钮。**工作区选择不画**, 预设那一档也
-  **已取消** (2026-11-08 主人)
+  底部一行左边 `+` 与表情钮、右边模型 chip 与 34px 圆钮。**输入卡上不画工作区选择**, 预设那一档也
+  **已取消** (2026-11-08 主人); 工作区只在空态那颗「选工作区」(见下节)
 - **待发附件行** (`#lwp-attach-row`): 图与表情是 64px 缩略图 + 右上角 `×` (照 dsh 的
   `ComposerAttachments`: 圆角 16 / `object-fit:cover` / `pointer:coarse` 时常显), 非图片文件是一颗
   「名字 · 大小 · 状态」chip; 顺序就是挑选 / 点的顺序, `reading` 有扫光、`error` 红描边, 全部 ready
@@ -97,6 +97,31 @@ nextTask + router 的 checks) 摆在同一屏上
 
 **判断只在宿主那一处**: 门户显示的是 `router.json` 的 `last` (宿主 `judgeRouter` 判完写的), 它自己
 不重算, 所以抽屉里那句 `why` 与宿主真的判过的那一次逐字一致
+
+## 首启没有工作区: 空态那颗「选工作区」(2026-11-12 #37)
+
+`pm clear` 之后 dsh 那一边可能一个工作区都没有, 而这一层把 dsh 的界面整块盖住: 没有入口就等于
+一句话都发不出去 (`newConversation` 落不到场, 发送钮也按不动)。所以空态多一颗实体按钮
+`#lwp-pick-workspace` (字是「选工作区」, 原生 `<button>` —— 真机无障碍树里读得到 clickable=true):
+
+- **只有落不下去时才画** (`pickWanted()`): 一个工作区都没有, 或者这一场还没落到任何地方。有工作区
+  也有会话时这一屏是"和她说话"的地方, 工作区选择仍不在输入卡上画 (2026-11-08 的规矩不变)
+- 点开是 `#lwp-pick` 那一窗 (外壳照历史窗 / 预览窗): 一行一个工作区 (名字 + 路径), 当前那个标「当前 · 」;
+  名字没起过就用路径最后一节
+- **一个工作区都没有时先请应用备好 `Luwi` 那条目录** (`window.LuwiPortal.portalWorkspace(true)`, 目录由
+  `Workspace.resolve` 三档解析), 再让 dsh 认它 (`workspaces.create({path})`, 幂等), 最后靠列表订阅 +
+  250 ms × 12 拍补齐。**不走 dsh 的 `initializeDefault`**: 它那条首启缺省工作区在
+  `<系统 Documents>/deepseek-harness/default-workspace`, 安卓上必失败
+  (`system Documents directory is unavailable`), 首启就停在空态
+- **首启直接落进已有的 `Luwi`**: 宿主一起来 (客户端开屏之前) 就把**已经存在**的 `/sdcard/DSH/Luwi`
+  注册成工作区 (`adoptExploreWorkspace`, 只认已有不建目录), 于是 dsh 那一侧压根不会去问系统
+  Documents; 目录被人挪走时才轮到上面那颗按钮
+- 选中一行走 `openWorkspace(id)`: dsh 在那个工作区里复用 / 新建一张空白草稿并挂到 mainView, 门户等
+  `currentSessionId()` 落到那一场 (150 ms × 24), 落到就 `switchTo(id, 'new')` + `portalBind` + 15 s 不跟
+  账本 —— 与「开新对话」同一套, 于是下一句发得出去、也不会被 3 s 的账本拽走
+
+判据: `node tools/check-luwi-portal.mjs` (218 条), 其中一条真跑 `pickRows()` (名字缺省 / 当前那一条 /
+没有 id 的行不画)
 
 ## 预览窗 (2026-11-09)
 
