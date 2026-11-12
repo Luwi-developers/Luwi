@@ -33,6 +33,9 @@ param(
     [switch]$SkipInstall,
     [switch]$Build,
     [switch]$NoLaunch,
+    [int]$Attempts = 3,
+    [switch]$RequireHost,
+    [switch]$NoHome,
     [int]$WaitSeconds = 120
 )
 
@@ -96,42 +99,103 @@ $full = (Resolve-Path $Apk).Path
 $apkAge = [int]((Get-Date) - (Get-Item $full).LastWriteTime).TotalMinutes
 Write-Host "APK $([math]::Round((Get-Item $full).Length / 1MB, 1)) MB, built $apkAge min ago" -ForegroundColor Cyan
 
-# 装 : 两条路, 先流式 (HyperOS 只认这一条), 再退"推上去就地装"
+# 装 : HyperOS/MIUI 在 Luwi 前台时会拒装或装完即摘, 所以每次尝试前先回桌面;
+# 依次换 installer 身份 / 推送就地装, 每次 Success 后都用 pm path 复核 —— 空就算失败进下一轮
+# 判据不是 adb 的 "Success", 而是 `pm path` 有值 + lastUpdateTime 变新
 $component = "$Package/$Package.channel.LwAccessibility"
 $listener = "$Package/$Package.channel.LwNotificationListener"
 $wrote = $false
-if (-not $SkipInstall) {
-    # 判"到底装上了没有"的基准: 设备现在记的 lastUpdateTime。装完它必须变新, 否则就是没装成功 ——
-    # `pm install` 失败时会把异常栈打到 stderr, 只匹配 "Failure" 会漏掉 (实测真机上一次就是漏了,
-    # 脚本还报了成功)
-    $before = (& $adb -s $Serial shell "dumpsys package $Package | grep lastUpdateTime" 2>&1 | Out-String).Trim()
+$installedNow = $false
+$remote = '/data/local/tmp/lw-install.apk'
 
-    Write-Host "installing (streamed, with the package-installer identity)" -ForegroundColor Cyan
-    $streamed = (& $adb -s $Serial install -r -t -i com.android.packageinstaller $full 2>&1 | Out-String).Trim()
-    $okInstall = $streamed -match 'Success'
-    if (-not $okInstall) {
-        Write-Host "  streamed install did not go through: $($streamed -split "`n" | Select-Object -Last 1)" -ForegroundColor Yellow
-        # 次选: 先 push 到设备上再就地装 (大包在慢链路上更快, 而且有些 ROM 只认这一条)
-        $remote = '/data/local/tmp/lw-install.apk'
-        Write-Host "  falling back to: push + pm install" -ForegroundColor Yellow
-        $pushed = (& $adb -s $Serial push $full $remote 2>&1 | Out-String).Trim()
-        if ($pushed -match '1 file pushed') {
-            $inPlace = (& $adb -s $Serial shell "pm install -r -i com.android.packageinstaller -t $remote" 2>&1 | Out-String).Trim()
-            Write-Host "  $inPlace"
-            $okInstall = $inPlace -match 'Success'
-            & $adb -s $Serial shell "rm -f $remote" | Out-Null
-        } else {
-            Write-Host "  push failed: $pushed" -ForegroundColor Red
+function Test-PmPath {
+    $p = (Adb shell "pm path $Package").Trim()
+    return ($p -match '^package:')
+}
+
+function Add-InstallFailSnapshot {
+    param([string[]]$Lines)
+    $dir = 'D:\apk\logs\device'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $path = Join-Path $dir ("{0}-{1}-install-fail.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Serial)
+    $Lines | Out-File -FilePath $path -Encoding utf8
+    return $path
+}
+
+if (-not $SkipInstall) {
+    # 判"到底装上了没有"的基准: 设备现在记的 lastUpdateTime。装完它必须变新, 否则就是没装成功
+    $before = (& $adb -s $Serial shell "dumpsys package $Package | grep lastUpdateTime" 2>&1 | Out-String).Trim()
+    $attemptLines = @()
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        if (-not $NoHome) {
+            & $adb -s $Serial shell input keyevent KEYCODE_HOME 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
+
+        Write-Host "installing attempt $attempt/$Attempts (streamed, -i com.miui.packageinstaller)" -ForegroundColor Cyan
+        $out = (& $adb -s $Serial install -r -t -i com.miui.packageinstaller $full 2>&1 | Out-String).Trim()
+        if ($out -notmatch 'Success') {
+            Write-Host "  miui-installer streamed did not go through: $($out -split "`n" | Select-Object -Last 1)" -ForegroundColor Yellow
+            Write-Host "  trying -i com.android.packageinstaller" -ForegroundColor Yellow
+            $out = (& $adb -s $Serial install -r -t -i com.android.packageinstaller $full 2>&1 | Out-String).Trim()
+        }
+        if ($out -notmatch 'Success') {
+            Write-Host "  falling back to: push + pm install" -ForegroundColor Yellow
+            $pushed = (& $adb -s $Serial push $full $remote 2>&1 | Out-String).Trim()
+            if ($pushed -match '1 file pushed') {
+                $out = (& $adb -s $Serial shell "pm install -r -i com.miui.packageinstaller -t $remote" 2>&1 | Out-String).Trim()
+                & $adb -s $Serial shell "rm -f $remote" | Out-Null
+            } else {
+                Write-Host "  push failed: $pushed" -ForegroundColor Red
+                $out = $pushed
+            }
+        }
+        $attemptLines += "--- attempt $attempt ---`n$out"
+
+        # Success 之后才验: 出现「装完立刻被摘」时这里一定空
+        $pathOk = $false
+        for ($i = 0; $i -lt 20; $i++) {
+            if (Test-PmPath) { $pathOk = $true; break }
+            Start-Sleep -Seconds 1
+        }
+        $afterPath = (Adb shell "pm path $Package").Trim()
+        $afterUpdate = (Adb shell "dumpsys package $Package | grep lastUpdateTime").Trim()
+        if ($pathOk) {
+            Write-Host "installed: $afterUpdate" -ForegroundColor Green
+            $installedNow = $true
+            break
+        }
+        Write-Host "  Success but pm path is empty (package removed after install); retrying" -ForegroundColor Yellow
+        Write-Host "    path='$afterPath' lastUpdate='$afterUpdate'" -ForegroundColor DarkGray
+        if ($attempt -lt $Attempts) {
+            & $adb -s $Serial shell input keyevent KEYCODE_HOME 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
         }
     }
-    if (-not $okInstall) {
+
+    if (-not $installedNow) {
+        $lines = @(
+            "serial=$Serial apk=$full attempts=$Attempts",
+            "pm list packages -u:",
+            (Adb shell "pm list packages -u | grep -i luwi"),
+            "pm path: $(Adb shell "pm path $Package")",
+            "dumpsys package:",
+            (Adb shell "dumpsys package $Package"),
+            "install output:",
+            ($attemptLines -join "`n"),
+            "logcat (PackageManager/PackageInstaller/installd/luwi):",
+            (& $adb -s $Serial logcat -d -b all -v time 2>&1 |
+                Select-String -Pattern 'PackageManager|PackageInstaller|installd|luwi' |
+                Select-Object -Last 200 | Out-String)
+        )
+        $failLog = Add-InstallFailSnapshot -Lines $lines
         Write-Host ""
-        Write-Host "装不进去。HyperOS / MIUI 上最常见的一条是开发者选项里的「USB 安装」没开:" -ForegroundColor Red
-        Write-Host "  设置 -> 更多设置 -> 开发者选项 -> 「USB 安装」(允许通过 USB 安装应用)" -ForegroundColor Red
-        Write-Host "  那个开关有时还要求插着 SIM 且登录小米帐号; 开完再跑一次本脚本即可" -ForegroundColor Red
+        Write-Host "装不进去（$Attempts 次重试后 pm path 仍为空）。失败快照: $failLog" -ForegroundColor Red
+        Write-Host "  HyperOS 上先确认: 设置 -> 更多设置 -> 开发者选项 -> 「USB 安装」" -ForegroundColor Red
+        Write-Host "  不要手动删手机分身(user 999)里的副本；把快照发出来定位" -ForegroundColor Red
         exit 2
     }
-    Write-Host "installed" -ForegroundColor Green
 
     # 装完立刻把两条授权写回去 (vivo 上那个写入窗口就在装完这一会儿, 中间别插别的事)
     $script = @"
@@ -209,6 +273,11 @@ if (-not $NoLaunch) {
     } else {
         Write-Host "没等到 host 就绪行 (等了 $WaitSeconds s): 看设备上的 logcat -s DshHost" -ForegroundColor Yellow
     }
+}
+
+if ($RequireHost -and -not $SkipInstall -and -not $NoLaunch -and $null -eq $ready) {
+    Write-Host "RequireHost: 没等到 dsh web: http，验收失败（看上面的 DshHost 日志）" -ForegroundColor Red
+    exit 3
 }
 
 # 验收 : 两条判据, 缺一条就说清缺哪一条
