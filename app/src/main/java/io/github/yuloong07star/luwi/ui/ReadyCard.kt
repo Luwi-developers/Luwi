@@ -110,7 +110,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 关掉对话框不丢任何状态: 两个下载器的进度是它们自己的 Compose 状态, 窗关了照样在下, 再打开就接上
  */
 @Composable
-internal fun ReadyCardDialog(onDismiss: () -> Unit) {
+internal fun ReadyCardDialog(onDismiss: () -> Unit, onReport: () -> Unit) {
     // 第二个窗 (2026-11-07 主人: "在开机引导里再加上选择权限, 弹出第二个权限小窗")
     //
     // 为什么是第二个窗而不是在这一窗里换内容: 权限那一段是设置页现成的那一份 ([PermissionsItems]),
@@ -150,7 +150,11 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
                         .verticalScroll(rememberScrollState())
                         .padding(UiSpacing.Large),
                 ) {
-                    ReadyCardBody(permissionsDone = permissionsSeen, onPermissions = { permissions = true })
+                    ReadyCardBody(
+                        permissionsDone = permissionsSeen,
+                        onPermissions = { permissions = true },
+                        onReport = onReport,
+                    )
                     TextButton(
                         text = stringResource(R.string.ready_dialog_close),
                         onClick = onDismiss,
@@ -173,6 +177,8 @@ internal fun ReadyCardDialog(onDismiss: () -> Unit) {
             },
         )
     }
+    // 自检这一窗由调用方在体检表关掉之后再开: 平台 Dialog 里再叠一层 Overlay 窗会被它自己的窗口吃掉
+    // (2026-11-10 在 k40 上点不开, 就是这么发现的)
 }
 
 /**
@@ -283,10 +289,21 @@ internal object PermissionsSeen {
 internal fun ReadyPrompt() {
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
+    var doctor by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         if (withContext(Dispatchers.IO) { ReadyDialogSeen.claim(context) }) open = true
     }
-    if (open) ReadyCardDialog(onDismiss = { open = false })
+    if (open) {
+        ReadyCardDialog(
+            onDismiss = { open = false },
+            // 自检先把体检表关掉: 两层窗叠在一起点不开 (见 [ReadyCardDialog] 末尾那句)
+            onReport = {
+                open = false
+                doctor = true
+            },
+        )
+    }
+    if (doctor) DoctorDialog(onDismissRequest = { doctor = false })
 }
 
 /**
@@ -321,7 +338,7 @@ internal object ReadyDialogSeen {
 
 /** 对话框里那一坨: 一个环 + 四件依赖 + 下一步该按的那一颗按钮 */
 @Composable
-private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit) {
+private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, onReport: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // 这两个都是 Compose 状态: 通道与无障碍由各自的 Setting 在 worker 线程上填 —— 所以这里不需要轮询,
@@ -503,6 +520,18 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit) {
             },
         )
     }
+
+    // 修不好也得有个出口: 这一行点开就是八项读数 + 一个 "要不要发" 的岔路
+    // (窗由 [ReadyCardDialog] 叠在上面, 不能在这张表里再开一个 Dialog)
+    Text(
+        text = stringResource(R.string.doctor_entry_from_guide),
+        style = MiuixTheme.textStyles.footnote1,
+        color = MiuixTheme.colorScheme.primary,
+        modifier = Modifier
+            .padding(top = UiSpacing.Medium)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onReport() },
+    )
 }
 
 /**
