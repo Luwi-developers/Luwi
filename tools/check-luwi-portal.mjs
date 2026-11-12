@@ -236,8 +236,9 @@ if (client.includes('Number(outLines[s].at) >= lastUserTime) spoke = true')
 }
 // 2) 排序: 按「轮」排 (orderTimeline) —— 缺时间的 user 沉到最后, 同毫秒算上一轮, 不再用 sortAt
 // running max (那一条会把刚发出去的消息排到她上一句回复上面)
-if (client.includes('return orderTimeline(users, rows, extras)') && !client.includes('sortAt')
-  && !client.includes('sortFloor')) {
+// 2026-11-12 (#38): 排好的那一串再交给 `appendRecord` 接在门户记录后面 (自动换场带过来那一段)
+if (client.includes('return appendRecord(carried, orderTimeline(users, rows, extras))')
+  && !client.includes('sortAt') && !client.includes('sortFloor')) {
   notes.push('ok   排序走 orderTimeline 按轮排 (旧的 sortAt / running max 已拆)')
 } else {
   failures.push('client.js: 排序还没改成按轮排 —— 缺时间 / 同毫秒时消息会跳到上一句回复上面')
@@ -861,6 +862,205 @@ if (pickRowsSource === '' || workspaceTitleSource === '') {
   }
 }
 
+// ── 十四、主动场那句进当前对话 + 开场隐藏 (2026-11-12, 落实表 #38) ──────────────
+//
+// 主人 2026-11-12 的原话: "主动对话回复的消息只在那个主动对话里, 用户一打开应用不会看到, 只能通过
+// 历史对话查看; 要求回复的消息发送时要放到门户, 用户一打开就能看到, 并且不能显示发送的提示词;
+// 门户对话记录不可自动清空, 除非用户重启应用或者开启新对话"。
+// 2026-11-13 三次派单把口径收紧成: **那句要出现在当前对话 (门户首屏) 里, 不允许只落在那一场独立会话的历史
+// 对话里**, 且上一条历史仍在 (条数 = 触发前 + 1)。
+//
+// 所以这里钉五件, 都是把源码里的纯函数抽出来**真跑**:
+// ① 那一场是新的才投一次 (`proactiveNew`)
+// ② 不换场: 她的那几句进本场时间线 (`echoItemOf` + `orderTimeline` 真跑, 落在这条线末尾)
+// ③ 门户记录跨场只增不减 (`appendRecord`), 只有「开新对话」/ 点历史清 (`dropRecord`)
+// ④ 开场提示词整条不画 (`isProactiveStart`), 会话自己那一份历史一个字不动
+// ⑤ 回前台 / `lw/out` 变了一下都要把那一场的 jsonl 重取一遍
+
+const hostMark = grab(hostPlugin, /const PROACTIVE_START_MARK = '([^']+)'/)
+const clientMark = grab(client, /var PROACTIVE_START_MARK = '([^']+)'/)
+if (hostMark !== null && hostMark === clientMark) {
+  notes.push(`ok   开场那一句的头一段两侧逐字相同 (${hostMark})`)
+} else {
+  failures.push(`开场记号对不上: host-plugin ${String(hostMark)} / client.js ${String(clientMark)}`)
+}
+expect('client.js', client, 'function isProactiveStart')
+expect('client.js', client, 'function proactiveNew')
+expect('client.js', client, 'function echoItemOf')
+expect('client.js', client, 'function appendRecord')
+expect('client.js', client, 'function dropRecord')
+expect('client.js', client, 'appendRecord(carried, orderTimeline(')
+// **不换场**: 那一场只当一条数据源 (portalOut 认的是 `lw/out/<会话>.jsonl`), 屏上换场那一条不许有
+// (只看 `switchTo(...)` 的调用, `source.via === 'proactive'` 那个记号不在此列)
+if (/switchTo\([^)]*'proactive'/u.test(client) || client.includes('switchTo(run.session')) {
+  failures.push('client.js: 主动场还在换场 (主人 2026-11-12: 那句要进当前对话, 不是换到那一场去)')
+} else {
+  notes.push('ok   主动场不换场 (只把那一场的 jsonl 接进当前对话)')
+}
+expect('client.js', client, 'loadEcho(true)')
+expect('client.js', client, "call2('portalOut', echoSession, echoNext)")
+// 回前台先补一次全量: 本场与那一场各取一遍
+const visibleSource = takeFunction('onVisible')
+if (visibleSource !== '' && visibleSource.includes('loadOut(true)') && visibleSource.includes('loadEcho(true)')
+  && visibleSource.includes('pollLedger()')) {
+  notes.push('ok   回到前台先重取两次全量 (本场 + 那一场) 再立刻问一拍账本')
+} else {
+  failures.push('client.js: onVisible 没有把本场与那一场都重取 (回到前台会少几条)')
+}
+// `lw/out` 一变就补: 她刚说的那句不必等下一拍轮询
+const onOutSource = (() => {
+  const at = client.indexOf('onOut: function () {')
+  return at < 0 ? '' : client.slice(at, client.indexOf('\n        },', at))
+})()
+if (onOutSource.includes('loadOut(false)') && onOutSource.includes('loadEcho(false)')) {
+  notes.push('ok   onOut 两条流都补 (本场 + 那一场)')
+} else {
+  failures.push('client.js: onOut 只补了本场 —— 主动场那句要等 3 s 轮询')
+}
+// 宿主: 开场那一句带 `via: 'proactive'`; 别的那几条 (球 / 语音) 还是 `via: 'voice'`
+expect('host-plugin/index.mjs', hostPlugin, "via: 'proactive'")
+expect('host-plugin/index.mjs', hostPlugin, "via = 'voice'")
+expect('host-plugin/index.mjs', hostPlugin, ', auto.images, via)')
+// 宿主那份账 (proactive.json 的 run) 由桥交给页面: `session` / `startedAt` 两个读数
+expect('PortalBridge.kt', portalBridge, 'put("proactive"')
+expect('PortalBridge.kt', portalBridge, 'proactive.json')
+
+const startSource = takeFunction('isProactiveStart')
+if (startSource === '') {
+  failures.push('client.js: 抽不出 isProactiveStart (名字或缩进改过?)')
+} else {
+  /** 判据里的 `textOf`: 只认 text 块, 与 client.js 那份同一个口径 */
+  const textOfBlocks = (blocks) => {
+    const parts = []
+    for (const block of Array.isArray(blocks) ? blocks : []) {
+      if (block && block.type === 'text') parts.push(String(block.text === undefined ? '' : block.text))
+    }
+    return parts.join('\n')
+  }
+  const mark = clientMark === null ? '' : clientMark
+  const isProactiveStart = new Function(
+    'textOf', 'PROACTIVE_START_MARK', `${startSource}\nreturn isProactiveStart`,
+  )(textOfBlocks, mark)
+  const startText = `${mark}, 不是主人刚说的话.\n\n启动顺序: 最新探索摘要 -> 记着的事 -> 决定要不要开口.`
+  const cases = [
+    ['带 via: proactive 的那一条', { kind: 'user', source: { kind: 'user', via: 'proactive' }, content: [{ type: 'text', text: '看看今天' }] }, true],
+    ['老会话 (没有那个记号, 只有开场白本身)', { kind: 'user', source: { kind: 'user', via: 'voice' }, content: [{ type: 'text', text: startText }] }, true],
+    ['主人自己发的一句', { kind: 'user', source: { kind: 'user', rpcId: 'rpc-1' }, content: [{ type: 'text', text: '在吗' }] }, false],
+    ['球上转进来的一句 (via: voice)', { kind: 'user', source: { kind: 'user', via: 'voice' }, content: [{ type: 'text', text: '帮我看看今天的日程' }] }, false],
+    ['开场白只是被引用在句子中间', { kind: 'user', content: [{ type: 'text', text: `他说 ${startText}` }] }, false],
+  ]
+  let ok = true
+  for (const [label, node, want] of cases) {
+    const got = isProactiveStart(node)
+    if (got !== want) {
+      failures.push(`isProactiveStart 判错了: ${label} (got ${String(got)})`)
+      ok = false
+    }
+  }
+  if (ok) notes.push('ok   开场提示词整条不画 (via: proactive 与那句开场白都认, 主人自己的话照画)')
+}
+
+const proactiveNewSource = takeFunction('proactiveNew')
+if (proactiveNewSource === '') {
+  failures.push('client.js: 抽不出 proactiveNew (名字或缩进改过?)')
+} else {
+  const proactiveNew = new Function(`${proactiveNewSource}\nreturn proactiveNew`)()
+  const run = { session: 's_proactive', startedAt: 2000 }
+  const table = [
+    ['这一挂之后新开的那一场', run, 1000, true],
+    ['已经投过这一场', run, 2000, false],
+    ['比挂载还早的那一场 (重启前留下的)', run, 5000, false],
+    ['文件里还没开会话', { session: '', startedAt: 3000 }, 0, false],
+    ['没有 startedAt', { session: 's_x', startedAt: 0 }, 0, false],
+    ['读不到那一份', null, 0, false],
+  ]
+  let ok = true
+  for (const [label, one, seen, want] of table) {
+    const got = proactiveNew(one, seen)
+    if (got !== want) {
+      failures.push(`proactiveNew 判错了: ${label} (got ${String(got)})`)
+      ok = false
+    }
+  }
+  if (ok) notes.push('ok   proactiveNew: 只有这一挂之后新开的那一场投一次, 挂载前留下的不投')
+}
+
+const recordSource = takeFunction('appendRecord')
+const echoSource = takeFunction('echoItemOf')
+const itemSource = takeFunction('outItemOf')
+if (recordSource === '' || echoSource === '' || itemSource === '') {
+  failures.push('client.js: 抽不出 appendRecord / echoItemOf / outItemOf (名字或缩进改过?)')
+} else {
+  const appendRecord = new Function('RECORD_MAX', `${recordSource}\nreturn appendRecord`)(240)
+  const ECHO_SEQ_BASE = 1000 * 1000
+  const outItemOf = new Function(`${itemSource}\nreturn outItemOf`)()
+  const echoItemOf = new Function('outItemOf', 'ECHO_SEQ_BASE',
+    `${echoSource}\nreturn echoItemOf`)(outItemOf, ECHO_SEQ_BASE)
+
+  // ② 那句落在当前这条时间线的末尾 (条数 = 触发前 + 1), 而且不是另开一场
+  const before = [
+    { who: 'user', id: 'user\u0001rpc-1', seq: 1, time: 500, text: '在吗' },
+    { who: 'assistant', id: 'out\u00017', seq: 7, time: 600, text: '在的' },
+  ]
+  const echo = echoItemOf('s_proactive', { seq: 1, at: 900, text: '下班了吗' })
+  const after = appendRecord(before, [echo])
+  if (after.length === 3 && after[2] === echo) {
+    notes.push('ok   门户记录: 上一条历史仍在, 条数 = 触发前 + 1, 最新那条在最后')
+  } else {
+    failures.push(`门户记录接错了: ${JSON.stringify(after.map((one) => one.text))}`)
+  }
+  if (echo.id !== before[1].id && echo.seq >= 1000 * 1000) {
+    notes.push('ok   echoItemOf: 身份带场次、seq 抬到本场之上 (与本场 jsonl 不撞)')
+  } else {
+    failures.push(`echoItemOf 的身份/seq 不对: id=${String(echo.id)} seq=${String(echo.seq)}`)
+  }
+  // 与 `orderTimeline` 合起来跑: 那一句属于它前面那一轮, 且排在更晚的那一轮之前
+  const orderSource = takeFunction('orderTimeline')
+  if (orderSource === '') {
+    failures.push('client.js: 抽不出 orderTimeline (主动场那句归不了轮)')
+  } else {
+    const orderTimeline = new Function(`${orderSource}\nreturn orderTimeline`)()
+    const users = [
+      { who: 'user', id: 'u1', time: 500, text: '在吗' },
+      { who: 'user', id: 'u2', time: 1200, text: '人呢' },
+    ]
+    const ordered = orderTimeline(users, [echo], [])
+    if (ordered.map((one) => one.text).join(',') === '在吗,下班了吗,人呢') {
+      notes.push('ok   orderTimeline: 主动场那句按时间归到它那一轮, 后面那一轮仍在它后面')
+    } else {
+      failures.push(`主动场那句归轮错了: ${ordered.map((one) => one.text).join(',')}`)
+    }
+  }
+  // ③ 同一个身份不重复抄 + 上限
+  if (appendRecord(after, before).length === 3) {
+    notes.push('ok   门户记录: 同一个身份不重复抄 (连换两次场也不多一条)')
+  } else {
+    failures.push('门户记录: 同一个身份被抄成两条 —— 换场前后同一句会画两遍')
+  }
+  const many = []
+  for (let i = 0; i < 300; i += 1) many.push({ who: 'user', id: `u-${String(i)}`, text: String(i) })
+  const capped = appendRecord(many, [])
+  if (capped.length === 240 && capped[capped.length - 1].text === '299') {
+    notes.push('ok   门户记录: 超过 240 条只留最新那一段 (不会一场一场攒到无限长)')
+  } else {
+    failures.push(`门户记录没有上限或截错了: ${String(capped.length)} 条`)
+  }
+}
+
+const switchWithRecord = takeFunction('switchTo')
+if (switchWithRecord === ''
+  || !/source === 'new'[\s\S]{0,120}dropRecord\(\)/u.test(switchSource)
+  || !/source === 'ledger' \|\| source === 'list'/u.test(switchWithRecord)
+  || !switchWithRecord.includes('carryRecord()')) {
+  failures.push('client.js: switchTo 没分「自动换场抄记录 / 开新对话清空」两条腿')
+} else {
+  notes.push('ok   switchTo: 自动换场 (账本 / 会话表) 抄记录, 「开新对话」与点历史 dropRecord')
+}
+// 清空只在 dropRecord 一处定义、switchTo 里两处调: 别的地方 (退后台 / 收门户 / 换场) 一条都不许清
+const dropDefined = /function dropRecord\(\) \{[\s\S]*?carried = \[\]/u.test(client)
+const dropCalls = (switchWithRecord.match(/dropRecord\(\)/gu) ?? []).length
+if (dropDefined && dropCalls === 2) notes.push('ok   门户记录只在两处清空 (「开新对话」与点历史)')
+else failures.push(`client.js: 清门户记录的地方不对 (定义=${String(dropDefined)} 调用=${String(dropCalls)})`)
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
@@ -871,3 +1071,4 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(`\ncheck-luwi-portal: 全部通过 (${String(notes.length)} 条)`)
+

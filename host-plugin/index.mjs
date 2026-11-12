@@ -9511,7 +9511,9 @@ async function deliverToBall(ctx, controller, sessionId, line, auto) {
     // 主人发来的图先搬进工作区, 再拼正文 (见 [stageInboxImage])
     const cwd = String(agent.session?.header?.cwd ?? '')
     const staged = await stageInboxImage(line, cwd)
-    const message = await createVoiceMessage(withInboxPicture(line.text, staged), auto.images)
+    // `via` 由调用方带 (主动场带 'proactive'); 不带就还是老记号 'voice'
+    const via = typeof line?.via === 'string' && line.via !== '' ? line.via : 'voice'
+    const message = await createVoiceMessage(withInboxPicture(line.text, staged), auto.images, via)
     if (running) agent.steer(message)
     else agent.followup(message)
     const flushed = await ctx.sessions.flush(agent.session)
@@ -9898,14 +9900,16 @@ let messageFactory = null
  * [images] 是指代词命中时 [autoScreenShot] 截下来的那张主屏截图 (0 或 1 张): 图块与正文一起进这一条
  * 用户消息 —— 界面上与主人自己发的图长得一样, 而正文一个字都没改
  */
-async function createVoiceMessage(text, images = []) {
+async function createVoiceMessage(text, images = [], via = 'voice') {
   if (messageFactory === null) messageFactory = await import('@deepseek-ai/dsh-llm')
   return messageFactory.createUserMessage({
     content: [
       { type: 'text', text },
       ...images.map((attachment) => ({ type: 'image', attachment })),
     ],
-    source: { kind: 'user', via: 'voice' },
+    // `via` 是"这句话是谁送进来的"那个记号 (kind 必须留 `user`, 见 [voiceDeliver] 那段): 门户按它
+    // 认出**主动场的开场提示词**, 那一条不进门户正文 (2026-11-12 #38, 见 [PROACTIVE_START_MARK])
+    source: { kind: 'user', via },
   })
 }
 
@@ -11354,6 +11358,15 @@ function proactiveScreenRefusal(name) {
 }
 
 /**
+ * 开场那一句的头一段 (2026-11-12 #38)
+ *
+ * 门户按它把**整条**开场提示词认出来不画 (那是给模型的启动说明, 主人没说过)。客户端
+ * `presets/luwi-portal/lib/client.js` 的 `PROACTIVE_START_MARK` 逐字相同, `check-luwi-portal` 比对
+ * 这两个字面量; 消息本身还带 `via: 'proactive'`, 两个记号任一个命中就够
+ */
+const PROACTIVE_START_MARK = '这是到点自己开的一场主动对话'
+
+/**
  * 主动对话的开场正文 (纯函数)
  *
  * 应用投进来的那一行是 `proactive-card.md` 的正文 (没有就投缺省那句); 这里再补上这四件:
@@ -11373,7 +11386,7 @@ function proactiveStartLine(text, summaryPath, acting) {
       ? '这一场允许动手: 能写文件 / 开应用 / 跑命令; 屏不碰 —— 要看要点的事让主人自己来.'
       : '这一场只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.'
   return [
-    '这是到点自己开的一场主动对话, 不是主人刚说的话.',
+    `${PROACTIVE_START_MARK}, 不是主人刚说的话.`,
     '',
     asked,
     '',
@@ -11528,7 +11541,8 @@ async function startProactive(ctx, options = {}) {
       ctx,
       controller,
       sessionId,
-      { text: proactiveStartLine(options?.text, summaryPath, acting) },
+      // `via: 'proactive'` 是给门户的记号: 开场提示词不进门户正文, 但她说的那几句照常投 (2026-11-12 #38)
+      { text: proactiveStartLine(options?.text, summaryPath, acting), via: 'proactive' },
       { images: [] },
     )
   } catch (error) {

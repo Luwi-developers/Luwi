@@ -342,6 +342,9 @@
   = 没重载
 - **出包前先删旧 APK**: `app/build/outputs/apk/<变体>/app-<变体>.apk` (发布包是 `release/app-release.apk`) ——
   打包任务会在旧包上原地改写留空洞
+- **`packHostTree` 偶发原生崩溃**: `Client bundle` 那一步整个进程退 `3221226505` (`0xC0000409`), 那是原生
+  bundler 一次从零打三百多个包时的偶发事 —— 同一棵树重跑就绿 (`run-gates` 10/10, 第二趟只补剩下的);
+  `tools/pack-host.mjs` 只在原生崩溃码 / 信号上自动补跑一次, 脚本自己退的 1 不重试 (真红不许盖)
 - host 树裁剪在 `pack-host.mjs` 末尾 (剔 win32/darwin、`.map`、`.d.ts`、测试), 判据 `tools/check-host-slim.mjs`,
   **别用事后重打 zip 的脚本**
 - **换基座后先跑 `node tools/check-host-patches.mjs`**: 钉 `patch.md` 第 5/6/7/8 组 (bash/rg 指定、硬链接退路、附件

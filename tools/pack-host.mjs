@@ -119,6 +119,36 @@ function run(command, args, cwd) {
 }
 
 /**
+ * 原生崩溃时再跑一次 (2026-11-13, 2.8.0 #38 发包那一轮实测)
+ *
+ * `:app:packHostTree` 在 `Client bundle` 那一步整个进程退 **3221226505** (`0xC0000409`) —— 原生
+ * bundler 一次从零打三百多个包时的偶发崩溃, 不是源码红: 同一棵树马上重跑就绿 (run-gates 10/10),
+ * 因为第一趟已经把大部分 `lib/` 写出来了, 第二趟只补剩下的。
+ *
+ * 所以只在**原生崩溃**上重试: 脚本自己退的 1 是真红, 一次都不重试; 进程被信号带走 (`signal`) 或退
+ * 那几个崩溃码 (0xC0000000 及以上 / 134 / 139) 才重来一次, 并把码打出来 (读数要看得见)
+ *
+ * @param command - 可执行文件 (node 自己, 不走 shell)
+ * @param args - 参数
+ * @param cwd - 工作目录
+ * @param attempts - 最多跑几次 (缺省 2 = 原样一次 + 重试一次)
+ */
+function runRetryOnNativeCrash(command, args, cwd, attempts = 2) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      run(command, args, cwd)
+      return
+    } catch (error) {
+      const status = Number(error?.status)
+      const crashed = error?.signal != null
+        || (Number.isFinite(status) && (status < 0 || status >= 0xc0000000 || status === 134 || status === 139))
+      if (attempt >= attempts || !crashed) throw error
+      console.warn(`pack-host: ${command} exited ${String(error?.status ?? error?.signal)} (native crash); retrying once`)
+    }
+  }
+}
+
+/**
  * 一条命令怎么真的跑起来 (Windows 上那两种坑各踩过一次)
  *
  * - **不许套 `shell: true`**: 它把命令行交给 `cmd.exe`, 而 cmd 按空格切词 ——
@@ -475,7 +505,8 @@ if (values.install) {
 if (!values['skip-build']) {
   cleanBuildOutputs(dsh)
   dropOrphanPackages(dsh)
-  run(process.execPath, ['--import', 'tsx/esm', 'scripts/build.ts', '--profile', 'official'], dsh)
+  // 原生 bundler 偶发崩溃时补跑一次 (见 [runRetryOnNativeCrash]): 这一趟不重试, 一次失败就白等十分钟
+  runRetryOnNativeCrash(process.execPath, ['--import', 'tsx/esm', 'scripts/build.ts', '--profile', 'official'], dsh)
 }
 
 const packs = {}
