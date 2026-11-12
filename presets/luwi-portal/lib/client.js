@@ -658,6 +658,35 @@ window.__ModuleLoader__.load({
       'font:inherit;font-size:14px;font-weight:600;color:#fff;flex:none;',
       'background:var(--dsw-alias-button-info-fill,#3b82f6)}',
 
+      /* ── 选工作区窗 (2026-11-12 #37) ────────────────────────────────────────────
+       *
+       * 外壳与历史窗 / 预览窗同一套 (居中 / 左右 20dp / 高封 78% / 圆角 28 / 遮罩 40% 黑):
+       * 首启还没有工作区时, 空态那颗「选工作区」张的就是这一扇
+       */
+      '#lwp-pick{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;',
+      'padding:0 20px;background:rgba(0,0,0,.4)}',
+      '#lwp-pick[hidden]{display:none}',
+      '#lwp-pick .lwp-pick-card{width:100%;max-height:78%;display:flex;flex-direction:column;gap:10px;',
+      'box-sizing:border-box;padding:16px;border-radius:28px;',
+      'background:var(--lwp-glass-fill,rgba(252,253,254,.96));color:var(--history-ink,#18181b);',
+      '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur);',
+      'box-shadow:var(--dsw-elevation-panel)}',
+      '#lwp-pick .lwp-pick-head{display:flex;align-items:center;gap:8px;flex:none}',
+      '#lwp-pick .lwp-pick-title{flex:1;min-width:0;font-size:15px;font-weight:600}',
+      '#lwp-pick .lwp-pick-close{appearance:none;border:0;background:transparent;color:inherit;',
+      'width:30px;height:30px;border-radius:999px;display:grid;place-items:center;font-size:18px;line-height:1}',
+      '#lwp-pick .lwp-pick-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;',
+      'gap:6px;contain:layout style}',
+      '#lwp-pick .lwp-pick-row{appearance:none;display:flex;flex-direction:column;gap:2px;text-align:left;',
+      'border:0;border-radius:14px;padding:9px 11px;font:inherit;color:var(--history-ink,#18181b);',
+      'background:rgba(15,23,42,.045)}',
+      '#lwp-pick .lwp-pick-row[data-current="on"]{background:rgba(57,100,254,.16)}',
+      '#lwp-pick .lwp-pick-name{font-size:13px;line-height:1.35;overflow:hidden;white-space:nowrap;',
+      'text-overflow:ellipsis}',
+      '#lwp-pick .lwp-pick-path{font-size:11px;color:#6b7280;overflow:hidden;white-space:nowrap;',
+      'text-overflow:ellipsis}',
+      '#lwp-pick .lwp-pick-empty{font-size:12px;text-align:center;padding:20px 0;color:#6b7280}',
+
       /* ── `⋯` 里那几行 (判断层 / 工作 / 返回) ─────────────────────────────────── */
       '#lwp-drawer .lwp-menu-row{appearance:none;display:flex;align-items:center;gap:10px;width:100%;',
       'box-sizing:border-box;padding:11px 12px;margin-top:6px;font:inherit;font-size:14px;',
@@ -712,6 +741,16 @@ window.__ModuleLoader__.load({
       'line-height:1.2;letter-spacing:.02em}',
       '#lwp-hero .lwp-hero-line{position:relative;margin-top:6px;font-size:13px;line-height:1.7;',
       'color:var(--dsw-alias-label-secondary,#6b7280)}',
+      // 空态那颗「选工作区」(2026-11-12 #37): 首启还没有工作区时才画 (见 pickWanted), 实体按钮
+      // 而不是一行蓝字 —— 真机的无障碍树要读到 clickable=true 才有得点
+      '#lwp-hero .lwp-hero-pick{position:relative;margin-top:16px;appearance:none;border:0;',
+      'border-radius:999px;padding:10px 22px;font:inherit;font-size:14px;font-weight:600;line-height:1.4;',
+      'color:#fff;cursor:pointer;background:var(--dsw-alias-button-info-fill,#3b82f6);',
+      'box-shadow:var(--dsw-elevation-panel)}',
+      '#lwp-hero .lwp-hero-pick:active{transform:scale(.97)}',
+      '#lwp-hero .lwp-hero-pick[hidden]{display:none}',
+      '#lwp-hero .lwp-hero-pick:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3964fe);',
+      'outline-offset:2px}',
       '@keyframes lwp-float{0%,100%{transform:translateY(0);opacity:1}50%{transform:translateY(-3px);opacity:.94}}',
       // 键盘抬着时头像不浮 (见 applyIme): 起落那一下少一条每帧的合成
       '#lwp-root[data-ime="on"] #lwp-hero .lwp-hero-mark{animation:none}',
@@ -998,6 +1037,20 @@ window.__ModuleLoader__.load({
       var undoTimer = null
       /** 上一次替谁切过工作区 (同一个工作区 5 秒内不重复切) */
       var workspaceTry = { id: '', at: 0 }
+      /**
+       * 选工作区那一窗 (2026-11-12 #37): 开着没有 / 它的工作区订阅 / 补齐列表的定时器
+       *
+       * 首启 (`pm clear` 之后) dsh 那一边可能一个工作区都没有, 而这一层把 dsh 整个盖住了 ——
+       * 没有入口就等于发不出任何一句话, 所以空态自己摆一颗「选工作区」
+       */
+      var pickOpen = false
+      var pickUnsub = null
+      var pickTimer = null
+      var pickTries = 0
+      /** 窗里那行说明 (还在准备 / 建不起来), 有工作区时是空串 */
+      var pickNote = ''
+      /** 正在落进某个工作区: 连点只认第一次 (与 [navigating] 分开, 两条路可以互相接管) */
+      var entering = false
 
       /* ── 她说的话: 那一份 jsonl (方案 §3.2–3.4) ──────────────────────────────
        *
@@ -1209,20 +1262,7 @@ window.__ModuleLoader__.load({
        * `unknown session`; 那种情况得先 `openWorkspace()` 把那个工作区切过去, 再 open 才有效
        */
       function workspaceOf(id) {
-        var service = null
-        try {
-          service = typeof ctx.get === 'function' ? ctx.get('workspaces') : ctx.workspaces
-        } catch (_noService) {
-          return ''
-        }
-        if (!service || !service.list || typeof service.list.getSnapshot !== 'function') return ''
-        var snapshot = null
-        try {
-          snapshot = service.list.getSnapshot()
-        } catch (_noList) {
-          return ''
-        }
-        var items = snapshot && Array.isArray(snapshot.items) ? snapshot.items : []
+        var items = workspaceItems()
         for (var i = 0; i < items.length; i++) {
           var item = items[i]
           if (!item || !Array.isArray(item.sessionIds)) continue
@@ -1234,20 +1274,7 @@ window.__ModuleLoader__.load({
       /** 按**路径**找那个工作区 (冷启动时账本那一场还没进任何列表, 只能从账本的 cwd 认门) */
       function workspaceByPath(path) {
         if (typeof path !== 'string' || path === '') return ''
-        var service = null
-        try {
-          service = typeof ctx.get === 'function' ? ctx.get('workspaces') : ctx.workspaces
-        } catch (_noService) {
-          return ''
-        }
-        if (!service || !service.list || typeof service.list.getSnapshot !== 'function') return ''
-        var snapshot = null
-        try {
-          snapshot = service.list.getSnapshot()
-        } catch (_noList) {
-          return ''
-        }
-        var items = snapshot && Array.isArray(snapshot.items) ? snapshot.items : []
+        var items = workspaceItems()
         var want = path.replace(/\/+$/, '')
         for (var i = 0; i < items.length; i++) {
           var item = items[i]
@@ -1256,6 +1283,74 @@ window.__ModuleLoader__.load({
           if (mine !== '' && mine === want) return String(item.workspaceId || item.id || '')
         }
         return ''
+      }
+      /** 工作区服务 (`ctx.get('workspaces')`, 与 [workspaceOf] 同一个取法; 取不到回 null) */
+      function workspaceService() {
+        try {
+          return typeof ctx.get === 'function' ? ctx.get('workspaces') : ctx.workspaces
+        } catch (_noService) {
+          return null
+        }
+      }
+      /** 现在这一屏上认得的工作区 (列表还没到就是空表: 调用方只按"有没有"分流) */
+      function workspaceItems() {
+        var service = workspaceService()
+        if (!service || !service.list || typeof service.list.getSnapshot !== 'function') return []
+        var snapshot = null
+        try {
+          snapshot = service.list.getSnapshot()
+        } catch (_noList) {
+          return []
+        }
+        return snapshot && Array.isArray(snapshot.items) ? snapshot.items : []
+      }
+      /** 工作区名: 没起过名就用路径最后一节 (dsh 的 `workspaceDisplayTitle` 与这里同一口径) */
+      function workspaceTitle(item) {
+        var title = item && typeof item.title === 'string' ? item.title.trim() : ''
+        if (title !== '') return title
+        var path = item && typeof item.path === 'string' ? item.path.replace(/[\\/]+$/, '') : ''
+        if (path === '') return '工作区'
+        var parts = path.split(/[\\/]/)
+        var tail = parts[parts.length - 1]
+        return tail === '' ? '工作区' : tail
+      }
+      /**
+       * 那一窗里画哪几行 (纯函数: 判据 `check-luwi-portal` 抽出来真跑)
+       * @param {object[]} items `ctx.get('workspaces').list.getSnapshot().items`
+       * @param {string} currentWorkspaceId 这一场挂在哪个工作区下 (没有就是空串)
+       * @returns {{id: string, title: string, path: string, current: boolean}[]}
+       */
+      function pickRows(items, currentWorkspaceId) {
+        var rows = []
+        var list = Array.isArray(items) ? items : []
+        for (var i = 0; i < list.length; i += 1) {
+          var item = list[i]
+          if (!item) continue
+          var id = String(item.workspaceId || item.id || '')
+          if (id === '') continue
+          rows.push({
+            id: id,
+            title: workspaceTitle(item),
+            path: typeof item.path === 'string' ? item.path : '',
+            current: id === currentWorkspaceId,
+          })
+        }
+        return rows
+      }
+      /**
+       * 空态要不要给那颗「选工作区」(2026-11-12 #37)
+       *
+       * 只有**这一场落不到任何地方**时才给: 有工作区也有场次时, 这一屏是"和她说话"的地方,
+       * 工作区选择不画 (2026-11-08 主人定的), 首启 / `pm clear` 之后正好是前一种
+       */
+      function pickWanted() {
+        if (workspaceItems().length === 0) return true
+        return !(typeof sessionId === 'string' && sessionId !== '')
+      }
+      /** 让那颗按钮跟着状态走 (空态那张脸建好之后每一拍都对一次; 没有那颗按钮就什么都不做) */
+      function syncHeroPick() {
+        if (!els.heroPick) return
+        els.heroPick.hidden = !pickWanted()
       }
 
       /**
@@ -1406,8 +1501,9 @@ window.__ModuleLoader__.load({
           ctx.uiWorkspace.startSession()
         } catch (_cannotStart) {
           navigating = false
-          // 多半是"还没有工作区": dsh 那一屏被这一层盖着, 所以得说清去哪儿选
-          showNote('还没有工作区, 先在 dsh 里选一个', true)
+          // 多半是"还没有工作区": dsh 那一屏被这一层盖着, 所以直接把选工作区那一窗张出来 (2026-11-12 #37)
+          showNote('还没有工作区, 先选一个', true)
+          openPick()
           return
         }
         var tries = 0
@@ -1420,7 +1516,11 @@ window.__ModuleLoader__.load({
           }
           if (tries >= 24) {
             navigating = false
-            showNote('没开出来, 先选一个工作区', true)
+            // 这中间人可能已经从「选工作区」落进去了: 那就什么都不用说
+            if (sessionId === null) {
+              showNote('没开出来, 先选一个工作区', true)
+              openPick()
+            }
             return
           }
           setTimeout(look, 150)
@@ -2003,6 +2103,9 @@ window.__ModuleLoader__.load({
        * 有消息时这一块不画 —— 那会儿屏幕中间归对话。**没有「开一场」那颗按钮**了
        * (2026-11-09 主人: "不需要用户手动点击开一场, 新界面里自动开始新对话"): 空着的时候
        * [autoStart] 已经自己开了一场, 这张脸只在这半秒里出现
+       *
+       * **2026-11-12 #37**: 一场都落不下去时 (首启还没有工作区) 多摆一颗「选工作区」——
+       * dsh 那一屏被这一层盖着, 没有这颗按钮就没有任何入口, 发什么也发不出去
        */
       function heroNode() {
         var hero = h('div')
@@ -2020,7 +2123,18 @@ window.__ModuleLoader__.load({
         hero.appendChild(wrap)
         els.heroName = h('div', 'lwp-hero-name', identity.name === '' ? DEFAULT_NAME : identity.name)
         hero.appendChild(els.heroName)
-        hero.appendChild(h('div', 'lwp-hero-line', sessionId === null ? '正在开一场新的' : '在的，说吧'))
+        hero.appendChild(h('div', 'lwp-hero-line', sessionId === null
+          ? (workspaceItems().length === 0 ? '还没有工作区，先选一个' : '正在开一场新的')
+          : '在的，说吧'))
+        // 原生 `<button>`: 无障碍树里就是一颗可点的按钮 (真机 uiautomator 读 clickable=true)
+        var pick = h('button', 'lwp-hero-pick', '选工作区')
+        pick.id = 'lwp-pick-workspace'
+        pick.type = 'button'
+        pick.setAttribute('aria-label', '选工作区')
+        pick.onclick = function () { openPick() }
+        els.heroPick = pick
+        hero.appendChild(pick)
+        syncHeroPick()
         return hero
       }
 
@@ -2433,6 +2547,204 @@ window.__ModuleLoader__.load({
         if (!switchTo(id, 'history')) {
           showNote('这一场现在打不开, 先在 dsh 里切一下工作区再回来', true)
         }
+      }
+
+      /* ── 选工作区 (2026-11-12 #37) ────────────────────────────────────────────
+       *
+       * 首启 / `pm clear` 之后 dsh 那一边可能一个工作区都还没有, 而这一层盖住了它整个界面:
+       * 没有入口就没有任何一句话发得出去 —— 所以空态摆一颗「选工作区」, 点开是这一份列表:
+       * 一条工作区都没认出来时**先问宿主把默认那个备好** (`workspace/initializeDefault`,
+       * dsh 自己开屏也在做同一件事), 备好之后 3 s 内列表里就有它
+       */
+
+      /** 把那一窗按现在的工作区表重画 (窗开着才会被调到) */
+      function renderPick() {
+        if (!els.pickList) return
+        var here = sessionId === null ? '' : workspaceOf(sessionId)
+        var rows = pickRows(workspaceItems(), here)
+        els.pickList.textContent = ''
+        if (rows.length === 0) {
+          els.pickList.appendChild(h('div', 'lwp-pick-empty', pickNote === ''
+            ? '正在找可用的工作区…'
+            : pickNote))
+          return
+        }
+        for (var i = 0; i < rows.length; i += 1) els.pickList.appendChild(pickRow(rows[i]))
+      }
+
+      /** 列表里那一行 (整行可点 = 切过去; 名字说"当前"那一场落在这里) */
+      function pickRow(row) {
+        var node = h('button', 'lwp-pick-row')
+        node.type = 'button'
+        node.setAttribute('data-current', row.current ? 'on' : 'off')
+        node.appendChild(h('div', 'lwp-pick-name', (row.current ? '当前 · ' : '') + row.title))
+        node.appendChild(h('div', 'lwp-pick-path', row.path))
+        node.onclick = function () { pickWorkspace(row.id) }
+        return node
+      }
+
+      function openPick() {
+        if (!els.pick) return
+        pickOpen = true
+        pickNote = ''
+        els.pick.hidden = false
+        renderPick()
+        // 列表是活的: 工作区一出现就重画 (宿主备好默认那个 / 别处加了, 都在这一条上)
+        if (pickUnsub === null) {
+          var service = workspaceService()
+          if (service && service.list && typeof service.list.subscribe === 'function') {
+            try {
+              pickUnsub = service.list.subscribe(function () { if (pickOpen) renderPick() })
+            } catch (_noList) {
+              pickUnsub = null
+            }
+          }
+        }
+        ensureWorkspaces()
+      }
+
+      function closePick() {
+        pickOpen = false
+        if (els.pick) els.pick.hidden = true
+        stopPickPoll()
+        if (pickUnsub !== null) {
+          pickUnsub()
+          pickUnsub = null
+        }
+      }
+
+      function stopPickPoll() {
+        if (pickTimer === null) return
+        clearInterval(pickTimer)
+        pickTimer = null
+      }
+
+      /**
+       * 列表还空着时补几拍再看 (250 ms × 12 拍 —— 与"3 s 内列出"那条口径对齐)
+       *
+       * 订阅漏了事件 (宿主建完工作区那一刻列表还没推过来) 时, 这里是唯一的兜底
+       */
+      function startPickPoll() {
+        if (pickTimer !== null) return
+        pickTries = 0
+        pickTimer = setInterval(function () {
+          pickTries += 1
+          if (!pickOpen) {
+            stopPickPoll()
+            return
+          }
+          if (workspaceItems().length > 0) {
+            stopPickPoll()
+            pickNote = ''
+            renderPick()
+            return
+          }
+          if (pickTries >= 12) {
+            stopPickPoll()
+            pickNote = '没等到工作区列表, 再点一次「选工作区」'
+            renderPick()
+          }
+        }, 250)
+      }
+
+      /**
+       * 一个工作区都没有: 请宿主把默认那个备好
+       *
+       * 走的是 `ctx.get('workspaces').initializeDefault()` —— 就是 dsh 开屏自己那条 (同一份
+       * `workspace/initializeDefault`), 这一层只是按人的一下点击再叫一次, 失败只在窗里说一句
+       */
+      function ensureWorkspaces() {
+        if (workspaceItems().length > 0) return
+        var service = workspaceService()
+        if (!service || typeof service.initializeDefault !== 'function') {
+          pickNote = '还没有工作区, 这一版建不起来'
+          renderPick()
+          return
+        }
+        pickNote = '正在准备第一个工作区…'
+        renderPick()
+        var pending = null
+        try {
+          pending = service.initializeDefault()
+        } catch (error) {
+          pickNote = '没建起来: ' + describeError(error)
+          renderPick()
+          return
+        }
+        if (!pending || typeof pending.then !== 'function') {
+          startPickPoll()
+          return
+        }
+        pending.then(function () {
+          if (!pickOpen) return
+          pickNote = ''
+          renderPick()
+          if (workspaceItems().length === 0) startPickPoll()
+        }, function (error) {
+          if (!pickOpen) return
+          pickNote = '没建起来: ' + describeError(error)
+          renderPick()
+        })
+      }
+
+      /** 点中一行: 先关窗, 再落到那个工作区的一场里 */
+      function pickWorkspace(id) {
+        if (typeof id !== 'string' || id === '') return
+        closePick()
+        enterWorkspace(id)
+      }
+
+      /**
+       * 切到某个工作区并落进它的一场
+       *
+       * `openWorkspace` 自己会复用 / 新建一张空白草稿并把它挂到 dsh 的 mainView 上, 所以这里
+       * 只等 `currentSessionId()` 落到那一场 (与 [newConversation] 同一套 150 ms × 24 次);
+       * 落到就 `switchTo(id, 'new')` + `portalBind` + 15 s 不跟账本 —— 三件都做完, 下一句话
+       * 才发得出去、才不会被账本拽走
+       */
+      function enterWorkspace(workspaceId) {
+        if (entering) return
+        entering = true
+        var opening = null
+        try {
+          opening = ctx.uiWorkspace.openWorkspace(workspaceId)
+        } catch (error) {
+          entering = false
+          showNote('这个工作区打不开: ' + describeError(error), true)
+          openPick()
+          return
+        }
+        if (opening && typeof opening.catch === 'function') {
+          opening.catch(function (reason) {
+            console.log('[luwi-portal] openWorkspace failed: ' + describeError(reason))
+          })
+        }
+        var tries = 0
+        function look() {
+          tries += 1
+          var id = currentSessionId()
+          if (id !== null && bindingOf(id) !== undefined) {
+            landIn(id)
+            return
+          }
+          if (tries >= 24) {
+            entering = false
+            showNote('没开出来, 再点一次「选工作区」', true)
+            return
+          }
+          setTimeout(look, 150)
+        }
+        function landIn(id) {
+          entering = false
+          // 人点的那一条: 让 dsh 的 mainView 也搬到这一场 (source 'new' 自带 align)
+          switchTo(id, 'new')
+          bound = id
+          call('portalBind', id)
+          ledgerHoldUntil = Date.now() + 15000
+          renderMeta()
+          renderFlow()
+        }
+        setTimeout(look, 150)
       }
 
       /** 底部那颗「开始新的对话」: 与头栏那块身份同一个入口 */
@@ -2855,6 +3167,8 @@ window.__ModuleLoader__.load({
         if (!els.flow) return
         // 每画一次流就顺手对一次那颗点: "正在做…"那一行与它是同一个判据, 不该一个亮一个不亮
         renderMeta()
+        // 空态那颗「选工作区」跟着"落不落得下去"走 (2026-11-12 #37); 签名没变的几拍也照样对一次
+        syncHeroPick()
         var items = nodesOf()
         var shown = []
         for (var i = 0; i < items.length; i++) {
@@ -4321,6 +4635,33 @@ window.__ModuleLoader__.load({
         }
         root.appendChild(els.history)
 
+        /* ── 选工作区窗 (2026-11-12 #37) ──────────────────────────────────────
+         *
+         * 外壳与历史窗 / 预览窗同一套 (居中 / 左右 20dp / 高封 78% / 圆角 28 / 遮罩 40% 黑),
+         * 里面只有一份工作区表: 首启那颗「选工作区」张的就是它
+         */
+        els.pick = h('div')
+        els.pick.id = 'lwp-pick'
+        els.pick.hidden = true
+        var pickCard = h('div', 'lwp-pick-card')
+        var pickHead = h('div', 'lwp-pick-head')
+        pickHead.appendChild(h('div', 'lwp-pick-title', '选工作区'))
+        var pickClose = h('button', 'lwp-pick-close', '×')
+        pickClose.type = 'button'
+        pickClose.setAttribute('aria-label', '关闭')
+        pickClose.onclick = function () { closePick() }
+        pickHead.appendChild(pickClose)
+        pickCard.appendChild(pickHead)
+        els.pickList = h('div', 'lwp-pick-list')
+        els.pickList.id = 'lwp-pick-list'
+        pickCard.appendChild(els.pickList)
+        els.pick.appendChild(pickCard)
+        // 点遮罩关掉 (落在卡片里不算), 与另外两扇窗同一条手感
+        els.pick.onclick = function (event) {
+          if (event.target === els.pick) closePick()
+        }
+        root.appendChild(els.pick)
+
         document.body.appendChild(root)
         // **每次挂载都重新问一次**: 设置里改过的背景/浓淡可能比这一层活得久 (收起门户再回来是
         // 最普通的一步), 拿上一次的读数重画会让"改了没生效"
@@ -4398,6 +4739,9 @@ window.__ModuleLoader__.load({
         closeStickerPanel()
         closePreview()
         closeHistory()
+        closePick()
+        // 下一次挂载是新的 DOM: 落进工作区那条腿若正等着, 让它自然超时 (不跨挂载落地)
+        entering = false
         document.removeEventListener('pointerdown', onDocPointerDown, true)
         document.removeEventListener('visibilitychange', onHidden, false)
         if (chatUnsub !== null) chatUnsub()
