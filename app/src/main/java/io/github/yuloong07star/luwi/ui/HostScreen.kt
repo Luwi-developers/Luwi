@@ -891,7 +891,14 @@ private fun HostWebView(
         pending = null
         // The platform helper reads either form of result the picker can return, a single data
         // URI or the clip data of a multiple selection
-        answer.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+        val picked = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        answer.onReceiveValue(picked)
+        // 回来是空的 (`确定` 了却没有 data / 被取消): 页面上**什么都没发生** —— 那正是 issue #53 报的
+        // 那一下, 所以要说出来 (落实表 #35); 有文件就只是把计时器撤掉
+        val view = page
+        if (view != null) {
+            if (picked.isNullOrEmpty()) view.pickState(PICK_EMPTY) else view.pickState(PICK_PICKED)
+        }
     }
     // **已经交给 WebView 的那一条地址** (不是 `view.url`): host 打印的 token URL 会 302 到根路径,
     // 所以 `view.url` 永远不等于它 —— 拿这两者比, 每一次重组 (开屏淡出那一串 alpha 就是几十次)
@@ -1119,6 +1126,8 @@ private fun HostWebView(
                             params: FileChooserParams,
                         ): Boolean {
                             Log.i(WEB_TAG, "file chooser ${params.acceptTypes.joinToString()}")
+                            // 选择器真的起来了: 页面那侧"WebView 没回调"的计时器到此为止 (落实表 #35)
+                            view.pickState(PICK_SHOWN)
                             // A second request supersedes the first, and every callback has to be
                             // answered exactly once
                             pending?.onReceiveValue(null)
@@ -1130,6 +1139,7 @@ private fun HostWebView(
                                 Log.w(WEB_TAG, "no picker for ${params.acceptTypes.joinToString()}: ${error.message}")
                                 pending = null
                                 callback.onReceiveValue(null)
+                                view.pickState(PICK_NONE)
                                 true
                             }
                         }
@@ -1543,6 +1553,28 @@ private const val RETURN_TRIES = 2
  * 那一档 —— 挂得比它久就等于把返回键吃掉了, 而没答话时调用方会把这一下还给「再按一次退出」
  */
 private const val PAGE_BACK_MS = 500L
+
+/**
+ * 选图那一路的四个词 (落实表 #35, 2026-11-12): 页面 `__LUWI_PORTAL__.pickState(state)` 认的就是这一套
+ *
+ * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选好的文件交回页面 / `empty` =
+ * 回来是空的 / `none` = 选择器起不来; **后两个在屏上都是"点了没反应"** —— 那正是 issue #53 报的
+ * 那一下, 所以都要让页面说一句「图片发送失败：webview 未回调」
+ */
+private const val PICK_SHOWN = "shown"
+private const val PICK_PICKED = "picked"
+private const val PICK_EMPTY = "empty"
+private const val PICK_NONE = "none"
+
+/**
+ * 把选图那一下的结论推给门户 (空页面 / 门户没挂上时这一步什么都不做)
+ *
+ * 只走一条 `evaluateJavascript`: 页面那一侧拿它撤计时器或者报一句带原因的话, 宿主不重复判"该不该说"
+ * @param state 见 [PICK_SHOWN] 那四个词
+ */
+private fun WebView.pickState(state: String) {
+    evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.pickState('$state')", null)
+}
 
 /**
  * 返回键那一下该按页面上的哪个东西: 右栏那个展开着的格右上角的「收起」

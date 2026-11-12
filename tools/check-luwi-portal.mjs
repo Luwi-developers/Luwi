@@ -716,6 +716,124 @@ if (client.includes('cell.onclick = function () { stageSticker(name) }')) {
   failures.push('client.js: 表情格子的 onclick 没有走 stageSticker')
 }
 
+// ── 十二、图片发送失败要说出来 (2026-11-12, 落实表 #35) ────────────────────────
+//
+// 主人 (issue #53): "选图 → 点确定 → 没反应". 三条路以前都是静默 —— WebView 没进
+// `onShowFileChooser` / 选择器回来是空的 / 太大 / 读字节等超时. 现在它们共用一张三选一的说法表
+// (`webview 未回调` / `文件过大` / `上传超时`), 一句话进对话流 (`who:'error'`, 与 dsh 的 turn-error
+// 同一档), 同时让宿主把机型 + WebView 版本各一行打进 logcat
+
+const failTableSource = (() => {
+  const at = client.indexOf('var IMAGE_FAIL = {')
+  if (at < 0) return ''
+  const end = client.indexOf('\n      }', at)
+  return end < 0 ? '' : client.slice(at, end + '\n      }'.length)
+})()
+const imageFailSource = takeFunction('imageFail')
+const pickStateSource = takeFunction('pickState')
+
+if (failTableSource === '' || imageFailSource === '') {
+  failures.push('client.js: 抽不出 IMAGE_FAIL / imageFail —— 图片失败还是静默')
+} else {
+  const table = new Function(`${failTableSource}\nreturn IMAGE_FAIL`)()
+  const wanted = { noCallback: 'webview 未回调', tooBig: '文件过大', timeout: '上传超时' }
+  let tableOk = true
+  for (const key of Object.keys(wanted)) {
+    if (table[key] !== wanted[key]) {
+      failures.push(`client.js: IMAGE_FAIL.${key} 应该是「${wanted[key]}」, 实际是 ${JSON.stringify(table[key])}`)
+      tableOk = false
+    }
+  }
+  if (tableOk) notes.push('ok   IMAGE_FAIL 三选一与判据逐字一致 (webview 未回调 / 文件过大 / 上传超时)')
+
+  // 真跑: 说法表 → 气泡文案, 别的话一律按「上传超时」, 最多留三条
+  const stored = []
+  let renders = 0
+  const imageFail = new Function('IMAGE_FAIL', 'imageFails', 'call', 'renderFlow',
+    `${imageFailSource}\nreturn imageFail`)(
+    table, stored, () => ({ ok: true }), () => { renders += 1 },
+  )
+  imageFail(table.noCallback)
+  if (stored.length === 1 && stored[0].text === '图片发送失败：webview 未回调') {
+    notes.push('ok   imageFail: 屏上那句就是「图片发送失败：<原因>」')
+  } else {
+    failures.push(`client.js: imageFail 没写出「图片发送失败：webview 未回调」(实际 ${JSON.stringify(stored[0])})`)
+  }
+  imageFail('别的什么')
+  if (stored[1] && stored[1].text === '图片发送失败：上传超时') {
+    notes.push('ok   imageFail: 三种以外的说法按「上传超时」兜住 (屏上不写没人对得上的话)')
+  } else {
+    failures.push('client.js: imageFail 对没见过的说法没有兜底')
+  }
+  imageFail(table.tooBig)
+  imageFail(table.timeout)
+  imageFail(table.timeout)
+  if (stored.length === 3) notes.push('ok   imageFail: 只留最近三条 (连败十次不把对话顶走)')
+  else failures.push(`client.js: imageFail 的条数不是 3 (实际 ${String(stored.length)})`)
+  if (renders === 5) notes.push('ok   imageFail: 每一条都真去重画了流 (不是只记不画)')
+  else failures.push(`client.js: imageFail 没有每次都重画 (renderFlow 调了 ${String(renders)} 次, 应为 5)`)
+
+  // 三条路各自接上了: 点 `+` 的计时器 / 宿主回话 / 太大在读数之前就判 / 读字节有上限
+  if (client.includes('armPickWatch()') && client.indexOf('armPickWatch()') < client.indexOf('els.file.click()')) {
+    notes.push('ok   点 `+` 先挂"WebView 没回调"的计时器, 再点 input')
+  } else {
+    failures.push('client.js: pickFile 没有在 click 之前挂计时器 —— WebView 不回调时还是静默')
+  }
+  const onFilesSource = takeFunction('onFilesChosen')
+  if (onFilesSource.includes('imageFail(IMAGE_FAIL.tooBig)')
+    && onFilesSource.indexOf('imageFail(IMAGE_FAIL.tooBig)') < onFilesSource.indexOf('readImage(file)')) {
+    notes.push('ok   文件过大在读字节之前就报 (不是读完再报)')
+  } else {
+    failures.push('client.js: onFilesChosen 没有在读字节之前判大小')
+  }
+  // 8 个空格缩进 = 函数体里的调用 (6 个空格那处是它自己的定义)
+  const watched = client.split('\n        armUploadWatch(one)').length - 1
+  if (watched === 2) notes.push('ok   两条读字节的路 (readImage / stashOne) 都挂了上传超时')
+  else failures.push(`client.js: armUploadWatch 只在 ${String(watched)} 处被调 (应 2 处)`)
+
+  // 宿主那侧的口径: 四个词 + 一处 JS 入口 + logcat 两行
+  expect('client.js', client, 'pickState: pickState')
+  expect('client.js', client, 'pickState: function (state)')
+  expect('client.js', client, "call('portalImageFail', text)")
+  expect('client.js', client, 'id: imageFails[f].id')
+  expect('HostScreen.kt', screen, "pickState('$state')")
+  expect('HostScreen.kt', screen, 'private const val PICK_SHOWN = "shown"')
+  expect('HostScreen.kt', screen, 'private const val PICK_PICKED = "picked"')
+  expect('HostScreen.kt', screen, 'private const val PICK_EMPTY = "empty"')
+  expect('HostScreen.kt', screen, 'private const val PICK_NONE = "none"')
+  expect('HostScreen.kt', screen, 'view.pickState(PICK_SHOWN)')
+  expect('HostScreen.kt', screen, 'view.pickState(PICK_NONE)')
+  expect('HostScreen.kt', screen, 'view.pickState(PICK_EMPTY)')
+  expect('HostScreen.kt', screen, 'view.pickState(PICK_PICKED)')
+  expect('PortalBridge.kt', portalBridge, 'fun portalImageFail(reason: String): String')
+  expect('PortalBridge.kt', portalBridge, 'Log.w(LOOK_TAG, "image send failed: $text")')
+  expect('PortalBridge.kt', portalBridge, 'device ${Build.MANUFACTURER} ${Build.MODEL}')
+  expect('PortalBridge.kt', portalBridge, 'webview $label (major ${info?.major ?: 0})')
+
+  // 宿主回话那一支: 只有 shown / picked 撤计时器, empty / none 要报
+  if (pickStateSource === '') {
+    failures.push('client.js: 抽不出 pickState (宿主那句回话没人接)')
+  } else {
+    const reasons = []
+    let disarms = 0
+    const pickState = new Function('disarmPickWatch', 'imageFail', 'IMAGE_FAIL',
+      `${pickStateSource}\nreturn pickState`)(() => { disarms += 1 }, (reason) => reasons.push(reason), table)
+    pickState('shown')
+    pickState('picked')
+    if (reasons.length === 0) notes.push('ok   pickState: shown / picked 只撤计时器, 不报失败')
+    else failures.push(`client.js: pickState 对 shown/picked 也报了失败 (${reasons.join(',')})`)
+    pickState('empty')
+    pickState('none')
+    if (reasons.length === 2 && reasons.every((one) => one === table.noCallback)) {
+      notes.push('ok   pickState: empty / none 都报「webview 未回调」(选择器没结果 / 起不来)')
+    } else {
+      failures.push(`client.js: pickState 对 empty/none 没报「webview 未回调」(实际 ${reasons.join(',')})`)
+    }
+    if (disarms === 4) notes.push('ok   pickState: 四种回话都先撤计时器 (不会二次报)')
+    else failures.push(`client.js: pickState 撤计时器的次数不是 4 (实际 ${String(disarms)})`)
+  }
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

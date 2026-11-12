@@ -1078,6 +1078,31 @@ window.__ModuleLoader__.load({
       var MAX_ATTACH = 6
       /** 一份最大多少字节 (与 PortalBridge.STASH_MAX_BYTES 同一个数: 12 MB) */
       var MAX_STASH_BYTES = 12 * 1024 * 1024
+      /**
+       * 图片发送失败那三种说法 (落实表 #35, 2026-11-12)
+       *
+       * 主人报的是"选图 → 点确定 → 没反应": 三条路 (WebView 没回调 / 太大 / 等超时) 以前都是静默,
+       * 人只能来群里问。**说法只有这三种** —— 页面与宿主 (logcat) 认的是同一张表
+       */
+      var IMAGE_FAIL = {
+        /** 点了 `+` 宿主没进 `onShowFileChooser`, 或者选择器回来是空的 (那正是 issue #53 的现场) */
+        noCallback: 'webview 未回调',
+        /** 选出来的那一份超过 [MAX_STASH_BYTES] */
+        tooBig: '文件过大',
+        /** 读字节 / 落盘一直没回来 */
+        timeout: '上传超时',
+      }
+      /** 点 `+` 到宿主回报 "选择器起来了" 之间最多等多久: 要压在判据那个 5 s 里面 */
+      var PICK_WAIT_MS = 2500
+      /** 选完之后读字节 + 落盘最多等多久 (12 MB 在这台机器上不到 1 s, 留足余量) */
+      var UPLOAD_WAIT_MS = 10000
+      /**
+       * 本机那几条「图片发送失败」: `{id, at, text}` —— 画在对话流里 (`who:'error'`, 与 dsh 的
+       * turn-error 同一档), **不进 dsh 的会话账**: 这是本机的现场, 不是要发给模型的内容
+       */
+      var imageFails = []
+      /** 点 `+` 那一下的计时器 (宿主一回调就撤) */
+      var pickWatch = null
       /** 表情那个方框的边长 (px): 与 CSS `.lwp-sticker img` 里的 120 是同一个数, 改一处就得改另一处 */
       var STICKER_BOX = 120
       /**
@@ -1143,6 +1168,8 @@ window.__ModuleLoader__.load({
           clearOut('the conversation changed')
           // 草稿里那张图也不带过去 (它挂在上一场的会话 id 上)
           clearAttach()
+          // 上一场那几条「图片发送失败」也不带过去 (落实表 #35): 它们是这一场的现场
+          imageFails = []
           userKey = ''
           loadOut(true)
         }
@@ -1832,6 +1859,16 @@ window.__ModuleLoader__.load({
               console.log('[luwi-portal] 这一轮没有 lw_say, 正文兜底画了一句')
             }
           }
+        }
+        // 本机那几条「图片发送失败」 (落实表 #35, 2026-11-12): 与 dsh 的 turn-error 同一档 (`who:'error'`),
+        // 按它自己那一刻归轮 —— 不进 dsh 的会话账, 也不发给模型
+        for (var f = 0; f < imageFails.length; f += 1) {
+          extras.push({
+            who: 'error',
+            id: imageFails[f].id,
+            time: imageFails[f].at,
+            text: imageFails[f].text,
+          })
         }
         return orderTimeline(users, rows, extras)
       }
@@ -3426,6 +3463,85 @@ window.__ModuleLoader__.load({
        *   `<工作区>/lw-in/`, 路径写进正文, 她拿 fs 工具自己读
        */
 
+      /**
+       * 把一条「图片发送失败：<原因>」塞进对话流 (落实表 #35, 2026-11-12)
+       *
+       * 落点是门户自己的时间线: `who:'error'` 与 dsh 的 turn-error 同一个画法 (红字玻璃气泡), 排在
+       * 它自己那一刻所在的轮尾。**只认 [IMAGE_FAIL] 那三种说法**, 别的一律按「上传超时」说 —— 宁可
+       * 含糊, 也不在屏上写一句没人对得上的话
+       *
+       * @param {string} reason 三种说法之一 (页面内部只传常量, 宿主那侧不必认识这些字)
+       */
+      function imageFail(reason) {
+        var text = String(reason === undefined || reason === null ? '' : reason)
+        if (text !== IMAGE_FAIL.noCallback && text !== IMAGE_FAIL.tooBig && text !== IMAGE_FAIL.timeout) {
+          text = IMAGE_FAIL.timeout
+        }
+        var at = Date.now()
+        imageFails.push({
+          id: 'imagefail\u0001' + String(at) + '\u0001' + String(imageFails.length),
+          at: at,
+          text: '图片发送失败：' + text,
+        })
+        // 只留最近三条: 连着失败十次不该把整段对话顶走
+        while (imageFails.length > 3) imageFails.shift()
+        console.log('[luwi-portal] image send failed: ' + text)
+        // 读数那一半归宿主: 机型与 WebView 版本各一行进 logcat, 同一时刻与这条气泡对上 (判据就认这两行)
+        call('portalImageFail', text)
+        renderFlow()
+      }
+
+      /** 撤掉"WebView 没回调"那个计时器 (宿主真回调了就撤) */
+      function disarmPickWatch() {
+        if (pickWatch === null) return
+        clearTimeout(pickWatch)
+        pickWatch = null
+      }
+
+      /** 点 `+` 之后先假定"WebView 没回调": 宿主那侧一行 `pickState` 回来就撤掉它 */
+      function armPickWatch() {
+        disarmPickWatch()
+        pickWatch = setTimeout(function () {
+          pickWatch = null
+          imageFail(IMAGE_FAIL.noCallback)
+        }, PICK_WAIT_MS)
+      }
+
+      /**
+       * 宿主那侧对这次选择的回话 (见 `HostScreen.onShowFileChooser` 与那个选择器的回调)
+       *
+       * - `shown`: `onShowFileChooser` 真的进来了 —— 选择器起来了, 撤掉计时器
+       * - `picked`: 选好的文件已经交回页面 (随后就到了 change)
+       * - `empty` / `none`: 选择器回来是空的 / 起不来 —— 这两种在页面上与"没回调"一样是**没有反应**,
+       *   也就是 issue #53 报的那一下, 直接说清
+       * @param {string} state 宿主给的那一个词
+       */
+      function pickState(state) {
+        var what = String(state === undefined || state === null ? '' : state)
+        disarmPickWatch()
+        if (what === 'shown' || what === 'picked') return
+        imageFail(IMAGE_FAIL.noCallback)
+      }
+
+      /**
+       * 一条待发附件等字节的最长时间 (超了就地作废这一条, 并报「上传超时」)
+       *
+       * 计时器挂在条目自己身上 (`one.watch`), 收尾时由 [renderAttach] 顺手清掉 —— 状态不再是
+       * `reading` 就是已经有结论了
+       */
+      function armUploadWatch(one) {
+        one.gaveUp = false
+        one.watch = setTimeout(function () {
+          one.watch = undefined
+          if (one.status !== 'reading') return
+          one.gaveUp = true
+          one.status = 'error'
+          one.error = '等太久了'
+          renderAttach()
+          imageFail(IMAGE_FAIL.timeout)
+        }, UPLOAD_WAIT_MS)
+      }
+
       /** 弹选择器: 走 `<input type=file>`, 也就是 `HostScreen.onShowFileChooser` 那条路 */
       function pickFile() {
         if (els.file === undefined || els.file === null) return
@@ -3433,6 +3549,8 @@ window.__ModuleLoader__.load({
           showNote('先开一场对话', true)
           return
         }
+        // 这一下以前是静默的: WebView 不回调就没有任何反应 (落实表 #35)
+        armPickWatch()
         els.file.click()
       }
 
@@ -3464,6 +3582,11 @@ window.__ModuleLoader__.load({
         for (var i = 0; i < files.length && attach.length < MAX_ATTACH; i += 1) {
           var file = files[i]
           var type = file && typeof file.type === 'string' ? file.type : ''
+          // 太大在**读字节之前**就说: 读进来再报错, 那几秒的卡顿本身就是一条"没反应" (落实表 #35)
+          if (Number(file && file.size ? file.size : 0) > MAX_STASH_BYTES) {
+            imageFail(IMAGE_FAIL.tooBig)
+            continue
+          }
           if (type.indexOf('image/') === 0) readImage(file)
           else stashOne(file)
         }
@@ -3492,12 +3615,15 @@ window.__ModuleLoader__.load({
           return
         }
         var reader = new FileReader()
+        armUploadWatch(one)
         reader.onerror = function () {
+          if (one.gaveUp === true) return
           one.status = 'error'
           one.error = '读不动这张图'
           renderAttach()
         }
         reader.onload = function () {
+          if (one.gaveUp === true) return
           var buffer = reader.result
           var bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : null
           if (bytes === null || bytes.length === 0) {
@@ -3547,12 +3673,15 @@ window.__ModuleLoader__.load({
           return
         }
         var reader = new FileReader()
+        armUploadWatch(one)
         reader.onerror = function () {
+          if (one.gaveUp === true) return
           one.status = 'error'
           one.error = '读不动这个文件'
           renderAttach()
         }
         reader.onload = function () {
+          if (one.gaveUp === true) return
           var buffer = reader.result
           var bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : null
           if (bytes === null) {
@@ -3596,6 +3725,11 @@ window.__ModuleLoader__.load({
         els.attachRow.hidden = attach.length === 0
         for (var i = 0; i < attach.length; i += 1) {
           var one = attach[i]
+          // 已经有结论 (ready / error) 的那条不该再等着超时: 计时器挂在条目自己身上 (见 [armUploadWatch])
+          if (one.watch !== undefined && one.status !== 'reading') {
+            clearTimeout(one.watch)
+            one.watch = undefined
+          }
           els.attachRow.appendChild(one.kind === 'image' ? attachThumb(one) : attachChip(one))
           // 一行读数: 真机上"文件进没进 prompt"只能看这一行 —— 变了才写, 不刷屏
           if (one.lastLogged !== one.status) {
@@ -4399,6 +4533,14 @@ window.__ModuleLoader__.load({
         /** 宿主推的键盘高度 (2026-11-09): 只改这一层的 padding, 不动 WebView 尺寸 */
         setKeyboard: applyIme,
         /**
+         * 宿主对"选图"那一下的回话 (2026-11-12, 落实表 #35)
+         *
+         * `shown` / `picked` 是"选择器起来了 / 文件交回来了", 撤计时器就完事; `empty` / `none` 是
+         * "选了但 WebView 没回调" 与 "选择器起不来" —— 这两种在屏上都是**什么都没发生**, 所以直接
+         * 报一句带上原因
+         */
+        pickState: pickState,
+        /**
          * 宿主说"她说的话变了": 取增量入队 (方案 §3.4 的**触发源**)
          *
          * jsonl 不是 dsh 的快照, `chatTarget.subscribe` 不会因为它变化而触发 —— 没有这一条, 一轮工具
@@ -4433,6 +4575,12 @@ window.__ModuleLoader__.load({
         onOut: function () { portal.onOut() },
         // 宿主推的键盘高度 (2026-11-09): 门户盖着时 WebView 不缩放, 由这一层自己让出底部那一段
         setKeyboard: function (px) { portal.setKeyboard(px) },
+        /**
+         * 宿主对"选图"那一下的回话 (2026-11-12, 落实表 #35): `shown` / `picked` / `empty` / `none`
+         *
+         * 没有这一句, 页面上就分不清"还在等选择器"与"选了但 WebView 没回调" —— 后者正是 issue #53
+         */
+        pickState: function (state) { portal.pickState(state) },
       }
     }
 

@@ -1,6 +1,7 @@
 package io.github.yuloong07star.luwi.ui
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -228,6 +229,34 @@ internal class PortalBridge(private val context: Context) {
      */
     @JavascriptInterface
     fun portalIme(): String = JSONObject().put("px", PortalState.imePx).toString()
+
+    /**
+     * 页面报"这张图没发出去" (落实表 #35, 2026-11-12)
+     *
+     * 只做一件事: 把原因与**机型 + WebView 版本各一行**写进 logcat。issue #53 里用户在群里报
+     * "选图 → 点确定 → 没反应" 时, 维护者手上就只有这三样能对上 —— 机型读 `Build`, 版本读
+     * [WebCompat.info] (与开屏那行 `webview …` 同一份读数)
+     *
+     * **为什么三样都由页面报**: 三种原因里两种 (`文件过大` / `上传超时`) 只有页面知道; 第三种
+     * (`webview 未回调`) 也是页面在计时器到点后报的 —— 一条口径, 不必在两边各写一遍
+     * @param reason 页面给的那句话 ('webview 未回调' / '文件过大' / '上传超时')
+     * @return `{ok:true}` (页面不看, 留给将来对账)
+     */
+    @JavascriptInterface
+    fun portalImageFail(reason: String): String {
+        val text = reason.trim().ifEmpty { UNKNOWN_FAIL }
+        Log.w(LOOK_TAG, "image send failed: $text")
+        Log.i(
+            LOOK_TAG,
+            "device ${Build.MANUFACTURER} ${Build.MODEL}, android ${Build.VERSION.RELEASE}" +
+                " (sdk ${Build.VERSION.SDK_INT})",
+        )
+        val info = runCatching { WebCompat.info(context.applicationContext) }.getOrNull()
+        // 读不到版本就照实说 "unknown": 那一行是给人拿去对账的, 空着比写错更糟
+        val label = info?.label.orEmpty().ifEmpty { UNKNOWN_FAIL }
+        Log.i(LOOK_TAG, "webview $label (major ${info?.major ?: 0})")
+        return JSONObject().put("ok", true).toString()
+    }
 
     /**
      * 这一层的脸: 背景图与背景的不透明度 (2026-11-08 主人)
@@ -559,5 +588,8 @@ internal class PortalBridge(private val context: Context) {
 
         /** 那一张脸的日志 tag (与 HostScreen 的 WEB_TAG 同一族) */
         const val LOOK_TAG = "DshWebView"
+
+        /** [portalImageFail] 收到一句空原因时的兜底 (页面不会给空串, 但这行日志不能是空的) */
+        const val UNKNOWN_FAIL = "unknown"
     }
 }
