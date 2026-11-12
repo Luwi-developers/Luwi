@@ -2782,6 +2782,59 @@ const TOOLS = [
     },
   }),
 
+  // 主人自己登记的那几个工具 (2.8.1 B2)
+  //
+  // 与 lw_apps 的分工: 那一条列的是这台手机上能启动的全部应用, 名字随系统语言变, 于是每换一台手机
+  // 模型就得重新猜一次包名. 这一条读的是主人手写的 `$DSH_HOME/lw/external-apps.json`: id 是固定的,
+  // label 只是给人看的. 四件事: list 念登记表, probe 只问装没装 (不发 Intent), open 打开,
+  // handoff 把一段话交给那个工具
+  defineTool({
+    name: 'lw_external',
+    description:
+      'The tools this person registered for me to reach, by the id they chose rather than by a'
+      + ' label that changes with the system language. op=list (the default) prints the registry'
+      + ' and says which entries are installed right now; op=probe asks about one id or all of'
+      + ' them and starts nothing; op=open starts one (its registered activity first, its launcher'
+      + ' entry otherwise); op=handoff passes a stretch of text to one through ACTION_SEND.'
+      + ' **handoff takes words, not files**: the text is what the person would have typed or said,'
+      + ' so a path, a content:// or file:// URI, a shell line or a credential is refused - read the'
+      + ' file with another tool and hand over the part that matters. Nothing here installs,'
+      + ' downloads or creates a virtual screen; an id that is not in the registry answers unsupported'
+      + ' rather than guessing a package.',
+    parameters: {
+      op: {
+        type: 'string',
+        description: 'list (default) to read the registry, probe to ask, open to start one,'
+          + ' handoff to pass text to one',
+        enum: ['list', 'probe', 'open', 'handoff'],
+      },
+      id: {
+        type: 'string',
+        description: 'The id from the registry, for probe, open and handoff. Leave it out for'
+          + ' probe to ask about every entry',
+      },
+      text: {
+        type: 'string',
+        description: 'For handoff: the words to hand over, as the person would say them.'
+          + ' Never a path, URI, shell line or credential - those are refused',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = ['probe', 'open', 'handoff'].includes(args?.op) ? args.op : 'list'
+      const answer = await call('external', {
+        op,
+        id: args?.id,
+        text: args?.text,
+      })
+      return formatExternal(op, answer)
+    },
+  }),
+
   // 这一版认得哪些手机直连动作, 每条走哪条路、要什么权限、失败时说什么 (B3-c ⑧)
   //
   // 它是"选通道前先看一眼"的那一条: 动作表与路由都只有应用那一侧一份, 这里只把答案念出来,
@@ -6299,6 +6352,68 @@ function formatApps(result) {
   for (const app of apps) lines.push(`  ${app.label} - ${app.package}`)
   lines.push('Start one with lw_launch(package="..."), which takes the package or that name.')
   return lines.join('\n')
+}
+
+/**
+ * 登记表那一条的回话: 四个 op 各说各的, 但都不念 JSON
+ *
+ * list 顺带把"装没装"一起说 —— 那是主人此刻最想知道的, 模型也不必再 probe 一遍. open/handoff
+ * 失败时一定把那句话带出去 (registry 里没有 / 没装 / 不收这种文字), 因为下一步该改什么全写在那句里
+ */
+function formatExternal(op, result) {
+  if (!result || typeof result !== 'object') return String(result ?? '')
+  const because = result.error ? ` - ${result.error}` : ''
+  if (op === 'list') {
+    const apps = result.apps ?? []
+    if (apps.length === 0) {
+      return `nothing is registered yet${because}. The registry is `
+        + `${result.file || '$DSH_HOME/lw/external-apps.json'}; one line of it looks like`
+        + ' {"id":"termux","label":"Termux","package":"com.termux"}'
+    }
+    const lines = [
+      `${apps.length} registered tool${apps.length === 1 ? '' : 's'} in `
+        + `${result.file || 'the registry'}${because}:`,
+    ]
+    for (const app of apps) {
+      lines.push(
+        `  ${app.id} - ${app.label} (${app.package}) `
+          + `${app.installed ? 'installed' : 'not installed'}`,
+      )
+    }
+    lines.push(
+      'Open one with lw_external(op="open", id="..."), or pass it a stretch of words with'
+        + ' op="handoff" - the text is what the person would say, never a path or a URI.',
+    )
+    return lines.join('\n')
+  }
+  if (op === 'probe') {
+    if (result.known === false) return `no entry with that id${because}`
+    const apps = result.apps ?? []
+    if (apps.length === 0) return `the registry has nothing to ask about${because}`
+    const lines = [`${apps.length} entr${apps.length === 1 ? 'y' : 'ies'}${because}:`]
+    for (const app of apps) {
+      const can = [
+        app.canOpen ? 'can be opened' : '',
+        app.canSend ? 'accepts a send' : '',
+      ].filter(Boolean).join(', ')
+      lines.push(
+        `  ${app.id} (${app.package}): ${app.installed ? 'installed' : 'not installed'}`
+          + `${can ? ` - ${can}` : ''}`,
+      )
+    }
+    return lines.join('\n')
+  }
+  if (op === 'handoff') {
+    if (result.sent) {
+      return `handed ${result.chars} characters to ${result.id} as ${result.mime}`
+    }
+    return `handoff to ${result.id || 'that entry'} did not go through${because}`
+  }
+  if (result.started) {
+    return `started ${result.id} (${result.package}`
+      + `${result.activity ? ` ${result.activity}` : ''})`
+  }
+  return `opening ${result.id || 'that entry'} did not work${because}`
 }
 
 /**
