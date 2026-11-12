@@ -1,6 +1,7 @@
 import java.io.File
 import java.net.URI
 import java.security.MessageDigest
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -293,12 +294,69 @@ android {
     val debugKeystore = providers.environmentVariable("LW_DEBUG_KEYSTORE")
         .orElse(providers.environmentVariable("ANDROID_SDK_HOME").map { "$it/.android/debug.keystore" })
         .getOrElse(rootProject.file("../.android/debug.keystore").absolutePath)
+
+    /**
+     * 签名: 发布包用**固定的那一把 release keystore** (2026-11-12, 2.8.0 #36)
+     *
+     * 2.7.10 的包拆开能看到 `application-debuggable` 与 `CN=Android Debug` (issue #50): 调试口子
+     * 跟着发布包走, 而"同版本号能不能覆盖装"还取决于跑 gradle 的是谁、拿到的是哪一把 debug key
+     *
+     * 现在发布包走 release 变体 + 这把 key: 主体 `CN=Luwi Release`, 有效期 100 年, R8 与 debug 同一份规则
+     *
+     * **key 与口令都不进仓库** —— 公开仓里放一把 release key 等于把签名权发给所有人
+     * 默认落点 `D:\apk\.android\luwi-release.jks` 与同目录的 `luwi-release.properties`
+     * (storePassword / keyAlias / keyPassword); 换机器用 `LW_RELEASE_KEYSTORE` 指过去, 口令也可以走
+     * `LW_RELEASE_STORE_PASSWORD` / `LW_RELEASE_KEY_PASSWORD` / `LW_RELEASE_KEY_ALIAS`
+     * 生成与体检: `pwsh -File tools/lw-make-release-keystore.ps1 [-Check]` (摘要要与发布闸钉的一致)
+     *
+     * **换 key = 所有人卸载重装**: 包名相同而签名不同, 安卓只回
+     * INSTALL_FAILED_UPDATE_INCOMPATIBLE, 没有"覆盖升级"这条路, 卸载还会带走 files/dsh-home
+     * (会话 / 凭据 / 设置) —— 所以这把 key 只生成一次, 之后只备份
+     */
+    val releaseKeystore: File = File(
+        providers.environmentVariable("LW_RELEASE_KEYSTORE").getOrElse("D:/apk/.android/luwi-release.jks"),
+    )
+    val releaseKeystoreProps: File = File(
+        providers.environmentVariable("LW_RELEASE_KEYSTORE_PROPERTIES")
+            .getOrElse(File(releaseKeystore.parentFile, "luwi-release.properties").path),
+    )
+
+    /** 口令顺序: 环境变量 > keystore 旁边那份 properties > 空 (空口令 keytool 自己也认不了) */
+    fun releaseKeyValue(envName: String, propName: String, fallback: String = ""): String {
+        val fromEnv = providers.environmentVariable(envName).orNull
+        if (!fromEnv.isNullOrBlank()) return fromEnv
+        if (releaseKeystoreProps.isFile) {
+            val props = Properties()
+            releaseKeystoreProps.inputStream().use { props.load(it) }
+            val fromFile = props.getProperty(propName)
+            if (!fromFile.isNullOrBlank()) return fromFile
+        }
+        return fallback
+    }
+
+    // 缺 key 就在装配 release 的时候当场说清楚, 别等签名那一步回一句看不出所以然的 keystore not found
+    if (!releaseKeystore.isFile &&
+        gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+    ) {
+        throw GradleException(
+            "release 签名要用的 keystore 不在: ${releaseKeystore.path}\n" +
+                "先生成一把 (只做一次, 换 key = 所有人卸载重装): " +
+                "pwsh -File tools/lw-make-release-keystore.ps1",
+        )
+    }
+
     signingConfigs {
         getByName("debug") {
             storeFile = file(debugKeystore)
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
+        }
+        create("release") {
+            storeFile = releaseKeystore
+            storePassword = releaseKeyValue("LW_RELEASE_STORE_PASSWORD", "storePassword")
+            keyAlias = releaseKeyValue("LW_RELEASE_KEY_ALIAS", "keyAlias", "luwi-release")
+            keyPassword = releaseKeyValue("LW_RELEASE_KEY_PASSWORD", "keyPassword", storePassword.orEmpty())
         }
     }
 
@@ -345,31 +403,35 @@ android {
     }
 
     buildTypes {
-        // 1.2.0: 发的就是 debug 包 (同一个 debug keystore, 才能覆盖安装、会话与记忆不丢), 而 R8 与
-        // 资源裁剪对哪个 build type 都适用 —— 所以把优化开在 debug 上, 不必改发 release 包。
+        // 1.2.0: debug 也吃 R8 与资源裁剪 —— 那时候发的是 debug 包, 而优化对哪个 build type 都适用
         // 关掉优化时 dex 是 69.6 MiB (十一个 classes*.dex), 那是这一版最大的一笔
+        // 2.8.0 #36 起正式包改走 release 变体 (下面那一段), dev 循环仍然走 debug, 两边的优化与规则同一份
         debug {
             optimization {
                 enable = true
             }
-            // 默认只有 release 才吃 proguard-rules.pro, 而这一版**发的是 debug 包**, 所以显式挂上。
-            // 那份规则里最要紧的一条是特权进程的入口类名 (见文件里的注释)
+            // 默认只有 release 才吃 proguard-rules.pro; dev 包也要跑同一套 (它与正式包只差 debuggable
+            // 与签名), 所以显式挂上 —— 那份规则里最要紧的一条是特权进程的入口类名 (见文件里的注释)
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
         }
         release {
+            // 2.8.0 #36: 发的换成 release 变体, 于是它要接过 debug 那一份的账 —— R8 与资源裁剪开着,
+            // 规则文件也是同一份 (那份里最要紧的一条是特权进程的入口类名, 见 proguard-rules.pro)
+            // 关掉优化时 dex 69.6 MiB, 那是这一版最大的一笔, 正式包不能这么发
             optimization {
-                enable = false
+                enable = true
             }
-            // 2026-10-18: release 变体从前没有挂签名, assembleRelease 会直接出
-            // app-release-unsigned.apk —— 装到设备上是 INSTALL_PARSE_FAILED_NO_CERTIFICATES
-            // ("该安装包未包含任何证书"). 这里挂上与 debug 同一把 key (D:\apk\.android\debug.keystore),
-            // 于是就算谁误跑了 release, 出来的包也签过名, 且与已发出去的 debug 包同签名能覆盖升级.
-            // 这不是"改发 release": 发版仍然只认 assembleDebug 的 app-debug.apk,
-            // 发布前的闸在 tools\lw-release-check.ps1
-            signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // `application-debuggable` 这一行由 build type 给: release 本来就不带, 这里写明是判据
+            // (tools/lw-release-check.ps1 会拿 aapt2 dump badging 再核一次), 谁把这条改成 true 都看得见
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -437,9 +499,21 @@ android {
 // onVariants runs, so this matches them as they appear rather than naming one now; the app
 // reports a missing or stale archive on its own, and `assembleDebug --dry-run` shows
 // `merge<variant>Assets` in the graph if this ever needs rechecking
+//
+// 2.8.0 #36: 发布包改走 release 变体之后, 第一次真的跑到 lintVital (它只跟 release 走), 而 lint
+// 的模型任务是**直接读源集里那两个生成目录**的 —— 没连边就被 Gradle 判成 implicit dependency
+// (`:app:generateReleaseLintVitalReportModel` uses output of `:app:zipHostTree`), 整趟构建当场红
+// 于是把 lint 那几个读 assets 的任务也一起连上, 别只连 merge<variant>Assets
 androidComponents {
     onVariants { variant ->
-        tasks.matching { it.name == "merge${variant.name.replaceFirstChar(Char::uppercaseChar)}Assets" }
+        val cap = variant.name.replaceFirstChar(Char::uppercaseChar)
+        val assetReaders = setOf(
+            "merge${cap}Assets",
+            "generate${cap}LintVitalReportModel",
+            "generate${cap}LintModel",
+            "lintVitalAnalyze${cap}",
+        )
+        tasks.matching { it.name in assetReaders }
             .configureEach {
                 dependsOn(zipHostTree)
                 dependsOn(copySeedAssets)
