@@ -113,6 +113,13 @@
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
+- **首启直接落进已有的 `Luwi` 工作区**: 宿主一起来 (客户端开屏前) 就把 `/sdcard/DSH/Luwi` 注册上
+  (`adoptExploreWorkspace`, **只认已有不建目录**) —— dsh 那一侧就不会去问系统 Documents (安卓上必失败,
+  日志 `system Documents directory is unavailable`); 目录被挪走时才是空的
+- **首启没有工作区时空态自己给「选工作区」** (`#lwp-pick-workspace`, 原生按钮, 判据 218 条): 只有落不下去
+  时才画 (`pickWanted()`), 点开 `#lwp-pick` 一行一个工作区, 一个都没有就先 `portalWorkspace(true)` 备目录再
+  `workspaces.create({path})` (**不走 `initializeDefault`**); 选中走 `openWorkspace` + 150 ms × 24 等场 +
+  `portalBind` (**输入卡上仍不画工作区选择**)
 - 设置页两层分组 (`GroupTitle` / `SectionTitle`), 缺省只展开省电与常用六段, **新加一段天然收起**
   (判据 `SettingsSectionsTest` + `check-settings-sections.mjs`)
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
