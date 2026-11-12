@@ -1,7 +1,6 @@
 import java.io.File
 import java.net.URI
 import java.security.MessageDigest
-import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -290,73 +289,41 @@ android {
      *
      * 所以这里点名 `D:\apk\.android\debug.keystore`: 谁跑、在哪个用户下跑, 签出来的都是同一把。
      * 换机器时用 `LW_DEBUG_KEYSTORE` 指过去 (它必须仍是**同一把旧 key**, 否则真机装不上)
+     *
+     * 2026-11-12: 加一条绝对路径兜底 —— 工单工作树在 `D:\apk\.lwtmp\sa\work\<单名>` 下, `../.android`
+     * 会落到 `.lwtmp\sa\work\.android` (不存在), 于是同一个仓库在工位里出不了包。**先挑存在的那份**,
+     * 挑不到就退回原来的相对路径 (报错信息仍对着它), 签名身份不变
      */
-    val debugKeystore = providers.environmentVariable("LW_DEBUG_KEYSTORE")
-        .orElse(providers.environmentVariable("ANDROID_SDK_HOME").map { "$it/.android/debug.keystore" })
-        .getOrElse(rootProject.file("../.android/debug.keystore").absolutePath)
+    val debugKeystoreCandidates = listOfNotNull(
+        providers.environmentVariable("LW_DEBUG_KEYSTORE").orNull,
+        providers.environmentVariable("ANDROID_SDK_HOME").map { "$it/.android/debug.keystore" }.orNull,
+        rootProject.file("../.android/debug.keystore").absolutePath,
+        "D:/apk/.android/debug.keystore",
+    )
+    val debugKeystore = debugKeystoreCandidates.firstOrNull { File(it).isFile } ?: debugKeystoreCandidates.first()
 
     /**
-     * 签名: 发布包用**固定的那一把 release keystore** (2026-11-12, 2.8.0 #36)
+     * 签名: 2.8.0 的发布包**仍然用这把旧 debug keystore** 签 (2026-11-12, #36 第二次派单)
      *
-     * 2.7.10 的包拆开能看到 `application-debuggable` 与 `CN=Android Debug` (issue #50): 调试口子
-     * 跟着发布包走, 而"同版本号能不能覆盖装"还取决于跑 gradle 的是谁、拿到的是哪一把 debug key
+     * 先把账说清: 这一版要解决的是"发布包带 `application-debuggable`"这个调试口子 (issue #50),
+     * 不是换 key。换 key 的代价是包名相同而签名不同 —— 安卓只回 INSTALL_FAILED_UPDATE_INCOMPATIBLE,
+     * 只能卸载重装, 而卸载会带走 files/dsh-home (会话 / 凭据 / 设置), 用户数据就这么丢了
      *
-     * 现在发布包走 release 变体 + 这把 key: 主体 `CN=Luwi Release`, 有效期 100 年, R8 与 debug 同一份规则
+     * 所以 2.8.0 只做两件事: 发布包改走 release 变体 (不带 debuggable), 签名照旧走上面那把
+     * `D:\apk\.android\debug.keystore` (CN=Android Debug, 证书摘要 652084a9…) —— 2.7.10 能被 2.8.0
+     * 直接覆盖安装, 数据一个字节都不动
      *
-     * **key 与口令都不进仓库** —— 公开仓里放一把 release key 等于把签名权发给所有人
-     * 默认落点 `D:\apk\.android\luwi-release.jks` 与同目录的 `luwi-release.properties`
-     * (storePassword / keyAlias / keyPassword); 换机器用 `LW_RELEASE_KEYSTORE` 指过去, 口令也可以走
-     * `LW_RELEASE_STORE_PASSWORD` / `LW_RELEASE_KEY_PASSWORD` / `LW_RELEASE_KEY_ALIAS`
-     * 生成与体检: `pwsh -File tools/lw-make-release-keystore.ps1 [-Check]` (摘要要与发布闸钉的一致)
-     *
-     * **换 key = 所有人卸载重装**: 包名相同而签名不同, 安卓只回
-     * INSTALL_FAILED_UPDATE_INCOMPATIBLE, 没有"覆盖升级"这条路, 卸载还会带走 files/dsh-home
-     * (会话 / 凭据 / 设置) —— 所以这把 key 只生成一次, 之后只备份
+     * **换 key 推到 2.9.0**, 并且只能走 APK Signature Scheme v3 的签名轮换 (lineage, 用旧 key 签字
+     * 授权新 key, 每版都带同一份 lineage), 那一版才既换掉 key 又保住"覆盖安装不丢数据"
+     * 新 key 已经生成好了 (`D:\apk\.android\luwi-release.jks`, CN=Luwi Release), 生成与体检见
+     * tools/lw-make-release-keystore.ps1
      */
-    val releaseKeystore: File = File(
-        providers.environmentVariable("LW_RELEASE_KEYSTORE").getOrElse("D:/apk/.android/luwi-release.jks"),
-    )
-    val releaseKeystoreProps: File = File(
-        providers.environmentVariable("LW_RELEASE_KEYSTORE_PROPERTIES")
-            .getOrElse(File(releaseKeystore.parentFile, "luwi-release.properties").path),
-    )
-
-    /** 口令顺序: 环境变量 > keystore 旁边那份 properties > 空 (空口令 keytool 自己也认不了) */
-    fun releaseKeyValue(envName: String, propName: String, fallback: String = ""): String {
-        val fromEnv = providers.environmentVariable(envName).orNull
-        if (!fromEnv.isNullOrBlank()) return fromEnv
-        if (releaseKeystoreProps.isFile) {
-            val props = Properties()
-            releaseKeystoreProps.inputStream().use { props.load(it) }
-            val fromFile = props.getProperty(propName)
-            if (!fromFile.isNullOrBlank()) return fromFile
-        }
-        return fallback
-    }
-
-    // 缺 key 就在装配 release 的时候当场说清楚, 别等签名那一步回一句看不出所以然的 keystore not found
-    if (!releaseKeystore.isFile &&
-        gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-    ) {
-        throw GradleException(
-            "release 签名要用的 keystore 不在: ${releaseKeystore.path}\n" +
-                "先生成一把 (只做一次, 换 key = 所有人卸载重装): " +
-                "pwsh -File tools/lw-make-release-keystore.ps1",
-        )
-    }
-
     signingConfigs {
         getByName("debug") {
             storeFile = file(debugKeystore)
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
-        }
-        create("release") {
-            storeFile = releaseKeystore
-            storePassword = releaseKeyValue("LW_RELEASE_STORE_PASSWORD", "storePassword")
-            keyAlias = releaseKeyValue("LW_RELEASE_KEY_ALIAS", "keyAlias", "luwi-release")
-            keyPassword = releaseKeyValue("LW_RELEASE_KEY_PASSWORD", "keyPassword", storePassword.orEmpty())
         }
     }
 
@@ -431,7 +398,9 @@ android {
             // `application-debuggable` 这一行由 build type 给: release 本来就不带, 这里写明是判据
             // (tools/lw-release-check.ps1 会拿 aapt2 dump badging 再核一次), 谁把这条改成 true 都看得见
             isDebuggable = false
-            signingConfig = signingConfigs.getByName("release")
+            // 签名仍是那把旧 debug key (理由见上面 signingConfigs 前那一段): 2.8.0 要能被 2.7.10 覆盖安装,
+            // 用户数据不能靠卸载重装来换一个"好看的证书主体"
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

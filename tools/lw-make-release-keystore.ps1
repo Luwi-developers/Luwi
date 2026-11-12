@@ -1,22 +1,26 @@
 <#
 .SYNOPSIS
-  Luwi 发布签名那把固定 release keystore: 生成 / 体检 / 打印证书摘要
+  Luwi 2.9.0 换签名用的那把 release keystore: 生成 / 体检 / 打印证书摘要
 
 .DESCRIPTION
-  2.8.0 #36: 发布包不再拿 debug key (CN=Android Debug) 签, 改用一把固定的 release keystore
-  (CN=Luwi Release), release 变体同时 debuggable=false
+  **2.8.0 还没用上这把 key** —— 那一版仍用旧 debug key 签 (CN=Android Debug), 因为换 key 会让
+  2.7.10 装不上 2.8.0, 只能卸载重装, files/dsh-home (会话 / 凭据 / 设置) 跟着丢
+
+  换 key 推到 2.9.0, 而且必须走 APK Signature Scheme v3 的签名轮换 (lineage: 用旧 key 签字授权
+  新 key, 每版都带同一份 lineage), 那一版才既换掉 key 又保住"覆盖安装不丢数据"
+  这个脚本只管那把新 key 本身 (生成 / 体检), lineage 那一步在签包时用 apksigner 做
 
   **keystore 与口令都不进仓库**: 公开仓里放一把 release key 等于把签名权发给所有人
   默认落点 `D:\apk\.android\luwi-release.jks`, 口令写同目录的 `luwi-release.properties`
   (storePassword / keyAlias / keyPassword, 认 utf8 无 BOM)
-  换个地方放就用 `LW_RELEASE_KEYSTORE` 指过去, app/build.gradle.kts 读同一份约定
 
-  没有 -Check 时: keystore 不在就按下面的 DN 生成一份, 再把摘要打出来钉进 tools\lw-release-check.ps1
-  keystore 已在就只体检, **不覆盖** —— 换 key = 所有人卸载重装, 那是一次有意的决定, 不交给脚本
+  没有 -Check 时: keystore 不在就按下面的 DN 生成一份, 再把摘要打出来 (2.9.0 启用的那天, 把它
+  钉进 tools\lw-release-check.ps1 的 ExpectedCertSha256); keystore 已在就只体检, **不覆盖** ——
+  换 key = 所有人卸载重装, 那是一次有意的决定, 不交给脚本
 
   用法:
     pwsh -File tools\lw-make-release-keystore.ps1                 # 生成 (已存在就体检)
-    pwsh -File tools\lw-make-release-keystore.ps1 -Check          # 只读体检, 比对发布闸里的期望摘要
+    pwsh -File tools\lw-make-release-keystore.ps1 -Check          # 只读体检, 打印 DN / 摘要 / 有效期
     pwsh -File tools\lw-make-release-keystore.ps1 -Keystore D:\apk\.android\other.jks
 
 .PARAMETER Keystore
@@ -114,19 +118,13 @@ Write-Host "  摘要     $shaFlat"
 Write-Host "  有效期   $valid"
 
 if ($dn -notmatch 'CN=Luwi Release') {
-    Write-Host "  FAIL     主体里没有 CN=Luwi Release, aapt2 / apksigner 那两条判据过不了" -ForegroundColor Red
+    Write-Host "  FAIL     主体里没有 CN=Luwi Release, 2.9.0 那条判据过不了" -ForegroundColor Red
     exit 1
 }
 
-# 发布闸钉着摘要; 这里当场比一次, 免得换过 key 之后闸还按旧的判
-$gatePath = Join-Path $PSScriptRoot 'lw-release-check.ps1'
-if (Test-Path -LiteralPath $gatePath) {
-    $pinned = ([regex]::Match((Get-Content -LiteralPath $gatePath -Raw), "ExpectedCertSha256\s*=\s*'([0-9a-fA-F]+)'")).Groups[1].Value.ToLowerInvariant()
-    if ($pinned -and $pinned -ne $shaFlat) {
-        Write-Host "  FAIL     tools\lw-release-check.ps1 钉的摘要对不上: $pinned (应改成 $shaFlat)" -ForegroundColor Red
-        exit 1
-    }
-    if ($pinned) { Write-Host '  PASS     与发布闸钉的摘要一致' -ForegroundColor Green }
-}
+# 2.8.0 的发布闸钉的还是旧 debug key, 所以这里不与它比 (比了必然红); 2.9.0 启用这把 key 的那天,
+# 把摘要与主体钉进 tools\lw-release-check.ps1, 再让这条比较回来
+Write-Host ''
+Write-Host "  下一步   2.9.0 用它签时: 把 $shaFlat 钉进 tools\lw-release-check.ps1, 并用 apksigner 的 --lineage 签"
 
 exit 0

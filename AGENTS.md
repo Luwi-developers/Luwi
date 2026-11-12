@@ -10,9 +10,10 @@
 - **2.7.10 冻结**: `D:\apk\archive\releases\Luwi-2.7.10-frozen-20261030-r2.apk`, 250,390,159 字节, sha256
   `F89348B9…`, 2026-11-01 周日发, 一字节都不许改
 - 发布只认 `archive\releases\` 副本 (`app-release.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
-- 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包): 签名是固定的
-  release key (`CN=Luwi Release`, key 与口令在 `D:\apk\.android\` 不进仓库, `tools/lw-make-release-keystore.ps1`
-  生成与体检), `debuggable=false`; dev 循环仍走 debug (另一把 key, 与发布包互不可覆盖)
+- 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包), `debuggable=false`;
+  **签名仍是那把旧 debug key** (`CN=Android Debug`) —— 换 key 会让 2.7.10 装不上 2.8.0, 只能卸载重装,
+  `files/dsh-home` (会话 / 凭据 / 设置) 跟着丢; 换 key 归 2.9.0, 且必须走 `apksigner` 的 v3 lineage
+  (`tools/lw-make-release-keystore.ps1` 已备好那把 `CN=Luwi Release` 的新 key, key 与口令都不进仓库)
 - 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定 / 不可调试) —— **换 key = 全员卸载重装**,
   并跑 `python tools/apk-bytes.py <apk>` 验无归属区间 (最大那条只应几 KB)
 - 公告: 对外只叫 `Luwi`, 不写 DSH / LW; 未上真机的项不进公告

@@ -7,9 +7,11 @@
   发版只认 :app:assembleRelease 出来的 app-release.apk (2.8.0 #36 起; 以前发的是 debug 包),
   而且上传前必须先过这几道:
     - 设备读数: 证据文件 (默认 docs\device-evidence.md) 里每一项都有可用读数, 由 tools\check-device-evidence.mjs 判
-    - 文件名必须是 app-release.apk (debug 包不进发布流程: 它 debuggable, 签的也是另一把 key)
+    - 文件名必须是 app-release.apk (debug 包不进发布流程: 它 debuggable)
     - apksigner verify 必须通过 (v2 / v3 签名在)
-    - 证书必须是项目那把固定的 release key (CN=Luwi Release, D:\apk\.android\luwi-release.jks)
+    - 证书必须是项目那把固定的 debug key (CN=Android Debug, D:\apk\.android\debug.keystore)
+      **2.8.0 仍然用旧 key**: 换 key 等于 2.7.10 装不上 2.8.0, 只能卸载重装, files/dsh-home
+      (会话 / 凭据 / 设置) 跟着丢; 换 key 推到 2.9.0 并走 v3 签名轮换 (lineage)
     - aapt2 dump badging 里不能有 application-debuggable 那一行
   最后打一张汇总: FAIL 的那一项连同它缺的东西一起点名; 有 FAIL 就以非零退出码结束,
   发布 / 上传那一步看见非零就不许传
@@ -40,10 +42,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 项目固定的那把 release key (CN=Luwi Release): 换 key = 所有人卸载重装, 理由见 app/build.gradle.kts
-# 生成与体检走 tools\lw-make-release-keystore.ps1, 那条命令会拿这个摘要跟自己比一次
-$ExpectedCertSha256 = '550c0499296de51186cc374d719bb4aaabd9e36e7c13439e9c3951d80fc6d77b'
-$ExpectedCertCn = 'CN=Luwi Release'
+# 项目固定那把 key (2.8.0 仍是旧 debug key): 换 key = 所有人卸载重装, 理由见 app/build.gradle.kts
+# 2.9.0 要换成 release key 时, 这两个常量跟着换, 并且那一版必须走 v3 lineage, 否则老用户装不上
+$ExpectedCertSha256 = '652084a902c50f95bf71e6ce6cd0bad8fa5a9b231a146f99016bc17265c97359'
+$ExpectedCertCn = 'CN=Android Debug'
 
 $checks = [System.Collections.Generic.List[object]]::new()
 function Add-Check([string]$Name, [string]$Status, [string]$Detail) {
@@ -195,9 +197,9 @@ if (-not (Test-Path -LiteralPath $Apk)) {
             } else {
                 $certSha = ($certLine -replace '.*certificate SHA-256 digest:\s*', '').Trim().ToLowerInvariant()
                 if ($certDn -notmatch [regex]::Escape($ExpectedCertCn)) {
-                    Add-Check '证书' 'FAIL' "主体不是 ${ExpectedCertCn}: $certDn (debug key 签的包就是 CN=Android Debug)"
+                    Add-Check '证书' 'FAIL' "主体不是 ${ExpectedCertCn}: $certDn (换 key 要等 2.9.0 + v3 lineage, 否则 2.7.10 覆盖安装不上)"
                 } elseif ($certSha -ne $ExpectedCertSha256) {
-                    Add-Check '证书' 'FAIL' "摘要不是项目那把 release key: $certSha (应为 $ExpectedCertSha256; 换 key 等于所有人卸载重装)"
+                    Add-Check '证书' 'FAIL' "摘要不是项目那把 key: $certSha (应为 $ExpectedCertSha256; 换 key 等于所有人卸载重装)"
                 } else {
                     Add-Check '证书' 'PASS' "$certDn $($certSha.Substring(0, 8))…"
                 }
