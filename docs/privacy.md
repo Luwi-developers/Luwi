@@ -16,11 +16,12 @@
 
 ## 二、出站清单
 
-这是全部。`grep -rn 'https://' app/src/main` 的结果就是它，没有第二份。
+这是全部。正文里写死的主机都在下表；有镜像域名是变量拼出来的（如 `gcore.jsdelivr.net`），`grep` 抓不到，以这张表为准。
 
 | 域名 | 什么时候访问 | 传过去什么 | 怎么关掉 |
 |---|---|---|---|
 | `api.github.com` | 检查更新、拉技能索引、反馈里选「公开到仓库」时开 issue | 只是一个 GET；开 issue 时带你在对话框里写的内容 | 不检查更新、不点反馈 |
+| `github.com` | 下载唤醒词 / 语音模型 release（先试 `ghfast.top` 镜像，失败回退本体） | GET 文件，不带任何标识 | 不下载语音模型 |
 | `luwi.dpdns.org` | 官网登录、酒馆签到、朗读取临时令牌（`/api/edge-token`）、反馈投递（`/feedback`） | 登录令牌 / 朗读的那段文字 / 反馈正文 | 不登录、不用「朗读」、不点反馈 |
 | `hf-mirror.com`、`huggingface.co` | 下载语音识别与唤醒词模型 | GET 文件，不带任何标识 | 不下载模型（不使用语音） |
 | `api.open-meteo.com`、`geocoding-api.open-meteo.com` | 自动化的「天气」条件 | 城市名或经纬度 | 不做带天气条件的排期 |
@@ -29,15 +30,18 @@
 | `mirrors.aliyun.com` | 内置 Alpine 根文件系统（`lw_linux` 沙盒） | GET 文件 | 不用终端沙盒 |
 | `127.0.0.1` | 本机的 dsh 宿主与界面之间的通信 | 不出设备 | — |
 
-三个容易误认的字符串，**不是请求**：
+几个容易误认的字符串，**不是请求**：
 
 - `www.w3.org` —— SSML 的 XML 命名空间常量（`app/src/main/java/io/github/yuloong07star/luwi/tool/LwEdgeSpeech.kt`）
 - `hapjs.org`、`doc.quickapp.cn` —— 快应用的 deeplink 前缀与注释（`channel/QuickAppCapability.kt`）
 - `example.com`、`lw.local` —— 示例地址与本地域名（`channel/PrivilegedBridge.kt`、`plugin/PluginBoundaries.kt`）
+- `developer.android.com`、`d.android.com` —— 备份 / keep 规则的文档链接（`res/xml/backup_rules.xml`、`res/xml/data_extraction_rules.xml`、`keepRules/rules.keep`）
+- `stuk.github.io` —— `assets/web/lw-office.js` 里 SheetJS 的文档链接
+- `codeload.github.com` —— 构建期 `CMakeLists.txt` 拉源码用，不进 APK 运行期
 
 ## 三、权限
 
-`app/src/main/AndroidManifest.xml` 里一共 **62 条**。它们不是开箱就在用，而是「快捷指令能覆盖到哪儿」的边界——哪条你没授，对应的指令就会直接失败并说清原因，不会静默降级。
+`app/src/main/AndroidManifest.xml` 里一共 **62 条**（源码口径）。装到设备后构建链会再自动追加 2 条（`…DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` 和 Shizuku 的 `moe.shizuku.manager.permission.API_V23`），`dumpsys package` 能看到 **64 条**。它们不是开箱就在用，而是「快捷指令能覆盖到哪儿」的边界——哪条你没授，对应的指令就会直接失败并说清原因，不会静默降级。
 
 | 组 | 干什么用 | 谁会用到 |
 |---|---|---|
@@ -68,8 +72,8 @@
 ## 五、你可以自己验
 
 ```bash
-# 1. 出站清单是不是这一份
-grep -rn 'https://' app/src/main
+# 1. 出站清单是不是这一份（assets 里第三方 JS 的注释 URL 不算）
+grep -rn 'https://' --include='*.kt' --include='*.xml' app/src/main
 
 # 2. 包里有没有第三方统计 SDK
 grep -rniE 'firebase|bugly|umeng|sentry|appsflyer|adjust|mixpanel|amplitude' app/build.gradle.kts
@@ -89,3 +93,4 @@ aapt2 dump badging app-debug.apk | grep -i debuggable
 | 日期 | 改动 |
 |---|---|
 | 2026-11-12 | 首版：出站清单、权限分组、本机数据位置、自证方法 |
+| 2026-11-13 | 按实测校正：补 `github.com` 下载源、grep 口径、权限 62/64 说明、注释型字符串 |
