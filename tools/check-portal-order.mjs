@@ -191,8 +191,9 @@ if (!source.includes('sortAt') && !source.includes('sortFloor')) {
   failures.push('client.js: sortAt / sortFloor 还在 —— 缺时间的键仍可能排到已知时间前面')
 }
 
-if (source.includes('return orderTimeline(users, rows, extras)')) {
-  notes.push('ok   nodesOf: 交给 orderTimeline 按轮排')
+// 2026-11-12 (#38): 排好的那一串再交给 `appendRecord` 接在门户记录后面 (自动换场带过来那一段)
+if (source.includes('return appendRecord(carried, orderTimeline(users, rows, extras))')) {
+  notes.push('ok   nodesOf: 交给 orderTimeline 按轮排, 再接在门户记录后面')
 } else {
   failures.push('client.js: nodesOf 没有走 orderTimeline')
 }

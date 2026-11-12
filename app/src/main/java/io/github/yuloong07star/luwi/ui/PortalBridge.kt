@@ -177,6 +177,17 @@ internal class PortalBridge(private val context: Context) {
                 put("thinking", turns.length() > 0)
                 put("count", turns.length())
             })
+            // 主动场 (2026-11-12 #38): 到点自己开的那一场 (宿主单写者, `lw/proactive.json` 的 `run`)
+            //
+            // 门户靠这两个读数把那一场**接进当前对话**: 它是固定新开的, 但主人要的是"那句出现在
+            // 门户首屏的当前对话里, 不是只落在那一场的历史对话里" —— 于是页面拿 `session` 去
+            // `portalOut` 取那一场的 jsonl, 当成时间线上的几行插进来 (不换场)。只读, 一个字节不写;
+            // `startedAt` 是"这一场是不是新的"的唯一判据
+            put("proactive", JSONObject().apply {
+                val run = readJson(lwFile("proactive.json"))?.optJSONObject("run")
+                put("session", run?.optString("session").orEmpty())
+                put("startedAt", run?.optLong("startedAt", 0L) ?: 0L)
+            })
         }
         return body.toString()
     }

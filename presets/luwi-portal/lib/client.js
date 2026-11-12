@@ -57,6 +57,29 @@ window.__ModuleLoader__.load({
     var SESSION_KEY = 'dsh.luwi.portal.session'
     /** 时间分段: 相邻两条隔这么久以上就另起一段 (2026-11-08 主人: "对话 30min 后分段") */
     var SECTION_GAP_MS = 30 * 60 * 1000
+    /**
+     * 主动场开场那句的头一段 (2026-11-12 #38)
+     *
+     * 宿主 `proactiveStartLine` 的第一行逐字相同 (`host-plugin` 的 `PROACTIVE_START_MARK`) ——
+     * 那一行是给模型的启动说明, **不是主人说的话**, 门户照它把整条认出来不画 (历史窗里仍在)
+     */
+    var PROACTIVE_START_MARK = '这是到点自己开的一场主动对话'
+    /** 门户记录最多留几条 (跨场续写时的上限, 免得一场一场攒出无限长) */
+    var RECORD_MAX = 240
+    /**
+     * 打开门户这一刻, 主动场那一场多久之内还算"最新的消息" (2026-11-12 #38)
+     *
+     * 与球那本账同一个 10 分钟 (`voice/session.json` 的复用窗口): 刚醒过来说完话就打开应用,
+     * 落的应该是那一句; 更早的就是上一次开机的事, 门户照旧落回"上次画的那一场"
+     */
+    var RECENT_PROACTIVE_MS = 10 * 60 * 1000
+    /**
+     * 主动场那几句插进本场时间线时的 `seq` 基址 (2026-11-12 #38, 2026-11-13 收紧口径)
+     *
+     * 同一轮里 `orderTimeline` 按 `seq` 排她的话: 那一场自己的 `seq` 从 1 数起, 与本场的数会撞, 于是
+     * 把它抬到本场之上 —— 同一轮里"她后说的"就该排在后面, 也不会顶到本场已有的那几句前面
+     */
+    var ECHO_SEQ_BASE = 1000 * 1000
 
     /**
      * `+` 上那个加号: dsh 的 `IconPlusOutlineMedium` 就这两笔 —— 与 `presets/ui-fix` 同一条分寸
@@ -1014,6 +1037,32 @@ window.__ModuleLoader__.load({
       var outNext = 0
       var outKey = ''
       var releasedIds = {}
+      /**
+       * 门户记录 (2026-11-12 #38): 自动换场之前已经画在屏上的那些行
+       *
+       * 主动场是**固定新开**一场 (`presets/proactive` 里写死的), 而主人要的是"一打开就看到最新那句,
+       * 上面那段历史还在" —— 所以自动换场 (账本 / 主动场 / 会话表) 之前先把当前画面抄进这里, 换过去
+       * 之后接在新场前面画。`nodesOf` 每次把这两段合成一份, 于是条数只增不减。
+       *
+       * **只有点左上角「开新对话」或这一层重挂 (重启应用) 才清空** (主人 2026-11-12 的原话:
+       * "门户对话记录不可自动清空"): 点历史是主人自己要看那一场, 也不抄
+       */
+      var carried = []
+      /** 上一次投过的主动场 (`startedAt`): 同一个数只投一次, 挂载时先把文件里那一场记下来 */
+      var proactiveSeen = 0
+      /**
+       * 主动场那几句 (2026-11-12 #38, 2026-11-13 收紧口径)
+       *
+       * 主人原话: "那句要出现在**当前对话**（门户首屏）里, **不允许只落在那一场独立会话的历史对话里**".
+       * 那一场仍然是固定新开的 (预设与硬闸都绑在它上面), 门户**不换场** —— 只把那一场的 `lw/out`
+       * 当成本场时间线上的几行插进来 (`echoItemOf`), 于是条数 = 触发前 + 1, 上面那段历史一条不动;
+       * 开场提示词只在那一场自己的历史对话里 (见 [isProactiveStart]), 这里只收她说的那几句
+       */
+      var echoes = []
+      /** 现在收的是哪一场 (`proactive.json` 的 `run.session`), 空串 = 还没收过 */
+      var echoSession = ''
+      /** 那一场已经收到哪个 `seq` (两段水位, 与 [loadOut] 同一条规矩) */
+      var echoNext = 0
       /** 已经取进 `outLines` 的那些 `seq` (取水位推进了也去重一次: 见 [loadOut] 里那段注释) */
       var seenSeq = {}
       var outQueue = []
@@ -1367,6 +1416,121 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 这一条 user 消息是不是主动场的开场提示词 (纯函数, 判据 `check-luwi-portal` 抽出来真跑)
+       *
+       * 两个记号都认: 宿主 2026-11-12 起写的 `source.via === 'proactive'`, 以及老会话里没有这个记号
+       * 时那句开场白本身的头一段 ([PROACTIVE_START_MARK])。命中就**整条不画** —— 它是启动说明, 不是
+       * 主人说的那句; 会话自己那一份历史 (dsh 的历史对话) 一个字都不动, 点进去还查得到
+       */
+      function isProactiveStart(node) {
+        if (!node || typeof node !== 'object') return false
+        var source = node.source
+        if (source && typeof source.via === 'string' && source.via === 'proactive') return true
+        var text = textOf(node.content)
+        return text.replace(/^\s+/u, '').indexOf(PROACTIVE_START_MARK) === 0
+      }
+
+      /**
+       * 这一场主动对话是不是"新的、还没投过" (纯函数)
+       *
+       * - 没开会话 / 没有 `startedAt` → 不是
+       * - `seen >= startedAt`: 这一场已经投过 (或它比挂载还早) → 不是, 同一个数只投一次
+       */
+      function proactiveNew(run, seen) {
+        if (!run || typeof run.session !== 'string' || run.session === '') return false
+        var startedAt = Number(run.startedAt) || 0
+        if (startedAt <= 0) return false
+        return startedAt > (Number(seen) || 0)
+      }
+
+      /**
+       * 把手里的行接在门户记录后面 (纯函数)
+       *
+       * 身份 (`id`) 一样的只留一条 —— 换场前后同一条不该画两遍; 超过 [RECORD_MAX] 从头上截,
+       * 留下来的一定是**最新的那一段**
+       */
+      function appendRecord(base, items) {
+        var kept = Array.isArray(base) ? base.slice() : []
+        var known = {}
+        for (var i = 0; i < kept.length; i += 1) {
+          var key = kept[i] && kept[i].id ? String(kept[i].id) : ''
+          if (key !== '') known[key] = true
+        }
+        var added = Array.isArray(items) ? items : []
+        for (var k = 0; k < added.length; k += 1) {
+          var one = added[k]
+          if (!one) continue
+          var id = one.id ? String(one.id) : ''
+          if (id !== '' && known[id] === true) continue
+          if (id !== '') known[id] = true
+          kept.push(one)
+        }
+        return kept.length > RECORD_MAX ? kept.slice(kept.length - RECORD_MAX) : kept
+      }
+
+      /** 换场之前先把屏上这些行抄进门户记录 (只有自动换场才抄, 见 [switchTo]) */
+      function carryRecord() {
+        carried = appendRecord(carried, nodesOf())
+      }
+
+      /**
+       * 清空门户记录 (2026-11-12 #38): **只有**「开新对话」与点历史这两条路
+       *
+       * 退后台 / 收门户 / 自动换场一条都不清 —— 主人: "门户对话记录不可自动清空, 除非用户重启应用
+       * 或者开启新对话"; 重挂 (重启应用) 天然是空的, 所以这里也只有这两处
+       */
+      function dropRecord() {
+        carried = []
+        echoes = []
+        echoSession = ''
+        echoNext = 0
+      }
+
+      /**
+       * 她在别的场次 (主动场) 说的一句 → 本场时间线上的一行 (纯函数)
+       *
+       * 身份带上场次 (`echo` + 会话 id + `seq`): 与本场 jsonl 的 `out\\u0001<seq>` 不可能撞, 换场两次
+       * 也不会被 [appendRecord] 当成同一条; `seq` 抬到 [ECHO_SEQ_BASE] 之上, 于是同一轮里排在本场
+       * 已有的那几句后面
+       */
+      function echoItemOf(sessionId, line) {
+        var item = outItemOf(line)
+        item.id = 'echo\u0001' + String(sessionId) + '\u0001' + String(line.seq)
+        item.seq = ECHO_SEQ_BASE + (Number(line.seq) || 0)
+        item.session = String(sessionId)
+        item.echo = true
+        return item
+      }
+
+      /**
+       * 取一次主动场那几句 (`portalOut` 认的是 `lw/out/<会话>.jsonl`, 不必是当前这一场)
+       *
+       * `reset` = 换了一场主动对话, 从 0 重取; 否则只取 `seq > echoNext` 的尾巴 —— 与 [loadOut] 的
+       * 两段水位同一条规矩. 取到就重画 (不排队: 她说的那几句已经在文件里落定了)
+       */
+      function loadEcho(reset) {
+        if (echoSession === '') return
+        if (reset) {
+          echoes = []
+          echoNext = 0
+        }
+        var page = call2('portalOut', echoSession, echoNext)
+        var lines = page && Array.isArray(page.lines) ? page.lines : []
+        var added = 0
+        for (var i = 0; i < lines.length; i += 1) {
+          var one = lines[i]
+          if (!one) continue
+          var seq = Number(one.seq) || 0
+          if (seq > echoNext) echoNext = seq
+          echoes.push(echoItemOf(echoSession, one))
+          added += 1
+        }
+        if (added === 0) return
+        flowForceBottom = true
+        renderFlow()
+      }
+
+      /**
        * 换场入口收敛 (2026-11-10, 方案 §3.3): 三个入口不再各写各的
        *
        * `source`: 'history' | 'new' | 'ledger' | 'list' | 'restore' —— 人点的 ('history' / 'new')
@@ -1376,8 +1540,19 @@ window.__ModuleLoader__.load({
       function switchTo(id, source) {
         if (typeof id !== 'string' || id === '') return false
         console.log('[luwi-portal] switch by=' + source + ' id=' + id)
-        if (source === 'history') return follow(id, { align: true })
-        if (source === 'new') return follow(id, { align: true })
+        if (source === 'history') {
+          // 点历史 = 主人自己要看那一场: 换过去就是那一场, 不带上一段 (2026-11-12 #38)
+          dropRecord()
+          return follow(id, { align: true })
+        }
+        if (source === 'new') {
+          // 「开新对话」是**唯一**清空门户记录的两条路之一 (另一条是重挂 / 重启应用)
+          dropRecord()
+          return follow(id, { align: true })
+        }
+        // 自动换场 (账本 / 会话表): 先把屏上那段抄进记录, 换过去之后接在后面画 ——
+        // 于是"上一条历史仍在, 条数 +1", 置后台十分钟回来也不会少
+        if (source === 'ledger' || source === 'list') carryRecord()
         // ledger / list / restore: 只画, 不反向改 dsh
         if (source === 'list') {
           // 会话表变了: 与原来那条 `adopt(id)` 行为不变 (只换订阅源, 不走重的 openSession)
@@ -1719,7 +1894,8 @@ window.__ModuleLoader__.load({
        * 收成 `users` / `rows` / `extras` 三份, 再交给 [orderTimeline] 按"轮"排
        */
       function nodesOf() {
-        if (chatTarget === null) return []
+        // 这一场的节点还没到 (刚换场 / 场景还没恢复): 门户记录照画, 屏上不清空 (2026-11-12 #38)
+        if (chatTarget === null) return carried.slice()
         var snapshot
         try {
           snapshot = chatTarget.getSnapshot()
@@ -1770,6 +1946,13 @@ window.__ModuleLoader__.load({
           var node = nodes[i]
           if (!node) continue
           if (node.kind === 'user' || node.kind === 'steering') {
+            // **主动场的开场提示词不画** (2026-11-12 #38): 那一条是给模型的启动说明 (启动顺序 / 这一档
+            // 能做什么 "/没有值得说的就沉默"), 主人没说过 —— 画出来就成了"她自己给自己下指令"的怪气泡。
+            // 会话自己那一份历史一个字都不动 (dsh 的历史对话里点进去仍查得到), 这里只是不上门户
+            if (isProactiveStart(node)) {
+              fingerprint.push(node.seq)
+              continue
+            }
             lastUserTime = Number(node.time) || lastUserTime
             // 附件那一段从正文里拆出去: 气泡里只留人话, 图与文件各自画 (2026-11-09)
             var split = splitAttach(textOf(node.content))
@@ -1830,6 +2013,13 @@ window.__ModuleLoader__.load({
           if (releasedIds[line.seq] !== true) continue
           rows.push(outItemOf(line))
         }
+        // 主动场那几句 (2026-11-12 #38): 与本场她的话走同一份 `rows` —— 交给 [orderTimeline] 按 `at`
+        // 归轮、按抬高的 `seq` 排在后面, 于是"她刚说的那句"就落在本场时间线的末尾 (条数 +1)。
+        // 主人自己翻到那一场时不叠: 那时它的真身就在上面那份 `outLines` 里
+        for (var w = 0; w < echoes.length; w += 1) {
+          if (echoes[w].session === sessionId) continue
+          rows.push(echoes[w])
+        }
         // 兜底正文 (2026-11-10 收紧):
         // - `luwi` 档的正文只当过程, 宿主 turn end 已经往同一份 jsonl 补了一行 (球与门户逐字同源),
         //   所以**不再兜底** —— 以前补句还没取回来时先画一句、补句一到再换, 就是"两句并存 / 顺序跳
@@ -1841,6 +2031,11 @@ window.__ModuleLoader__.load({
           // **已经取到、还没放出来的行也算"她说了"** (补句可能还在 `gapMs` 那一拍里排队)
           for (var s = 0; s < outLines.length; s += 1) {
             if (Number(outLines[s].at) >= lastUserTime) spoke = true
+          }
+          // 主动场投过来的那几句也算 (2026-11-12 #38): 否则本场 jsonl 还空着时会再兜一句正文,
+          // 屏上就变成"她说的 + 兜底"两条 —— 主人要的是**那条** + 1
+          for (var z = 0; z < echoes.length; z += 1) {
+            if (Number(echoes[z].time) >= lastUserTime) spoke = true
           }
           var allowFallback = !luwiFlow() || outLines.length === 0
           if (allowFallback && !spoke && assistantOwner >= 0) {
@@ -1870,7 +2065,8 @@ window.__ModuleLoader__.load({
             text: imageFails[f].text,
           })
         }
-        return orderTimeline(users, rows, extras)
+        // 排好之后接在门户记录后面 (落实表 #38): 自动换场带过来那一段在最前, 条数只增不减
+        return appendRecord(carried, orderTimeline(users, rows, extras))
       }
 
       /**
@@ -3974,6 +4170,19 @@ window.__ModuleLoader__.load({
             ledgerHoldUntil = Date.now() + 15000
           }
         }
+        // **主动场那几句要投到这一屏上** (2026-11-12 #38, 2026-11-13 收紧成"进当前对话"):
+        // 那一场是固定新开的 (预设与主动场硬闸都绑在它身上), 但主人要的是"出现在当前对话里, 不是
+        // 只落在那一场独立会话的历史里" —— 所以**不换场**, 只把那一场的 `lw/out` 当成本场时间线上的
+        // 几行插进来 (见 [echoes] / [echoItemOf]); 条数 = 触发前 + 1, 上面那段历史一条不动.
+        // 换了一场主动对话才重取 (同一个 `startedAt` 只投一次), 之后每拍补尾巴
+        var run = status && status.proactive ? status.proactive : null
+        if (proactiveNew(run, proactiveSeen)) {
+          proactiveSeen = Number(run.startedAt) || proactiveSeen
+          echoSession = run.session
+          loadEcho(true)
+        } else {
+          loadEcho(false)
+        }
         renderMeta()
       }
 
@@ -4373,6 +4582,25 @@ window.__ModuleLoader__.load({
        */
       function onHidden() {
         if (document.hidden) clearOut('the page went to the background')
+        else onVisible()
+      }
+
+      /**
+       * 回到前台 (2026-11-12 #38, 主人: "门户对话记录不可自动清空" + "打开应用要显示最新的消息")
+       *
+       * 撤队撤掉的那些条本来会永远不上屏 —— 取水位已经推到文件尾, 而 `releasedIds` 还是 false,
+       * 于是"她在这段时间说的话"一条都补不回来。所以回来先 `loadOut(true)` **从文件重取全量**:
+       * 一次画完、不排队; 视线落到底 (最新那条). 再立刻问一拍账本与主动场 —— 不等那 3 s 定时器
+       */
+      function onVisible() {
+        if (typeof document !== 'undefined' && document.hidden) return
+        loadOut(true)
+        // 那一场的 jsonl 也重取一次: 后台这十分钟她说的几句一条都不少 (2026-11-12 #38)
+        loadEcho(true)
+        stickOn = true
+        pollLedger()
+        scheduleRender()
+        stickFlow()
       }
 
       function unmount() {
@@ -4499,6 +4727,12 @@ window.__ModuleLoader__.load({
         try {
           restore()
           status = call('portalStatus')
+          // 挂载这一刻文件里记着的主动场: **十分钟内的算"最新的消息"**, 第一拍就接进当前对话 —— 这样
+          // "打开应用看到最新那句"与"页面被系统重建过"两条都不靠运气; 更早的就是上一次开机的事, 不接
+          // (`startedAt` 变大才算新, 见 [proactiveNew])
+          var openedRun = status && status.proactive ? status.proactive : null
+          var openedAt = openedRun ? Number(openedRun.startedAt) || 0 : 0
+          proactiveSeen = openedAt > 0 && Date.now() - openedAt <= RECENT_PROACTIVE_MS ? 0 : openedAt
           renderDrawer()
           refresh()
           // 模型是异步的: 先把界面立起来, 数据到了再补 (拿不到就不画)
@@ -4556,6 +4790,8 @@ window.__ModuleLoader__.load({
         onOut: function () {
           if (!mounted) return
           loadOut(false)
+          // `lw/out` 下任何一份变了都推这一下: 主动场那一份也在同一个目录里 (2026-11-12 #38)
+          loadEcho(false)
         },
         isOpen: function () { return mounted },
       }
