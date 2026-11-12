@@ -1696,12 +1696,18 @@ async function writeModelCatalog(ctx) {
   const payload = { v: 1, at: Date.now(), ok: false, current: { provider: '', model: '' }, items: [] }
   try {
     const defaults = ctx.get('agentDefaultModel')
-    const current = typeof defaults?.currentSelection === 'function' ? defaults.currentSelection() : null
-    if (current) payload.current = { provider: String(current.provider ?? ''), model: String(current.model ?? '') }
     const controller = ctx.get('sessionController')
+    let groups = []
     if (controller && typeof controller.modelCatalog === 'function') {
       const catalog = await controller.modelCatalog()
-      payload.items = (catalog?.groups ?? []).flatMap((group) => (group?.models ?? []).map((model) => ({
+      groups = catalog?.groups ?? []
+      // 先兜底再读 current: 修好之后写出去的 current 才是新选的 (首启那个问题的修法, 见下面)
+      await ensureDefaultModelUsable(ctx, groups)
+    }
+    const current = typeof defaults?.currentSelection === 'function' ? defaults.currentSelection() : null
+    if (current) payload.current = { provider: String(current.provider ?? ''), model: String(current.model ?? '') }
+    if (controller && typeof controller.modelCatalog === 'function') {
+      payload.items = groups.flatMap((group) => (group?.models ?? []).map((model) => ({
         provider: String(group.id ?? ''),
         model: String(model.id ?? ''),
         label: `${group.name ?? group.id} · ${model.name ?? model.id}`,
@@ -1726,6 +1732,45 @@ async function writeModelCatalog(ctx) {
   }
   if (payload.ok) modelCatalogState.settled = true
   return payload.ok
+}
+
+/**
+ * 首启兜底: 默认那一对模型在目录里不可用时, 换一个能用的 (真机 issue #42, 2026-11-13)
+ *
+ * dsh-base 把默认定成 `deepseek-official/deepseek-flash`, 这条路由要 API key; 刚装好、只登录了
+ * 账号的手机上发第一句就报 "no API key", 必须去模型选择器里点一下才正常。dsh 自己有一处
+ * `initializeDefaultModel()`, 但它只在登录那一帧调一次, 而且"已经存过任何 API key"时直接
+ * return —— 这里按目录兜一层: 当前这一对不可用时优先换成账号路线, 否则换成目录里第一个有
+ * 模型的组。**本进程里只试成一次** (`done`), 之后不再动, 不覆盖主人后来手动改的选择。
+ */
+const defaultModelFix = { done: false, lastError: null }
+
+async function ensureDefaultModelUsable(ctx, groups) {
+  if (defaultModelFix.done) return
+  const list = Array.isArray(groups) ? groups : []
+  if (list.length === 0) return
+  const defaults = ctx.get('agentDefaultModel')
+  if (defaults === void 0 || typeof defaults.saveSelection !== 'function') return
+  const current = typeof defaults.currentSelection === 'function' ? defaults.currentSelection() : null
+  const usable = (pair) => {
+    if (pair === null || typeof pair !== 'object') return false
+    const group = list.find((item) => item?.id === pair.provider)
+    return Array.isArray(group?.models) && group.models.some((model) => model?.id === pair.model)
+  }
+  if (usable(current)) {
+    defaultModelFix.done = true
+    return
+  }
+  const account = list.find((item) => item?.id === 'deepseek-account' && Array.isArray(item.models) && item.models.length > 0)
+  const pick = account ?? list.find((item) => Array.isArray(item?.models) && item.models.length > 0)
+  if (pick === void 0) return
+  try {
+    await defaults.saveSelection({ provider: String(pick.id), model: String(pick.models[0].id) })
+    defaultModelFix.done = true
+    console.info(`luwi-channel: the default model was pointed at ${pick.id}/${pick.models[0].id} (the previous choice was not in the catalog)`)
+  } catch (error) {
+    defaultModelFix.lastError = `fixing the default model failed: ${error?.message ?? error}`
+  }
 }
 
 /** 应用那个"现在刷一次目录"的记号是不是刚写的 (30 s 之内) */
