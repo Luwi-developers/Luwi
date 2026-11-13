@@ -35,7 +35,7 @@
 | `check-video-gate.mjs` | 视频模式那两道闸 (屏幕类工具一律拒 / 相机同时只许一场会话用) 的判据表, 临时 `DSH_HOME` 自己搭 |
 | `check-single-screen.mjs` | 虚拟屏单槽那条硬限制的判据表 (2026-10-28): 特权侧建屏前先放已有的 / 应用侧先关旧再建 / 桥回被替换的 displayId / 插件把它写进描述与答案 / `displayId` 可省略但事件订阅不补 / 请求有超时 / `lw_wait_text` 在视频模式被拒 |
 | `check-explore.mjs` | 探索那一档的判据表 (2.7.8 批次 7): 预设那一段的 19 行 / persona 那三条红线与五节摘要 / 预算常数与 `exploreBudget` 真值表 / 工作区与预设回退 / 省电只当读数 (2026-10-26 起不再拦) / 数步只数不拒 / `lw_explore` 的工具面 / 摘要的文件形状 (抽那几段纯函数真跑) / 候选卡已下线 |
-| `check-proactive.mjs` | 主动对话那一档的判据表 (2.8.0 B4-a): requestCode 43 与 41 / 42 不撞 / `proactive-schedule.json` 的四个键与"先拉宿主再投" / `SOURCE_PROACTIVE` 两侧同一个字面量 / 主动场固定新开 / 主动场不建虚拟屏 (`proactiveScreenGate` 真跑) / `presets/proactive` 的四步启动顺序与插件表 / 预设落位 / `lw_persona` 的档位 |
+| `check-proactive.mjs` | 主动对话那一档的判据表 (2.8.0 B4-a): requestCode 43 与 41 / 42 不撞 / `proactive-schedule.json` 的四个键与"先拉宿主再投" / `SOURCE_PROACTIVE` 两侧同一个字面量 / 主动场固定新开 / 主动场不建虚拟屏 (`proactiveScreenGate` 真跑) / `presets/proactive` 的四步启动顺序与插件表 / 预设落位 / `lw_persona` 的档位 / 措辞 (2026-11-13 #43: 开场第一行只说"她自己想起他", 「到点」只在禁令那一句里露面, 缺省开场与 `FALLBACK_TEXT` 逐字相同) |
 | `check-persona-live.mjs` | 人格卡"运行时读"那一条 (2026-11-10): 抽 `host-plugin` 那一节真跑 —— 设备卡原样与按 mtime 重读 / 缺失退包内默认 / 都缺失四行兜底 / 超 20000 字截断 / 非 luwi 档返回空 / provider 不抛 / 首次启动从包内默认播种且不覆盖已有内容 |
 | `check-host-persistence.mjs` | dsh 后台持久化那一条的判据表 (2026-10-26; 2026-10-28 扩): renderer 优先级钉在不可见也不降 / renderer 死了自己换一块并有次数上限 / `MainActivity.onResume` 自愈 / 电池白名单只有一份实现且两处入口 / 酒馆缓存带 token 且 token 变了只重载一次 / 酒馆 renderer 也钉住并自己重建 / 浮标输入条收起再展开只重新挂上 / 那份文案两份 strings 都有 |
 | `check-bare-percent.py` | 扫 `strings.xml` 里的裸 `%` (`Resources.getString` 会把它当转换符, 主线程崩) |
