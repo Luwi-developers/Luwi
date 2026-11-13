@@ -153,8 +153,11 @@
 - **老 WebView 垫 polyfill**: `assets/web/lw-compat.js` 经 `addDocumentStartJavaScript` 注入, `MIN_MAJOR` = **116**
   (`Promise.withResolvers` / `AbortSignal.any`); 12 秒没出 `root` 弹 `Dialog` 的兜底已撤, 卡住只留
   `Log.w(page never rendered)`; **补 polyfill 要扫 `host-tree` 里所有 client bundle**, 不只看 `dsh-web-frontend/dist`
-- **切后台回来不重载**: renderer 钉 `RENDERER_PRIORITY_BOUND`, `onRenderProcessGone` 回 true 换新 (最多 3 次,
-  `MAX_PAGE_REBUILDS`); **同一地址只 load 一次**; 判据 `tools/check-host-persistence.mjs`
+- **切后台回来不重载**: renderer 钉 `RENDERER_PRIORITY_BOUND`, `onRenderProcessGone` 回 true 换新
+  (**退避 1/3/8 s + 60 s 窗口内 3 次 + 30 s 慢档**, 账在 `ui/PageRebuild.kt`); `halted` 不是终态 ——
+  慢档时开屏那块给「重新加载界面」, 回前台那一趟也会再试一次; **同一地址只 load 一次**;
+  清单 `MainActivity` **必须 `singleTop`** (否则同一 task 堆两个实例, 两份 renderer 把机器推进 lmkd 连环杀);
+  判据 `tools/check-host-persistence.mjs`
 - **键盘避让**用 `ui/KeyboardInsets.kt` 的 `rememberImeLift` (只认贴底键盘); `adjustResize` 在 targetSdk 37 不管用
 - **门户盖着时只抬输入卡与对话区**: WebView 尺寸不动, 宿主推 `ime - nav` (`__LUWI_PORTAL__.setKeyboard` →
   `--lwp-ime`), 只改 `#lwp-root` 的 padding-bottom (`#lwp-wall` 是 absolute inset:0, 包含块是 padding box, 背景图不动);
