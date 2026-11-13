@@ -1,5 +1,7 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.os.Handler
@@ -12,6 +14,7 @@ import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.OutFile
+import io.github.yuloong07star.luwi.tool.OutPaths
 import io.github.yuloong07star.luwi.tool.OutWatch
 import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.RouterChecks
@@ -528,30 +531,62 @@ internal class PortalBridge(private val context: Context) {
      */
     @JavascriptInterface
     fun portalAbsPath(rel: String): String {
-        fun fail(reason: String): String = JSONObject().apply {
-            put("ok", false)
-            put("error", reason)
-        }.toString()
-        val clean = rel.trim()
-        if (clean.isEmpty()) return fail("没有路径")
-        if (clean.contains("..") || clean.contains('\\') || clean.contains('\u0000')) {
-            return fail("这不是一条相对路径")
-        }
-        val file = when {
-            clean.startsWith("assets/") -> File(File(home(), "lw/out"), clean)
-            clean.startsWith("in/") -> File(
-                LwIn.dir(Workspace.resolve(context).directory),
-                clean.removePrefix("in/"),
-            )
-            else -> return fail("只认 assets/ 与 in/ 两段")
-        }
-        if (!file.isFile || file.length() <= 0L) return fail("这一份不在了")
+        val (file, why) = outTarget(rel)
+        if (file == null) return refused(why)
         return JSONObject().apply {
             put("ok", true)
             put("path", file.absolutePath)
             put("name", file.name)
             put("bytes", file.length())
         }.toString()
+    }
+
+    /**
+     * 把这一份的绝对路径放进系统剪贴板 (落实表 #41, 2026-11-13: "可选复制路径")
+     *
+     * 路径与 [portalAbsPath] 同一条拼法 (认 `assets/` 与 `in/` 两段, 挡 `..`); 复制这边放在 app
+     * 侧, 因为 WebView 里的 `navigator.clipboard` 要有焦点、要算用户手势 —— 长按菜单点下来那一下
+     * 不是每次都算数, 而系统剪贴板一定成
+     */
+    @JavascriptInterface
+    fun portalCopyPath(rel: String): String {
+        val (file, why) = outTarget(rel)
+        if (file == null) return refused(why)
+        val manager = context.getSystemService(ClipboardManager::class.java)
+            ?: return refused("系统的剪贴板不在")
+        runCatching {
+            manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, file.absolutePath))
+        }.getOrElse { return refused("剪贴板写不进去") }
+        Log.i(LOOK_TAG, "copied path of ${file.name} (${file.length()} bytes)")
+        return JSONObject().apply {
+            put("ok", true)
+            put("path", file.absolutePath)
+            put("name", file.name)
+        }.toString()
+    }
+
+    /** 一句"不成立"的回话 (页面照原话给 `showNote`) */
+    private fun refused(reason: String?): String = JSONObject().apply {
+        put("ok", false)
+        put("error", reason ?: "这一份打不开")
+    }.toString()
+
+    /**
+     * 行里那条相对路径 -> 一个真在的文件 (或者一句为什么不成)
+     *
+     * 认哪两段、挡 `..` 那一层在 [OutPaths] (没有设备也能量); 这里只补上"落在哪个根下"与
+     * "它还在不在"
+     */
+    private fun outTarget(rel: String): Pair<File?, String?> {
+        val lookup = OutPaths.lookup(rel)
+        if (lookup is OutPaths.Lookup.Rejected) return null to lookup.reason
+        val found = lookup as OutPaths.Lookup.Found
+        val file = when (found.root) {
+            OutPaths.ASSETS -> File(File(home(), "lw/out"), OutPaths.ASSETS + found.leaf)
+            else -> File(LwIn.dir(Workspace.resolve(context).directory), found.leaf)
+        }
+        if (!file.isFile || file.length() <= 0L) return null to "这一份不在了"
+        return file to null
     }
 
     /** 表情认的那几种 (与宿主 `lw_sticker op=list` 那张正则同一个集合) */
@@ -618,5 +653,8 @@ internal class PortalBridge(private val context: Context) {
 
         /** [portalImageFail] 收到一句空原因时的兜底 (页面不会给空串, 但这行日志不能是空的) */
         const val UNKNOWN_FAIL = "unknown"
+
+        /** 复制路径那一下剪贴板上的说明 (Android 13 起系统会在左下角给一眼预览) */
+        const val CLIP_LABEL = "Luwi path"
     }
 }
