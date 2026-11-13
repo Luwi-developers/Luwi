@@ -89,6 +89,9 @@
 ## 界面
 
 - **上原生渲染虚拟屏预览, 下 `weight(1f)` WebView 渲染 dsh Web GUI, 会话界面不重写**
+- **首启顺序: 加载界面 → 新手引导**: 页面 host 一就绪就挂 (含 dsh 自己的登录弹窗), 「开始使用」等
+  加载界面收尾才弹 (页面画出来 / host 起不来 / `LOADING_BACKSTOP_MS` 45 s 兜底); #39 那条"引导期间
+  不挂 WebView"已推翻 (2.8.0 #44), 判据 `check-ready-card` 第十一节 + `GettingStartedTest`
 - **画面在 `TopAppBar` 下面**: 看画面时整条顶栏不画 (`CollapsedHeight = 52.dp`), 菜单浮右上角, 静 3 秒淡出
 - 缩进与段间距由 `scaffolds/LazyColumn.kt` 给; **Card 不写水平边距、不套 `padding(16.dp)`**; 按钮一律 `fillMaxWidth()`
 - **转场已取消**: `AppNav` 的 `transition` = `NavTransitions.None`, `dimAmount = 0f`; 横滑返回登记仍在, 别接回去

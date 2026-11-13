@@ -282,32 +282,37 @@ internal object PermissionsSeen {
 /**
  * 首启自动弹的那一次 (2026-11-04 主人 #1①)
  *
- * 一辈子只自动弹一次 ([ReadyDialogSeen] 落 `ready-dialog-seen`), 弹不弹只看"看过没有" —— 这一窗是
- * 第一次进应用的那一眼, 那四件齐不齐是它要**说**的事, 不是它该不该出现的前提。之后要看就走设置页
- * 那一行「检查所需依赖」。判那一步仍在 IO 上做, 因为它要读偏好
+ * 一辈子只自动弹一次 ([ReadyDialogSeen] 落 `ready-dialog-seen`), 弹不弹只看"看过没有" —— 这一次打开
+ * 的头一眼是**加载界面** (开屏与页面加载), 这一窗排在它后面 (落实表 2.8.0 #44), 那四件齐不齐是它要
+ * **说**的事, 不是它该不该出现的前提。之后要看就走设置页那一行「检查所需依赖」。判那一步仍在 IO 上做,
+ * 因为它要读偏好
  */
 @Composable
 internal fun ReadyPrompt() {
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     var doctor by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+    // **加载界面在前, 这一窗在后** (落实表 2.8.0 #44): 开屏与页面加载都算加载界面, 走完才弹引导;
+    // `waiting` 要读才是订阅 ([GettingStarted]), 页面画出来 / host 起不来 / 兜底到点时它自己翻成 false
+    val waiting = GettingStarted.waiting
+    LaunchedEffect(waiting) {
+        if (waiting) return@LaunchedEffect
         if (withContext(Dispatchers.IO) { ReadyDialogSeen.claim(context) }) open = true
-        // 这一趟不弹 (记过了 / 已经弹过): 页面不该继续等 —— [GettingStarted.prepare] 那一下要是判早了,
-        // 这里是唯一会把闸打开的地方, 否则 dsh 那一页永远挂不上
-        else GettingStarted.release()
+    }
+    // 兜底: 页面死活画不出来时加载界面收不了尾, 而引导里那张体检表正是修这一类问题的地方 ——
+    // 到点把闸放开, 别让人对着开屏等一窗永远不来的引导
+    LaunchedEffect(Unit) {
+        if (!GettingStarted.waiting) return@LaunchedEffect
+        delay(LOADING_BACKSTOP_MS)
+        GettingStarted.settle()
     }
     if (open) {
         ReadyCardDialog(
-            // 关掉这一窗 = 引导办完了: dsh 那一页从这一帧起才挂得上 (见 [GettingStarted], 2.8.0 #39)
-            onDismiss = {
-                open = false
-                GettingStarted.release()
-            },
+            // 关掉这一窗只是关掉这一窗: dsh 那一页早在加载界面那一段就挂上了 (2.8.0 #44)
+            onDismiss = { open = false },
             // 自检先把体检表关掉: 两层窗叠在一起点不开 (见 [ReadyCardDialog] 末尾那句)
             onReport = {
                 open = false
-                GettingStarted.release()
                 doctor = true
             },
         )
@@ -316,46 +321,52 @@ internal fun ReadyPrompt() {
 }
 
 /**
- * 「开始使用」那一窗与 dsh 页面之间的先后 (落实表 2.8.0 #39, 2026-11-13)
+ * 加载界面与「开始使用」那一窗谁先谁后 (落实表 2.8.0 #44, 2026-11-13; 顺序推翻 #39)
  *
- * 首启两件事会在同一秒撞上: 原生这一窗「开始使用」, 与页面里 dsh 自己的登录 / 凭据弹窗 (这台机器上
- * 还没有能用模型时它自己弹, 见 dsh 的 `DeepSeekOnboardingDialog` 那一档 `automatic`)。主人要的是
- * **引导在前**: 引导在场期间**不挂 WebView**, 关掉之后才挂 —— 于是那个登录弹窗只能出现在引导之后
+ * 首启这一段是三件事挤在同一秒里: 原生开屏 (host 起来 → 页面加载), 页面里 dsh 自己的登录 / 凭据
+ * 弹窗 (这台机器上还没有能用模型时它自己弹, 见 dsh 的 `DeepSeekOnboardingDialog` 那一档 `automatic`),
+ * 与原生这一窗「开始使用」。主人要的顺序是 **加载界面在前, 引导在后**: 开屏与页面加载照常开跑, 页面
+ * 画出来 (或 host 确实起不来 / 兜底到点) 之后才轮到引导
  *
- * **判在组合之前** ([prepare] 由 MainActivity 在 setContent 之前叫一次): 页面那一支在 [HostScreen]
- * 里, 而 `ReadyPrompt` 那一声 `claim` 跑在 LaunchedEffect 上、晚于第一帧 —— 等它来判就已经晚了一帧,
- * 页面可能已经在加载了
+ * #39 曾经把 dsh 那一页压到引导之后 (页面不挂, 登录弹窗自然排在引导后面) —— 那正是反的: 人先看见的
+ * 是一张没有底的开屏, 真正的加载要等引导关掉才开始。这一版改回来: 页面照旧 host 一就绪就挂, 引导
+ * 改成等加载界面收尾 (见 [guideWaitsLoading])
  *
- * 只有首启才拦: `ready-dialog-seen` 记过 (或这一趟已经弹过) 的机器 [prepare] 直接放行, 页面照旧立刻挂
+ * 判在组合之前 ([prepare] 由 MainActivity 在 setContent 之前叫一次): 这份状态要在第一帧就位, 否则
+ * 引导会抢在开屏前面闪一下
  */
 internal object GettingStarted {
 
     private const val TAG = "LwReady"
 
-    /** 引导那一窗还压在上面: [HostScreen] 读它决定这一帧挂不挂 WebView (Compose 状态) */
-    var holdsPage by mutableStateOf(false)
-        private set
+    /** 这一趟要不要弹引导 ([prepare] 记一次, 之后不变) */
+    private var firstRun = false
 
-    /** 这一次打开要不要先让路 (在页面组合之前叫, 见类注释) */
+    /** 加载界面收尾了没有 (Compose 状态: [settle] 翻它, `ReadyPrompt` 读它) */
+    private var loadingDone by mutableStateOf(false)
+
+    /** 引导现在还要不要等加载界面 (判据见 [guideWaitsLoading]) */
+    val waiting: Boolean get() = guideWaitsLoading(firstRun, loadingDone)
+
+    /** 这一次打开要不要等 (在页面组合之前叫, 见类注释) */
     fun prepare(context: Context) {
-        val wait = ReadyDialogSeen.willPrompt(context)
-        holdsPage = wait
+        firstRun = ReadyDialogSeen.willPrompt(context)
+        loadingDone = false
         Log.i(
             TAG,
-            if (wait) "the first-run guide is up: the dsh page waits" else "no first-run guide: the dsh page may load",
+            if (waiting) {
+                "the loading screen goes first: the first-run guide waits"
+            } else {
+                "no first-run guide: the loading screen is not a gate"
+            },
         )
     }
 
-    /** 引导真的要弹 (`claim` 判过之后): 页面继续等 */
-    fun hold() {
-        holdsPage = true
-    }
-
-    /** 引导那一窗关了 (点「开始使用 Luwi」/ 点空白 / 返回 / 转去自检): 页面这一帧起可以挂 */
-    fun release() {
-        if (!holdsPage) return
-        holdsPage = false
-        Log.i(TAG, "the first-run guide is done: the dsh page may load")
+    /** 加载界面走完了 (页面真的画出来 / host 起不来 / 兜底到点): 引导这一帧起才弹 */
+    fun settle() {
+        if (loadingDone) return
+        loadingDone = true
+        Log.i(TAG, "the loading screen is done: the first-run guide may show")
     }
 }
 
@@ -370,6 +381,27 @@ internal object GettingStarted {
  * @return true = 这一次要弹
  */
 internal fun firstRunWaits(seen: Boolean, promptedThisRun: Boolean): Boolean = !seen && !promptedThisRun
+
+/**
+ * 加载界面还拦不拦引导 (落实表 2.8.0 #44)
+ *
+ * 顺序是**加载界面在前, 引导在后**: 开屏与页面加载那一段 (`HostStatus` 到 host 就绪、页面画出
+ * 东西为止) 还没走完, 原生的引导窗就先别弹 —— 否则人第一眼看见的是一张没有底的窗, 真正的加载在
+ * 它关掉之后才开始
+ *
+ * @param firstRun 这一趟要不要弹引导 ([firstRunWaits] 判)
+ * @param loadingDone 加载界面走完没有 ([GettingStarted.settle] 翻它)
+ * @return true = 还要等
+ */
+internal fun guideWaitsLoading(firstRun: Boolean, loadingDone: Boolean): Boolean = firstRun && !loadingDone
+
+/**
+ * 加载界面死活收不了尾时的兜底 (2.8.0 #44)
+ *
+ * 首启那一趟解压要动三万多个文件, 比半分钟长是正常的 —— 所以这个数取得比"等一会儿"宽; 但它不能
+ * 没有: 页面真要画不出来时, 引导里那张体检表就是唯一能把人领出去的东西
+ */
+internal const val LOADING_BACKSTOP_MS = 45_000L
 
 /**
  * 首启那一弹的账: 弹没弹过 (`ready-dialog-seen`) 与"这一次打开弹过没有"
@@ -394,12 +426,10 @@ internal object ReadyDialogSeen {
         if (!willPrompt(context)) return false
         promptedThisRun = true
         runCatching { prefs(context).edit().putBoolean(SEEN, true).apply() }
-        // 这一窗真的要弹了: dsh 那一页压到它关掉之后 (2.8.0 #39)
-        GettingStarted.hold()
         return true
     }
 
-    /** 这一次打开要不要弹 (**不写记号**): [GettingStarted.prepare] 用它决定页面让不让路 */
+    /** 这一次打开要不要弹 (**不写记号**): [GettingStarted.prepare] 用它决定引导等不等加载界面 */
     fun willPrompt(context: Context): Boolean =
         firstRunWaits(prefs(context).getBoolean(SEEN, false), promptedThisRun)
 

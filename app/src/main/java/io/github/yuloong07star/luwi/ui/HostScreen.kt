@@ -257,55 +257,58 @@ fun HostScreen(modifier: Modifier = Modifier) {
                             animationSpec = tween(260),
                             label = "page-fade",
                         )
-                        // 首启那张「开始使用」还压在上面时**先不挂 WebView** (落实表 2.8.0 #39): 页面一挂,
-                        // dsh 自己的登录 / 凭据弹窗就可能抢在引导前面出来。引导那一窗一关,
-                        // [GettingStarted.release] 把这一格放行 —— 那个弹窗于是只可能出现在引导之后
-                        val guideUp = GettingStarted.holdsPage
+                        // 页面照旧 host 一就绪就挂 (落实表 2.8.0 #44 把 #39 那条让路撤了): 加载界面在前,
+                        // 首启引导在后 —— 顺序反过来就是"先看见一张没有底的开屏, 引导关掉之后界面才开始加载";
+                        // 首启那张「开始使用」现在等这一页真的画出来 (见 [GettingStarted.settle])
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                            if (guideUp) {
+                            HostWebView(
+                                url = status.url,
+                                modifier = Modifier.fillMaxSize(),
+                                alpha = alpha,
+                                onReady = {
+                                    pageUp = true
+                                    // 页面画出来了 = 加载界面走完: 首启引导从这一帧起才弹 (2.8.0 #44)
+                                    GettingStarted.settle()
+                                },
+                                // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
+                                // 一块空白的子 View 等新页面加载
+                                onLost = { pageUp = false },
+                                // 页面那一层现在什么光景 / 人点了按钮 (2.8.0 renderer-retry)
+                                onStage = { layer = it },
+                                retryTick = retryTick,
+                            )
+                            // `alpha < 1f` 是"页面还没淡进来"; `layer != UP` 是"这一格现在
+                            // 根本没有 WebView / 它卡住了" —— 后者以前只有 `halted` 一条路,
+                            // 那时 alpha 停在 0, 所以这一条其实一直被前一条顺带盖住了;
+                            // 现在把它写出来, 是因为 `STUCK` 那一档 alpha 也是 0 但没有重建
+                            if (alpha < 1f || layer != PageStage.UP) {
                                 HostBootPanel(
                                     status = status,
-                                    pageStage = stringResource(R.string.boot_stage_guide),
+                                    // 页面掉了就别再说"加载中": 那一句在真机上正是骗了主人
+                                    // 十六分钟的那一句 (报告 2026-11-13)
+                                    pageStage = stringResource(
+                                        if (layer == PageStage.DOWN_GAVE_UP) R.string.boot_stage_page_lost
+                                        else R.string.boot_stage_page,
+                                    ),
+                                    // 自动退避途中 (`DOWN`) 不需要人管, 不给按钮
+                                    onRetry = if (layer == PageStage.DOWN_GAVE_UP || layer == PageStage.STUCK) {
+                                        { retryTick += 1 }
+                                    } else {
+                                        null
+                                    },
                                     modifier = Modifier.fillMaxSize(),
                                 )
-                            } else {
-                                HostWebView(
-                                    url = status.url,
-                                    modifier = Modifier.fillMaxSize(),
-                                    alpha = alpha,
-                                    onReady = { pageUp = true },
-                                    // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
-                                    // 一块空白的子 View 等新页面加载
-                                    onLost = { pageUp = false },
-                                    onStage = { layer = it },
-                                    retryTick = retryTick,
-                                )
-                                // `alpha < 1f` 是"页面还没淡进来"; `layer != UP` 是"这一格现在
-                                // 根本没有 WebView / 它卡住了" —— 后者以前只有 `halted` 一条路,
-                                // 那时 alpha 停在 0, 所以这一条其实一直被前一条顺带盖住了;
-                                // 现在把它写出来, 是因为 `STUCK` 那一档 alpha 也是 0 但没有重建
-                                if (alpha < 1f || layer != PageStage.UP) {
-                                    HostBootPanel(
-                                        status = status,
-                                        // 页面掉了就别再说"加载中": 那一句在真机上正是骗了主人
-                                        // 十六分钟的那一句 (报告 2026-11-13)
-                                        pageStage = stringResource(
-                                            if (layer == PageStage.DOWN_GAVE_UP) R.string.boot_stage_page_lost
-                                            else R.string.boot_stage_page,
-                                        ),
-                                        // 自动退避途中 (`DOWN`) 不需要人管, 不给按钮
-                                        onRetry = if (layer == PageStage.DOWN_GAVE_UP || layer == PageStage.STUCK) {
-                                            { retryTick += 1 }
-                                        } else {
-                                            null
-                                        },
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
-                                }
                             }
                         }
                     }
-                    else -> HostBootPanel(status = status, modifier = Modifier.weight(1f).fillMaxWidth())
+                    else -> {
+                        // host 起不来时加载界面就到头了: 首启引导该出来了, 它里面那张体检表正是修这一步的地方
+                        // (落实表 2.8.0 #44)
+                        LaunchedEffect(status) {
+                            if (status is HostStatus.Failed) GettingStarted.settle()
+                        }
+                        HostBootPanel(status = status, modifier = Modifier.weight(1f).fillMaxWidth())
+                    }
                 }
             }
             // 小窗直接挂在 Scaffold 的内容里, **中间不留任何一层容器**: 拖动范围就是这一层按 inset

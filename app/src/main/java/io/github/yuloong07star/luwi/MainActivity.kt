@@ -115,9 +115,8 @@ class MainActivity : ComponentActivity() {
         runCatching { LwWakeWord.ensure(this) }
         // 浮标那个开关也是存盘的: 开着就照它把球放出来 —— 缺悬浮窗权限或开关关着时, 它什么都不做
         runCatching { LwOverlay.ensure(this) }
-        // 首启那张「开始使用」与 dsh 页面谁先谁后 (落实表 2.8.0 #39): **必须在 setContent 之前判** ——
-        // 页面那一支在 HostScreen 里, 而 `ReadyPrompt` 的 claim 跑在 LaunchedEffect 上、晚于第一帧;
-        // 这一趟要弹就把页面压到那一窗关掉之后, 于是 dsh 自己的登录弹窗只能出现在引导之后
+        // 首启那张「开始使用」与加载界面谁先谁后 (落实表 2.8.0 #44): **必须在 setContent 之前判** ——
+        // 引导等的是加载界面 (开屏 + 页面加载), 而那一份状态要在第一帧就位, 否则引导会抢在开屏前面闪一下
         GettingStarted.prepare(this)
         setContent {
             LuwiApp()
