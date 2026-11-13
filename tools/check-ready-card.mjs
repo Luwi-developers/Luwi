@@ -13,15 +13,15 @@
  *   4. **只走既有下载通道**: 唤醒词与语音模型各有一个现成下载器 (`WakeWordDownload` /
  *      `SpeechModelDownload`), 这一卡只许调它们的 `download()`、只许读它们的 `phase` / `received` /
  *      `total`; 自己再写一套 http 客户端就是第二份文件表与第二份 sha256
- *   5. **入口**: ① 首启一次 (prefs 键 `ready-dialog-seen`, 挂在 AppNav 最外层, 于是开屏那一屏上就
- *      盖得住) ② 设置页「省电」**上方**那一行。两处内嵌的挂载必须都不在了, 否则又是"底部半张卡"
+ *   5. **入口**: ① 首启一次 (prefs 键 `ready-dialog-seen`, 挂在 AppNav 最外层, 排在加载界面之后)
+ *      ② 设置页「省电」**上方**那一行。两处内嵌的挂载必须都不在了, 否则又是"底部半张卡"
  *   6. **虚拟屏整行都不在了** (2026-11-04 主人: 那一行去掉): 判定是"step 里 `action` 的赋值只有
  *      四处" + `CreateScreen` 全无 + `ready_screen` 那三条文案与 `VirtualScreen` 引用一起没了 ——
  *      少一条它就悄悄长回一行
  *   7. **刷新按钮真的没了**: 它原来是 `reload` 计数 + `key(reload)` 整棵重建。删一半 (只删图标、留着
  *      `reload += 1`) 编译不过, 删错一半 (留着死代码) 则看不出问题, 所以四条一起看
- *   8. **引导在前, dsh 页面在后** (2.8.0 #39): 引导那一窗在场期间不挂 WebView, 关掉之后才挂 ——
- *      页面里 dsh 自己的登录弹窗于是不可能抢在引导前面出来
+ *   8. **加载界面在前, 首启引导在后** (2.8.0 #44, 推翻 #39): 开屏与页面加载照常开跑 (页面 host 一就绪
+ *      就挂), 引导等加载界面收尾才弹 —— 页面画出来 / host 起不来 / 45 s 兜底, 三条里任一条放行
  *
  * 不需要设备: 全是拿真源码对着核 (与 `check-ball-menu.mjs` 同一个办法)。
  *
@@ -300,7 +300,7 @@ check(
   [true, true, true],
 )
 
-/* ── 七、首启弹一次: prefs 键 + 挂在最外层 (开屏那一屏就盖得住) ─────────── */
+/* ── 七、首启弹一次: prefs 键 + 挂在最外层 (排在加载界面之后) ─────────── */
 
 check(
   '首启弹一次, 弹过记 `ready-dialog-seen`; 挂在 AppNav 最外层',
@@ -309,7 +309,9 @@ check(
     card.includes('getBoolean(SEEN, false)'),
     card.includes('putBoolean(SEEN, true)'),
     card.includes('internal fun ReadyPrompt()'),
-    /LaunchedEffect\(Unit\) \{\s*\n\s*if \(withContext\(Dispatchers\.IO\) \{ ReadyDialogSeen\.claim\(context\) \}\) open = true/u.test(card),
+    // 弹之前先看闸: 加载界面还没走完就不 claim (2.8.0 #44, 顺序见第十一节)
+    /LaunchedEffect\(waiting\) \{\s*\n\s*if \(waiting\) return@LaunchedEffect\s*\n\s*if \(withContext\(Dispatchers\.IO\) \{ ReadyDialogSeen\.claim\(context\) \}\) open = true/u
+      .test(card),
     nav.includes('ReadyPrompt()'),
   ],
   [true, true, true, true, true, true],
@@ -359,35 +361,42 @@ check(
   [true, true, true, true, true],
 )
 
-/* ── 十一、引导在前, dsh 页面在后 (落实表 2.8.0 #39, 2026-11-13) ──────────── */
+/* ── 十一、加载界面在前, 首启引导在后 (落实表 2.8.0 #44, 2026-11-13) ─────── */
 
-// 首启那一刻页面里 dsh 自己的登录 / 凭据弹窗会自己弹 (没有可用模型时), 而这一窗是原生的:
-// 主人要的是**引导在前**。判据就是"页面只在闸打开之后才挂" —— 断了这条, 登录弹窗又抢到引导前面
+// 首启那一段三件事挤在同一秒: 原生开屏 (host 就绪 → 页面加载), 页面里 dsh 自己的登录 / 凭据弹窗,
+// 与原生这张「开始使用」。顺序是**加载界面在前, 引导在后** —— 页面照旧 host 一就绪就挂 (不然真正的
+// 加载要等引导关掉才开始), 引导改成等加载界面收尾: 页面画出来 / host 起不来 / 45 s 兜底
 check(
-  '首启引导在场期间不挂 dsh 页面, 引导关掉之后才挂 (2.8.0 #39)',
+  '首启引导排在加载界面之后, 页面不再被引导押住 (2.8.0 #44)',
   [
     card.includes('internal object GettingStarted {'),
-    // 判据是纯函数, 单测 (GettingStartedTest) 钉的是它
+    // 两条纯判据, 单测 (GettingStartedTest) 钉的是它们
     card.includes('internal fun firstRunWaits('),
-    // 判在组合之前: 页面那一支在 HostScreen 里, 等 claim 那一声就晚了一帧
+    card.includes('internal fun guideWaitsLoading('),
+    // 判在组合之前: 引导读的那份状态要在第一帧就位
     activity.includes('GettingStarted.prepare(this)'),
-    /val guideUp = GettingStarted\.holdsPage/u.test(host),
+    // #39 那条"引导压着 WebView"已经撤了: 页面不再读 holdsPage, 也不再为引导画另一种开屏
+    !host.includes('GettingStarted.holdsPage'),
+    !host.includes('R.string.boot_stage_guide'),
+    !`${en}${zh}`.includes('boot_stage_guide'),
+    // 页面画出来那一下算加载界面走完: onReady 里 settle, 而且要在 onLost 之前
     (() => {
-      const at = host.indexOf('val guideUp = GettingStarted.holdsPage')
-      const panel = host.indexOf('R.string.boot_stage_guide', at)
-      const branch = host.indexOf('} else {', at)
-      const page = host.indexOf('HostWebView(', at)
-      // guideUp 那一支画的是开屏 (引导那几句), 页面只在 else 里
-      return at > 0 && panel > at && branch > panel && page > branch
+      const ready = host.indexOf('onReady = {')
+      const settle = host.indexOf('GettingStarted.settle()', ready)
+      const lost = host.indexOf('onLost =', ready)
+      return ready > 0 && settle > ready && lost > settle
     })(),
-    // 关窗 / 转去自检都算引导办完; 这一趟不弹时也得把闸放开 (否则页面永远不挂)
-    [
-      /onDismiss = \{\s*open = false\s*GettingStarted\.release\(\)/u.test(card),
-      /onReport = \{\s*open = false\s*GettingStarted\.release\(\)/u.test(card),
-      card.includes('else GettingStarted.release()'),
-    ],
+    // host 起不来也算走完: 引导里那张体检表正是修这一步的地方
+    (() => {
+      const failed = host.indexOf('status is HostStatus.Failed')
+      return failed > 0 && host.indexOf('GettingStarted.settle()', failed) > failed
+    })(),
+    // 引导等的是状态 (等它翻成 false), 不是"这一帧就弹"; 兜底也得在
+    card.includes('val waiting = GettingStarted.waiting'),
+    /LaunchedEffect\(waiting\)/u.test(card),
+    card.includes('delay(LOADING_BACKSTOP_MS)'),
   ],
-  [true, true, true, true, true, [true, true, true]],
+  [true, true, true, true, true, true, true, true, true, true, true, true],
 )
 
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)
