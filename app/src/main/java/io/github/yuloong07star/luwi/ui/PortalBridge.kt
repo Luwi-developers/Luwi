@@ -228,13 +228,13 @@ internal class PortalBridge(private val context: Context) {
     }
 
     /**
-     * 「Luwi」工作区那个目录 (2.8.0 #37): 门户在"一个工作区都没有"时靠它把目录备好
+     * 「Luwi」工作区那个目录 (2.8.0 #37): 门户在没有工作区时靠它把目录备好
      *
      * 为什么不让 dsh 自己去建: 它那条首启缺省工作区落在 `<系统 Documents>/deepseek-harness/default-workspace`,
      * 安卓上 `system Documents directory is unavailable` 必失败, 于是首启停在空态。工作区目录本来就由
      * 应用三档解析 (见 `Workspace.resolve`), 这里只是把同一份事实交给门户: 目录在不在, 以及要不要建
      *
-     * @param make 目录不在时建它 (`mkdirs`), 只在人点了「选工作区」之后才传 true
+     * @param make 目录不在时建它 (`mkdirs`); 2026-11-13 起门户自动落位那一趟自己传 true, 不再由人点
      * @returns `{path, exists}` —— `path` 是绝对路径, `exists` 是建完之后它真的是个目录
      */
     @JavascriptInterface

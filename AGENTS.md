@@ -116,13 +116,13 @@
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
-- **首启直接落进已有的 `Luwi` 工作区**: 宿主一起来 (客户端开屏前) 就把 `/sdcard/DSH/Luwi` 注册上
-  (`adoptExploreWorkspace`, **只认已有不建目录**) —— dsh 那一侧就不会去问系统 Documents (安卓上必失败,
-  日志 `system Documents directory is unavailable`); 目录被挪走时才是空的
-- **首启没有工作区时空态自己给「选工作区」** (`#lwp-pick-workspace`, 原生按钮, 判据 218 条): 只有落不下去
-  时才画 (`pickWanted()`), 点开 `#lwp-pick` 一行一个工作区, 一个都没有就先 `portalWorkspace(true)` 备目录再
-  `workspaces.create({path})` (**不走 `initializeDefault`**); 选中走 `openWorkspace` + 150 ms × 24 等场 +
-  `portalBind` (**输入卡上仍不画工作区选择**)
+- **首启直接默认使用 `<工作区根>/Luwi`, 门户里没有任何选工作区入口** (2026-11-13 改口径, 原 #37 的按钮作废):
+  ① 宿主一起来 (客户端开屏前) 就 `ensureExploreWorkspace` —— 目录不在就建 (`/sdcard/DSH/Luwi`), 建完注册,
+  dsh 那一侧于是不会去问系统 Documents (安卓上必失败, 日志 `system Documents directory is unavailable`);
+  ② 客户端空着时走 `landInDefaultWorkspace`: 列表里没有就 `portalWorkspace(true)` 备目录 + `workspaces.create({path})`
+  (**不走 `initializeDefault`**) → 250 ms × 12 补拍 → `openWorkspace` + 150 ms × 24 等场 + `portalBind`;
+  ③ 挑默认工作区按路径认 (尾部 `/` 归一), 认不到退第一条; 没成只留一句提示 + 一次 15 s 补试, 不弹窗
+  (判据 `check-luwi-portal` 第十三节 + `check-explore` 第十四节)
 - 设置页两层分组 (`GroupTitle` / `SectionTitle`), 缺省只展开省电与常用六段, **新加一段天然收起**
   (判据 `SettingsSectionsTest` + `check-settings-sections.mjs`)
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
@@ -303,7 +303,7 @@
   必踩); 第四处**替换** `hot-memory.js` 末行, 锚点带行首换行 (不带会命中两次、构建当场红); **四条各自判断是否已应用,
   不许「首个文件命中就整段跳过」**; 升级前跑 `node tools/check-mneme-patches.mjs --from npm --version <v>`
   (打上四处 + 真跑 `roundsFromEvents` 验行为) PASS 再改 `pack-host.mjs` 版本号; 判据 `tools/check-bundled-plugins.mjs`
-  (产物级是行为断言); 当前 0.13.0
+  (产物级是行为断言); 当前 0.15.0 (热记忆那条上游已自修, 旧补丁按 `retiredWhen` 自动退役)
 - `PluginOverlay` 每启一次写 `disabled: false`; CSS 覆盖层 `presets/ui-fix` (**只写选择器**); 挂插件要往 `PLUGINS` 与
   `OWN_PLUGINS` 各加一行
 

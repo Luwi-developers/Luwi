@@ -646,17 +646,19 @@ check('段首那句读数带上预算 (分 / 步)', screen.includes('R.string.se
 
 /* ── 十四、工作区与读数 (2.7.9 T5) ─────────────────────────────────────── */
 
-check('宿主起来就把**已有**的探索那条工作区认出来 (2.8.0 #37: 启动不建目录)', [
-  // 启动那一下走"只认已有": 目录不在就什么都不做, 否则「选工作区」永远不会出现
-  /void adoptExploreWorkspace\(ctx\)\n\s*\.then\(\(workspace\) => \{[\s\S]*?return exploreStateWrite\(\)/u.test(host),
-  /async function adoptExploreWorkspace\(ctx\) \{[\s\S]*?adoptExistingChannelWorkspace\(registry, EXPLORE_WORKSPACE_NAME, exploreWorkspaceState\)/u.test(host),
-  // 投递那一下仍走会建目录的那条 (一场探索真的要在那里落脚)
+check('宿主起来就把探索那条工作区**建好并注册** (2026-11-13 改口径: 不再"只认已有")', [
+  // 启动那一下走"建目录 + 注册": 门户里没有「选工作区」那一档, 首启要的是目录真的在
+  /void ensureExploreWorkspace\(ctx\)\n\s*\.then\(\(workspace\) => \{[\s\S]*?return exploreStateWrite\(\)/u.test(host),
+  // "只认已有"那两条路已删 (判据不许它们回来; 注释里留的名字不算)
+  !/function adoptExploreWorkspace\b/u.test(host),
+  !/function adoptExistingChannelWorkspace\b/u.test(host),
+  // 投递那一下仍是同一条 (一场探索真的要在那里落脚)
   (host.match(/await ensureExploreWorkspace\(ctx\)/gu) ?? []).length >= 1,
-  // 宿主一起来还有一次更早的认领 (客户端开屏之前), 这一条是"首启直接落在 Luwi"的落点
-  /ctx\.inject\(\['workspaceRegistry'\][\s\S]*?adoptExploreWorkspace\(workspaceCtx\)/u.test(host),
-], [true, true, true, true])
+  // 宿主一起来还有一次更早的那条 (客户端开屏之前), 这一条是"首启直接落在 Luwi"的落点
+  /ctx\.inject\(\['workspaceRegistry'\][\s\S]*?ensureExploreWorkspace\(workspaceCtx\)/u.test(host),
+], [true, true, true, true, true])
 check('注册与那一次写排在 restore 之后 (抢在前面会把上一场抹掉)', [
-  host.indexOf('void adoptExploreWorkspace(ctx)')
+  host.indexOf('void ensureExploreWorkspace(ctx)')
     > host.indexOf('the explore state could not be read'),
 ], [true])
 
