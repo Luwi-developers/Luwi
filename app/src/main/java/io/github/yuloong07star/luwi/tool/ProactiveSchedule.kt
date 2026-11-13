@@ -77,9 +77,11 @@ internal object ProactiveSchedule {
     /** 缺省时刻: 上午九点半 (夜里不打扰, 一天先问一次) */
     const val DEFAULT_AT = "09:30"
 
-    /** 卡是空的时候投什么 —— 启动顺序那四步, 与宿主 `proactiveStartLine` 的缺省同一段
-     *  (2026-11-07 起"记忆搜索"换成"记着的事": Luwi 上那一档没有记忆插件, 读的是 `wishes.json`) */
-    const val FALLBACK_TEXT = "最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口"
+    /** 卡是空的时候投什么 —— 启动顺序那四步, 与宿主 `PROACTIVE_ASK_DEFAULT` **逐字相同**
+     *  (2026-11-07 起"记忆搜索"换成"记着的事": Luwi 上那一档没有记忆插件, 读的是 `wishes.json`;
+     * 2026-11-13 #43 改措辞: 同一件事用一句话说, 不做箭头清单 —— 它进的是她那场的开场, 语气要像人话;
+     * 两处字面量由 `tools/check-proactive.mjs` 比对) */
+    const val FALLBACK_TEXT = "最新探索摘要, 记着的事 (lw_wish), 今天的日历, 通知摘要 —— 看完再决定要不要开口"
 
     /** 与自动指令 (41) / 探索 (42) 两个闹钟分开, 三个 requestCode 互不覆盖 */
     private const val REQUEST = 43

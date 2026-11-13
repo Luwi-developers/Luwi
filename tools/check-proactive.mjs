@@ -12,7 +12,9 @@
  *      而且主动场的屏幕类工具由 `proactiveScreenGate` 硬拒 —— 这里直接抽那两段纯函数真跑
  *   5. **预设**: `presets/proactive` 的 row id / config.id / order / persona 四步启动顺序 / 权限 /
  *      插件表 (不装 shell 与写文件那几个)
- *   6. **落位**: `pack-host` 那两份声明 / `CustomPresets.PRESET_ROWS` / 清单里的广播接收器
+ *   6. **措辞** (#43): 开场第一行只说"她自己想起他" / 「到点」只在禁令那一句里露面 /
+ *      缺省开场与应用 `FALLBACK_TEXT` 逐字相同
+ *   7. **落位**: `pack-host` 那两份声明 / `CustomPresets.PRESET_ROWS` / 清单里的广播接收器
  *
  * 跑法: `node tools/check-proactive.mjs`
  * 它**直接取 `host-plugin/index.mjs` 里那一段源码来跑** (不复制第二份), 所以测的是上线那一份
@@ -70,7 +72,8 @@ const api = new Function(
     + ' PROACTIVE_SCREEN_DENIED, PROACTIVE_ACT_TABLE, PROACTIVE_COMMAND_DENIED,'
     + ' PROACTIVE_ACTING_REMIND, PROACTIVE_ACTING_ACT, PROACTIVE_ACTING_FULL,'
     + ' PROACTIVE_ACTING_TIERS, PROACTIVE_ACTING_CACHE_MS, PROACTIVE_AUDIT_FILE,'
-    + ' PROACTIVE_STATE_FILE, PROACTIVE_WORKSPACE_NAME }',
+    + ' PROACTIVE_STATE_FILE, PROACTIVE_WORKSPACE_NAME, PROACTIVE_START_MARK,'
+    + ' PROACTIVE_ASK_DEFAULT, PROACTIVE_BANNED_OPENERS, PROACTIVE_START_VOICE }',
 )(
   () => '', async () => [], join, () => '', async () => {}, async () => {}, async () => {}, async () => {},
   readFileSync, statSync, appendFile,
@@ -420,6 +423,53 @@ check('档位的中文名与设置页那三行同一套字', [
   api.proactiveActingLabel('remind'), api.proactiveActingLabel('act'), api.proactiveActingLabel('full'),
 ], ['只提醒', '允许动手', '全放开'])
 
+/* ── 四·六、措辞: 去指令痕迹 (2026-11-13 #43) ───────────────────────────────
+ *
+ * 主人原话: "让 agent 更有人味, 语言更加自然流畅; 例如去掉句首的「到点醒一下」, 让人感觉是 agent
+ * 自然主动发出的, 而不是背后有指令要求". 那句"到点醒一下"是模型照抄开场正文第一行来的, 所以这里
+ * 钉三件: ① 第一行只说"她自己想起他" ② 「到点」只在禁令那一句里露面 ③ 最后一段讲怎么说 */
+
+const voiceLine = api.proactiveStartLine('看看今天', '/x.md', 'remind')
+
+check('开场第一行只说"她自己想起他", 不再写"到点开的一场"', [
+  voiceLine.startsWith(api.PROACTIVE_START_MARK),
+  api.PROACTIVE_START_MARK.includes('想起他'),
+  api.PROACTIVE_START_MARK.includes('到点'),
+], [true, true, false])
+check('「到点」在开场正文里只在禁令那一句里露面', (() => {
+  const lines = voiceLine.split('\n')
+  const ban = lines.filter((line) => line.includes('句首不要写'))
+  return [
+    ban.length,
+    ban[0].includes('到点'),
+    lines.filter((line) => line !== ban[0]).join('\n').includes('到点'),
+  ]
+})(), [1, true, false])
+check('禁令点名四种交代来路的开头 (到点 / 提醒 / 该叫你 / 我醒过来了)',
+  api.PROACTIVE_BANNED_OPENERS.map((word) => voiceLine.includes(word)), [true, true, true, true])
+check('开场正文最后一段讲"怎么说": 柔和 / 客气 / 不催 / 不哄', [
+  voiceLine.includes('开口的样子'),
+  voiceLine.includes('语气柔和'),
+  voiceLine.includes('客气'),
+  voiceLine.includes('不催'),
+  voiceLine.includes('不哄'),
+], [true, true, true, true, true])
+check('开场正文仍然要她"像自己说的一句" (不复述说明 / 不贴屏上原文)', [
+  voiceLine.includes('就当是你自己想到他'),
+  voiceLine.includes('不复述这几行说明'),
+  voiceLine.includes('不贴界面上看到的原文'),
+], [true, true, true])
+check('卡空时的缺省开场与应用那一侧逐字相同', (() => {
+  const kotlin = /const val FALLBACK_TEXT = "([^"]+)"/u.exec(schedule)?.[1]
+  return [
+    kotlin === api.PROACTIVE_ASK_DEFAULT,
+    api.PROACTIVE_ASK_DEFAULT.includes('探索摘要'),
+    api.PROACTIVE_ASK_DEFAULT.includes('通知摘要'),
+    // 缺省那一行也要是"人话": 不许再是箭头清单
+    api.PROACTIVE_ASK_DEFAULT.includes('->'),
+  ]
+})(), [true, true, true, false])
+
 /* ── 五、预设那一段 ───────────────────────────────────────────────────── */
 
 /** 一份 patch 里开头那段 `- insert:` (到下一个顶层 `- ` 之前) */
@@ -502,6 +552,21 @@ check('persona 一次说几句走 lw_say 的 lines 数组 (同一个意群只调
   persona.includes('sticker'),
   persona.includes('speak: true'),
 ], [true, true, true, true])
+
+// 2026-11-13 #43: 「到点醒一下」是从人设里"到点你自己醒过来"那句话照抄出来的 —— 人设本身先不提时刻,
+// 哪几种开头不许写由开场正文逐字列 (见四·六)。语气那三个词是主人这一轮点名要的"柔和礼貌"
+check('persona 不再把这一场说成"到点自己醒过来"', [
+  persona.includes('到点'),
+  persona.includes('醒过来'),
+  persona.includes('柔和'),
+  persona.includes('客气'),
+  persona.includes('不交代来路'),
+], [false, false, true, true, true])
+check('persona 开头就说清这是"她自己想到他"的一场', [
+  persona.includes('这场叫「主动对话」'),
+  persona.includes('主人专门留给你的'),
+  persona.includes('开口要像你自己想到他'),
+], [true, true, true])
 
 const rows = pluginRows(proactiveBlock)
 check('预设里装了 persona / agent-instructions / 只读检索 / compaction', [

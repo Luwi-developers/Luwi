@@ -11358,13 +11358,44 @@ function proactiveScreenRefusal(name) {
 }
 
 /**
- * 开场那一句的头一段 (2026-11-12 #38)
+ * 开场那一句的头一段 (2026-11-12 #38; 2026-11-13 #43 改措辞)
  *
  * 门户按它把**整条**开场提示词认出来不画 (那是给模型的启动说明, 主人没说过)。客户端
  * `presets/luwi-portal/lib/client.js` 的 `PROACTIVE_START_MARK` 逐字相同, `check-luwi-portal` 比对
  * 这两个字面量; 消息本身还带 `via: 'proactive'`, 两个记号任一个命中就够
+ *
+ * 2026-11-13 改的是**措辞**: 原来写作"这是到点自己开的一场主动对话", 模型把这几个字照抄进自己
+ * 开口的第一句 ("到点醒一下…"), 主人一看就知道背后有人在发指令。现在只说她是自己想起来的,
+ * 一个字都不提时刻 —— 排期是后台的事, 不该出现在她嘴里
  */
-const PROACTIVE_START_MARK = '这是到点自己开的一场主动对话'
+const PROACTIVE_START_MARK = '这行字不是主人发的, 是你自己想起他, 于是开了这个话头'
+
+/**
+ * 卡是空 (或那一行没带正文) 时的缺省问题
+ *
+ * 与应用那一侧 `ProactiveSchedule.FALLBACK_TEXT` **逐字相同** (`check-proactive` 比对两处字面量):
+ * 主人没写 `proactive-card.md` 时应用投的就是这一段, 两边说法不一致等于同一场两个开场
+ */
+const PROACTIVE_ASK_DEFAULT = '最新探索摘要, 记着的事 (lw_wish), 今天的日历, 通知摘要 —— 看完再决定要不要开口'
+
+/**
+ * 开口时不许写在句首的几种"交代来路"的话 (2026-11-13 #43, 主人点名的例子是「到点醒一下」)
+ *
+ * 这几个词都是**后台的事** (排期 / 闸 / 把宿主叫起来): 她一说出来, 主人立刻看出背后有安排, 那句
+ * 话就不再像她自己想说的。开场正文逐字列出来, 判据 (`check-proactive`) 钉的就是那一句
+ */
+const PROACTIVE_BANNED_OPENERS = ['到点', '提醒', '该叫你', '我醒过来了']
+
+/**
+ * 这一场"怎么说" (开场正文的最后一段, 说完这段她就要动嘴)
+ *
+ * 放最后是刻意的: 上面几段讲读什么、这一档能做什么, 这一段只讲**怎么说**。人格那一份管她是谁,
+ * 这一段管这一场的第一句话像不像她自己想到他 —— 语气词 (柔和 / 客气 / 不催 / 不哄) 也是 #43 要的
+ */
+const PROACTIVE_START_VOICE = '开口的样子: 就当是你自己想到他, 顺口说一句, 不是照着稿子念. '
+  + `句首不要写「${PROACTIVE_BANNED_OPENERS.join('」「')}」这类交代来路的话, 也不提设定 / 任务 / 指令 / 系统; `
+  + '不列工具名, 不复述这几行说明, 不贴界面上看到的原文. '
+  + '语气柔和、客气一点: 先说你记挂着的那一件, 再轻轻问一句要不要看; 不催, 也不哄.'
 
 /**
  * 主动对话的开场正文 (纯函数)
@@ -11375,10 +11406,12 @@ const PROACTIVE_START_MARK = '这是到点自己开的一场主动对话'
  *
  * 2026-11-10: 权限那一段**按档位生成** (方案 §3.5). 三档各一句, 与宿主那道硬闸 [proactiveGate]
  * 逐格对应 —— 注入说"能做什么", 闸决定"真能不能", 两边说法必须一致
+ *
+ * 2026-11-13 (#43): 头一段换成"你自己想起他", 末尾加一段 [PROACTIVE_START_VOICE]. 排期、提醒、
+ * 叫醒这些后台的事一个字都不写进来, 只留"看一眼 -> 想说就说一句"这件事本身
  */
 function proactiveStartLine(text, summaryPath, acting) {
-  const asked = String(text ?? '').trim()
-    || '最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口'
+  const asked = String(text ?? '').trim() || PROACTIVE_ASK_DEFAULT
   const tier = PROACTIVE_ACTING_TIERS.has(acting) ? acting : PROACTIVE_ACTING_DEFAULT
   const permission = tier === PROACTIVE_ACTING_FULL
     ? '这一场全放开: 能写文件 / 开应用 / 跑命令, 也能建虚拟屏、截图、点、滑; 但动手前先说一句你要做什么.'
@@ -11386,7 +11419,7 @@ function proactiveStartLine(text, summaryPath, acting) {
       ? '这一场允许动手: 能写文件 / 开应用 / 跑命令; 屏不碰 —— 要看要点的事让主人自己来.'
       : '这一场只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.'
   return [
-    `${PROACTIVE_START_MARK}, 不是主人刚说的话.`,
+    `${PROACTIVE_START_MARK}.`,
     '',
     asked,
     '',
@@ -11395,7 +11428,9 @@ function proactiveStartLine(text, summaryPath, acting) {
     '启动顺序: 最新探索摘要 -> 记着的事 (lw_wish op=list) -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
     `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
     permission,
+    // "可以沉默"先说, "怎么说"留到最后一行: 说完这段她就要动嘴, 最后读到的该是语气
     '没有值得说的就保持沉默, 一条话都不要写.',
+    PROACTIVE_START_VOICE,
   ].join('\n')
 }
 
