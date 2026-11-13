@@ -279,7 +279,8 @@ const screen = read('app/src/main/java/io/github/yuloong07star/luwi/ui/HostScree
 expect('HostScreen.kt', screen, 'PortalBridge(')
 expect('HostScreen.kt', screen, 'PORTAL_BRIDGE = "LuwiPortal"')
 expect('HostScreen.kt', screen, 'PortalState.run = {')
-expect('HostScreen.kt', screen, '回到对话层')
+expect('HostScreen.kt', screen, '回到前台')
+expect('HostScreen.kt', screen, '回到后台')
 expect('HostScreen.kt', screen, '__LUWI_PORTAL__')
 
 // ── 三、两处写死的量 ──────────────────────────────────────────────────────────
@@ -333,6 +334,11 @@ expect('SettingsScreen.kt', settingsScreen, 'R.string.settings_portal_wall')
 expect('SettingsScreen.kt', settingsScreen, 'R.string.settings_portal_alpha')
 expect('SettingsScreen.kt', settingsScreen, 'PortalFace.setWall(')
 expect('SettingsScreen.kt', settingsScreen, 'reloadLook()')
+// 设置里那一行的口径与球菜单同一条: 门户 = 前台 (#40, 2026-11-13), 两侧资源同一句话
+const stringsZh = read('app/src/main/res/values-zh/strings.xml')
+const stringsEn = read('app/src/main/res/values/strings.xml')
+expect('values-zh/strings.xml', stringsZh, '<string name="settings_portal_wall">前台背景</string>')
+expect('values/strings.xml', stringsEn, '<string name="settings_portal_wall">Foreground background</string>')
 
 // ── 五、她说的话那份 jsonl 的那两处实现 (2026-11-08) ─────────────────────────
 
@@ -506,12 +512,17 @@ if (tailCond.includes('flowRows.length - 2') && tailCond.includes('plan.length -
 //
 // 主人这一轮的四件事: ① 黄点 (上一节) ③ 头像与昵称 ④ 历史记录 + 「···」
 
-// 「判断层」「工作」合成一颗 `⋯`: 两颗旧按钮必须一个不剩, 菜单里那两行还在
+// 「判断」「探索」合成一颗 `⋯`: 两颗旧按钮必须一个不剩, 菜单里那两行按新口径写 (#40, 2026-11-13)
 if (!client.includes("'lwp-tab', '判断层'") && !client.includes("'lwp-tab', '工作'")) {
-  notes.push('ok   头栏两颗旧按钮已撤 (判断层 / 工作 收进 ⋯)')
+  notes.push('ok   头栏两颗旧按钮已撤 (判断 / 探索 收进 ⋯)')
 } else {
   failures.push('client.js: 头栏还挂着「判断层」/「工作」两颗按钮')
 }
+// 菜单那两行与点进去的面板标题同口径: 点进去前后看到的是同一个词
+expect('client.js', client, "['router', '判断',")
+expect('client.js', client, "['work', '探索',")
+expect('client.js', client, "h('h3', null, '判断')")
+expect('client.js', client, "h('h3', null, '探索')")
 expect('client.js', client, 'id = \'lwp-more-btn\'')
 expect('client.js', client, 'id = \'lwp-history-btn\'')
 expect('client.js', client, 'function renderMenuDrawer')

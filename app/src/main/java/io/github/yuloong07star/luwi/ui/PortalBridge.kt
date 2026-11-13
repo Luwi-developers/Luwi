@@ -27,7 +27,7 @@ import java.io.File
  * 门户开着没有, 以及"让页面收起 / 打开"的那条 JS 入口
  *
  * 两侧共用这一份: 页面在挂载与收起时报 `portalVisible`, 菜单 (右上那颗 Tune) 读 `open` 决定显示
- * "回到 dsh"还是"回到对话层", 点了就走 `run` 那一条 `evaluateJavascript`
+ * "回到后台"还是"回到前台", 点了就走 `run` 那一条 `evaluateJavascript`
  *
  * **界面上不放这两颗按钮** (2026-11-07 主人: "和返回 dsh 这些都加到 luwi 菜单里, 不放界面上"),
  * 所以这两个动作只有菜单一个入口

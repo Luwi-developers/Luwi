@@ -167,8 +167,8 @@ nextTask + router 的 checks) 摆在同一屏上
 - `localStorage['dsh.luwi.portal.session']`: 这一层上次画的那一场 (挂载时先回到它)
 - `localStorage['dsh.luwi.portal.preset']`: 还没开场时选的那一档 (下一场生效)
 - `localStorage['dsh.luwi.portal.wall']`: 背景图的缓存 (`{ver, url}`), 换一张才重搬
-- **进出只有 Luwi 菜单一个入口** (右上那颗 Tune): 门户开着时那一条是「回到 dsh」, 收起之后变成
-  「回到对话层」。界面上不放这两颗按钮 (2026-11-07 主人: "和返回 dsh 这些都加到 luwi 菜单里,
+- **进出只有 Luwi 菜单一个入口** (右上那颗 Tune): 门户开着时那一条是「回到后台」(dsh 那一屏), 收起之后
+  变成「回到前台」(这一层)。界面上不放这两颗按钮 (2026-11-07 主人: "和返回 dsh 这些都加到 luwi 菜单里,
   不放界面上")
 - 菜单那一条走的是 `window.__LUWI_PORTAL__` 的 `show()` / `hide()` (`HostScreen.kt` 的
   `PortalState` 握着 `evaluateJavascript` 那条入口); 门户每次挂载/收起报 `portalVisible`, 菜单靠它

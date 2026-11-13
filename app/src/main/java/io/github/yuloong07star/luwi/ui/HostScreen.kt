@@ -798,8 +798,10 @@ private fun mainMenu(
                 // 门户那一层的进出口 (2026-11-07 主人: "回到对话层没有按钮补一下, 和返回 dsh 这些都
                 // 加到 luwi 菜单里, 不放界面上"): 界面上不放按钮, 两个动作都在这里 —— 收起门户看 dsh,
                 // 或者从 dsh 回到门户。方向由页面报上来的 `PortalState.open` 决定
+                // 2026-11-13 (#40): 口径改成「后台 = dsh」「前台 = 门户」, 于是这两句分别是
+                // 回到后台 / 回到前台
                 DropdownItem(
-                    text = if (PortalState.open) "回到 dsh" else "回到对话层",
+                    text = if (PortalState.open) "回到后台" else "回到前台",
                     onClick = {
                         val run = PortalState.run
                         val script = if (PortalState.open) {

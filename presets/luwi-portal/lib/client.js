@@ -687,7 +687,7 @@ window.__ModuleLoader__.load({
       'text-overflow:ellipsis}',
       '#lwp-pick .lwp-pick-empty{font-size:12px;text-align:center;padding:20px 0;color:#6b7280}',
 
-      /* ── `⋯` 里那几行 (判断层 / 工作 / 返回) ─────────────────────────────────── */
+      /* ── `⋯` 里那几行 (判断 / 探索 / 返回) ───────────────────────────────────── */
       '#lwp-drawer .lwp-menu-row{appearance:none;display:flex;align-items:center;gap:10px;width:100%;',
       'box-sizing:border-box;padding:11px 12px;margin-top:6px;font:inherit;font-size:14px;',
       'border-radius:14px;border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
@@ -3634,14 +3634,17 @@ window.__ModuleLoader__.load({
       /**
        * 「···」那张菜单 (2026-11-10 主人: "右上角判断层和工作合成一个按钮, 改成 ··· 表示更多")
        *
-       * 三行: 判断层 / 工作 / 收起。点进去沿用原来那两个面板 (内容一个字节没改), 面板顶上多一行
+       * 三行: 判断 / 探索 / 收起。点进去沿用原来那两个面板 (内容一个字节没改), 面板顶上多一行
        * 「‹ 返回」回到这张菜单 —— 这样 `#lwp-drawer` 只有一处, 不必给每个面板再造一扇窗
+       *
+       * 2026-11-13 (#40): 这两行的口径改成「判断」「探索」—— 面板里那一行标题跟着同口径,
+       * 于是点进去前后看到的是同一个词
        */
       function renderMenuDrawer() {
         els.drawer.appendChild(h('h3', null, '更多'))
         var items = [
-          ['router', '判断层', '她什么时候开口那一套读数'],
-          ['work', '工作', '探索排期与上一次摘要'],
+          ['router', '判断', '她什么时候开口那一套读数'],
+          ['work', '探索', '探索排期与上一次摘要'],
         ]
         for (var i = 0; i < items.length; i += 1) {
           (function (which, label, note) {
@@ -3691,7 +3694,7 @@ window.__ModuleLoader__.load({
         var data = status || {}
         var router = data.router || {}
         var last = router.last || {}
-        els.drawer.appendChild(h('h3', null, '判断层'))
+        els.drawer.appendChild(h('h3', null, '判断'))
         els.drawer.appendChild(kv('上一次判断', last.say === true
           ? '开口了' + (last.kind ? ' (' + last.kind + ')' : '')
           : (last.why || '还没判过')))
@@ -3754,7 +3757,7 @@ window.__ModuleLoader__.load({
       function renderWorkDrawer() {
         var data = status || {}
         var explore = data.explore || {}
-        els.drawer.appendChild(h('h3', null, '工作'))
+        els.drawer.appendChild(h('h3', null, '探索'))
         els.drawer.appendChild(kv('下一趟', explore.nextTask || '还没有排'))
         els.drawer.appendChild(kv('上次摘要', explore.lastSummaryAt ? clock(explore.lastSummaryAt) : '—'))
         els.drawer.appendChild(kv('探索时刻', explore.schedule || '—'))
@@ -4848,7 +4851,7 @@ window.__ModuleLoader__.load({
         }
         mounted = true
         // **门户盖上了** (2026-11-07 那条菜单方向, 2026-11-09 起键盘让位也靠它): 原来只有收起时报
-        // `false`, 一次 `true` 都没有 —— 于是宿主一直以为门户没开, 菜单永远写「回到对话层」, 键盘也
+        // `false`, 一次 `true` 都没有 —— 于是宿主一直以为门户没开, 菜单永远写「回到前台」, 键盘也
         // 一直走"缩 WebView"那条旧路。挂上就报一次, 收起时 unmount() 再报 false
         call('portalVisible', true)
         staleFollowed = false
