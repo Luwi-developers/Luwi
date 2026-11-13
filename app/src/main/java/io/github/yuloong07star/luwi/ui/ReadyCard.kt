@@ -8,6 +8,7 @@
 package io.github.yuloong07star.luwi.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
@@ -292,19 +293,83 @@ internal fun ReadyPrompt() {
     var doctor by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         if (withContext(Dispatchers.IO) { ReadyDialogSeen.claim(context) }) open = true
+        // 这一趟不弹 (记过了 / 已经弹过): 页面不该继续等 —— [GettingStarted.prepare] 那一下要是判早了,
+        // 这里是唯一会把闸打开的地方, 否则 dsh 那一页永远挂不上
+        else GettingStarted.release()
     }
     if (open) {
         ReadyCardDialog(
-            onDismiss = { open = false },
+            // 关掉这一窗 = 引导办完了: dsh 那一页从这一帧起才挂得上 (见 [GettingStarted], 2.8.0 #39)
+            onDismiss = {
+                open = false
+                GettingStarted.release()
+            },
             // 自检先把体检表关掉: 两层窗叠在一起点不开 (见 [ReadyCardDialog] 末尾那句)
             onReport = {
                 open = false
+                GettingStarted.release()
                 doctor = true
             },
         )
     }
     if (doctor) DoctorDialog(onDismissRequest = { doctor = false })
 }
+
+/**
+ * 「开始使用」那一窗与 dsh 页面之间的先后 (落实表 2.8.0 #39, 2026-11-13)
+ *
+ * 首启两件事会在同一秒撞上: 原生这一窗「开始使用」, 与页面里 dsh 自己的登录 / 凭据弹窗 (这台机器上
+ * 还没有能用模型时它自己弹, 见 dsh 的 `DeepSeekOnboardingDialog` 那一档 `automatic`)。主人要的是
+ * **引导在前**: 引导在场期间**不挂 WebView**, 关掉之后才挂 —— 于是那个登录弹窗只能出现在引导之后
+ *
+ * **判在组合之前** ([prepare] 由 MainActivity 在 setContent 之前叫一次): 页面那一支在 [HostScreen]
+ * 里, 而 `ReadyPrompt` 那一声 `claim` 跑在 LaunchedEffect 上、晚于第一帧 —— 等它来判就已经晚了一帧,
+ * 页面可能已经在加载了
+ *
+ * 只有首启才拦: `ready-dialog-seen` 记过 (或这一趟已经弹过) 的机器 [prepare] 直接放行, 页面照旧立刻挂
+ */
+internal object GettingStarted {
+
+    private const val TAG = "LwReady"
+
+    /** 引导那一窗还压在上面: [HostScreen] 读它决定这一帧挂不挂 WebView (Compose 状态) */
+    var holdsPage by mutableStateOf(false)
+        private set
+
+    /** 这一次打开要不要先让路 (在页面组合之前叫, 见类注释) */
+    fun prepare(context: Context) {
+        val wait = ReadyDialogSeen.willPrompt(context)
+        holdsPage = wait
+        Log.i(
+            TAG,
+            if (wait) "the first-run guide is up: the dsh page waits" else "no first-run guide: the dsh page may load",
+        )
+    }
+
+    /** 引导真的要弹 (`claim` 判过之后): 页面继续等 */
+    fun hold() {
+        holdsPage = true
+    }
+
+    /** 引导那一窗关了 (点「开始使用 Luwi」/ 点空白 / 返回 / 转去自检): 页面这一帧起可以挂 */
+    fun release() {
+        if (!holdsPage) return
+        holdsPage = false
+        Log.i(TAG, "the first-run guide is done: the dsh page may load")
+    }
+}
+
+/**
+ * 这一次打开要不要弹首启引导 (纯判据, 判在 [GettingStarted.prepare] 与 [ReadyDialogSeen.claim] 两处)
+ *
+ * 两个数都是"这一次"的: `seen` 是偏好里记过没有 (跨启动), `promptedThisRun` 是这一趟进程已经弹过
+ * (Activity 重建不重弹)。只有两个都假才弹 —— 一处判错就是"引导弹过又弹"或"再也不弹"
+ *
+ * @param seen 偏好里 `ready-dialog-seen` 那个记号
+ * @param promptedThisRun 这一次打开应用里已经弹过
+ * @return true = 这一次要弹
+ */
+internal fun firstRunWaits(seen: Boolean, promptedThisRun: Boolean): Boolean = !seen && !promptedThisRun
 
 /**
  * 首启那一弹的账: 弹没弹过 (`ready-dialog-seen`) 与"这一次打开弹过没有"
@@ -326,12 +391,17 @@ internal object ReadyDialogSeen {
 
     /** 这一次打开要不要弹; 返回 true 时记号已经写下了 */
     fun claim(context: Context): Boolean {
-        if (promptedThisRun) return false
-        if (prefs(context).getBoolean(SEEN, false)) return false
+        if (!willPrompt(context)) return false
         promptedThisRun = true
         runCatching { prefs(context).edit().putBoolean(SEEN, true).apply() }
+        // 这一窗真的要弹了: dsh 那一页压到它关掉之后 (2.8.0 #39)
+        GettingStarted.hold()
         return true
     }
+
+    /** 这一次打开要不要弹 (**不写记号**): [GettingStarted.prepare] 用它决定页面让不让路 */
+    fun willPrompt(context: Context): Boolean =
+        firstRunWaits(prefs(context).getBoolean(SEEN, false), promptedThisRun)
 
     private fun prefs(context: Context) = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
 }

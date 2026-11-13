@@ -26,6 +26,7 @@ import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.tool.VideoLooks
+import io.github.yuloong07star.luwi.ui.GettingStarted
 import io.github.yuloong07star.luwi.ui.LuwiApp
 import io.github.yuloong07star.luwi.ui.LuwiTavern
 import io.github.yuloong07star.luwi.update.AutoUpdate
@@ -114,6 +115,10 @@ class MainActivity : ComponentActivity() {
         runCatching { LwWakeWord.ensure(this) }
         // 浮标那个开关也是存盘的: 开着就照它把球放出来 —— 缺悬浮窗权限或开关关着时, 它什么都不做
         runCatching { LwOverlay.ensure(this) }
+        // 首启那张「开始使用」与 dsh 页面谁先谁后 (落实表 2.8.0 #39): **必须在 setContent 之前判** ——
+        // 页面那一支在 HostScreen 里, 而 `ReadyPrompt` 的 claim 跑在 LaunchedEffect 上、晚于第一帧;
+        // 这一趟要弹就把页面压到那一窗关掉之后, 于是 dsh 自己的登录弹窗只能出现在引导之后
+        GettingStarted.prepare(this)
         setContent {
             LuwiApp()
             // 设置页里点过的那条授权申请到这一层才真的弹。挂 Content 外面那一层而不是某一页里,

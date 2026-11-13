@@ -20,6 +20,8 @@
  *      少一条它就悄悄长回一行
  *   7. **刷新按钮真的没了**: 它原来是 `reload` 计数 + `key(reload)` 整棵重建。删一半 (只删图标、留着
  *      `reload += 1`) 编译不过, 删错一半 (留着死代码) 则看不出问题, 所以四条一起看
+ *   8. **引导在前, dsh 页面在后** (2.8.0 #39): 引导那一窗在场期间不挂 WebView, 关掉之后才挂 ——
+ *      页面里 dsh 自己的登录弹窗于是不可能抢在引导前面出来
  *
  * 不需要设备: 全是拿真源码对着核 (与 `check-ball-menu.mjs` 同一个办法)。
  *
@@ -36,6 +38,7 @@ const card = await read(src('ui/ReadyCard.kt'))
 const settings = await read(src('ui/SettingsScreen.kt'))
 const host = await read(src('ui/HostScreen.kt'))
 const nav = await read(src('ui/AppNav.kt'))
+const activity = await read(src('MainActivity.kt'))
 const en = await read('app/src/main/res/values/strings.xml')
 const zh = await read('app/src/main/res/values-zh/strings.xml')
 
@@ -186,12 +189,12 @@ check(
 check(
   'ReadyCard 作为**居中对话框**的内容存在 (Dialog 居中 + 一张会滚的 Card + 一颗"开始使用 Luwi")',
   [
-    /internal fun ReadyCardDialog\(onDismiss: \(\) -> Unit\)/u.test(card),
+    /internal fun ReadyCardDialog\(onDismiss: \(\) -> Unit, onReport: \(\) -> Unit\)/u.test(card),
     card.includes('Dialog('),
     card.includes('DialogProperties(usePlatformDefaultWidth = false)'),
     card.includes('contentAlignment = Alignment.Center'),
     card.includes('verticalScroll(rememberScrollState())'),
-    /fun ReadyCardBody\(permissionsDone: Boolean, onPermissions: \(\) -> Unit\)/u.test(card),
+    /fun ReadyCardBody\(permissionsDone: Boolean, onPermissions: \(\) -> Unit, onReport: \(\) -> Unit\)/u.test(card),
     card.includes('R.string.ready_dialog_close'),
     // 原来那套"内嵌占位"跟着内嵌挂载一起退休了: 对话框里没有要 reserve 的页面空间
     !card.includes('reserve.toDp()'),
@@ -279,7 +282,8 @@ check(
     settings.includes('R.string.ready_check'),
     settings.includes('R.string.ready_check_summary'),
     settings.includes('onClick = { readyOpen = true }'),
-    settings.includes('if (readyOpen) ReadyCardDialog(onDismiss = { readyOpen = false })'),
+    // 2026-11-10 起这一窗还带 `onReport` (自检那条路), 所以这里只认"同一个对话框 + 同一个开关"
+    /if \(readyOpen\) \{\s*ReadyCardDialog\(\s*onDismiss = \{ readyOpen = false \},/u.test(settings),
     // 位置必须在「省电」那一段之前
     settings.indexOf('R.string.ready_check') > 0
       && settings.indexOf('R.string.ready_check') < settings.indexOf('key = "power"'),
@@ -353,6 +357,37 @@ check(
     !card.includes('LingerMillis'),
   ],
   [true, true, true, true, true],
+)
+
+/* ── 十一、引导在前, dsh 页面在后 (落实表 2.8.0 #39, 2026-11-13) ──────────── */
+
+// 首启那一刻页面里 dsh 自己的登录 / 凭据弹窗会自己弹 (没有可用模型时), 而这一窗是原生的:
+// 主人要的是**引导在前**。判据就是"页面只在闸打开之后才挂" —— 断了这条, 登录弹窗又抢到引导前面
+check(
+  '首启引导在场期间不挂 dsh 页面, 引导关掉之后才挂 (2.8.0 #39)',
+  [
+    card.includes('internal object GettingStarted {'),
+    // 判据是纯函数, 单测 (GettingStartedTest) 钉的是它
+    card.includes('internal fun firstRunWaits('),
+    // 判在组合之前: 页面那一支在 HostScreen 里, 等 claim 那一声就晚了一帧
+    activity.includes('GettingStarted.prepare(this)'),
+    /val guideUp = GettingStarted\.holdsPage/u.test(host),
+    (() => {
+      const at = host.indexOf('val guideUp = GettingStarted.holdsPage')
+      const panel = host.indexOf('R.string.boot_stage_guide', at)
+      const branch = host.indexOf('} else {', at)
+      const page = host.indexOf('HostWebView(', at)
+      // guideUp 那一支画的是开屏 (引导那几句), 页面只在 else 里
+      return at > 0 && panel > at && branch > panel && page > branch
+    })(),
+    // 关窗 / 转去自检都算引导办完; 这一趟不弹时也得把闸放开 (否则页面永远不挂)
+    [
+      /onDismiss = \{\s*open = false\s*GettingStarted\.release\(\)/u.test(card),
+      /onReport = \{\s*open = false\s*GettingStarted\.release\(\)/u.test(card),
+      card.includes('else GettingStarted.release()'),
+    ],
+  ],
+  [true, true, true, true, true, [true, true, true]],
 )
 
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)

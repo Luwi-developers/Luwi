@@ -249,22 +249,34 @@ fun HostScreen(modifier: Modifier = Modifier) {
                             animationSpec = tween(260),
                             label = "page-fade",
                         )
+                        // 首启那张「开始使用」还压在上面时**先不挂 WebView** (落实表 2.8.0 #39): 页面一挂,
+                        // dsh 自己的登录 / 凭据弹窗就可能抢在引导前面出来。引导那一窗一关,
+                        // [GettingStarted.release] 把这一格放行 —— 那个弹窗于是只可能出现在引导之后
+                        val guideUp = GettingStarted.holdsPage
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                            HostWebView(
-                                url = status.url,
-                                modifier = Modifier.fillMaxSize(),
-                                alpha = alpha,
-                                onReady = { pageUp = true },
-                                // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
-                                // 一块空白的子 View 等新页面加载
-                                onLost = { pageUp = false },
-                            )
-                            if (alpha < 1f) {
+                            if (guideUp) {
                                 HostBootPanel(
                                     status = status,
-                                    pageStage = stringResource(R.string.boot_stage_page),
+                                    pageStage = stringResource(R.string.boot_stage_guide),
                                     modifier = Modifier.fillMaxSize(),
                                 )
+                            } else {
+                                HostWebView(
+                                    url = status.url,
+                                    modifier = Modifier.fillMaxSize(),
+                                    alpha = alpha,
+                                    onReady = { pageUp = true },
+                                    // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
+                                    // 一块空白的子 View 等新页面加载
+                                    onLost = { pageUp = false },
+                                )
+                                if (alpha < 1f) {
+                                    HostBootPanel(
+                                        status = status,
+                                        pageStage = stringResource(R.string.boot_stage_page),
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
                             }
                         }
                     }
