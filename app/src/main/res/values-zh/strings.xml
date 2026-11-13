@@ -14,6 +14,8 @@
     <string name="host_status_failed">host 启动失败: %1$s</string>
     <string name="boot_stage_preparing">正在准备…</string>
     <string name="boot_stage_page">界面加载中…</string>
+    <string name="boot_stage_page_lost">界面掉了, 正在重连…</string>
+    <string name="boot_page_retry">重新加载界面</string>
     <string name="boot_stage_guide">先完成开始使用…</string>
     <string name="boot_log_waiting">等待 host 输出…</string>
     <string name="boot_log_hint">点一下看完整日志</string>

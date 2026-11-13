@@ -27,6 +27,9 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -244,6 +247,11 @@ fun HostScreen(modifier: Modifier = Modifier) {
                         // 永远在组合绘制内容之上), 所以反过来: 页面先以 alpha 0 挂着加载, 开屏那块画在
                         // 它底下; 页面 ready 之后它淡进来, 淡到 1 才把开屏撤掉
                         var pageUp by remember(status) { mutableStateOf(false) }
+                        // 页面那一层现在什么光景 (2026-11-13): 它决定开屏那块画哪一句、要不要给那个
+                        // 「重新加载界面」的按钮 —— 以前 `halted` 之后这一屏没有任何出口, 只能重启 host
+                        var layer by remember(status) { mutableStateOf(PageStage.UP) }
+                        // 人点那个按钮: 一变就让 `HostWebView` 换一块新的重新加载
+                        var retryTick by remember(status) { mutableIntStateOf(0) }
                         val alpha by animateFloatAsState(
                             targetValue = if (pageUp) 1f else 0f,
                             animationSpec = tween(260),
@@ -269,11 +277,28 @@ fun HostScreen(modifier: Modifier = Modifier) {
                                     // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
                                     // 一块空白的子 View 等新页面加载
                                     onLost = { pageUp = false },
+                                    onStage = { layer = it },
+                                    retryTick = retryTick,
                                 )
-                                if (alpha < 1f) {
+                                // `alpha < 1f` 是"页面还没淡进来"; `layer != UP` 是"这一格现在
+                                // 根本没有 WebView / 它卡住了" —— 后者以前只有 `halted` 一条路,
+                                // 那时 alpha 停在 0, 所以这一条其实一直被前一条顺带盖住了;
+                                // 现在把它写出来, 是因为 `STUCK` 那一档 alpha 也是 0 但没有重建
+                                if (alpha < 1f || layer != PageStage.UP) {
                                     HostBootPanel(
                                         status = status,
-                                        pageStage = stringResource(R.string.boot_stage_page),
+                                        // 页面掉了就别再说"加载中": 那一句在真机上正是骗了主人
+                                        // 十六分钟的那一句 (报告 2026-11-13)
+                                        pageStage = stringResource(
+                                            if (layer == PageStage.DOWN_GAVE_UP) R.string.boot_stage_page_lost
+                                            else R.string.boot_stage_page,
+                                        ),
+                                        // 自动退避途中 (`DOWN`) 不需要人管, 不给按钮
+                                        onRetry = if (layer == PageStage.DOWN_GAVE_UP || layer == PageStage.STUCK) {
+                                            { retryTick += 1 }
+                                        } else {
+                                            null
+                                        },
                                         modifier = Modifier.fillMaxSize(),
                                     )
                                 }
@@ -839,6 +864,19 @@ private fun mainMenu(
 }
 
 /**
+ * 页面那一层现在是什么光景 (2026-11-13 那一档卡死之后才有这个读数)
+ *
+ * 以前 `halted` 只有一个状态: 额度用光就到底, 于是整屏只剩开屏那块「界面加载中…」, 而唯一的复位口是
+ * host 地址变 (重启 host) —— 主人切后台再回来看到的还是同一屏。现在这一层要分得开:
+ *
+ * - [UP]: WebView 挂着
+ * - [DOWN]: renderer 刚死, 正在按 1 s / 3 s / 8 s 退避重建 (**不需要人管**)
+ * - [DOWN_GAVE_UP]: 窗口内额度用光, 进了 30 s 慢档 —— 开屏那块要给一个「重新加载界面」的真按钮
+ * - [STUCK]: WebView 挂着但 12 s 没画出 `root` ([STUCK_SECONDS] 那个看门狗), 也给同一个按钮
+ */
+internal enum class PageStage { UP, DOWN, DOWN_GAVE_UP, STUCK }
+
+/**
  * The dsh GUI itself, which is a normal browser page served from loopback
  *
  * The host authenticates a browser by answering the token URL with a redirect that sets an
@@ -852,11 +890,17 @@ private fun mainMenu(
  * renderer 的优先级钉住 (不因为不可见就被降级回收), 以及 renderer 真死时自己换一块新的
  * (那只的缺省行为是把整个应用进程一起带走, 而进程里还有 host 与虚拟屏)
  *
+ * **死掉之后不再是"4 次打完就永久放弃"** (2026-11-13 真机: 界面永远停在「界面加载中…」): 重建按
+ * [REBUILD_BACKOFF_MS] 退避, 额度按 [REBUILD_WINDOW_MS] 的时间窗归还, 用光之后走 [SLOW_RETRY_MS]
+ * 慢档并把出口交给开屏那块那个按钮; 回前台一趟也会再试一次
+ *
  * @param url the token-carrying URL the host printed once its tree settled.
  * @param modifier layout modifier from the caller.
  * @param alpha 页面还没画出来时给 0: 开屏那块画在它底下, 靠这一层透明才看得见 (见调用处那段注释)
  * @param onReady 页面真的画出东西了 (`root` 有子节点) 时叫一次
  * @param onLost renderer 死了、这一页要重建时叫一次 (调用方据此把开屏盖回去)
+ * @param onStage 这一层现在是什么光景 (见 [PageStage]): 开屏那块据此换文案与那个按钮
+ * @param retryTick 人点了「重新加载界面」/ 回前台那一趟: 一变就换一块新的 WebView 重新加载
  */
 @Composable
 private fun HostWebView(
@@ -865,6 +909,8 @@ private fun HostWebView(
     alpha: Float = 1f,
     onReady: () -> Unit = {},
     onLost: () -> Unit = {},
+    onStage: (PageStage) -> Unit = {},
+    retryTick: Int = 0,
 ) {
     val context = LocalContext.current
     // 「回应用」那一跳: **请求一变就跑一次** (见下面那个 LaunchedEffect), 而不押在 `AndroidView` 的
@@ -883,12 +929,20 @@ private fun HostWebView(
     val imeLiftDp = imeLift.value.roundToInt()
     var finishes by remember { mutableIntStateOf(0) }
     // renderer 是 Chrome 那边独立的一个进程: 它一死这块 WebView 就再也不能用, 只能整块重建 ——
-    // generation 一变就换一块新的 (key 在 AndroidView 外面), rebuilds 是"同一个窗最多自动重建几次";
-    // halted 是额度用完之后那一档: 那时 composition 里干脆不挂 WebView, 免得还有代码去碰那块
-    // 已经 destroy 掉的旧实例
+    // generation 一变就换一块新的 (key 在 AndroidView 外面); halted 是"这一格现在不挂 WebView"
+    // (等退避 / 额度用光等慢档), 免得还有代码去碰那块已经 destroy 掉的旧实例;
+    // 重建该不该、等多久这一笔账在 [PageRebuild] 里 (2026-11-13 真机连死四回那一档)
     var generation by remember { mutableIntStateOf(0) }
-    var rebuilds by remember { mutableIntStateOf(0) }
+    val rebuildPlan = remember { PageRebuild(windowMs = REBUILD_WINDOW_MS, backoffMs = REBUILD_BACKOFF_MS, maxRebuilds = MAX_PAGE_REBUILDS) }
     var halted by remember { mutableStateOf(false) }
+    // 死亡事件计数: 它一变下面那个 LaunchedEffect 就按 waitMs 说的等一会儿再重建
+    var deaths by remember { mutableIntStateOf(0) }
+    /** 这一次死亡给的处置: 等这么多毫秒; null = 额度用光, 进慢档 */
+    var waitMs by remember { mutableStateOf<Long?>(null) }
+    /** 额度真的用光了 (只有人的按钮 / 回前台 / 慢档那一趟才能把它翻回来) */
+    var exhausted by remember { mutableStateOf(false) }
+    /** 回前台那一趟要的重试信号 (与 caller 那个 `retryTick` 各记各的, 一起进同一个 effect) */
+    var resumeTick by remember { mutableIntStateOf(0) }
     // A file input can only be answered by an activity, so the page's request parks here until
     // the picker it launched comes back
     var pending by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
@@ -999,10 +1053,12 @@ private fun HostWebView(
                          *
                          * 这个进程里还有 host 与虚拟屏, 一起死掉等于"回来要从解压与起 host 重来一遍"。
                          * 所以这里接住: 拆掉这一块已经不能用的 WebView (之后一个方法都不许再调它),
-                         * 换一块新的重新加载同一页; 返回 true = "我自己处理了", 别动进程
+                         * 记一笔账再**退避**换一块新的重新加载同一页; 返回 true = "我自己处理了", 别动进程
                          *
-                         * 连着死超过 [MAX_PAGE_REBUILDS] 次就不再自动重建 (那会变成重建循环),
-                         * 直接把"还缺什么"那个真 Dialog 摆出来
+                         * 2026-11-13 之前这里是"立刻换新的", 额度用光就 `halted = true` 到底 —— 真机上
+                         * 那台机器 1.2 s 连死四回, 界面从此只剩开屏那块「界面加载中…」。现在换页的时机
+                         * 交给 [PageRebuild] (1 s / 3 s / 8 s, 额度按时间窗还), 额度用光只表示进慢档,
+                         * 而慢档与那个按钮都在下面那段里
                          */
                         override fun onRenderProcessGone(
                             view: WebView,
@@ -1012,21 +1068,14 @@ private fun HostWebView(
                             (view.parent as? ViewGroup)?.removeView(view)
                             runCatching { view.destroy() }
                             if (page === view) page = null
-                            rebuilds += 1
-                            if (rebuilds > MAX_PAGE_REBUILDS) {
-                                Log.w(WEB_TAG, "the renderer died $rebuilds times; asking the person instead")
-                                // 不重建了: halted 让 composition 把 WebView 摘掉, 开屏盖回去,
-                                // 决定权交给那个更新弹窗
-                                halted = true
-                                stuck = true
-                                onLost()
-                                return true
-                            }
+                            // 先摘掉: composition 里那一格不再挂这块已经 destroy 的实例, 开屏盖回去
+                            halted = true
+                            onLost()
                             stuck = false
                             compatMissing = emptyList()
                             readyAt = 0
-                            generation += 1
-                            onLost()
+                            waitMs = rebuildPlan.death(SystemClock.uptimeMillis())
+                            deaths += 1
                             return true
                         }
 
@@ -1067,8 +1116,8 @@ private fun HostWebView(
                                 if (result.trim('"').toIntOrNull()?.let { it > 0 } == true) {
                                     readyAt += 1
                                     // 这一页真的画出来了: 上一次那几笔 renderer 事故就不该再
-                                    // 占着"最多重建几次"的额度
-                                    rebuilds = 0
+                                    // 占着"最多自动重建几次"的额度
+                                    rebuildPlan.rendered()
                                     onReady()
                                 }
                             }
@@ -1205,7 +1254,65 @@ private fun HostWebView(
     LaunchedEffect(url) {
         // 换了一个 host 地址 (重启 host 那一档): 上一轮的额度与停摆都不作数了
         halted = false
-        rebuilds = 0
+        exhausted = false
+        deaths = 0
+        waitMs = null
+        rebuildPlan.reset()
+    }
+    // renderer 死了之后**退避**重建 (2026-11-13 真机那一档): 以前的写法是一死在回调里就
+    // `generation += 1`, 于是上一版在 1.2 s 里连要了四次 200 MB, 四次都被 lmkd 当场收掉。
+    // 现在按 [PageRebuild] 说的等 (1 s / 3 s / 8 s); 额度用光就进 [SLOW_RETRY_MS] 慢档 ——
+    // **慢档不是放弃**: 到点自己再试一次, 界面同时给一个按钮 (`retryTick`)
+    LaunchedEffect(deaths) {
+        if (deaths == 0) return@LaunchedEffect
+        val wait = waitMs
+        if (wait == null) {
+            exhausted = true
+            Log.w(WEB_TAG, "the renderer died ${rebuildPlan.rebuilds} times in ${REBUILD_WINDOW_MS / 1000}s; waiting ${SLOW_RETRY_MS / 1000}s before trying again")
+            val seen = generation
+            delay(SLOW_RETRY_MS)
+            // 这期间人点了按钮 / 回前台 / host 换了地址: 这一趟作废
+            if (generation != seen || !halted) return@LaunchedEffect
+            exhausted = false
+            rebuildPlan.reset()
+            generation += 1
+            halted = false
+            return@LaunchedEffect
+        }
+        Log.w(WEB_TAG, "rebuild ${rebuildPlan.rebuilds} of the page in ${wait}ms")
+        val seen = generation
+        delay(wait)
+        if (generation != seen || !halted) return@LaunchedEffect
+        generation += 1
+        halted = false
+    }
+    // 开屏那块那个「重新加载界面」/ 回前台那一趟都走这里: 把额度还回来, 换一块新的 WebView 重载
+    LaunchedEffect(retryTick, resumeTick) {
+        if (retryTick == 0 && resumeTick == 0) return@LaunchedEffect
+        Log.i(WEB_TAG, "reloading the page on request (rebuilds was ${rebuildPlan.rebuilds})")
+        rebuildPlan.reset()
+        exhausted = false
+        stuck = false
+        halted = false
+        generation += 1
+    }
+    // 切后台再回来那一下 (2026-11-13): 以前 `MainActivity.onResume` 只把 host 服务拉一次,
+    // 页面这一层已经废了却没人管 —— 于是回来看到的还是同一屏「界面加载中…」。这里只在
+    // **自动重试已经用光 (exhausted)** 时才插一脚 (退避途中它自己会重来), 并且 30 s 只试一次
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val lastTry = longArrayOf(0L)
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (!exhausted) return@LifecycleEventObserver
+            val now = SystemClock.uptimeMillis()
+            if (now - lastTry[0] < SLOW_RETRY_MS) return@LifecycleEventObserver
+            lastTry[0] = now
+            Log.i(WEB_TAG, "came back to the foreground with no page; retrying")
+            resumeTick += 1
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(url, finishes, generation) {
         stuck = false
@@ -1219,7 +1326,19 @@ private fun HostWebView(
     // 「WebView 版本太旧 / 卡住了」那个弹窗 **2026-11-07 撤掉了** (主人: "这个也去掉"): 它原来
     // 兜的是"polyfill 没垫全"与"12 秒没画出 root"两档, 而这两档在真机上一直是"看见了也做不了什么"
     // —— 那四条更新指引对普通人来说只是在开屏上多挡一层。**检测本身留着**: 上面那句
-    // `Log.w(page never rendered)` 与桥报上来的 missing 仍然进日志, 出事时有读数可查
+    // `Log.w(page never rendered)` 与桥报上来的 missing 仍然进日志, 出事时有读数可查。
+    // **2026-11-13 起 `stuck` 有读者了**: 它让开屏那块多一个「重新加载界面」的按钮 ——
+    // 那一档以前只能干等, 现在至少有一条自己动手的路
+    LaunchedEffect(halted, exhausted, stuck) {
+        onStage(
+            when {
+                !halted && stuck -> PageStage.STUCK
+                !halted -> PageStage.UP
+                exhausted -> PageStage.DOWN_GAVE_UP
+                else -> PageStage.DOWN
+            },
+        )
+    }
 
     /**
      * 等下一次 `onPageFinished` (超时回 false): "重载真的落地了没有"只有它答得上来
@@ -1493,12 +1612,36 @@ private val WINDOW_START_TOP = 120.dp
 private const val WEB_TAG = "DshWebView"
 
 /**
- * renderer 死了之后**同一个窗最多自动换几次新的**
+ * **一个 [REBUILD_WINDOW_MS] 窗口里**最多自动换几次新页
  *
- * 一次是正常的恢复 (系统回收 / OOM 各是一次意外); 连着死三次还自动重建就是在重建循环里烧电,
- * 那时把手交给那个真 Dialog, 让主人自己决定要不要重试
+ * 一次是正常的恢复 (系统回收 / OOM 各是一次意外); 连着死三次还自动重建就是在重建循环里烧电。
+ * 2026-11-13 之前这里是"整个会话的额度", 于是真机上一次内存抖动 (1.2 s 连死四回) 就把额度一口气
+ * 用光, 之后这一屏再也不自动重建 —— 现在额度按时间窗归还, 且用光只表示"进慢档", 不是终态
  */
 private const val MAX_PAGE_REBUILDS = 3
+
+/**
+ * 多远的死亡还算"同一场事故"的额度
+ *
+ * 一次抖动 (lk 连环杀 / 一次大内存申请失败) 里连着死几回是正常的; 而半小时后再死一次是另一件事,
+ * 不该被上一场事故的计数吃掉
+ */
+private const val REBUILD_WINDOW_MS = 60_000L
+
+/**
+ * 第 1 / 2 / 3 次重建各等多久
+ *
+ * 2026-11-13 真机现场: 上一版是一死就立刻换新的, 从上一次死亡到下一次申请内存只隔 0.3~0.6 s ——
+ * 在内存最紧的时刻连续要 200 MB, 必然连续被杀。退避就是让那一阵抖动先过去
+ */
+private val REBUILD_BACKOFF_MS = longArrayOf(1_000L, 3_000L, 8_000L)
+
+/**
+ * 额度用光之后的慢档: 隔这么久再自己试一次, 界面同时留一个可点的按钮
+ *
+ * 同一个数也是"回前台那一趟要不要重试"的闸 —— 两条都是"别再连着要内存"
+ */
+private const val SLOW_RETRY_MS = 30_000L
 
 /**
  * 预览里那颗「用系统文件管理器打开」用的自定义 scheme
@@ -1888,6 +2031,9 @@ private const val WAKE_BADGE_JS = """
  *
  * @param status the state to describe.
  * @param modifier layout modifier from the caller.
+ * @param onRetry 页面那一层已经停摆时给的那条出路 (2026-11-13): null = 不画按钮 —— 自动退避那一档
+ *   不需要人管; 而"额度用光"那一档不给按钮, 就等于把主人锁在一屏「界面加载中…」上 (真机上正是这样
+ *   坐了十六分钟)
  */
 @Composable
 private fun HostBootPanel(
@@ -1895,6 +2041,7 @@ private fun HostBootPanel(
     modifier: Modifier = Modifier,
     /** host 已经就绪、只剩页面还在加载时的那一句 (那一档 [HostStatus] 自己说不出来) */
     pageStage: String? = null,
+    onRetry: (() -> Unit)? = null,
 ) {
     val colors = MiuixTheme.colorScheme
     val context = LocalContext.current
@@ -1968,6 +2115,14 @@ private fun HostBootPanel(
                 TextButton(
                     text = stringResource(R.string.boot_failed_report),
                     onClick = { reportFailure = true },
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+            // 页面那一层停摆时的那条出路 (2026-11-13): 与上面那颗「上报」同一形状, 位置也一样
+            if (onRetry != null) {
+                TextButton(
+                    text = stringResource(R.string.boot_page_retry),
+                    onClick = onRetry,
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }

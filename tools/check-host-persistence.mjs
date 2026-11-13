@@ -32,6 +32,8 @@ function check(name, got, want) {
 }
 
 const host = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/HostScreen.kt')
+const pageRebuild = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PageRebuild.kt')
+const manifest = await read('app/src/main/AndroidManifest.xml')
 const main = await read('app/src/main/java/io/github/yuloong07star/luwi/MainActivity.kt')
 const tavern = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/TavernChatScreen.kt')
 const overlay = await read('app/src/main/java/io/github/yuloong07star/luwi/overlay/OverlayService.kt')
@@ -49,7 +51,7 @@ check('renderer 优先级钉在 BOUND, 不可见也不豁免降级', [
 ], [true])
 check('renderer 死了自己换一块新的, 不让系统杀应用进程', [
   /override fun onRenderProcessGone\(/u.test(host),
-  /if \(rebuilds > MAX_PAGE_REBUILDS\)/u.test(host),
+  /PageRebuild\(windowMs = REBUILD_WINDOW_MS/u.test(host),
   /view\.destroy\(\)/u.test(host),
   /generation \+= 1/u.test(host),
 ], [true, true, true, true])
@@ -64,7 +66,48 @@ check('同一个地址不会因为重组再 loadUrl 一次 (302 之后 view.url 
   !/if \(view\.url != url\) view\.loadUrl\(url\)/u.test(host),
 ], [true, true])
 
-/* ── 一之二、酒馆与浮标输入条 (2026-10-28) ──────────────────────────────── */
+/* ── 一之二、连死之后界面上要有出口 (2026-11-13 真机「界面加载中」卡死) ──────── */
+
+// 报告 docs/Luwi-真机-界面加载中-检查-2026-11-13.md 那一档: 系统 lmkd 在内存抖动里 1.2 s 连杀四次
+// renderer, 旧代码第 4 次 `halted = true` 到底 —— 整屏只剩开屏那块「界面加载中…」, 唯一的复位口是
+// 重启 host。这一组钉住现在的四条: 退避 / 额度按窗口还 / 慢档不是终态 / 面板上有真按钮
+check('重建按退避来, 不是一死就立刻要一块新的', [
+  /private const val REBUILD_WINDOW_MS = 60_000L/u.test(host),
+  /private val REBUILD_BACKOFF_MS = longArrayOf\(1_000L, 3_000L, 8_000L\)/u.test(host),
+  /delay\(wait\)/u.test(host),
+], [true, true, true])
+check('额度用光只进慢档 (30 s 后再来), 不是永久放弃', [
+  /private const val SLOW_RETRY_MS = 30_000L/u.test(host),
+  /if \(wait == null\) \{/u.test(host),
+  /delay\(SLOW_RETRY_MS\)/u.test(host),
+  /exhausted = false\s*\n\s*rebuildPlan\.reset\(\)/u.test(host),
+], [true, true, true, true])
+check('开屏那块有「重新加载界面」这个真按钮', [
+  /R\.string\.boot_page_retry/u.test(host),
+  /onRetry != null/u.test(host),
+  /onRetry: \(\(\) -> Unit\)\? = null/u.test(host),
+  host.includes('R.string.boot_stage_page_lost'),
+], [true, true, true, true])
+check('回前台那一趟会再试一次 (exhausted 态, 30 s 闸)', [
+  /LifecycleEventObserver/u.test(host),
+  /Lifecycle\.Event\.ON_RESUME/u.test(host),
+  /came back to the foreground with no page; retrying/u.test(host),
+], [true, true, true])
+check('重建这笔账在 PageRebuild 里 (单测量得到, 不靠真机连死四回)', [
+  /internal class PageRebuild/u.test(pageRebuild),
+  /fun death\(now: Long\): Long\?/u.test(pageRebuild),
+  /fun rendered\(\)/u.test(pageRebuild),
+  /fun reset\(\)/u.test(pageRebuild),
+], [true, true, true, true])
+check('清单里 MainActivity 是 singleTop (同一个 task 只留一个实例)', [
+  /<activity\s[^>]*android:name="\.MainActivity"[^>]*android:launchMode="singleTop"/su.test(manifest),
+], [true])
+check('两条新文案两份 strings 都有', [
+  ['boot_stage_page_lost', 'boot_page_retry']
+    .filter((key) => !zh.includes(`name="${key}"`) || !en.includes(`name="${key}"`)),
+], [[]])
+
+/* ── 一之三、酒馆与浮标输入条 (2026-10-28) ──────────────────────────────── */
 
 // 酒馆那块也是"常驻复用"的一条: 退出只摘不 destroy, 再进来直接是上一屏。它比主界面多两件事 ——
 // 令牌换了要重建 / 重载 (host 重启后旧 cookie 会 401), renderer 死了要自己接住 (缺省会杀应用进程)

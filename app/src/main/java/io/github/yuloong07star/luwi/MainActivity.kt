@@ -150,6 +150,10 @@ class MainActivity : ComponentActivity() {
     /**
      * 「回应用」再点一次时走这一条 (SINGLE_TOP: 界面已经在栈里就不再新建一个)
      *
+     * 那个 `singleTop` 是 `AndroidManifest.xml` 里那一行给的 (2026-11-13 补上): 以前只在这条注释里
+     * 写着, 清单上是缺省的 `standard`, 于是桌面图标能把同一个 task 里堆出第二个实例 (真机现场两个
+     * `HostScreen` / 两个 `FloatingBall` / 两个 renderer, 见 `docs/Luwi-真机-界面加载中-检查-2026-11-13.md`)
+     *
      * 那一件事本身 (让会话界面切到浮标那一场) 走 [BallReturn]: 这一次的 intent 里带没带那个 id 都要
      * 传给它 —— 没带就什么都不做, 界面照旧只是被提到前面
      */
