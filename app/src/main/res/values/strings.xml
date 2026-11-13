@@ -14,6 +14,7 @@
     <string name="host_status_failed">Host failed: %1$s</string>
     <string name="boot_stage_preparing">Getting ready…</string>
     <string name="boot_stage_page">Loading the interface…</string>
+    <string name="boot_stage_guide">Finish getting started first…</string>
     <string name="boot_log_waiting">Waiting for the host…</string>
     <string name="boot_log_hint">Tap for the full log</string>
     <string name="boot_log_collapse">Tap to collapse</string>
