@@ -11,8 +11,8 @@
  *    的快照里取 durable 节点 (user / assistant / turn-error); 过程类节点 (reasoning / tool / 步骤) 一律
  *    不画 —— 这一层是"门户", 只显示人话
  * 2. **判断层只显示宿主判过的结果**: `router.json` 的 `last` / `checks` 与 `sim.json` 的阈值原文,
- *    由 `window.LuwiPortal.portalStatus()` 原样读出; 点「敲钟」投的就是 `RouterTick` 那条收件箱行, 与
- *    定时敲钟同一个入口 (判断永远只在宿主那一处)
+ *    由 `window.LuwiPortal.portalStatus()` 原样读出; 点「唤醒一下」投的就是 `RouterTick` 那条收件箱行, 与
+ *    定时唤醒同一个入口 (判断永远只在宿主那一处)
  * 3. **写好读回**: 每次动作之后重新拉一次 `portalStatus()`, 界面显示的就是文件里的事实
  *
  * **这一份不是普通的 ESM**: dsh 的客户端模块按 `window.__ModuleLoader__.load({ id, factory })` 装载,
@@ -4004,6 +4004,20 @@ window.__ModuleLoader__.load({
         if (els.moreButton) els.moreButton.setAttribute('data-on', drawer === '' ? 'off' : 'on')
       }
 
+      /**
+       * 动作行最右那颗「设置」(2026-11-13 主人: "判断和探索面板的设置按钮…应该加在打开唤醒/刷新 的右侧")
+       *
+       * 只翻一个开关: 参数在原生那层读写 (设置 → 活动 → 更多设置 是同一份), 页面一个字节不写盘 ——
+       * 与面板上那几行读数同一条边界。`focus` 决定弹窗落在哪一组
+       */
+      function settingsButton(focus) {
+        var button = h('button', null, '设置')
+        button.onclick = function () {
+          if (call('portalActivitySettings', focus) === null) showNote('这一版宿主还不支持', true)
+        }
+        return button
+      }
+
       function renderRouterDrawer() {
         var data = status || {}
         var router = data.router || {}
@@ -4022,7 +4036,8 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(kv('沉睡前等待', router.rules && router.rules.preSleepWaitMs
           ? Math.round(Number(router.rules.preSleepWaitMs) / 60000) + ' 分'
           : '—'))
-        els.drawer.appendChild(kv('敲钟', router.tick && router.tick.enabled === true ? '开着 (25-55 分一次)' : '关着'))
+        // 这一行叫「唤醒」: 2026-11-13 主人把叫法统一了, 与 `sim.json` 的 `wake` 段一个口径
+        els.drawer.appendChild(kv('唤醒', router.tick && router.tick.enabled === true ? '开着 (25-55 分一次)' : '关着'))
 
         var checks = Array.isArray(router.checks) ? router.checks : []
         els.drawer.appendChild(h('h3', null, 'checks (' + checks.length + ' / 3)'))
@@ -4053,18 +4068,20 @@ window.__ModuleLoader__.load({
         }
 
         var actions = h('div', 'lwp-actions')
-        var tick = h('button', null, '敲一下钟')
+        var tick = h('button', null, '唤醒一下')
         tick.onclick = function () {
           call('portalTick')
           setTimeout(refresh, 600)
         }
         actions.appendChild(tick)
-        var toggle = h('button', null, router.tick && router.tick.enabled === true ? '关掉敲钟' : '打开敲钟')
+        var toggle = h('button', null, router.tick && router.tick.enabled === true ? '关掉唤醒' : '打开唤醒')
         toggle.onclick = function () {
           call('portalTickEnabled', !(router.tick && router.tick.enabled === true))
           setTimeout(refresh, 300)
         }
         actions.appendChild(toggle)
+        // 第三颗挂在动作行最右 (主人 2026-11-13 点名的位置), 落判断层那一组
+        actions.appendChild(settingsButton('router'))
         els.drawer.appendChild(actions)
       }
 
@@ -4085,6 +4102,8 @@ window.__ModuleLoader__.load({
         var again = h('button', null, '刷新')
         again.onclick = refresh
         actions.appendChild(again)
+        // 第三颗挂在「开始这一趟 / 刷新」右边, 落探索那一组
+        actions.appendChild(settingsButton('explore'))
         els.drawer.appendChild(actions)
       }
 
@@ -5280,6 +5299,13 @@ window.__ModuleLoader__.load({
           loadEcho(false)
         },
         isOpen: function () { return mounted },
+        /**
+         * 弹窗关掉之后收一次最新读数 (2026-11-13)
+         *
+         * 原生那个窗是独立 Window, 盖在 WebView 上时这一层不重绘; 关掉之后宿主播一句
+         * `onSettingsClosed`, 这里把 `portalStatus()` 再拉一遍 —— 面板上那几行读数才是刚改过的数
+         */
+        refresh: refresh,
       }
     }
 
@@ -5309,6 +5335,11 @@ window.__ModuleLoader__.load({
          * 没有这一句, 页面上就分不清"还在等选择器"与"选了但 WebView 没回调" —— 后者正是 issue #53
          */
         pickState: function (state) { portal.pickState(state) },
+        /**
+         * 原生那个「更多设置」窗关掉了 (2026-11-13): 面板不关, 只是把读数重拉一遍 ——
+         * 弹窗里改的就是那几行 (冷却 / 唤醒 / 下一趟), 不拉就会停在旧数
+         */
+        onSettingsClosed: function () { portal.refresh() },
       }
     }
 

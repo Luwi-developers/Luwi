@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.update.AboutSettings
 import io.github.yuloong07star.luwi.update.ReleaseJson
@@ -336,11 +337,10 @@ internal fun SourceDialog(onDismissRequest: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     val initial = remember { AboutSettings.source(context) }
     var text by rememberSaveable(initial) { mutableStateOf(initial) }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_source_title),
         summary = stringResource(R.string.settings_source_summary, AboutSettings.DEFAULT_SOURCE),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         SuperTextField(

@@ -37,6 +37,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.feedback.Feedback
 import io.github.yuloong07star.luwi.feedback.FeedbackChannel
 import io.github.yuloong07star.luwi.feedback.FeedbackIssue
@@ -249,11 +250,13 @@ internal fun FeedbackDialog(onDismissRequest: () -> Unit) {
         }
     }
 
-    OverlayDialog(
+    // 反馈也是一张"要打字"的窗 (正文 + 附件), 与设置里那些填写窗走同一个壳 (2026-11-14):
+    // 居中出现、键盘起来不压住正文; 表单比别处长, 高度给到 0.8 屏
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_feedback_title),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
+        heightFraction = 0.8f,
     ) {
         if (sent) {
             // 真交出去了: 换成"提交成功 + 两个交流群"那一屏 —— 表单收起来, 免得再点一次多开一条

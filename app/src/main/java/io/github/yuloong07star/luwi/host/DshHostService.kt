@@ -67,10 +67,10 @@ class DshHostService : Service() {
         // 主动对话的排期 (2.8.0 B4-a): 与探索那一句并排 —— 宿主起来就按主人定的几个时刻排上
         // (关着就撤), 到点先拉宿主再投 `source:"proactive"` 那一行
         ProactiveSchedule.ensure(this)
-        // 判断层的敲钟 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
-        // 才按 25~55 分钟不定时敲一次 "该看一眼了"
+        // 判断层的唤醒 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
+        // 才按 25~55 分钟不定时唤醒一次 "该看一眼了"
         RouterTick.ensure(this)
-        // 「今天用了多久」先算一次 (2026-11-07): 判断层的敲钟随时可能来, 而第一拍心跳还要等 60 秒
+        // 「今天用了多久」先算一次 (2026-11-07): 判断层的唤醒随时可能来, 而第一拍心跳还要等 60 秒
         runCatching { UsageLedger.maybeRefresh(this, System.currentTimeMillis()) }
         // **唤醒词自愈** (2026-10-10 主人: "让它自愈"): 那个开关开着、又不在省电模式, 就把监听拉起来
         //

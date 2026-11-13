@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +24,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import io.github.yuloong07star.luwi.scaffolds.ArrowSlider
@@ -44,25 +47,60 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles
 
+/** 设置页那四个入口的顺序 (一组 = 小标题 + 卡片, 两个 item) */
+private val SIM_GROUPS = listOf("wake", "send", "router", "sticker")
+
+/** 门户那两颗「设置」多出来两组, 摆在最前面; 加组只改这两张表, 别在 item 里数魔法数 */
+private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS
+
+/**
+ * 焦点词 → 该滚到第几个 item
+ *
+ * 一组占两个 item (小标题 + 卡片), 所以 `组序 × 2`; 认不出来的词 (含 `top`) 从顶上开始 —— 页面
+ * 不用处理失败分支, 最坏就是"从头看"
+ * @param focus 门户给的词 (`explore` / `proactive` / `router` / `top`)
+ * @param withActivity 门户那一侧 (多两组) 还是设置页那一侧
+ */
+private fun groupIndex(focus: String, withActivity: Boolean): Int {
+    val groups = if (withActivity) ACTIVITY_GROUPS else SIM_GROUPS
+    val wanted = when (focus.trim()) {
+        "explore", "proactive", "router" -> focus.trim()
+        else -> "top"
+    }
+    val at = groups.indexOf(wanted)
+    return if (at <= 0) 0 else at * 2
+}
+
 /**
  * 「更多设置」那个弹窗 (2026-11-07 晚, 活动段末尾那一行点开的)
  *
  * 主人这一条要的是"功能与 QQ 桥接里的二代仿真一致" —— 所以这里把 `socialV2` 里那些**时机与
- * 节奏**搬了过来 (多久敲一次钟 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值)。
+ * 节奏**搬了过来 (多久唤醒一次 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值)。
  * **2026-11-10 去群味**: Luwi 只有单聊, 群里那 14 项 (什么算一次唤醒 / 等多久 / 带多少历史)
  * 在单聊里没有语义, 已整段撤掉 (方案 `docs/Luwi-更多设置去群味-方案-2026-11-10.md`), 这一页只剩
  * 真有读者的四段 —— 主动程度 / 开口节奏与分条 / 判断层 / 表情
  *
- * 而**敲钟之后看什么**不在这里写: 那是探索每天自己加进 `router.json` 的 `checks`
+ * 而**唤醒之后看什么**不在这里写: 那是探索每天自己加进 `router.json` 的 `checks`
  * (主人: "检测的内容应由探索时加上"), 这一坨只把它们列出来、给一个开关与一个「忘掉」
  *
  * **形状是弹窗** (主人 2026-11-07 晚: "改成像选择权限那样的弹窗"): 一页参数不值得占一次跳转,
  * 与插件能力那张同一个壳 —— `OverlayDialog` + 一坨可滚动的 + 底部一个按钮
  *
  * 落 `$DSH_HOME/lw/sim.json` (见 [SimSetting]); 改完立刻生效, 宿主下一次判断就按新的来
+ *
+ * **2026-11-13: 一份实现, 三个入口** (主人: "判断和探索面板的设置按钮…加在打开唤醒/刷新 的右侧")
+ * —— 门户判断面板 / 门户探索面板 / 设置 → 活动 → 更多设置 都调这里。门户那两个多两组 ([withActivity]
+ * 打开: 探索 / 主动对话), 并按 [focus] 滚到对应那一组。**不另开第二个弹窗壳**: 抄第二份参数页就是灾难
+ * @param focus 门户那两颗按钮给的词 (`explore` / `proactive` / `router` / `top`), 决定滚到第几组
+ * @param withActivity 门户进来时为真: 多出「探索」「主动对话」两组 (设置页那四个入口不重复列)
+ * @param onDismiss 关窗
  */
 @Composable
-fun SimSettingsDialog(onDismiss: () -> Unit) {
+fun SimSettingsDialog(
+    onDismiss: () -> Unit,
+    focus: String = "top",
+    withActivity: Boolean = false,
+) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var plan by remember { mutableStateOf(SimSetting.plan(context)) }
@@ -70,6 +108,12 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var editingFrom by remember { mutableStateOf(false) }
     var editingTo by remember { mutableStateOf(false) }
+    // 一组 = 小标题 + 卡片两个 item, 所以下标是"组序 × 2"; 下标表只有这一处
+    val listState = rememberLazyListState()
+    LaunchedEffect(focus, withActivity) {
+        val index = groupIndex(focus, withActivity)
+        if (index > 0) listState.scrollToItem(index)
+    }
 
     fun commit(next: SimSetting.Plan = plan) {
         plan = next
@@ -95,9 +139,37 @@ fun SimSettingsDialog(onDismiss: () -> Unit) {
                 .fillMaxWidth()
                 // 那一句说明已经在弹窗的 summary 上, 所以这一坨只放条目; 高度留出底部按钮与它的间距,
                 // 0.72 屏会把按钮挤到内容上去 (2026-11-07 真机上量到)
-                .height((screenHeight * 0.58f).dp),
+                //
+                // 2026-11-13: 门户进来时多两组 (探索 / 主动对话), 五个小标题 + 六张卡在原高度里太挤,
+                // 那一侧给 0.66 屏 (设置页那四个入口仍是 0.58, 一个像素没动)
+                .height((screenHeight * (if (withActivity) 0.66f else 0.58f)).dp),
         ) {
-            LazyColumn(contentPadding = PaddingValues(0.dp), limitLandscapeWidth = false) {
+            LazyColumn(
+                contentPadding = PaddingValues(0.dp),
+                limitLandscapeWidth = false,
+                state = listState,
+            ) {
+
+            // 门户那两个入口多出来的两组 (2026-11-13): **搬的是设置页那一份 composable**, 不复制
+            // —— `ExploreItems` / `ProactiveItems` 本来就只写各自的文件, 这里只是把它们换个壳摆出来
+            if (withActivity) {
+                item { SectionSmallTitle(stringResource(R.string.settings_activity_daily)) }
+                item {
+                    Card {
+                        Column {
+                            ExploreItems()
+                        }
+                    }
+                }
+                item { SectionSmallTitle(stringResource(R.string.settings_activity_speak)) }
+                item {
+                    Card {
+                        Column {
+                            ProactiveItems()
+                        }
+                    }
+                }
+            }
 
             /* ── 一、主动程度 ───────────────────────────────────────────── */
             item { SectionSmallTitle(stringResource(R.string.settings_sim_wake_group)) }
@@ -548,7 +620,14 @@ private fun NumberRow(
         },
         unit = unit,
         onValueChangeFinished = { onCommit() },
-        onInputConfirm = { text -> text.trim().toFloatOrNull()?.let { onChange(it.roundToInt()) } },
+        // 手打那一档也得落盘 (2026-11-13 真机上量到: 只调 `onChange` 就只是改了内存里的那一份,
+        // 关掉弹窗再打开又回到 30 —— 滑块"松手才落盘"那条对它不成立, 这一档没有"松手"这个动作)
+        onInputConfirm = { text ->
+            text.trim().toFloatOrNull()?.let {
+                onChange(it.roundToInt())
+                onCommit()
+            }
+        },
     )
 }
 
@@ -584,11 +663,10 @@ private fun TimeTextDialog(
     onSave: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = title,
         summary = stringResource(R.string.settings_sim_quiet_hint),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by remember { mutableStateOf(initial) }

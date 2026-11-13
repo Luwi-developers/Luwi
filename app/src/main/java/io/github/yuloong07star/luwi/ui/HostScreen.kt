@@ -357,6 +357,23 @@ fun HostScreen(modifier: Modifier = Modifier) {
             if (feedbackOpen) {
                 FeedbackDialog(onDismissRequest = { feedbackOpen = false })
             }
+            // 门户判断 / 探索面板动作行最右那颗「设置」(2026-11-13 主人: "加在打开唤醒/刷新 的右侧"):
+            // 页面只翻 `PortalAsk` 这一个开关, 弹的窗与设置页那一张是**同一份** (`SimSettingsDialog`),
+            // 门户侧多两组 (探索 / 主动对话) 并按 focus 滚到对应那一组
+            PortalAsk.activitySettings.value?.let { focus ->
+                SimSettingsDialog(
+                    onDismiss = {
+                        PortalAsk.close()
+                        // 弹窗改的就是面板上那几行读数: 不推这一句, 面板会停在旧数 (冷却改了还写着 30 分)
+                        PortalState.run?.invoke(
+                            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.onSettingsClosed" +
+                                " && window.__LUWI_PORTAL__.onSettingsClosed()",
+                        )
+                    },
+                    focus = focus,
+                    withActivity = true,
+                )
+            }
             // 「再按一次退出」走这里。挂在主页而不是脚手架上, 是因为提示只有主页会用到:
             // 按返回从设置页回来的时候不该弹它, 弹的是这一页的返回
             SnackbarHost(

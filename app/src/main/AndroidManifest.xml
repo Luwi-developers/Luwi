@@ -326,7 +326,7 @@
             android:name=".tool.ProactiveAlarmReceiver"
             android:exported="false" />
 
-        <!-- 判断层的敲钟 (2026-11-07): 25~55 分钟不定时投一行 source:"router", 说"该看一眼了"。
+        <!-- 判断层的唤醒 (2026-11-07): 25~55 分钟不定时投一行 source:"router", 说"该看一眼了"。
              要不要开口由宿主那侧判 (见 host-plugin 的 judgeRouter), 缺省关着 -->
         <receiver
             android:name=".tool.RouterTickReceiver"

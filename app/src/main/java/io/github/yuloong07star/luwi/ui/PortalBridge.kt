@@ -79,7 +79,7 @@ internal object PortalState {
 }
 
 /**
- * 门户那一层要的那几件事: 读判断层与工作结构, 写"球的那一场"的账, 敲一下钟
+ * 门户那一层要的那几件事: 读判断层与工作结构, 写"球的那一场"的账, 唤醒一下
  *
  * **为什么在 app 这一侧**: `$DSH_HOME/lw` 下那几份 json 与 `$DSH_HOME/voice` 都在 app 沙盒里, 浏览器
  * 里的 JS 一个字节都碰不到 (WebView 拿到的是 host 发出来的那几个 http 响应), 而宿主插件那一侧只给
@@ -91,7 +91,7 @@ internal object PortalState {
  *
  * 1. **只读判断层, 不重算**: 该不该开口、为什么不说, 全是宿主 `judgeRouter` 判完落在 `router.json`
  *    的 `last` 上; 这里原样搬给页面, 于是界面上那句 `why` 与宿主真的判过的那一次逐字一致
- * 2. **动作只走已有入口**: 敲钟 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时敲的是同一行),
+ * 2. **动作只走已有入口**: 唤醒 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时唤醒投的是同一行),
  *    开探索 = 投一行 `source:"explore"`, 开关 = `RouterTick.setEnabled` —— 不新增第二条判断链路
  * 3. **写账与宿主同格式**: `voice/session.json` 是 `{id, at, origin, cwd}`, 宿主 `voiceCurrentSession()`
  *    只在 `cwd` 落在 `dsh-ball` 底下时认它 ([VOICE_SESSION_MS] 那 10 分钟也在那边), 所以这里写的是
@@ -377,7 +377,7 @@ internal class PortalBridge(private val context: Context) {
         return portalSession()
     }
 
-    /** 敲一下钟: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧 */
+    /** 唤醒一下: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧 */
     @JavascriptInterface
     fun portalTick(): String {
         val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_ROUTER) }.getOrNull()
@@ -388,15 +388,33 @@ internal class PortalBridge(private val context: Context) {
         }.toString()
     }
 
-    /** 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长敲一次) */
+    /** 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长唤醒一次) */
     @JavascriptInterface
     fun portalTickEnabled(on: Boolean): String {
         RouterTick.setEnabled(context, on)
         return portalStatus()
     }
 
-    /** 一条检测项处理掉了: 从 `router.json` 的 `checks` 里摘掉 (与设置页那一栏写的是同一份) */
+    /**
+     * 页面动作行最右那颗「设置」: 只翻一个开关并报一句 focus (2026-11-13)
+     *
+     * 参数本身仍归 app 这一侧读写 —— 与面板上那几行读数同一条边界, 页面一个字节不写盘。认不出来的
+     * 词归到第一组 (`top`), 于是页面不用处理失败分支; 关窗之后由页面自己 `refresh()` 收最新的读数
+     */
     @JavascriptInterface
+    fun portalActivitySettings(focus: String): String {
+        val word = when (focus.trim()) {
+            "explore", "proactive", "router", "top" -> focus.trim()
+            else -> "top"
+        }
+        PortalAsk.ask(word)
+        return JSONObject().apply {
+            put("ok", true)
+            put("focus", word)
+        }.toString()
+    }
+
+    /** 一条检测项处理掉了: 从 `router.json` 的 `checks` 里摘掉 (与设置页那一栏写的是同一份) */    @JavascriptInterface
     fun portalCheckDone(id: String): String {
         val wanted = id.trim()
         if (wanted.isNotEmpty()) RouterChecks.drop(context, wanted)
@@ -653,7 +671,7 @@ internal class PortalBridge(private val context: Context) {
         /** 会话 id 的长度上限 (与 [WakeBridge] 那一处同一个数) */
         const val SESSION_ID_MAX = 128
 
-        /** 敲钟那一行的正文: 宿主只看 source, 正文只是给人看的读数 */
+        /** 唤醒那一行的正文: 宿主只看 source, 正文只是给人看的读数 */
         const val TICK_TEXT = "tick"
 
         /** 探索那一行没有 nextTask 时的兜底正文 (空正文会被收件箱拒掉) */

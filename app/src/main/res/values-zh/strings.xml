@@ -520,7 +520,7 @@
     <string name="settings_activity_more">更多设置</string>
     <string name="settings_activity_more_summary">潜水 / 节奏 / 判断层 / 表情</string>
     <string name="settings_sim_title">更多设置</string>
-    <string name="settings_sim_note">这一页写的是 lw/sim.json, 改完立刻生效; 敲钟之后看什么由探索每天自己加, 这里只列出来</string>
+    <string name="settings_sim_note">这一页写的是 lw/sim.json, 改完立刻生效; 唤醒之后看什么由探索每天自己加, 这里只列出来</string>
     <string name="settings_sim_saved">已保存</string>
     <string name="settings_sim_failed">没写进去 (文件不可写)</string>
     <string name="settings_sim_save">保存</string>
@@ -529,17 +529,17 @@
     <string name="settings_sim_send_group">开口节奏与分条</string>
     <string name="settings_sim_router_group">判断层</string>
     <string name="settings_sim_mode">她现在的状态</string>
-    <string name="settings_sim_mode_summary">潜水 = 不主动敲钟, 活跃 = 到点就看一眼</string>
+    <string name="settings_sim_mode_summary">潜水 = 不主动唤醒, 活跃 = 到点就看一眼</string>
     <string name="settings_sim_mode_diving">潜水</string>
     <string name="settings_sim_mode_active">活跃</string>
-    <string name="settings_sim_gap_min">敲钟的最短间隔</string>
+    <string name="settings_sim_gap_min">唤醒的最短间隔</string>
     <string name="settings_sim_gap_min_summary">两次之间至少 %1$d 分钟</string>
-    <string name="settings_sim_gap_max">敲钟的最长间隔</string>
+    <string name="settings_sim_gap_max">唤醒的最长间隔</string>
     <string name="settings_sim_gap_max_summary">最多隔 %1$d 分钟</string>
     <string name="settings_sim_pre_sleep">沉睡前等多久</string>
-    <string name="settings_sim_pre_sleep_summary">你上一条说完还没到 %1$d 分钟, 她这一拍就不敲</string>
+    <string name="settings_sim_pre_sleep_summary">你上一条说完还没到 %1$d 分钟, 她这一拍就不唤醒</string>
     <string name="settings_sim_quiet">静默时段</string>
-    <string name="settings_sim_quiet_summary">这一段里敲钟照敲, 只是不开口</string>
+    <string name="settings_sim_quiet_summary">这一段里照常唤醒, 只是不开口</string>
     <string name="settings_sim_quiet_from">从几点开始</string>
     <string name="settings_sim_quiet_to">到几点结束</string>
     <string name="settings_sim_quiet_hint">写成 23:00 这样</string>

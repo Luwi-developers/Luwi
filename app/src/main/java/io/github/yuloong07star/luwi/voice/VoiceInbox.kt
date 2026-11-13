@@ -113,7 +113,7 @@ internal object VoiceInbox {
     const val SOURCE_PROACTIVE = "proactive"
 
     /**
-     * 判断层敲的那一下 (2026-11-07)
+     * 判断层唤醒的那一下 (2026-11-07)
      *
      * 它与 [SOURCE_PROACTIVE] 不是一回事: 那一条是"到点了, 开一场"; 这一条只是"该看一眼了" ——
      * 要不要开口、说什么, 由宿主那侧的 `judgeRouter` 定 (见 host-plugin 的 `routerTick`)
