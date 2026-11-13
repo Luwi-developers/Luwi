@@ -1072,6 +1072,153 @@ const dropDefined = /function dropRecord\(\) \{[\s\S]*?carried = \[\]/u.test(cli
 const dropCalls = (switchWithRecord.match(/dropRecord\(\)/gu) ?? []).length
 if (dropDefined && dropCalls === 2) notes.push('ok   门户记录只在两处清空 (「开新对话」与点历史)')
 else failures.push(`client.js: 清门户记录的地方不对 (定义=${String(dropDefined)} 调用=${String(dropCalls)})`)
+// ── 十五、长按文件出菜单: 复制路径 / 用其它应用打开 (2026-11-13, 落实表 #41) ──────
+//
+// 主人: "在前台里, 如果有文件, 比如 doc/ppt/jpg 等, 允许长按出菜单, 可选复制路径, 用其它应用打开"
+// 点一下仍是预览 (2026-11-09 那条不能退回去); 长按多出来的只是这两件事。四件事各有一条判据:
+// 1) 两份能长按的载体 (文件 chip 与图) 都接上了, 且长按抬手后的那条 click 被吞掉
+// 2) 路径只有一处拼法 (`OutPaths`), 复制走系统剪贴板 (`portalCopyPath`), 交给系统仍走 `luwi-open://`
+// 3) 菜单夹进视口 (`clampMenuPos`), 手势有滑动阈值 (`pressMoved`) —— 两条纯函数真跑
+// 4) 收起的三条路都在 (点空白 / 选一条 / 滑动与下线)
+
+expect('client.js', client, 'function attachLongPress')
+expect('client.js', client, 'function consumeHeld')
+expect('client.js', client, 'function openFileMenu')
+expect('client.js', client, 'function fileMenuPlan')
+expect('client.js', client, 'function closeFileMenu')
+expect('client.js', client, 'function clampMenuPos')
+expect('client.js', client, 'function pressMoved')
+expect('client.js', client, 'var LONG_PRESS_MS = 520')
+expect('client.js', client, 'var LONG_PRESS_SLOP = 10')
+expect('client.js', client, "els.fileMenu.id = 'lwp-file-menu'")
+expect('client.js', client, '#lwp-file-menu{position:fixed;z-index:2147483003;')
+expect('client.js', client, "fileMenuItem('复制路径'")
+expect('client.js', client, "fileMenuItem('用其它应用打开'")
+expect('client.js', client, "call('portalCopyPath', file.rel)")
+expect('client.js', client, "'luwi-open://file?path=' + encodeURIComponent(got.path)")
+
+const longPressWired = client.split('attachLongPress(wrap, ').length - 1
+if (longPressWired === 2) {
+  notes.push('ok   文件 chip 与图都接了长按 (attachLongPress 两处)')
+} else {
+  failures.push(`client.js: attachLongPress 接了 ${String(longPressWired)} 处 (应为 2: fileChip / imageBubble)`)
+}
+const heldGuarded = client.split('if (consumeHeld(wrap)) return').length - 1
+if (heldGuarded === 2) {
+  notes.push('ok   长按之后那条 click 被吞掉 (不会菜单和预览窗一起弹)')
+} else {
+  failures.push(`client.js: consumeHeld 只在 ${String(heldGuarded)} 处 (应为 2)`)
+}
+
+const longPressSource = takeFunction('attachLongPress')
+if (longPressSource === '') {
+  failures.push('client.js: 抽不出 attachLongPress (长按没有那条手势了)')
+} else {
+  const needs = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'pointerleave', 'contextmenu']
+  const missing = needs.filter((one) => !longPressSource.includes(one))
+  if (missing.length === 0) notes.push('ok   长按四条退路 + 原生 contextmenu 都接上了')
+  else failures.push(`client.js: attachLongPress 缺 ${missing.join(' / ')}`)
+  if (longPressSource.includes('pressMoved(')) notes.push('ok   挪出阈值就撤 (滑动对话流时不会弹菜单)')
+  else failures.push('client.js: attachLongPress 里没有滑动阈值')
+}
+
+const docDownSource = takeFunction('onDocPointerDown')
+if (docDownSource.includes('els.fileMenu') && docDownSource.includes('closeFileMenu()')) {
+  notes.push('ok   点空白处收起那颗菜单')
+} else {
+  failures.push('client.js: onDocPointerDown 没有收起文件菜单 (它会一直挂在屏上)')
+}
+const unmountSource = takeFunction('unmount')
+if (unmountSource.includes('closeFileMenu()')) {
+  notes.push('ok   下线 (unmount) 时那颗菜单一起收')
+} else {
+  failures.push('client.js: unmount 没有 closeFileMenu')
+}
+if (client.includes("els.flow.addEventListener('scroll', function () { closeFileMenu() }")) {
+  notes.push('ok   对话流一滑动就收起 (菜单与那一份文件不再对得上)')
+} else {
+  failures.push('client.js: 对话流 scroll 没有收起文件菜单')
+}
+
+// 两条纯函数真跑: 手势阈值 / 菜单夹进视口
+const movedSource = takeFunction('pressMoved')
+const clampSource = takeFunction('clampMenuPos')
+if (movedSource === '' || clampSource === '') {
+  failures.push('client.js: 抽不出 pressMoved / clampMenuPos (长按与菜单落点的判法丢了)')
+} else {
+  const slop = Number(grab(client, /var LONG_PRESS_SLOP = (\d+)/))
+  const pressMoved = new Function('LONG_PRESS_SLOP', `${movedSource}\nreturn pressMoved`)(slop)
+  const movedCases = [
+    [3, 4, false], // 斜着挪 5px: 仍是"按住"
+    [slop, 0, false], // 正好到阈值不算挪出
+    [0, slop + 1, true],
+    [-40, 0, true],
+  ]
+  let movedOk = slop === 10
+  if (!movedOk) failures.push(`client.js: LONG_PRESS_SLOP 是 ${String(slop)} (这一层判据按 10 写)`)
+  for (const [dx, dy, want] of movedCases) {
+    if (pressMoved(dx, dy) !== want) {
+      failures.push(`pressMoved(${String(dx)},${String(dy)}) 判错了 (应为 ${String(want)})`)
+      movedOk = false
+    }
+  }
+  if (movedOk) notes.push('ok   pressMoved: 10px 以内算按住, 过了就撤')
+
+  const clampMenuPos = new Function(`${clampSource}\nreturn clampMenuPos`)()
+  const inside = clampMenuPos(100, 200, 184, 96, 1080, 2460)
+  if (inside.left === 100 && inside.top === 200) {
+    notes.push('ok   clampMenuPos: 放得下就落在手指那一点')
+  } else {
+    failures.push(`clampMenuPos 放得下时挪了位置: ${JSON.stringify(inside)}`)
+  }
+  const edge = clampMenuPos(1050, 2400, 184, 96, 1080, 2460)
+  if (edge.left === 888 && edge.top === 2356) {
+    notes.push('ok   clampMenuPos: 贴右手边 / 贴底时整块收进视口 (留 8px)')
+  } else {
+    failures.push(`clampMenuPos 贴边算错了: ${JSON.stringify(edge)}`)
+  }
+  const negative = clampMenuPos(-20, -20, 184, 96, 1080, 2460)
+  if (negative.left === 8 && negative.top === 8) {
+    notes.push('ok   clampMenuPos: 负坐标也回到 8px')
+  } else {
+    failures.push(`clampMenuPos 没有挡住负坐标: ${JSON.stringify(negative)}`)
+  }
+
+  // 菜单里那两条成不成立: 行里没留路径的那一份只写字, 不把按钮画上
+  const planSource = takeFunction('fileMenuPlan')
+  if (planSource === '') {
+    failures.push('client.js: 抽不出 fileMenuPlan (菜单那两条的成立与否没判)')
+  } else {
+    const fileMenuPlan = new Function(`${planSource}\nreturn fileMenuPlan`)()
+    const good = fileMenuPlan({ rel: 'assets/s/1-报表.docx', name: '报表.docx', bytes: 4096 })
+    if (good.known === true && good.name === '报表.docx' && good.bytes === 4096) {
+      notes.push('ok   fileMenuPlan: 有路径的那一份两条都成立')
+    } else {
+      failures.push(`fileMenuPlan 认错了有路径的那一份: ${JSON.stringify(good)}`)
+    }
+    const lost = fileMenuPlan({ name: '旧行.ppt' })
+    if (lost.known === false && lost.name === '旧行.ppt' && lost.rel === '') {
+      notes.push('ok   fileMenuPlan: 没留路径的那一份只写字 (不外抛, 也不假装能点)')
+    } else {
+      failures.push(`fileMenuPlan 对没路径的那一份判错了: ${JSON.stringify(lost)}`)
+    }
+    if (fileMenuPlan(null).name === '文件') notes.push('ok   fileMenuPlan: 名字缺省是「文件」')
+    else failures.push('fileMenuPlan 没有名字兜底')
+  }
+}
+
+// 宿主那侧: 路径只有一处拼法 + 复制走系统剪贴板
+const outPaths = read('app/src/main/java/io/github/yuloong07star/luwi/tool/OutPaths.kt')
+expect('OutPaths.kt', outPaths, 'const val ASSETS = "assets/"')
+expect('OutPaths.kt', outPaths, 'const val INBOX = "in/"')
+expect('OutPaths.kt', outPaths, 'fun lookup(rel: String): Lookup')
+expect('PortalBridge.kt', portalBridge, 'fun portalAbsPath(rel: String): String')
+expect('PortalBridge.kt', portalBridge, 'fun portalCopyPath(rel: String): String')
+expect('PortalBridge.kt', portalBridge, 'OutPaths.lookup(rel)')
+expect('PortalBridge.kt', portalBridge, 'manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, file.absolutePath))')
+expect('PortalBridge.kt', portalBridge, 'ClipboardManager::class.java')
+expect('tools/OutPathsTest.kt', read('app/src/test/java/io/github/yuloong07star/luwi/tool/OutPathsTest.kt'), 'class OutPathsTest')
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

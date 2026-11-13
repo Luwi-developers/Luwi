@@ -839,6 +839,25 @@ window.__ModuleLoader__.load({
       // 自己发的那一份也走同一个蓝: 主人要的是"能打开的都看得出能点" (2026-11-09),
       // 谁说的这件事靠左右对齐分, 不靠颜色分
       '.lwp-file[data-broken="on"]{color:var(--dsw-alias-label-secondary,#6b7280);background:rgba(15,23,42,.045)}',
+      // 长按那一下的手感 (落实表 #41, 2026-11-13): 按住到点的那一块先暗下去, 菜单弹出来就知道按到了谁
+      '.lwp-file[data-held="on"],.lwp-image[data-held="on"]{opacity:.7}',
+      // 长按这两块时不要顺带选中名字: 那次选中会压在我们的菜单下面, 手一抬还留着一条高亮
+      '.lwp-file,.lwp-image{-webkit-user-select:none;user-select:none}',
+      // 长按文件弹出的那颗菜单: 与预设菜单同一套玻璃, 挂在手指那一点上 (`position:fixed` + 夹进视口),
+      // 所以没有 `#lwp-menu` 那条"贴着卡片左边"的定位
+      '#lwp-file-menu{position:fixed;z-index:2147483003;min-width:184px;max-width:78vw;padding:6px;',
+      'border-radius:var(--dsw-radius-md,12px);background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
+      '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur);',
+      '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent)}',
+      '#lwp-file-menu[hidden]{display:none}',
+      '#lwp-file-menu .lwp-file-menu-name{font-size:12px;line-height:16px;padding:4px 8px 6px;',
+      'color:var(--dsw-alias-label-caption);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '#lwp-file-menu .lwp-file-menu-note{font-size:12px;line-height:18px;padding:2px 8px 6px;',
+      'color:var(--dsw-alias-label-secondary,#6b7280);white-space:normal}',
+      '#lwp-file-menu .lwp-file-menu-item{display:block;width:100%;padding:8px;border:0;border-radius:8px;',
+      'background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;',
+      'line-height:20px;text-align:left;cursor:pointer}',
+      '@media (hover:hover){#lwp-file-menu .lwp-file-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}}',
       // 预览窗 (2026-11-09 主人: "一个屏幕中心的窗口, 和权限选择窗口一样大小")
       // 尺寸照 ReadyPermissionsDialog: 居中 / 左右各留 20dp / 高封 78% / 遮罩 40% 黑
       // **高度固定成 78vh, 不跟着内容缩** (2026-11-09 主人: "预览窗口应当固定大小"): 短文件也张这么大,
@@ -1074,6 +1093,13 @@ window.__ModuleLoader__.load({
       var pickNote = ''
       /** 正在落进某个工作区: 连点只认第一次 (与 [navigating] 分开, 两条路可以互相接管) */
       var entering = false
+      /**
+       * 长按文件那颗菜单正在说的是哪一份 (落实表 #41, 2026-11-13)
+       *
+       * `{rel, name, bytes}` —— `rel` 是 `/lw-out/` 后面那段, 复制路径与交给系统都按它再问一次桥,
+       * 页面自己不留绝对路径 (`portalAbsPath` / `portalCopyPath` 才是唯一一处拼路)
+       */
+      var menuFile = null
 
       /* ── 她说的话: 那一份 jsonl (方案 §3.2–3.4) ──────────────────────────────
        *
@@ -2449,7 +2475,14 @@ window.__ModuleLoader__.load({
         wrap.appendChild(img)
         settleDecode(img)
         var leaf = rel.substring(rel.lastIndexOf('/') + 1)
-        wrap.onclick = function () { openPreview({ rel: rel, name: leaf, bytes: 0 }) }
+        // 点一下 = 预览窗; 长按 = 那颗菜单 (复制路径 / 用其它应用打开, 落实表 #41)
+        wrap.onclick = function () {
+          if (consumeHeld(wrap)) return
+          openPreview({ rel: rel, name: leaf, bytes: 0 })
+        }
+        attachLongPress(wrap, function (at) {
+          openFileMenu({ rel: rel, name: leaf, bytes: 0 }, at)
+        })
         return wrap
       }
 
@@ -2471,7 +2504,12 @@ window.__ModuleLoader__.load({
         glyph.innerHTML = FILE_ICON
         wrap.appendChild(glyph)
         wrap.appendChild(h('span', 'lwp-file-name', name))
-        wrap.onclick = function () { openPreview(file) }
+        // 点一下 = 预览窗, 长按 = 那颗菜单 (落实表 #41: 复制路径 / 用其它应用打开)
+        wrap.onclick = function () {
+          if (consumeHeld(wrap)) return
+          openPreview(file)
+        }
+        attachLongPress(wrap, function (at) { openFileMenu(file, at) })
         return wrap
       }
 
@@ -3008,6 +3046,198 @@ window.__ModuleLoader__.load({
           return
         }
         location.href = 'luwi-open://file?path=' + encodeURIComponent(got.path)
+      }
+
+      /* ── 长按文件那颗菜单 (落实表 #41, 2026-11-13) ───────────────────────────────
+       *
+       * 主人: "在前台里, 如果有文件, 比如 doc/ppt/jpg 等, 允许长按出菜单, 可选复制路径, 用其它应用打开"
+       *
+       * 点一下仍然是预览 (2026-11-09 的那条); 长按多出来的只是这两件事 —— **路径从桥上来**,
+       * 页面手里只有 `assets/<id>/<名字>` 与 `in/<名字>` 两种相对路径 (见 `PortalBridge.portalAbsPath`)
+       */
+
+      /** 按住多久算长按 (与发送钮那条 550 ms 同一档, 取略短: 文件上按下去有回显, 晚了像没反应) */
+      var LONG_PRESS_MS = 520
+
+      /** 手指挪出这么多 px 就不算长按 (在对话流里滑动时不能弹菜单) */
+      var LONG_PRESS_SLOP = 10
+
+      /** 挪出多远算"这不是一下按住" (平方比, 省一次开方) */
+      function pressMoved(dx, dy) {
+        return dx * dx + dy * dy > LONG_PRESS_SLOP * LONG_PRESS_SLOP
+      }
+
+      /**
+       * 把一颗元素接上长按
+       *
+       * 四条退路都要接: 抬手 / 指针被系统收走 / 手指挪出这一块 / 挪出这个距离 —— 少一条就会出现
+       * "滑一下对话流, 菜单冒出来"。另外 Android WebView 对图的长按还会送一条 `contextmenu`
+       * (那张"保存图片"的原生菜单), 一并吞掉
+       *
+       * @param el 接长按的那一块 (文件 chip 或一张图)
+       * @param handler 到点时调一次, 参数是按下那一点的 `{x, y}` (菜单就弹在那儿)
+       */
+      function attachLongPress(el, handler) {
+        var timer = null
+        var from = null
+        function drop() {
+          if (timer !== null) {
+            clearTimeout(timer)
+            timer = null
+          }
+          from = null
+          if (el.removeAttribute) el.removeAttribute('data-held')
+        }
+        el.addEventListener('pointerdown', function (event) {
+          if (event && typeof event.button === 'number' && event.button !== 0) return
+          // 这一下按下去就重新算: 上一次长按若没等到 click (手抬到外面去了), 残留的标记不能吞掉这一次
+          el.__lwHeld = false
+          drop()
+          from = { x: Number(event.clientX) || 0, y: Number(event.clientY) || 0 }
+          timer = setTimeout(function () {
+            timer = null
+            el.__lwHeld = true
+            if (el.setAttribute) el.setAttribute('data-held', 'on')
+            handler(from)
+          }, LONG_PRESS_MS)
+        })
+        el.addEventListener('pointermove', function (event) {
+          if (from === null || timer === null) return
+          if (pressMoved(Number(event.clientX) - from.x, Number(event.clientY) - from.y)) drop()
+        })
+        el.addEventListener('pointerup', function () { drop() })
+        el.addEventListener('pointercancel', function () { drop() })
+        el.addEventListener('pointerleave', function () { drop() })
+        el.addEventListener('contextmenu', function (event) {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        })
+        return el
+      }
+
+      /**
+       * 这一颗刚才是"长按"吗
+       *
+       * 长按抬手之后浏览器照样会补一条 `click`, 若不吞掉就会"菜单弹出来的同时预览窗也张开了"
+       */
+      function consumeHeld(el) {
+        if (!el || el.__lwHeld !== true) return false
+        el.__lwHeld = false
+        return true
+      }
+
+      /**
+       * 菜单往哪儿放: 手指那一点起, 但整块夹进视口
+       *
+       * `fixed` 的 left/top 是视口坐标, 手指点在最右边那一份文件上时菜单会有一半在屏外 ——
+       * 所以先按手指放, 放不下就贴边 (留 8px)
+       */
+      function clampMenuPos(x, y, w, h, vw, vh) {
+        var margin = 8
+        var maxLeft = vw - w - margin
+        var maxTop = vh - h - margin
+        var left = Math.max(margin, Math.min(x, maxLeft))
+        var top = Math.max(margin, Math.min(y, maxTop))
+        return { left: left, top: top }
+      }
+
+      /** 菜单里那一行 (整行都能点, 与预设菜单同一个手感) */
+      function fileMenuItem(label, onPick) {
+        var item = h('button', 'lwp-file-menu-item', label)
+        item.type = 'button'
+        item.setAttribute('role', 'menuitem')
+        item.onclick = function () { onPick() }
+        return item
+      }
+
+      /** 收起那颗菜单 (点空白 / 选了其中一条 / 换一份文件 / 下线时都走这里) */
+      function closeFileMenu() {
+        menuFile = null
+        if (els.fileMenu) els.fileMenu.hidden = true
+      }
+
+      /**
+       * 菜单要说的是哪一份, 以及那两条能不能点
+       *
+       * 行里没有 `rel` 的那一份 (旧行 / 坏行) 两个动作都不成立: 菜单照弹, 但只写一句"没有留下路径",
+       * 而不是把按钮画上再点出一句错
+       */
+      function fileMenuPlan(file) {
+        var rel = String(file && file.rel ? file.rel : '')
+        var name = String(file && file.name ? file.name : '文件')
+        return {
+          rel: rel,
+          name: name,
+          bytes: Number(file && file.bytes ? file.bytes : 0),
+          known: rel !== ''
+        }
+      }
+
+      /**
+       * 长按一份文件之后弹菜单
+       *
+       * @param file `{rel, name, bytes}` (与她说过的那份行同形)
+       * @param at 按下那一点 `{x, y}` (视口坐标)
+       */
+      function openFileMenu(file, at) {
+        if (!els.fileMenu) return
+        var plan = fileMenuPlan(file)
+        // 菜单与预设菜单 / 表情面板互斥: 那两块都从输入卡上弹, 同时开着会叠在一起
+        closeMenu()
+        closeStickerPanel()
+        closePreview()
+        closeHistory()
+        closePick()
+        menuFile = { rel: plan.rel, name: plan.name, bytes: plan.bytes }
+        els.fileMenuName.textContent = plan.name
+        els.fileMenuNote.hidden = plan.known
+        els.fileMenuCopy.hidden = !plan.known
+        els.fileMenuOpen.hidden = !plan.known
+        els.fileMenu.hidden = false
+        // 量一次尺寸再落位: 先藏起来量 (visibility 不影响布局), 免得先在左上角闪一帧
+        els.fileMenu.style.visibility = 'hidden'
+        var box = els.fileMenu.getBoundingClientRect()
+        var vw = window.innerWidth || 0
+        var vh = window.innerHeight || 0
+        var spot = clampMenuPos(
+          Number(at && at.x) || 0,
+          Number(at && at.y) || 0,
+          box.width,
+          box.height,
+          vw,
+          vh
+        )
+        els.fileMenu.style.left = String(spot.left) + 'px'
+        els.fileMenu.style.top = String(spot.top) + 'px'
+        els.fileMenu.style.visibility = ''
+      }
+
+      /**
+       * 复制这一份的绝对路径
+       *
+       * 复制走应用那一侧 (`portalCopyPath`): WebView 里 `navigator.clipboard` 要有焦点、要算用户
+       * 手势, 长按菜单点下来这一下不是每次都算数; 系统剪贴板才是一定成的那条
+       */
+      function copyFilePath() {
+        var file = menuFile
+        closeFileMenu()
+        if (!file || file.rel === '') {
+          showNote('这一份没有留下路径', true)
+          return
+        }
+        var got = call('portalCopyPath', file.rel)
+        if (!got || got.ok !== true) {
+          showNote(got && got.error ? String(got.error) : '复制不了这条路径', true)
+          return
+        }
+        showNote('已复制路径: ' + String(got.path))
+      }
+
+      /** 菜单第二条: 交给系统里接这个类型的那个应用 (与预览窗那颗按钮同一条窄通道) */
+      function openFileWithSystem() {
+        var file = menuFile
+        closeFileMenu()
+        if (!file) return
+        openWithSystem(file.rel)
       }
 
       /* ── 表情包 (2026-11-09 主人: "`+` 的右边增加表情包图标, 点击弹出表情包选择") ─── */
@@ -4614,6 +4844,8 @@ window.__ModuleLoader__.load({
           if (!dragging && dragTimer === 0) return
           stickOn = (els.flow.scrollHeight - els.flow.scrollTop - els.flow.clientHeight) < 48
         })
+        // 一滑动就把那颗菜单收起: 它按手指那一点定过一次位, 流一动就与那一份文件对不上了
+        els.flow.addEventListener('scroll', function () { closeFileMenu() }, { passive: true })
         if (typeof ResizeObserver === 'function') {
           try {
             var flowStickObserver = new ResizeObserver(function () { stickFlow() })
@@ -4819,6 +5051,28 @@ window.__ModuleLoader__.load({
         }
         root.appendChild(els.preview)
 
+        /* ── 长按文件那颗菜单 (落实表 #41, 2026-11-13) ─────────────────────────
+         *
+         * 两个动作: 复制这一份的绝对路径 / 交给系统里接它的应用。菜单本体只建一次, 每次长按只改
+         * 名字与落点 (`openFileMenu`), 收起是 `hidden` —— 与抽屉、预览窗同一条手感
+         */
+        els.fileMenu = h('div')
+        els.fileMenu.id = 'lwp-file-menu'
+        els.fileMenu.hidden = true
+        els.fileMenu.setAttribute('role', 'menu')
+        els.fileMenuName = h('div', 'lwp-file-menu-name', '')
+        els.fileMenu.appendChild(els.fileMenuName)
+        els.fileMenuNote = h('div', 'lwp-file-menu-note', '这一份没有留下路径')
+        els.fileMenuNote.hidden = true
+        els.fileMenu.appendChild(els.fileMenuNote)
+        els.fileMenuCopy = fileMenuItem('复制路径', function () { copyFilePath() })
+        els.fileMenu.appendChild(els.fileMenuCopy)
+        els.fileMenuOpen = fileMenuItem('用其它应用打开', function () { openFileWithSystem() })
+        els.fileMenu.appendChild(els.fileMenuOpen)
+        // 菜单自己那一块吃掉 click: 否则点菜单里的空白处会一路冒到下面的消息上
+        els.fileMenu.onclick = function (event) { event.stopPropagation() }
+        root.appendChild(els.fileMenu)
+
         /* ── 历史记录窗 (2026-11-10) ──────────────────────────────────────────
          *
          * 一样是 `position:fixed` 盖满视口的一层: 天花板 78%、圆角 28、左右 20dp —— 与预览窗同一套
@@ -4910,6 +5164,11 @@ window.__ModuleLoader__.load({
       /** 点空白处收起: 捕获阶段判一次, 落在菜单 / 表情面板 / 那几颗钮里才放过 */
       function onDocPointerDown(event) {
         var target = event.target
+        // 长按文件那颗菜单先判: 它浮在手指那一点上, 点到它自己以外就收起
+        if (els.fileMenu && !els.fileMenu.hidden) {
+          if (target instanceof Node && els.fileMenu.contains(target)) return
+          closeFileMenu()
+        }
         // 「···」那张抽屉: 点到它自己与那颗按钮之外就收起 (与下面那颗输入卡菜单同一条手感)
         if (drawer !== '' && els.drawer && els.moreButton
           && !(target instanceof Node && els.drawer.contains(target))
@@ -4980,6 +5239,7 @@ window.__ModuleLoader__.load({
         undoTimer = null
         closeMenu()
         closeStickerPanel()
+        closeFileMenu()
         closePreview()
         closeHistory()
         closePick()
