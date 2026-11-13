@@ -98,30 +98,26 @@ nextTask + router 的 checks) 摆在同一屏上
 **判断只在宿主那一处**: 门户显示的是 `router.json` 的 `last` (宿主 `judgeRouter` 判完写的), 它自己
 不重算, 所以抽屉里那句 `why` 与宿主真的判过的那一次逐字一致
 
-## 首启没有工作区: 空态那颗「选工作区」(2026-11-12 #37)
+## 首启自动落进 `<工作区根>/Luwi` (2026-11-13 改口径, 原「选工作区」作废)
 
-`pm clear` 之后 dsh 那一边可能一个工作区都没有, 而这一层把 dsh 的界面整块盖住: 没有入口就等于
-一句话都发不出去 (`newConversation` 落不到场, 发送钮也按不动)。所以空态多一颗实体按钮
-`#lwp-pick-workspace` (字是「选工作区」, 原生 `<button>` —— 真机无障碍树里读得到 clickable=true):
+`pm clear` 之后 dsh 那一边可能一个工作区都没有, 而这一层把 dsh 的界面整块盖住: 落不下去就等于
+一句话都发不出去。主人 2026-11-13 定了口径 —— **直接默认使用 `<工作区根>/Luwi`, 界面不给任何要人
+点的选择入口**: 原来那颗 `#lwp-pick-workspace` 按钮与 `#lwp-pick` 那一窗已整段删除, 改成静默落位。
 
-- **只有落不下去时才画** (`pickWanted()`): 一个工作区都没有, 或者这一场还没落到任何地方。有工作区
-  也有会话时这一屏是"和她说话"的地方, 工作区选择仍不在输入卡上画 (2026-11-08 的规矩不变)
-- 点开是 `#lwp-pick` 那一窗 (外壳照历史窗 / 预览窗): 一行一个工作区 (名字 + 路径), 当前那个标「当前 · 」;
-  名字没起过就用路径最后一节
-- **一个工作区都没有时先请应用备好 `Luwi` 那条目录** (`window.LuwiPortal.portalWorkspace(true)`, 目录由
-  `Workspace.resolve` 三档解析), 再让 dsh 认它 (`workspaces.create({path})`, 幂等), 最后靠列表订阅 +
-  250 ms × 12 拍补齐。**不走 dsh 的 `initializeDefault`**: 它那条首启缺省工作区在
-  `<系统 Documents>/deepseek-harness/default-workspace`, 安卓上必失败
-  (`system Documents directory is unavailable`), 首启就停在空态
-- **首启直接落进已有的 `Luwi`**: 宿主一起来 (客户端开屏之前) 就把**已经存在**的 `/sdcard/DSH/Luwi`
-  注册成工作区 (`adoptExploreWorkspace`, 只认已有不建目录), 于是 dsh 那一侧压根不会去问系统
-  Documents; 目录被人挪走时才轮到上面那颗按钮
-- 选中一行走 `openWorkspace(id)`: dsh 在那个工作区里复用 / 新建一张空白草稿并挂到 mainView, 门户等
-  `currentSessionId()` 落到那一场 (150 ms × 24), 落到就 `switchTo(id, 'new')` + `portalBind` + 15 s 不跟
-  账本 —— 与「开新对话」同一套, 于是下一句发得出去、也不会被 3 s 的账本拽走
+- **宿主那一半先备好**: 宿主一起来 (客户端开屏之前) 就走 `ensureExploreWorkspace` —— 目录不在就建
+  (`/sdcard/DSH/Luwi`), 建完 `registry.create` 注册; dsh 那一侧于是不会去问系统 Documents (那条在
+  安卓上必失败, 日志 `system Documents directory is unavailable`)。探索投递那条路用的是同一个函数
+- **客户端这一半兜底**: `landInDefaultWorkspace(from)` 先看列表, 一条都没有就请应用备目录
+  (`window.LuwiPortal.portalWorkspace(true)`, 目录由 `Workspace.resolve` 三档解析) → `workspaces.create({path})`
+  (幂等) → 250 ms × 12 拍等列表 → `openWorkspace(id)`; **不走 dsh 的 `initializeDefault`** (那条缺省工作区在
+  `<系统 Documents>/deepseek-harness/default-workspace`)。全程不弹窗, 没成只留一句提示 + 一次 15 s 补试
+- **挑哪一条**: `defaultWorkspaceId(items, wantPath)` 按路径认 (尾部 `/` 归一), 认不到退列表第一条 ——
+  这条是纯函数, 判据真跑
+- 落到那一场与「开新对话」同一套: 等 `currentSessionId()` (150 ms × 24) → `switchTo(id, 'new')` +
+  `portalBind` + 15 s 不跟账本, 于是下一句发得出去、也不会被 3 s 的账本拽走
 
-判据: `node tools/check-luwi-portal.mjs` (218 条), 其中一条真跑 `pickRows()` (名字缺省 / 当前那一条 /
-没有 id 的行不画)
+判据: `node tools/check-luwi-portal.mjs` 第十三节 (⑨ 那一套名字一个都不许留 / 落位链接着 / `defaultWorkspaceId`
+真跑), `node tools/check-explore.mjs` 第十四节 (启动走 `ensureExploreWorkspace`, `adopt*` 不许回来)
 
 ## 预览窗 (2026-11-09)
 

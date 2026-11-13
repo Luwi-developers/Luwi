@@ -846,30 +846,59 @@ if (failTableSource === '' || imageFailSource === '') {
   }
 }
 
-// ── 十三、首启没有工作区时首页给「选工作区」(2026-11-12 #37) ────────────────────
+// ── 十三、首启自动落进默认工作区, 界面上没有「选工作区」入口 (2026-11-13) ────────
 //
-// `pm clear` 之后 dsh 那一边可能一个工作区都没有, 而门户把它整个界面盖住了: 没有入口就一句
-// 话都发不出去。空态那颗「选工作区」后面只两条路 —— 一条是这一窗的行怎么画 (工作区表 ->
-// 名字 / 路径 / 当前那一条), 一条是选中之后落进那个工作区。第一条是纯函数, 抽出来真跑
+// 主人 2026-11-13 改口径: 原来那颗「选工作区」按钮与 `#lwp-pick` 那一窗整个删掉, 首启由
+// `landInDefaultWorkspace` 静默把 `<工作区根>/Luwi` 备好再落进去 (备目录 -> `workspaces.create`
+// -> 补拍 -> `openWorkspace`), 失败只留一句提示不弹窗。这里钉三件:
+// ① 那一套的名字一个都不许留 ② 自动落位那条链真的接着 ③ 挑默认工作区那条纯函数真跑
 
-const pickRowsSource = takeFunction('pickRows')
-const workspaceTitleSource = takeFunction('workspaceTitle')
-if (pickRowsSource === '' || workspaceTitleSource === '') {
-  failures.push('client.js: 抽不出 pickRows / workspaceTitle (选工作区那一窗的行画不出来)')
+const goneNames = ['lwp-pick-workspace', 'lwp-pick-card', 'function pickWanted', 'function openPick',
+  'function pickRows', 'function syncHeroPick', 'function ensureWorkspaces', 'function renderPick']
+const stillThere = goneNames.filter(name => client.includes(name))
+if (stillThere.length === 0) {
+  notes.push('ok   选工作区: 那颗按钮 / 那一窗 / 旧兜底函数全删了 (首启改成自动落位)')
 } else {
-  const pickRows = new Function(`${workspaceTitleSource}\n${pickRowsSource}\nreturn pickRows`)()
-  const rows = pickRows([
-    { workspaceId: 'w1', title: '球', path: '/sdcard/DSH/dsh-ball', sessionIds: [] },
-    // 没起过名: 用路径最后一节当名字, 不能是一行空白
-    { workspaceId: 'w2', title: '  ', path: '/sdcard/DSH/work/', sessionIds: [] },
-    // 没有 id 的那一条不是工作区: 画出来也点不动
-    { title: '空壳', path: '/sdcard/DSH/ghost', sessionIds: [] },
-  ], 'w2')
-  const shape = rows.map(row => `${row.id}|${row.title}|${row.current ? 'on' : 'off'}`).join(',')
-  if (shape === 'w1|球|off,w2|work|on') {
-    notes.push('ok   选工作区: 名字缺省取路径末节, 当前那一条标出来 (没 id 的行不画)')
+  failures.push(`client.js: 选工作区那一套还有残留 (${stillThere.join(' ')})`)
+}
+
+const defaultSource = takeFunction('defaultWorkspaceId')
+const landSource = takeFunction('landInDefaultWorkspace')
+const ensureSource = takeFunction('ensureWorkspace')
+if (defaultSource === '' || landSource === '' || ensureSource === '') {
+  failures.push('client.js: 抽不出 defaultWorkspaceId / landInDefaultWorkspace / ensureWorkspace (首启自动落位那条链断了)')
+} else {
+  const pickDefault = new Function(`${defaultSource}\nreturn defaultWorkspaceId`)()
+  const items = [
+    { workspaceId: 'w1', path: '/sdcard/DSH/dsh-ball', sessionIds: [] },
+    // 尾部 `/` 要归一: 宿主写目录时带不带斜杠都算同一个
+    { workspaceId: 'w2', path: '/sdcard/DSH/Luwi/', sessionIds: [] },
+    // 没有 id 的那一条不是工作区, 不参与退路
+    { path: '/sdcard/DSH/ghost', sessionIds: [] },
+  ]
+  const shape = [
+    pickDefault(items, '/sdcard/DSH/Luwi'),
+    pickDefault(items, '/sdcard/DSH/elsewhere'),
+    pickDefault([], '/sdcard/DSH/Luwi'),
+  ].join(',')
+  if (shape === 'w2,w1,') {
+    notes.push('ok   defaultWorkspaceId: 按路径认 Luwi (尾部 / 归一), 认不到退第一条, 空表回空串')
   } else {
-    failures.push(`pickRows 画错了: ${shape}`)
+    failures.push(`defaultWorkspaceId 选错了: ${shape}`)
+  }
+  if (ensureSource.includes("call('portalWorkspace', true)")
+    && ensureSource.includes('service.create({ path: path })')
+    && landSource.includes('enterWorkspace(id)')) {
+    notes.push('ok   landInDefaultWorkspace: 备目录 -> 注册 -> 补拍 -> 落进去, 全程不开窗')
+  } else {
+    failures.push('client.js: 自动落位那条链没接上 (portalWorkspace / create / enterWorkspace)')
+  }
+  const autoSource = takeFunction('autoStart')
+  const newSource = takeFunction('newConversation')
+  if (autoSource.includes('landInDefaultWorkspace(') && newSource.includes('landInDefaultWorkspace(')) {
+    notes.push('ok   autoStart / newConversation 都走自动落位 (不再弹一窗让人点)')
+  } else {
+    failures.push('client.js: autoStart 或 newConversation 没走 landInDefaultWorkspace')
   }
 }
 
