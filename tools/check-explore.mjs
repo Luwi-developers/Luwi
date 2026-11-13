@@ -630,7 +630,7 @@ check('老行没有这两个键时仍落 30 / 60', [
 ], [30, 60])
 
 const exploreItems = screen.slice(
-  screen.indexOf('private fun ExploreItems'),
+  screen.indexOf('fun ExploreItems()'),
   screen.indexOf('private fun ExploreTimeDialog'),
 )
 check('设置页那两条在 (分钟用滑块 / 步数用档位), 仍然没有手动开始', [

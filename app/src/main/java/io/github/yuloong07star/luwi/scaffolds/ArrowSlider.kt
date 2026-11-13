@@ -177,11 +177,11 @@ private fun SliderInputDialog(
 ) {
     val haptic = LocalHapticFeedback.current
 
-    OverlayDialog(
+    // 手打那一档走共用的输入窗壳: 居中出现 + 键盘起来时让出那一段 (2026-11-14 主人)
+    InputDialog(
         show = showDialog,
         title = title,
         summary = summary,
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
         onDismissFinished = onDismissFinished,
     ) {

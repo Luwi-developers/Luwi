@@ -58,7 +58,7 @@ nextTask + router 的 checks) 摆在同一屏上
 | `portalSession()` | 读 `voice/session.json`, 回 `{id, at, usable, remainMs, workspacePath}` |
 | `portalLook(wantWall)` | 读 `lw/face.json` + `lw/face/<图>` (设置 → 外观), 回 `{alpha, wall, ver}`; `wantWall=true` 才把图编成 data URL (几万字), 平时只问 `alpha`/`ver`; `ver` 是文件名, 页面拿它当缓存键 |
 | `portalBind(id)` | 把这一场写进账本 (`origin:"ball"`, `cwd` = `dsh-ball`), 球接下来 10 分钟接的就是它 |
-| `portalTick()` | 往收件箱投一行 `source:"router"` + `RouterTick.ensure` (与定时敲钟同一个入口) |
+| `portalTick()` | 往收件箱投一行 `source:"router"` + `RouterTick.ensure` (与定时唤醒同一个入口) |
 | `portalTickEnabled(on)` | `RouterTick.setEnabled` |
 | `portalCheckDone(id)` | `RouterChecks.drop` |
 | `portalExplore()` | 往收件箱投一行 `source:"explore"` (正文是 `explore.json` 的 nextTask) |

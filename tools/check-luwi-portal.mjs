@@ -1248,6 +1248,75 @@ expect('PortalBridge.kt', portalBridge, 'manager.setPrimaryClip(ClipData.newPlai
 expect('PortalBridge.kt', portalBridge, 'ClipboardManager::class.java')
 expect('tools/OutPathsTest.kt', read('app/src/test/java/io/github/yuloong07star/luwi/tool/OutPathsTest.kt'), 'class OutPathsTest')
 
+// ── 十六、判断面板的叫法: 「唤醒」(2026-11-13, 主人: 敲钟改成唤醒) ──────────────
+//
+// 只钉门户这一侧的字面量 (设置页那几条由 `check-wording.mjs` 管): 面板上那一行读数与两颗按钮
+// 是主人每次点开都要看的字, 换成别的词就当场能看出来, 所以这里按逐字断言
+
+expect('client.js 唤醒一下', client, "'唤醒一下'")
+expect('client.js 打开唤醒', client, "'打开唤醒'")
+expect('client.js 关掉唤醒', client, "'关掉唤醒'")
+expect('client.js 读数行 唤醒', client, "kv('唤醒',")
+
+// 旧的叫法一处都不许留 (注释也算) —— 拼出来写, 免得这一行自己被当成命中
+const retiredWord = '敲' + '钟'
+if (client.includes(retiredWord)) {
+  failures.push(`client.js: 还在说「${retiredWord}」, 这一版统一叫「唤醒」`)
+} else {
+  notes.push('ok   client.js 里没有旧的叫法')
+}
+
+// ── 十七、判断/探索面板那颗「设置」(2026-11-13, 主人: 加在打开唤醒/刷新 的右侧) ──
+//
+// 位置是主人点名的: 动作行最右一颗, 不是菜单里一行、也不是抽屉最底下另起一块。所以这里按
+// draw 函数切片比较 `indexOf` 的先后 —— 只断言"有那颗按钮"会在有人把它挪走时照样绿
+
+const settingsSource = takeFunction('settingsButton')
+const routerDrawerSource = takeFunction('renderRouterDrawer')
+const workDrawerSource = takeFunction('renderWorkDrawer')
+
+if (settingsSource === '') failures.push('client.js: 抽不出 settingsButton')
+else {
+  expect('settingsButton 按钮字', settingsSource, "'设置'")
+  expect('settingsButton 桥方法', settingsSource, "call('portalActivitySettings', focus)")
+  expect('settingsButton 桥不在时留话', settingsSource, "showNote('这一版宿主还不支持'")
+  notes.push('ok   settingsButton: 只翻一个开关, 桥不在时留一句')
+}
+
+/**
+ * 切片里 a 必须出现在 b 之前, 两样都得有
+ * @param label - 判据名字
+ * @param source - 被查的函数源
+ * @param before - 应当在前面的片段
+ * @param after - 应当在后面的片段
+ */
+function expectOrder(label, source, before, after) {
+  const at = source.indexOf(before)
+  const later = source.indexOf(after)
+  if (at < 0 || later < 0) {
+    failures.push(`${label}: 切片里缺 ${JSON.stringify(at < 0 ? before : after)}`)
+  } else if (at >= later) {
+    failures.push(`${label}: ${JSON.stringify(after)} 不在 ${JSON.stringify(before)} 之后`)
+  } else {
+    notes.push(`ok   ${label}`)
+  }
+}
+
+if (routerDrawerSource === '') failures.push('client.js: 抽不出 renderRouterDrawer')
+else {
+  expectOrder('判断面板: 设置 在打开/关掉唤醒 的右侧', routerDrawerSource, 'actions.appendChild(toggle)', "settingsButton('router')")
+  expectOrder('判断面板: 设置 挂在动作行里', routerDrawerSource, "settingsButton('router')", 'els.drawer.appendChild(actions)')
+}
+if (workDrawerSource === '') failures.push('client.js: 抽不出 renderWorkDrawer')
+else {
+  expectOrder('探索面板: 设置 在刷新 的右侧', workDrawerSource, 'actions.appendChild(again)', "settingsButton('explore')")
+  expectOrder('探索面板: 设置 挂在动作行里', workDrawerSource, "settingsButton('explore')", 'els.drawer.appendChild(actions)')
+}
+
+// 关窗之后面板得收一次最新读数 —— 弹窗是独立 Window, WebView 那一层不会自己重绘
+expect('client.js onSettingsClosed', client, 'onSettingsClosed: function () { portal.refresh() }')
+expect('client.js refresh 露出来', client, 'refresh: refresh')
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

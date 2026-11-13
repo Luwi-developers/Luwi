@@ -24,7 +24,7 @@
 | 今天用了多久 | `lw/usage.json` | **应用写（只读）** | 每个应用今天累计多久、现在前台是谁 |
 | 手机上的信号 | `lw/signals.jsonl` | **应用写（只读）** | 前台换了 / 解锁了，一行一件事 |
 | 记着的事 | `lw/wishes.json` | 宿主（`lw_wish`），设置页可删一条 | 考试 / 截止日 / 要买的东西 |
-| 判断层 | `lw/router.json` | 宿主（`lw_router`），`tick.enabled` 由设置页写 | 上一次判断说了什么、到点要不要敲钟 |
+| 判断层 | `lw/router.json` | 宿主（`lw_router`），`tick.enabled` 由设置页写 | 上一次判断说了什么、到点要不要唤醒 |
 | 她学到的词 | `lw/slang.json` + `lw/slang.md` | 宿主（`lw_slang`） | 候选词库，以及给会话读的那一份 |
 | API 朗读与音色库 | 第 9 节 + `lw/tts-voices.json` | 配置：应用写 / 音色库：应用代写（`lw_speak op=voice`） | 设计出来的音色登记在这里，设置页「说话 → API」读它 |
 

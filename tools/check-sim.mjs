@@ -1,13 +1,13 @@
 /**
  * 「更多设置」那一页的判据表 (2026-11-07 晚)
  *
- * 这一页的每一行都**只是数字**: 写歪一个也不会报错, 只会让"她多久敲一次钟 / 一次说几条 /
+ * 这一页的每一行都**只是数字**: 写歪一个也不会报错, 只会让"她多久唤醒一次 / 一次说几条 /
  * 什么时候该闭嘴"悄悄换了一套。所以四件事分开钉:
  *
  *   1. **缺省值与 QQ 桥接的二代仿真同一套** (`config.json → socialV2`, 值写死在这里比对) ——
  *      主人那一句是"功能与 qq 桥接里的二代仿真一致", 数不一样就等于没对上
  *   2. **读盘逐键兜底**: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的 `sim.json`
- *      不该让敲钟停下来
+ *      不该让唤醒停下来
  *   3. **写盘是原子的, 而且只写自己那一份** (`sim.json` 单写者; `router.json` 读-改-写)
  *   4. **检测项的所有权在探索**: 宿主 `finishExplore` 收 `checks` → `router.json`, 应用只开关与忘掉;
  *      判断层那一侧 (分数、今天提过、关掉不判) 由 `check-router.mjs` 跑
@@ -147,7 +147,7 @@ check('router.json 那一侧是读-改-写, 只替换 checks 这一项', [
 
 /* ── 四、接线: 时机与节奏 ───────────────────────────────────────────────── */
 
-check('敲钟的间隔读 sim.json (不传就用原来那 25~55 分钟)', [
+check('唤醒的间隔读 sim.json (不传就用原来那 25~55 分钟)', [
   /fun gapFor\(roll: Float, minMs: Long = MIN_GAP_MS, maxMs: Long = MAX_GAP_MS\): Long/.test(tick),
   /plan\?\.gapMinMs \?: MIN_GAP_MS/.test(tick),
   /plan\?\.gapMaxMs \?: MAX_GAP_MS/.test(tick),
@@ -257,16 +257,19 @@ check('数据层与页面里不再有群味那 14 项的名字', [
   !/data class Wait\(/.test(sim) && !/data class ContextSize\(/.test(sim),
 ], [true, true, true, true, true, true, true])
 
-// 第一段标题已从「潜水与唤醒」改成「主动程度」(只改值不动键); 「唤醒」与 Diving and waking 都不该
+// 第一段标题已从「潜水与唤醒」改成「主动程度」(只改值不动键); "Diving and waking" 那种群味长句不该
 // 再出现在这一页的文案里 —— 上面那一大段「唤醒词」是另一件事, 不在这条判据的范围里
-check('这一页的文案里没有「唤醒」/ Diving and waking 的群味词', [
-  !simLines(zh).includes('唤醒'),
+//
+// **2026-11-13 改口**: 主人把主动场那一下统一叫「唤醒」("敲钟改成唤醒"), 于是「唤醒」这个词本身不再
+// 算群味词 (原来那条 `!simLines(zh).includes('唤醒')` 与本次口径直接冲突, 以主人这一句为准撤掉);
+// 留着的仍是那句英文长句与第一段的标题
+check('这一页的文案里没有 Diving and waking 那种群味长句', [
   !simLines(en).includes('Diving and waking'),
   zh.includes('<string name="settings_sim_wake_group">主动程度</string>'),
   en.includes('<string name="settings_sim_wake_group">How active she is</string>'),
   zh.includes('<string name="settings_activity_more_summary">潜水 / 节奏 / 判断层 / 表情</string>'),
   en.includes('<string name="settings_activity_more_summary">Diving, pacing, decision layer, stickers</string>'),
-], [true, true, true, true, true, true])
+], [true, true, true, true, true])
 
 // 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount`, 读的时候夹进各自范围
 check('表情那两格写进 sim.json 的 sticker.maxMb / maxCount, 读回时夹进范围', [
@@ -281,10 +284,11 @@ check('表情那两格写进 sim.json 的 sticker.maxMb / maxCount, 读回时夹
 ], [true, true, true, true, true, true, true, true])
 
 check('那条弹窗的形状与插件能力那张一样 (OverlayDialog + 可滚动的一坨 + 底部按钮)', [
-  /fun SimSettingsDialog\(onDismiss: \(\) -> Unit\)/.test(page),
+  /fun SimSettingsDialog\(/.test(page),
   /OverlayDialog\(/.test(page),
   /show = true,/.test(page),
-  /height\(\(screenHeight \* 0\.58f\)\.dp\)/.test(page),
+  // 高度按屏算; 2026-11-13 起门户那一侧多两组, 用 0.66 (设置页仍是 0.58) —— 两种写法都认
+  /height\(\(screenHeight \* 0\.58f\)\.dp\)|height\(\(screenHeight \* \(if \(withActivity\) 0\.66f else 0\.58f\)\)\.dp\)/.test(page),
   /R\.string\.settings_sim_close/.test(page),
   /verticalScroll|LazyColumn\(/.test(page),
 ], [true, true, true, true, true, true])
@@ -293,6 +297,15 @@ check('那一页没有"手写一条检测项"的入口 (检测项只由探索加
   !/RouterChecks\.add\(/.test(page),
   !/settings_sim_checks_add/.test(page),
 ], [true, true])
+
+// 手打那一档也要落盘 (2026-11-13 真机上量到: 只改内存里的那份, 关掉再打开又回到 30)
+{
+  const at = page.indexOf('onInputConfirm = { text ->')
+  const body = at < 0 ? '' : page.slice(at, at + 260)
+  check('数字项手打之后也写一遍 (不是只改内存)', [
+    at >= 0 && /onCommit\(\)/.test(body),
+  ], [true])
+}
 
 /* ── 七、两份 strings.xml ───────────────────────────────────────────────── */
 

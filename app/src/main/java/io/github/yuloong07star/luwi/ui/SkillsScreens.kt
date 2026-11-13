@@ -29,6 +29,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.scaffolds.LazyColumn
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
@@ -445,11 +446,10 @@ fun SkillBrowseDialog(
         }
     }
 
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_skills_browse),
         summary = stringResource(R.string.settings_skills_browse_summary, AppSkills.REPO),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         SuperTextField(
@@ -530,11 +530,10 @@ fun SkillBrowseDialog(
     }
 
     edited?.let { (skill, files) ->
-        OverlayDialog(
+        InputDialog(
             show = true,
             title = stringResource(R.string.settings_skills_browse_edited_title),
             summary = stringResource(R.string.settings_skills_browse_edited_summary, files.joinToString(", ")),
-            defaultWindowInsetsPadding = false,
             onDismissRequest = { edited = null },
         ) {
             TextButton(

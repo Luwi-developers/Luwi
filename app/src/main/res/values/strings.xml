@@ -521,7 +521,7 @@
     <string name="settings_activity_more">More settings</string>
     <string name="settings_activity_more_summary">Diving, pacing, decision layer, stickers</string>
     <string name="settings_sim_title">More settings</string>
-    <string name="settings_sim_note">This page writes lw/sim.json and takes effect right away; what she watches after a tick is added by the exploration itself every day, and only listed here</string>
+    <string name="settings_sim_note">This page writes lw/sim.json and takes effect right away; what she watches after a wake is added by the exploration itself every day, and only listed here</string>
     <string name="settings_sim_saved">saved</string>
     <string name="settings_sim_failed">nothing was written (the file is not writable)</string>
     <string name="settings_sim_save">Save</string>
@@ -530,17 +530,17 @@
     <string name="settings_sim_send_group">Pacing and splitting</string>
     <string name="settings_sim_router_group">Decision layer</string>
     <string name="settings_sim_mode">How she sits right now</string>
-    <string name="settings_sim_mode_summary">diving = no ticking on her own, active = looks once when the clock says so</string>
+    <string name="settings_sim_mode_summary">diving = no waking on her own, active = wakes once when the clock says so</string>
     <string name="settings_sim_mode_diving">Diving</string>
     <string name="settings_sim_mode_active">Active</string>
-    <string name="settings_sim_gap_min">Shortest gap between ticks</string>
+    <string name="settings_sim_gap_min">Shortest gap between wakes</string>
     <string name="settings_sim_gap_min_summary">at least %1$d minutes apart</string>
-    <string name="settings_sim_gap_max">Longest gap between ticks</string>
+    <string name="settings_sim_gap_max">Longest gap between wakes</string>
     <string name="settings_sim_gap_max_summary">at most %1$d minutes apart</string>
     <string name="settings_sim_pre_sleep">How long before she dozes off</string>
-    <string name="settings_sim_pre_sleep_summary">if your last line is younger than %1$d minutes, this tick is skipped</string>
+    <string name="settings_sim_pre_sleep_summary">if your last line is younger than %1$d minutes, this wake is skipped</string>
     <string name="settings_sim_quiet">Quiet hours</string>
-    <string name="settings_sim_quiet_summary">the clock still ticks in this window, she just does not speak</string>
+    <string name="settings_sim_quiet_summary">she still wakes in this window, she just does not speak</string>
     <string name="settings_sim_quiet_from">From</string>
     <string name="settings_sim_quiet_to">To</string>
     <string name="settings_sim_quiet_hint">written like 23:00</string>

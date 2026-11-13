@@ -39,6 +39,9 @@
 | `check-persona-live.mjs` | 人格卡"运行时读"那一条 (2026-11-10): 抽 `host-plugin` 那一节真跑 —— 设备卡原样与按 mtime 重读 / 缺失退包内默认 / 都缺失四行兜底 / 超 20000 字截断 / 非 luwi 档返回空 / provider 不抛 / 首次启动从包内默认播种且不覆盖已有内容 |
 | `check-host-persistence.mjs` | dsh 后台持久化那一条的判据表 (2026-10-26; 2026-10-28 扩): renderer 优先级钉在不可见也不降 / renderer 死了自己换一块并有次数上限 / `MainActivity.onResume` 自愈 / 电池白名单只有一份实现且两处入口 / 酒馆缓存带 token 且 token 变了只重载一次 / 酒馆 renderer 也钉住并自己重建 / 浮标输入条收起再展开只重新挂上 / 那份文案两份 strings 都有 |
 | `check-bare-percent.py` | 扫 `strings.xml` 里的裸 `%` (`Resources.getString` 会把它当转换符, 主线程崩) |
+| `check-wording.mjs` | 叫法那一条 (2026-11-13 主人: 敲钟改成唤醒): 门户页面 / 两套 `strings.xml` / 宿主插件说明三处都不许再留旧叫法, `settings_sim_*` 那六条说明都带「唤醒」, 而语音那段仍是「唤醒词」(没被误伤) |
+| `check-activity-settings.mjs` | 门户那两颗「设置」与它们弹的窗 (2026-11-13): 三个入口共用一份 `SimSettingsDialog` (ui/ 里不许有第二份参数页) / `focus` 与那两张组表对得上 / 页面只调 `portalActivitySettings` 一个桥方法且状态只在 `PortalAsk` / 关窗推 `onSettingsClosed` / 设置页那个入口一个参数都没加 |
+| `check-input-dialogs.mjs` | 填写窗那一条 (2026-11-14 主人: "填写窗放屏幕中间, 防止弹出键盘时挡住填写内容"): 24 个要打字的弹窗都过 `scaffolds/InputDialog.kt` (Compose `Dialog` + `Alignment.Center` + `imePadding` + 按可用高度收卡片) / 反向闸: `OverlayDialog` 里再塞 `SuperTextField` 就红 / 只读弹窗 (关于 / 更新) 没被顺手换壳 |
 | `check-docx-preview.mjs` | Office 预览那一包 (2.7.9 第 6 条 T8/T9) 的判据表: 包形状 / 装载 id 与包名一字不差 / `extension` 档与那两条**末尾不能带 `$`** 的模式 / 读字节走 `remote.workspaceFiles` / 渲染进 `sandbox` iframe / 10 MB 闸与三种失败 / `lib/client.js` 是打包产物 / 两张覆盖层表各一行且不在 `PluginRows` |
 | `check-phone-actions.mjs` | 手机直连那一条的判据表 (2.8.0 B3-c): 快应用能力只在 `QuickAppCapability.kt` 里 / 标准链接三种写法 / 包名不像包名就拒 / 快应用这一条不许调建屏 / 不可用明确 unsupported / `quick_app` 只走 deep link 且路由里没有虚拟屏 / 桥上有 capabilities 与 quickapp 两档 / 插件的两条工具参数与说明 / phone.md 的固定优先级 (native -> intent -> 无障碍 -> 虚拟屏 -> unsupported) |
 | `check-tools.mjs` | 扫本目录自己: 命名 / 用法段 / 根目录落位 (就是本文那三条约定) |
@@ -134,6 +137,9 @@ node tools/check-host-persistence.mjs
 node tools/check-phone-actions.mjs
 node tools/check-web-compat.mjs
 node tools/check-device-evidence.mjs
+node tools/check-wording.mjs
+node tools/check-activity-settings.mjs
+node tools/check-input-dialogs.mjs
 python tools/check-bare-percent.py
 node tools/check-tools.mjs
 ```

@@ -61,6 +61,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.automation.AutomationEngine
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.automation.AutomationStore
@@ -710,7 +711,7 @@ fun SettingsScreen() {
                     SectionSmallTitle(stringResource(R.string.settings_activity_knows))
                     SettingsPanel { KnowsItems() }
                     // 更多设置 (2026-11-07 晚): 潜水与唤醒 / 开口节奏 / 判断层那一套参数 —— 与 QQ 桥接
-                    // 的二代仿真同一个口径; 敲钟之后"看什么"由探索自己加, 这一行只把入口摆出来
+                    // 的二代仿真同一个口径; 唤醒之后"看什么"由探索自己加, 这一行只把入口摆出来
                     //
                     // 弹窗而不是二级页 (主人当天: "改成像选择权限那样的弹窗"): 它是一页参数, 不值得
                     // 占一次跳转; 状态记在段内, 收起这一段就等于把它关掉
@@ -1043,11 +1044,10 @@ private fun PortalFaceItems() {
 @Composable
 private fun PortalNameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_portal_name),
         summary = stringResource(R.string.settings_portal_name_dialog),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -1513,11 +1513,10 @@ private fun LockPasswordDialog(
     onSave: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_inject_password_dialog),
         summary = stringResource(R.string.settings_lock_inject_password_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -1569,11 +1568,10 @@ private fun LockScriptDialog(
     onImport: (String, String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_script_dialog),
         summary = stringResource(R.string.settings_lock_script_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -1633,11 +1631,10 @@ private fun LockRecordDialog(
     onStart: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_record_dialog),
         summary = stringResource(R.string.settings_lock_record_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -2739,11 +2736,10 @@ private fun PluginLinkDialog(
     onInstall: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = title,
         summary = summary,
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -2839,11 +2835,10 @@ private fun PluginIndexDialog(
             }
         }
     }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_plugin_browse),
         summary = stringResource(R.string.settings_plugin_browse_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         SuperTextField(
@@ -3381,11 +3376,10 @@ private fun QuickCreateDialog(
     onCreate: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_quick_new_title),
         summary = stringResource(R.string.settings_quick_new_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -3520,7 +3514,9 @@ private fun ExploreOverview() {
 }
 
 @Composable
-private fun ExploreItems() {
+// internal 而不是 private: 门户判断/探索面板那颗「设置」弹的窗里也要这两段 (2026-11-13),
+// 而**同一份 composable 只许一处定义** —— 搬出去复制一份就是两个参数页
+internal fun ExploreItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
@@ -3753,11 +3749,10 @@ private fun ExploreSummaryDialog(file: File, onDismiss: () -> Unit) {
 @Composable
 private fun ExploreTimeDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_explore_at),
         summary = stringResource(R.string.settings_explore_at_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -3795,11 +3790,10 @@ private fun ExploreTimeDialog(current: String, onDismiss: () -> Unit, onSave: (S
 @Composable
 private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_explore_card),
         summary = stringResource(R.string.settings_explore_card_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -3871,7 +3865,8 @@ private fun ProactiveOverview() {
 }
 
 @Composable
-private fun ProactiveItems() {
+// internal 同上: 门户那颗「设置」弹的窗里也要这一段, 一份定义两个入口
+internal fun ProactiveItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
@@ -4105,11 +4100,10 @@ private fun ProactiveItems() {
 @Composable
 private fun ProactiveTimesDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_proactive_times),
         summary = stringResource(R.string.settings_proactive_times_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -4568,11 +4562,10 @@ private fun sendAutomationSetup(context: Context, line: String): String {
 @Composable
 private fun AutomationCreateDialog(onDismiss: () -> Unit, onCreate: (String, Int) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_new_title),
         summary = stringResource(R.string.settings_automation_new_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -4763,11 +4756,10 @@ private fun AutomationBrokenDialog(
 @Composable
 private fun AutomationEditDialog(name: String, onDismiss: () -> Unit, onEdit: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_edit_title),
         summary = stringResource(R.string.settings_automation_edit_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -4812,11 +4804,10 @@ private fun AutomationEditDialog(name: String, onDismiss: () -> Unit, onEdit: (S
 @Composable
 private fun AutomationCooldownDialog(current: Int, onDismiss: () -> Unit, onSave: (Int) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_cooldown_title),
         summary = stringResource(R.string.settings_automation_cooldown_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current.toString()) }
@@ -4855,11 +4846,10 @@ private fun AutomationCooldownDialog(current: Int, onDismiss: () -> Unit, onSave
 @Composable
 private fun AutomationQuietDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_quiet_title),
         summary = stringResource(R.string.settings_automation_quiet_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -5364,11 +5354,10 @@ private fun ModeEndpointDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val snapshot = remember(ModeModel.revision) { ModeModel.snapshot(context) }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_mode_endpoint),
         summary = stringResource(R.string.settings_mode_endpoint_note),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         val screenHeight = LocalConfiguration.current.screenHeightDp
@@ -5472,11 +5461,10 @@ private fun ModeModelDialog(onDismiss: () -> Unit) {
     val snapshot = remember(ModeModel.revision) { ModeModel.snapshot(context) }
     // 目录要么整份可用 (有候选), 要么整个退回手填 —— "半份目录"不拿来假装是列表
     val listed = catalog?.takeIf { it.ok && it.items.isNotEmpty() }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_mode_model),
         summary = stringResource(R.string.settings_section_look_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         val screenHeight = LocalConfiguration.current.screenHeightDp
@@ -6732,11 +6720,10 @@ private fun WakeWordDialog(
     onConfirm: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_wake_words),
         summary = stringResource(R.string.settings_wake_words_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -6784,11 +6771,10 @@ private fun PowerWindowDialog(
     onConfirm: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_wake_power_window),
         summary = stringResource(R.string.settings_wake_power_window_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -6865,11 +6851,10 @@ private fun SpeakTextFieldDialog(
         SpeakText.EDGE_VOICE -> SpeakSettings.edgeVoice
     }
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = title,
         summary = summary,
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }

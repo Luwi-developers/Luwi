@@ -21,19 +21,19 @@ import java.io.File
  * 主人那一句是"功能与 QQ 桥接里的二代仿真一致" —— 所以这里的键名与缺省值照 `qq-bridge` 的
  * `config.json → socialV2` 抄了一遍, 只把它搬到球这一侧能用的载体上:
  *
- * - **时机与节奏归这一页**: 多久敲一次钟 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值
+ * - **时机与节奏归这一页**: 多久唤醒一次 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值
  * - **检测内容归探索**: `router.json` 的 `checks` 由探索收尾写 (见 [RouterChecks]), 这一页只列出来
  *   给主人开关与删掉
  *
  * 落 `$DSH_HOME/lw/sim.json`, **应用单写者**; 宿主只读 (见 `host-plugin` 的 `readRouterInputs`)。
- * 读法一律逐键兜底: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的文件不该让敲钟停下来
+ * 读法一律逐键兜底: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的文件不该让唤醒停下来
  */
 internal object SimSetting {
 
     const val DIRECTORY = "lw"
     const val FILE = "sim.json"
 
-    /** 潜水的意思是不主动敲钟; 活跃的意思是到点就敲 (与 tick.enabled 任一为开都算开) */
+    /** 潜水的意思是不主动唤醒; 活跃的意思是到点就唤醒 (与 tick.enabled 任一为开都算开) */
     const val MODE_DIVING = "diving"
     const val MODE_ACTIVE = "active"
 
@@ -101,7 +101,7 @@ internal object SimSetting {
 
     /**
      * 主动程度 (2026-11-10 改名, 原「潜水与唤醒」; 2026-11-10 去群味: 群里那 9 条"什么算一次唤醒"
-     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"她多主动、隔多久来敲一次"
+     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"她多主动、隔多久唤醒一次"
      */
     data class Wake(
         val mode: String = Default.WAKE_MODE,

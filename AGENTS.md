@@ -282,7 +282,7 @@
   读 `router.json` 的 `checks` + `AutomationCalendar` 算 (`arm()` 跑得太早, 宿主那时还没判断完); 去重键
   `routerCheckHit` 回 `{fact, key}`, event 键是 `日期@startMs`
 - **检测内容由探索加, 节奏由设置页给**: `$DSH_HOME/lw/sim.json` (见 `tool/SimSetting.kt`, 缺省照 `socialV2`) 管
-  潜水/活跃、敲钟间隔、分条节奏、判断层阈值; 设置 → 活动 → 更多设置 是它的界面, **没有手写检测项的入口**;
+  潜水/活跃、唤醒间隔、分条节奏、判断层阈值; 设置 → 活动 → 更多设置 是它的界面, **没有手写检测项的入口**;
   判据 `tools/check-sim.mjs` / `check-router.mjs`
 - **表情单张上限同在那页**: `sim.json` 的 `sticker.maxMb` (1~20, 缺省 2), 三处同读 —— 宿主 `lw_sticker op=fetch`、
   `BallStickers.capBytes`、`PortalBridge`; 只改一处就"存得下但画不出"
