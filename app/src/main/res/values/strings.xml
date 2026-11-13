@@ -128,8 +128,8 @@
     <string name="settings_portal_name_dialog">Give her another name; leave it empty for Luwi</string>
     <string name="settings_portal_name_hint">Luwi</string>
     <string name="settings_portal_name_limit">16 characters at most; the header cuts longer ones with an ellipsis</string>
-    <string name="settings_portal_wall">Dialogue layer background</string>
-    <string name="settings_portal_wall_none">No image yet; this layer uses the theme colour</string>
+    <string name="settings_portal_wall">Foreground background</string>
+    <string name="settings_portal_wall_none">No image yet; the foreground uses the theme colour</string>
     <string name="settings_portal_wall_ready">One image selected</string>
     <string name="settings_portal_wall_clear">Clear the background</string>
     <string name="settings_portal_wall_failed">That image could not be read; pick another one</string>
