@@ -14,7 +14,10 @@ param(
     [string]$RepoRoot = 'D:\apk\Luwi',
     [string]$Repo = 'Luwi-developers/Luwi',
     [string]$Gh = 'D:\Codex\gh-cli\gh.exe',
-    [string]$RemoteRef = 'luwi/main',
+    # **写全名** (2026-11-14): `luwi/main` 这种短名在仓库里同时命中 `refs/heads/luwi/main`
+    # (本地一条陈旧分支) 与 `refs/remotes/luwi/main`, git 取前者 —— base 因此一直是旧的,
+    # 会把别人的提交重放一遍. 全名不会歧义; 推功能分支时传 `refs/remotes/luwi/<分支>`
+    [string]$RemoteRef = 'refs/remotes/luwi/main',
     [string]$Tag = 'v1.0.3',
     # 推**功能分支**（PR 用）：留空＝老行为（推 heads/main 并打标）；填了就只动 refs/heads/<Branch>。
     # 分支已存在 → PATCH；不存在 → POST 创建。对象照旧逐个比对 SHA，全对才动 ref。

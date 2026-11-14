@@ -398,6 +398,15 @@
   祖先 fsync、`--allow-lan`); 0.2.2 换基座就悄悄丢了这四组, 症状 `spawn bash EACCES`
 - **推送**: `git push` 不通; 走 `tools/lw-api-push.ps1`: blob → tree → commit → **最后才动 ref**, 每对象比 SHA,
   先 dry run 再 `-Apply -Tag`; `-input` 的 JSON 不能带 BOM
+- **fetch 也不通 → 用 `tools/lw-api-fetch.mjs` 补对象** (2026-11-14): 同一个 GitHub API 反过来拉 —— commit 由
+  `verification.payload` 原文重建 (**带 GPG 签名的要把 `verification.signature` 按 `gpgsig` 缩进插回去,
+  且签名值**带**尾换行**, GitHub 的 merge 提交就是这样), tree 缺就逐层重建, blob 按 base64 写; 每个对象都跟
+  期望 SHA 比对, 全对才 `update-ref`。`node tools/lw-api-fetch.mjs` 先看缺什么, 加 `--apply` 才动
+  `refs/remotes/luwi/main`
+- **`RemoteRef` 必须写全名** (2026-11-14 挖到的真坑): 仓库里同时有 `refs/heads/luwi/main` (一条陈旧本地分支)
+  与 `refs/remotes/luwi/main`, 短名 `luwi/main` 会被 git 解析到**前者** —— 于是 base 永远是旧的, 每次推送都会把
+  别人的提交重放一遍。那条本地分支已归档成 `refs/heads/archive/luwi-main-local`, 两个脚本的默认值也都改成
+  `refs/remotes/luwi/main`
 - **后台 job 回执为什么慢**: harness 判完成等**整棵进程树清空**, gradle 守护进程是子孙; `dev.ps1` 因此 ① DSH 会话里
   (`$env:DSH_SHELL`) 加 `--no-daemon` 并**跳过** assemble 前 `--stop`, ② 用 `Start-Process -RedirectStandardOutput` 跑
   (不再 `& gradlew | Tee-Object`), **不能加 `-Wait`**, 只 `$proc.WaitForExit()`; 代价: 输出不流式 (全文在
