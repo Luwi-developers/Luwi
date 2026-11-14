@@ -435,6 +435,23 @@ internal class PortalBridge(private val context: Context) {
         return portalStatus()
     }
 
+    /**
+     * 门户「⋯」抽屉要的那一份菜单 (2026-11-14 主人: "把 luwi 设置浮标菜单内容都塞到 ··· 即可")
+     *
+     * 回执是一段 JSON 数组, 每一项 `{id, title, summary, on, enabled, children?}` —— 页面只画它收到的
+     * 东西, 开关态与当前屏名都由 [PortalMenu] 现算, 于是抽屉里那几行与 dsh 里看到的是同一件事
+     */
+    @JavascriptInterface
+    fun portalMenu(): String = PortalMenu.json(context)
+
+    /**
+     * 抽屉里点了一行: 执行并回一份最新清单
+     *
+     * 回执可能还差一拍 (执行走主线程), 页面收到后 120 ms 再拉一次 `portalMenu()` 就对上了
+     */
+    @JavascriptInterface
+    fun portalMenuPick(id: String): String = PortalMenu.pick(context, id.trim())
+
     /** 开始这一趟探索: 投一行 `source:"explore"`, 正文就是 `explore.json` 排好的那个 nextTask */
     @JavascriptInterface
     fun portalExplore(): String {

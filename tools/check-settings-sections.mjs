@@ -96,6 +96,56 @@ check('白名单的集合形态由那份名单算出来 (不是又抄一遍)', [
   /internal val SettingsSectionsAlwaysOpen: Set<String> = SettingsSectionsAlwaysOpenKeys\.toSet\(\)/u.test(screen),
 ], [true])
 
+/* ── 三、顶部段名索引条 (2026-11-14) ──────────────────────────────────── */
+
+const bar = await readFile(
+  new URL('app/src/main/java/io/github/yuloong07star/luwi/scaffolds/settings/SettingsSectionBar.kt', root),
+  'utf8',
+).catch(() => '')
+
+/** 索引条那本"段名 → 段名资源"的表 (只在那一段声明里取, 别把页面别处的 `x to R.string.y` 算进来) */
+const titleAt = screen.indexOf('internal val SettingsSectionTitleRes')
+const titles = [...screen.slice(titleAt, screen.indexOf('\n)', titleAt)).matchAll(/"([a-z-]+)" to R\.string\./gu)]
+  .map((m) => m[1])
+
+/** 页面实况: 段与组标题按出现顺序排成一条流 */
+const flow = [...screen.matchAll(/settingsSection\(\s*key = "([a-z-]+)"|item \{ GroupTitle\(|LuwiTavern\.tavernSection\(/gu)]
+  .map((m) => m[1] ?? (m[0].startsWith('item') ? '__group__' : 'tavern'))
+
+/** 每一处组标题后面紧跟的那一段 */
+const groupFollows = flow.flatMap((key, index) => (key === '__group__' ? [flow[index + 1]] : []))
+
+/** Kotlin 那一份字面量 */
+const beforeLiteral = [
+  ...(screen.match(/internal val SettingsGroupTitleBefore: Set<String> = setOf\(([^)]*)\)/u)?.[1] ?? '')
+    .matchAll(/"([a-z-]+)"/gu),
+].map((m) => m[1])
+
+check('索引条的段名表与段名表逐个对齐 (键与顺序都管)', titles, [...(open ?? []), ...(ability ?? [])])
+
+check('段名表的项数与段数一样', titles.length, page.length)
+
+check('页面上只有两处组标题, 分别在常用与能力那两组之前', groupFollows, ['appearance', 'notifications'])
+
+check('Kotlin 里那份组标题名单与页面实况一致', beforeLiteral, groupFollows)
+
+check('顶上那条提示占的下标数只写一处', /internal const val SettingsListLeadingItems = 1/u.test(screen), true)
+
+check('索引条与列表共用同一个滚动位置', [
+  /val listState = rememberLazyListState\(\)/u.test(screen),
+  /state = listState,/u.test(screen),
+  /animateScrollToItem\(row\)/u.test(screen),
+  /settingsSectionAtRow\(SettingsSectionKeys, listState\.firstVisibleItemIndex\)/u.test(screen),
+  /SettingsSectionBar\(/u.test(screen),
+], [true, true, true, true, true])
+
+check('索引条不另抄一份段名表 (只吃调用方给的那一份)', [
+  /settings_section_/u.test(bar),
+  /linkedMapOf|mapOf\(/u.test(bar),
+  /entries\.indexOfFirst/u.test(bar),
+  /onPick\(entry\.key\)/u.test(bar),
+], [false, false, true, true])
+
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
 console.log(`\n${checks - failures}/${checks} checks passed`)

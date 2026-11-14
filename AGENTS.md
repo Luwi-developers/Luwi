@@ -142,6 +142,13 @@
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
+- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 触摸控制 / 同步 /
+  酒馆 / 回到后台 / 反馈 / 设置) 由宿主 `ui/PortalMenu.kt` 出清单 (`portalMenu` / `portalMenuPick` 两条桥),
+  门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`); **回到 dsh 后台浮球自己回来**
+  (`PortalState.open` 为假时画) —— 后台没有门户头栏, 那时球是唯一的门; **球菜单没有撤**, 两份语义逐条对齐
+  (判据 `check-luwi-portal` 第十一节); 跨到界面的三件 (设置 / 酒馆 / 反馈) 走 `PortalAsk.pending` 由 `HostScreen` 消费;
+  **`__LUWI_PORTAL__.show()` 里不再问 `portal.isOpen()`** —— 那个方法从没暴露在对象上, 一按就是 TypeError,
+  「回到前台」因此一直是死的 (2026-11-14 真机 logcat 抓到; `mount()` 自己幂等, 直接调它)
 - **首启直接默认使用 `<工作区根>/Luwi`, 门户里没有任何选工作区入口** (2026-11-13 改口径, 原 #37 的按钮作废):
   ① 宿主一起来 (客户端开屏前) 就 `ensureExploreWorkspace` —— 目录不在就建 (`/sdcard/DSH/Luwi`), 建完注册,
   dsh 那一侧于是不会去问系统 Documents (安卓上必失败, 日志 `system Documents directory is unavailable`);
@@ -151,6 +158,10 @@
   (判据 `check-luwi-portal` 第十三节 + `check-explore` 第十四节)
 - 设置页两层分组 (`GroupTitle` / `SectionTitle`), 缺省只展开省电与常用六段, **新加一段天然收起**
   (判据 `SettingsSectionsTest` + `check-settings-sections.mjs`)
+- **设置页顶部一条段名索引条** (2026-11-14): 二十个段名排在顶栏下面一行, 左右滑着看全, 点一下**展开并滚到**
+  那一段, 高亮跟着纵向滚动走; 段下标 = `SettingsListLeadingItems` + `SettingsSectionKeys` 的顺序 +
+  `SettingsGroupTitleBefore` 那两处组标题 (页面上只有「常用」「能力」两处), **新加一段必须同时进
+  `SettingsSectionKeys` 与 `SettingsSectionTitleRes`** (判据 `check-settings-sections.mjs` 第三节)
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
   **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 零轮询; **会话钩子必须带 `{ global: true }`**

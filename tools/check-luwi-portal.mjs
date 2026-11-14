@@ -236,12 +236,14 @@ if (client.includes('Number(outLines[s].at) >= lastUserTime) spoke = true')
 }
 // 2) 排序: 按「轮」排 (orderTimeline) —— 缺时间的 user 沉到最后, 同毫秒算上一轮, 不再用 sortAt
 // running max (那一条会把刚发出去的消息排到她上一句回复上面)
-// 2026-11-12 (#38): 排好的那一串再交给 `appendRecord` 接在门户记录后面 (自动换场带过来那一段)
-if (client.includes('return appendRecord(carried, orderTimeline(users, rows, extras))')
+// 2026-11-14: 排好的那一串**不再** `appendRecord` 盲接在记录前面 —— 与门户记录按时间合并
+// (`mergeTimeline`)。盲拼接会把"冷启 / 换场那一拍只有她的行"那半截线冻进记录里, 之后她的行整组压在
+// 自己的消息上面 (主人 2026-11-14 截图)
+if (client.includes('return mergeTimeline(carried, orderTimeline(users, rows, extras))')
   && !client.includes('sortAt') && !client.includes('sortFloor')) {
-  notes.push('ok   排序走 orderTimeline 按轮排 (旧的 sortAt / running max 已拆)')
+  notes.push('ok   排序走 orderTimeline 按轮排, 再与门户记录按时间合并 (旧的 sortAt / running max 已拆)')
 } else {
-  failures.push('client.js: 排序还没改成按轮排 —— 缺时间 / 同毫秒时消息会跳到上一句回复上面')
+  failures.push('client.js: 排序还没改成按轮排 / 记录那一段还是盲接 —— 她的行会整组压在自己的消息上面')
 }
 // 跨工作区的那一场: sessions.retain 只认当前工作区, 所以注入里必须有 workspaces
 expect('client.js', client, 'function workspaceOf')
@@ -520,8 +522,8 @@ if (!client.includes("'lwp-tab', '判断层'") && !client.includes("'lwp-tab', '
   failures.push('client.js: 头栏还挂着「判断层」/「工作」两颗按钮')
 }
 // 菜单那两行与点进去的面板标题同口径: 点进去前后看到的是同一个词
-expect('client.js', client, "['router', '判断',")
-expect('client.js', client, "['work', '探索',")
+expect('client.js', client, "drawerRow('判断', '她什么时候开口那一套读数'")
+expect('client.js', client, "drawerRow('探索', '探索排期与上一次摘要'")
 expect('client.js', client, "h('h3', null, '判断')")
 expect('client.js', client, "h('h3', null, '探索')")
 expect('client.js', client, 'id = \'lwp-more-btn\'')
@@ -928,8 +930,9 @@ expect('client.js', client, 'function isProactiveStart')
 expect('client.js', client, 'function proactiveNew')
 expect('client.js', client, 'function echoItemOf')
 expect('client.js', client, 'function appendRecord')
+expect('client.js', client, 'function mergeTimeline')
 expect('client.js', client, 'function dropRecord')
-expect('client.js', client, 'appendRecord(carried, orderTimeline(')
+expect('client.js', client, 'mergeTimeline(carried, orderTimeline(')
 // **不换场**: 那一场只当一条数据源 (portalOut 认的是 `lw/out/<会话>.jsonl`), 屏上换场那一条不许有
 // (只看 `switchTo(...)` 的调用, `source.via === 'proactive'` 那个记号不在此列)
 if (/switchTo\([^)]*'proactive'/u.test(client) || client.includes('switchTo(run.session')) {
@@ -1411,6 +1414,55 @@ expect('每轮 turn/start 兜一次', hostPlugin, 'void lwAccountAdoptModel(ctx)
 expect('起来也收一次', hostPlugin, 'void lwAccountAdoptModel(ctx).catch((error) => {')
 expect('卡片收模型名', portalAccount, 'var model by mutableStateOf("")')
 expect('模型名从 status 的 model 里取', portalAccount, 'body.optJSONObject("model")?.optString("label")')
+
+// ── 十一、浮球菜单搬进 `⋯` (2026-11-14) ───────────────────────────────────────
+//
+// 主人这一轮: "前台界面时不再显示 luwi 的设置浮标, 而是加到右上角更多右边" → "不用新建图标和按钮,
+// 直接把设置浮标菜单内容都塞到 ··· 即可"。于是三件事必须同时成立:
+// ① 页面抽屉真的画原生那一份清单, ② 清单里每一件都在且执行仍是真函数, ③ 前台浮球让位、后台回来
+
+const portalMenu = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalMenu.kt')
+const hostScreen = read('app/src/main/java/io/github/yuloong07star/luwi/ui/HostScreen.kt')
+const portalAsk = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalAsk.kt')
+
+expect('client.js', client, "call('portalMenu')")
+expect('client.js', client, "call('portalMenuPick', item.id)")
+expect('client.js', client, 'function portalRow')
+expect('client.js', client, 'function renderScreenDrawer')
+expect('client.js', client, "drawer === 'screen'")
+expect('client.js', client, "drawerRow('判断'")
+expect('client.js', client, "drawerRow('探索'")
+expect('client.js', client, "drawerRow('收起'")
+// 原生清单里那几件一件都不能少 (少一件就是前台少一个入口)
+expect('PortalMenu.kt', portalMenu, 'fun json(context: Context): String')
+expect('PortalMenu.kt', portalMenu, 'fun pick(context: Context, id: String): String')
+for (const id of ['screens', 'screen-control', 'screen-release', 'screen-window', 'touch', 'sync', 'tavern', 'portal', 'feedback', 'settings']) {
+  expect(`PortalMenu.kt 的 ${id} 那一行`, portalMenu, `id = "${id}"`)
+}
+expect('虚拟屏列表那一支', portalMenu, 'id = "screen:')
+expect('释放仍带 byUser', portalMenu, 'VirtualScreen.release(it, byUser = true)')
+expect('同步仍是那一个开关', portalMenu, 'SyncSetting.setSyncOn(context, wanted)')
+expect('同步改完顺手重启 host', portalMenu, 'DshHost.restart(context)')
+expect('回到后台走页面那条入口', portalMenu, 'window.__LUWI_PORTAL__')
+expect('PortalBridge.kt', portalBridge, 'fun portalMenu(): String')
+expect('PortalBridge.kt', portalBridge, 'fun portalMenuPick(id: String): String')
+expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK }')
+expect('PortalAsk.kt', portalAsk, 'val pending = mutableStateOf<Target?>(null)')
+expect('前台浮球让位', hostScreen, 'if (!PortalState.open) {')
+expect('小窗那一格挪到进程里', hostScreen, 'ScreenWindow.hidden')
+expect('设置页由掷标打开', hostScreen, 'PortalAsk.Target.SETTINGS -> navigator.push(Screen.Settings)')
+expect('酒馆由掷标打开', hostScreen, 'PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)')
+expect('反馈窗由掷标打开', hostScreen, 'PortalAsk.Target.FEEDBACK -> feedbackOpen = true')
+// 球菜单**没有撤**: 回到 dsh 后台之后门户不在, 那时只有球能开门
+expect('球菜单仍在 (后台那一条)', hostScreen, '"回到后台" else "回到前台"')
+expect('球菜单的反馈项仍在', hostScreen, 'onFeedback = { feedbackOpen = true }')
+// 「回到前台」那句调过的是一个没暴露的方法 (`portal.isOpen`), 一按就 TypeError —— 2026-11-14 修
+expect('回到前台走的是 mount 的幂等', client, 'portal.mount()')
+if (/if \(!portal\.isOpen\(\)\) portal\.mount\(\)/u.test(client)) {
+  failures.push('client.js: 还有 `if (!portal.isOpen()) portal.mount()` 那句 (那个方法没暴露, 一按就 TypeError)')
+} else {
+  notes.push('ok   「回到前台」不再问 portal.isOpen')
+}
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 

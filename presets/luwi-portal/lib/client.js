@@ -693,6 +693,11 @@ window.__ModuleLoader__.load({
       '#lwp-drawer .lwp-menu-row em{font-style:normal;font-size:12px;',
       'color:var(--dsw-alias-label-secondary,#9ca3af)}',
       '#lwp-drawer .lwp-menu-back{align-self:flex-start;margin-bottom:2px}',
+      // 原生那一份菜单 (2026-11-14): 开关行按 data-on 加粗, 禁用行变灰, 两组之间一条细线
+      '#lwp-drawer .lwp-menu-row[data-on="on"]{font-weight:600}',
+      '#lwp-drawer .lwp-menu-row[disabled]{opacity:.45}',
+      '#lwp-drawer .lwp-menu-sep{height:1px;margin:10px 0 2px;',
+      'background:var(--dsw-alias-border-l1,rgba(15,23,42,.12))}',
 
       '#lwp-flow{position:relative;z-index:1;flex:1;min-height:0;overflow-y:auto;padding:16px 14px 8px;',
       // 键盘起落只改这一块的高度: 重排与重绘收在对话区里, 不往头栏与背景那边扩散
@@ -1007,6 +1012,8 @@ window.__ModuleLoader__.load({
       var sessionId = null
       var status = null
       var drawer = ''
+      // 「虚拟屏」那一项的二级项: 原生清单里的一项带 children 时暂存在这里, 抽屉切进 `screen` 态再画
+      var screenItems = []
       var sending = false
       var bound = ''
       /**
@@ -3956,30 +3963,83 @@ window.__ModuleLoader__.load({
        */
       function renderMenuDrawer() {
         els.drawer.appendChild(h('h3', null, '更多'))
-        var items = [
-          ['router', '判断', '她什么时候开口那一套读数'],
-          ['work', '探索', '探索排期与上一次摘要'],
-        ]
-        for (var i = 0; i < items.length; i += 1) {
-          (function (which, label, note) {
-            var row = h('button', 'lwp-menu-row')
-            row.type = 'button'
-            var text = h('div', null, '')
-            text.style.display = 'flex'
-            text.style.flexDirection = 'column'
-            text.style.minWidth = '0'
-            text.appendChild(h('span', null, label))
-            text.appendChild(h('em', null, note))
-            row.appendChild(text)
-            row.appendChild(h('span', null, '›'))
-            row.onclick = function () { openDrawer(which) }
-            els.drawer.appendChild(row)
-          }(items[i][0], items[i][1], items[i][2]))
+        // 她自己的两张面板一直在最上面: 那是这一页的东西
+        drawerRow('判断', '她什么时候开口那一套读数', '›', false, true, function () { openDrawer('router') })
+        drawerRow('探索', '探索排期与上一次摘要', '›', false, true, function () { openDrawer('work') })
+        // 原生那一份 (2026-11-14: 前台不画浮球之后, 球菜单里那几件全搬到这里)
+        // 老宿主没有 `portalMenu` 时回 null, 于是抽屉就还是原来那三行 —— 不回归
+        var menu = call('portalMenu')
+        if (Array.isArray(menu) && menu.length > 0) {
+          els.drawer.appendChild(h('div', 'lwp-menu-sep'))
+          for (var i = 0; i < menu.length; i += 1) portalRow(menu[i])
         }
-        var close = h('button', 'lwp-menu-row', '收起')
-        close.type = 'button'
-        close.onclick = function () { openDrawer('') }
-        els.drawer.appendChild(close)
+        drawerRow('收起', '', '', false, true, function () { openDrawer('') })
+      }
+
+      /**
+       * 抽屉里的一行
+       *
+       * @param mark 右边那个记号: `›` = 点进去还有一层, `✓` = 这一项现在开着, 空 = 点了就办
+       * @param on 开关态 / 选中态 (写 `data-on`, CSS 加粗)
+       * @param enabled false 时整行点不动 (与原生那份清单的 enabled 同一件事)
+       */
+      function drawerRow(label, note, mark, on, enabled, onPick) {
+        var row = h('button', 'lwp-menu-row')
+        row.type = 'button'
+        if (enabled === false) row.disabled = true
+        if (on) row.setAttribute('data-on', 'on')
+        var text = h('div')
+        text.style.display = 'flex'
+        text.style.flexDirection = 'column'
+        text.style.minWidth = '0'
+        text.appendChild(h('span', null, label))
+        if (note) text.appendChild(h('em', null, note))
+        row.appendChild(text)
+        if (mark) row.appendChild(h('span', null, mark))
+        row.onclick = onPick
+        els.drawer.appendChild(row)
+        return row
+      }
+
+      /** 原生那一份菜单里的一行 (虚拟屏 / 触摸控制 / 同步 / 酒馆 / 回到后台 / 反馈 / 设置) */
+      function portalRow(item) {
+        if (!item || typeof item.id !== 'string') return
+        var kids = Array.isArray(item.children) ? item.children : []
+        var mark = kids.length > 0 ? '›' : (item.on === true ? '✓' : '')
+        drawerRow(item.title || '', item.summary || '', mark, item.on === true, item.enabled !== false, function () {
+          if (kids.length > 0) {
+            screenItems = kids
+            openDrawer('screen')
+            return
+          }
+          if (call('portalMenuPick', item.id) === null) {
+            showNote('这一版宿主还不支持', true)
+            return
+          }
+          renderDrawer()
+          // 开关那一拍要等主线程执行完: 隔一会儿再画一次, 状态就对上了
+          setTimeout(function () { if (drawer !== '') renderDrawer() }, 160)
+        })
+      }
+
+      /** 「虚拟屏」那一层: 屏列表 / 暂停接受控制 / 释放 / 显示隐藏窗口 */
+      function renderScreenDrawer() {
+        // 每画一次都拿最新的那一份: 点「释放」之后列表里那块就该没了
+        var menu = call('portalMenu')
+        if (Array.isArray(menu)) {
+          for (var j = 0; j < menu.length; j += 1) {
+            if (menu[j] && Array.isArray(menu[j].children) && menu[j].children.length > 0) {
+              screenItems = menu[j].children
+              break
+            }
+          }
+        }
+        els.drawer.appendChild(h('h3', null, '虚拟屏'))
+        if (screenItems.length === 0) {
+          drawerRow('还没有已创建的虚拟屏', '', '', false, false, function () {})
+          return
+        }
+        for (var i = 0; i < screenItems.length; i += 1) portalRow(screenItems[i])
       }
 
       function renderDrawer() {
@@ -3998,6 +4058,7 @@ window.__ModuleLoader__.load({
             els.drawer.appendChild(back)
           }
           if (drawer === 'menu') renderMenuDrawer()
+          else if (drawer === 'screen') renderScreenDrawer()
           else if (drawer === 'router') renderRouterDrawer()
           else renderWorkDrawer()
         }
@@ -5438,7 +5499,11 @@ window.__ModuleLoader__.load({
       window.__LUWI_PORTAL__ = {
         show: function () {
           writeSwitch('on')
-          if (!portal.isOpen()) portal.mount()
+          // `mount()` 自己带着 `if (mounted) return` 的幂等, 不必再问一次"开着没有" ——
+          // 原来那句是 `if (!portal.isOpen())`, 而 `isOpen` 从来没暴露在这个对象上, 一按就是
+          // TypeError: portal.isOpen is not a function (2026-11-14 真机 logcat 抓到),
+          // 于是菜单里「回到前台」一直是死的
+          portal.mount()
         },
         hide: function () { portal.hide() },
         // 设置页那一侧用的 (2026-11-08): 外观里改完背景或透明度, 原生那页 evaluateJavascript 推一句
