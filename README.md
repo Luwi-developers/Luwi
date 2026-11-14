@@ -138,6 +138,14 @@
 - **内置的轻量级 Linux 兼容层**（Alpine minirootfs + proot，随包发一份 base，装在 `/data/local/tmp/lwlinux`）：可以 `apk add` 装 python、编译脚本 —— **它不是虚拟机，也不是安全沙盒**，沙盒里只看得到工作区、网络是通的。
 - **dsh 与它的 Web GUI 一起进 APK**：Node 24 随包发，前台服务常驻，关掉界面也活着；两个模式的人设与技能随应用发布，模型按模式的人设作业。
 
+## 隐私
+
+**不收集、不上传任何用户数据。** 包里没有统计 SDK、没有崩溃上报、没有安装编号、没有广告 ID。
+
+- 会出网的只有几件事，而且每一件都由你自己触发或在设置里可关：检查更新（`api.github.com`）、官网登录与朗读令牌（`luwi.dpdns.org`）、语音模型下载（`hf-mirror.com` / `huggingface.co`）、插件索引（`jsdelivr` / `ghfast.top`）、天气条件（`open-meteo.com`）、你自己填的模型服务商。
+- 截图、屏幕内容、聊天、输入、联系人、文件、账号与 API Key，都不上传。API Key 只存在本机。
+- 完整出站清单、62 条权限各自干什么、数据存在哪儿、以及**怎么自己验**（抓包 / MobSF / 签名与可调试位 / `grep -rn 'https://' app/src/main`）：见 [`docs/privacy.md`](docs/privacy.md)。
+
 ## 注意事项
 
 > [!WARNING]
