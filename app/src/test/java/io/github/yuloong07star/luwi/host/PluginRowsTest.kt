@@ -345,4 +345,89 @@ class PluginRowsTest {
         val patch = "- insert:\n    - id: imagegen\n      name: 'file:///x/index.js'\n"
         assertEquals(patch, PluginRows.ensuredConfig(patch, "mneme", listOf("documentMemoryEnabled: true")))
     }
+
+    /**
+     * 跟随应用版本那条判据 (2026-11-14): 本体 0.9.4 比树里 0.15.1 旧 → 让位给树里那份
+     *
+     * 这条如果判反了, 真机上的现象是"面板一直写着 0.9.4" —— 那天就是这么发现的
+     */
+    @Test
+    fun `versionsBefore puts 0_9_4 behind 0_15_1`() {
+        assertTrue(PluginRows.versionsBefore("0.9.4", "0.15.1"))
+        assertTrue(PluginRows.versionsBefore("0.15.0", "0.15.1"))
+        assertTrue(PluginRows.versionsBefore("0.15.1", "0.16.0"))
+        assertFalse(PluginRows.versionsBefore("0.15.1", "0.15.1"))
+        assertFalse(PluginRows.versionsBefore("0.16.0", "0.15.1"))
+        // 段数不一样也要对: 0.15 与 0.15.0 是同一版, 0.15 比 0.15.1 旧
+        assertFalse(PluginRows.versionsBefore("0.15", "0.15.0"))
+        assertTrue(PluginRows.versionsBefore("0.15", "0.15.1"))
+    }
+
+    /** 预发布段排在正式版前面 (FOLLOW_TREE 里现在没有这种包, 但别让它悄悄判反) */
+    @Test
+    fun `versionsBefore treats a prerelease as older than the release`() {
+        assertTrue(PluginRows.versionsBefore("0.16.0-rc.1", "0.16.0"))
+        assertFalse(PluginRows.versionsBefore("0.16.0", "0.16.0-rc.1"))
+    }
+
+    /** 读不出版本就别动人家的目录: 读回 null, 让位照旧 */
+    @Test
+    fun `versionOf reads the version out of package json`() {
+        val dir = kotlin.io.path.createTempDirectory("lw-mneme-ver").toFile()
+        try {
+            java.io.File(dir, "package.json").writeText("{\n  \"name\": \"@modusensus/dsh-mneme\",\n  \"version\": \"0.15.1\",\n}\n")
+            assertEquals("0.15.1", PluginRows.versionOf(dir))
+            assertEquals(null, PluginRows.versionOf(java.io.File(dir, "missing")))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * 收编老行: 主人那条 `dsh-mneme` 改成我们的 id 与树里的 name, **config 一项都不许丢**
+     *
+     * 2026-11-14 真机上就是这条: 本体被备份之后老行指向不存在的文件, 而他的 dream/summarize
+     * 那十几项躺在老行的 config 里
+     */
+    @Test
+    fun `adoptForeignRow keeps every config key`() {
+        val patch = """
+            - insert:
+                - id: dsh-mneme
+                  name: 'file:///data/user/0/pkg/files/dsh-home/plugins-src/mneme/lib/index.js'
+                  config:
+                    language: zh
+                    dreamProvider: xiaomi
+                    dreamModel: mimo-v2.6-flash
+
+        """.trimIndent() + "\n"
+        val next = PluginRows.adoptForeignRow(
+            patch,
+            "dsh-mneme",
+            "mneme",
+            "/data/user/0/pkg/files/host/node_modules/@modusensus/dsh-mneme/lib/index.js",
+        )
+        assertTrue(next.contains("- id: mneme"))
+        assertFalse(next.contains("- id: dsh-mneme"))
+        assertTrue(next.contains("file:///data/user/0/pkg/files/host/node_modules/@modusensus/dsh-mneme/lib/index.js"))
+        assertTrue(next.contains("dreamProvider: xiaomi"))
+        assertTrue(next.contains("dreamModel: mimo-v2.6-flash"))
+        assertTrue(next.contains("language: zh"))
+    }
+
+    /** 认老行: 包名最后一段出现在 name 路径里就算同一个包; 我们那一行自己不算 */
+    @Test
+    fun `foreignRowIdOf finds the hand written row of the same package`() {
+        val patch = """
+            - insert:
+                - id: dsh-mneme
+                  name: 'file:///x/plugins-src/mneme/lib/index.js'
+                - id: imagegen
+                  name: 'file:///x/host/node_modules/@dickpy/dsh-imagegen/lib/index.js'
+
+        """.trimIndent() + "\n"
+        assertEquals("dsh-mneme", PluginRows.foreignRowIdOf(patch, "@modusensus/dsh-mneme", "mneme"))
+        assertEquals(null, PluginRows.foreignRowIdOf(patch, "@modusensus/dsh-mneme", "dsh-mneme"))
+        assertEquals(null, PluginRows.foreignRowIdOf(patch, "@other/not-there", "mneme"))
+    }
 }

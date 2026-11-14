@@ -96,6 +96,22 @@ internal object PluginRows {
     private val RETIRED = listOf("free-model" to "dsh-our-free-model")
 
     /**
+     * 这几个包**跟随应用版本**: 本体比随包那份旧时, 备份本体并把挂载行改回宿主树 (2026-11-14)
+     *
+     * 2026-10-25 定的"先看本体, 有就不装"有一条代价: 本体一旦装下就永远钉在那一个版本上。应用升到
+     * 2.8.0 带的是 mneme 0.15.1, 而机器上 `plugins-src/mneme` 还停在 0.9.4 时, 随包那份让位之后
+     * 新版一个字节都用不上 (2026-11-14 真机读数: 面板写着 `dsh-mneme 0.9.4`), 而 Luwi 这一侧
+     * 越来越依赖 mneme 的新能力 (文档记忆 / 实体提取 / 酒馆排除那几处补丁) —— 主人问的是
+     * "能强制安装升级吗, 不然 luwi 有些用到 mneme 新功能的地方会无法使用"
+     *
+     * 做法只对这张表里的 id 生效, 而且**不删也不覆盖主人那份**: 比树里旧就改个名就地放着
+     * (`mneme.bak-0.9.4-20261114`), 想退回把名字改回来即可; 版本相同或本体更新时照旧让位
+     *
+     * 只放 mneme: imagegen 的主人那份可能是他自己改过的, 顶掉会丢改动, 那条还是纯让位
+     */
+    private val FOLLOW_TREE = setOf("mneme")
+
+    /**
      * 记忆库落在 `$DSH_HOME/memory`, 不落在工作区的 `~/.dsh/memory` (见 [Owned])
      *
      * 2026-10-29: 再加一条 `excludeAgentPresets: ['tavern']` —— 酒馆一场存档就是一场 DSH 会话
@@ -146,8 +162,30 @@ internal object PluginRows {
             // 反过来, 只有**一条可用本体都没有**时才装随包这份; 树里那份进 APK 是给新机器的
             val mountedByRow = mountsPackage(patch, row.packageName, row.id)
             val userCopy = if (mountedByRow) null else userInstallOf(context, row.packageName, root)
-            val taken = mountedByRow || userCopy != null
+            // [FOLLOW_TREE] 里的包再判一次版本: 本体比树里旧就把它改名备份, 让位改由树里那份接管
+            val stale = when {
+                userCopy == null || !target.isFile || row.id !in FOLLOW_TREE -> null
+                else -> retireStaleCopy(File(userCopy), File(File(root, "node_modules"), row.packageName))
+            }
+            val taken = (mountedByRow || userCopy != null) && stale == null
+            if (stale != null) {
+                Log.w(TAG, "${row.packageName} was older than the bundled copy, so the local one was kept as"
+                    + " ${stale.name} and ${row.id} mounts the bundled one")
+            }
+            // 老安装里那条手写行的 id 与我们的不同 (主人当年写的是 `dsh-mneme`, 我们这一行叫 `mneme`),
+            // 本体被改名之后它就指向一个不存在的文件 —— 这里按包名把它收编: 改 id 与 name 两行,
+            // `config:` 一个字节都不动 (主人那十几项 dream/summarize 就是靠这一条留下来的)
+            //
+            // 两种情形都要收编: 这一趟刚把本体退役 (stale), 与更早一趟退役完、行还指着那个不存在的
+            // 路径 (2026-11-14 真机就是这样: 第一版没有收养逻辑, 留了一行空指向)
+            val foreignId = when {
+                !target.isFile -> null
+                else -> foreignRowIdOf(patch, row.packageName, row.id)
+                    ?.takeIf { stale != null || rowNameMissing(patch, it) }
+            }
             patch = when {
+                stale != null && foreignId != null ->
+                    adoptForeignRow(withoutRow(patch, row.id), foreignId, row.id, target.absolutePath)
                 taken && hasInsertRow(patch, row.id) -> withoutRow(patch, row.id).also {
                     Log.w(TAG, "${row.packageName} is already installed (${reasonOf(mountedByRow, userCopy)}),"
                         + " so ${row.id} stood down")
@@ -508,6 +546,123 @@ internal object PluginRows {
         if (!candidate.exists()) return null
         val path = runCatching { candidate.canonicalPath }.getOrNull() ?: return candidate.absolutePath
         return if (isUserCopy(path, hostRoot.absolutePath)) path else null
+    }
+
+    /**
+     * 本体比树里旧时改名备份一份, 返回备份文件; 不旧 / 两边有一个读不出版本就回 null
+     *
+     * 只改名不移走: 主人那份的 `config` 与数据都还指着它, 想退回把名字改回来就行
+     * (命名与 2026-11-14 手工升级时留下的 `mneme.bak-0.9.4-20261114` 同形)
+     */
+    private fun retireStaleCopy(theirs: File, ours: File): File? {
+        val mine = versionOf(theirs) ?: return null
+        val bundled = versionOf(ours) ?: return null
+        if (!versionsBefore(mine, bundled)) return null
+        val stamp = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+        val parent = theirs.parentFile ?: return null
+        var backup = File(parent, "${theirs.name}.bak-$mine-$stamp")
+        var round = 2
+        while (backup.exists() && round < 100) {
+            backup = File(parent, "${theirs.name}.bak-$mine-$stamp-$round")
+            round += 1
+        }
+        return if (theirs.renameTo(backup)) backup else null
+    }
+
+    /** `<目录>/package.json` 里的 `version`; 读不到 (或没有这一行) 回 null */
+    fun versionOf(packageDir: File): String? = runCatching {
+        val text = File(packageDir, "package.json").readText()
+        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+    }.getOrNull()
+
+    /**
+     * patch 里挂着**同一个包**的 insert 行 id; 找不到 (或者只有 [exceptId] 那一行) 回 null
+     *
+     * 认法是 name 里的路径段。两个名字对不上的地方在真机上长这样: 我们的 [Owned.packageName] 是
+     * `@modusensus/dsh-mneme`, 主人那行写的是 `file:///…/plugins-src/mneme/lib/index.js` ——
+     * 包名那一段带着 `dsh-` 前缀, 目录名却没有, 所以两头都试: 包名最后一段 (`dsh-mneme`) 与
+     * 去掉 `dsh-` 之后的那一段 (`mneme`)
+     */
+    fun foreignRowIdOf(patch: String, packageName: String, exceptId: String): String? {
+        val tail = packageName.substringAfterLast('/')
+        if (tail.isEmpty()) return null
+        val candidates = setOf(tail, tail.removePrefix("dsh-")).filter { it.isNotEmpty() }
+        val lines = patch.lines()
+        for (index in lines.indices) {
+            val line = lines[index]
+            if (indentOf(line) <= 0) continue
+            if (!line.trimStart().startsWith("- id: ")) continue
+            val id = line.trimStart().removePrefix("- id: ").trim()
+            if (id == exceptId) continue
+            val indent = indentOf(line)
+            for (scan in index + 1 until lines.size) {
+                if (lines[scan].isNotBlank() && indentOf(lines[scan]) <= indent) break
+                val entry = lines[scan].trimStart()
+                if (!entry.startsWith("name:")) continue
+                val name = entry.removePrefix("name:").trim().trim('\'', '"')
+                val hit = candidates.any { name.contains("/$it/") || name.endsWith("/$it") }
+                if (hit) return id
+                break
+            }
+        }
+        return null
+    }
+
+    /**
+     * 那条行的 `name:` 是不是指向一个**已经不存在的文件**
+     *
+     * 只认 `file://` 形态: 裸包名要交给 profile 的 node_modules 去解析, 这里判不了也不该判
+     * (2026-11-14: 本体被改名之后, 老行留下的就是一条 `file://…/plugins-src/mneme/lib/index.js`,
+     * 而那个目录已经不是它了 —— dsh 每启一次报一句 failed to import, 界面照常但没人愿意看那句红)
+     */
+    fun rowNameMissing(patch: String, rowId: String): Boolean {
+        val name = nameOfRow(patch, rowId) ?: return false
+        if (!name.startsWith("file://")) return false
+        return !File(name.removePrefix("file://")).exists()
+    }
+
+    /**
+     * 把那条老行收编成我们这一行: 只改 `id:` 与 `name:` 两行, 别的 (尤其 `config:`) 原样不动
+     *
+     * 判据 `adoptForeignRow keeps every config key` —— 主人那条 `dsh-mneme` 里躺着他配的
+     * `dreamProvider` / `summarizeModel` 那十几项, 收编时丢一个就等于把他的模型选择改回缺省
+     */
+    fun adoptForeignRow(patch: String, foreignId: String, rowId: String, entryPath: String): String {
+        val name = fileUrlOf(entryPath)
+        val lines = patch.lines().toMutableList()
+        for (index in lines.indices) {
+            if (indentOf(lines[index]) <= 0) continue
+            if (lines[index].trimStart() != "- id: $foreignId") continue
+            val indentText = lines[index].takeWhile { it == ' ' }
+            lines[index] = "$indentText- id: $rowId"
+            for (scan in index + 1 until lines.size) {
+                if (lines[scan].isNotBlank() && indentOf(lines[scan]) <= indentText.length) break
+                if (!lines[scan].trimStart().startsWith("name:")) continue
+                val nameIndent = lines[scan].takeWhile { it == ' ' }
+                lines[scan] = "$nameIndent" + "name: '$name'"
+                return lines.joinToString("\n")
+            }
+            return lines.joinToString("\n")
+        }
+        return patch
+    }
+
+    /**
+     * 数字段比较: `0.9.4` 比 `0.15.1` 旧 (逐段转数字, 缺的段当 0)
+     *
+     * 不引 semver 依赖: 这里只用来判"本体要不要让位", 带上 `-rc.1` 那种预发布段的包不在
+     * [FOLLOW_TREE] 里; 非数字段一律按 -1 计, 于是 `-rc` 永远排在正式版前面 (够用)
+     */
+    fun versionsBefore(older: String, newer: String): Boolean {
+        fun parts(one: String): List<Int> = one.split('.', '-', '+').map { it.toIntOrNull() ?: -1 }
+        val left = parts(older)
+        val right = parts(newer)
+        for (index in 0 until maxOf(left.size, right.size)) {
+            val a = left.getOrElse(index) { 0 }
+            val b = right.getOrElse(index) { 0 }
+            if (a != b) return a < b
+        }
+        return false
     }
 
     /**
