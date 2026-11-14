@@ -110,6 +110,20 @@ internal class PortalBridge(private val context: Context) {
 
     // ── 读 ────────────────────────────────────────────────────────────────────
 
+    /**
+     * 账号那三件事的结果 (2026-11-14)
+     *
+     * 页面上 `__LUWI_PORTAL__.account(...)` 干完一件就调它一次, 一段 JSON: `{action, ok, ...}`。
+     * 只落状态 ([PortalAccount]), 一个字节不写盘 —— 登录结果由宿主自己持久化
+     * @param payload 结果本体
+     * @return 空串 (这座桥的模式是"一个方法交回一段 JSON", 这里没有要交回的东西)
+     */
+    @JavascriptInterface
+    fun lwAccountResult(payload: String): String {
+        PortalAccount.adopt(payload)
+        return ""
+    }
+
     /** 判断层与工作结构的一次快照 (页面照着画, 不做合并判断) */
     @JavascriptInterface
     fun portalStatus(): String {

@@ -8,6 +8,8 @@
 package io.github.yuloong07star.luwi.ui
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -32,9 +34,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,16 +60,21 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.AccessibilitySetting
 import io.github.yuloong07star.luwi.channel.ChannelSetting
 import io.github.yuloong07star.luwi.channel.Funnel
 import io.github.yuloong07star.luwi.constants.UiSpacing
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
+import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.voice.SpeechModelDownload
 import io.github.yuloong07star.luwi.wake.WakeWordDownload
@@ -445,6 +454,8 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
     // 也不需要自己记住上一次读到什么
     val channel = ChannelSetting.state
     val accessibility = AccessibilitySetting.state
+    // 账号那一窗开着没有 (2026-11-14): 与「选择权限」那一路同一个写法 —— 一行入口, 点开是设置页 / 弹窗
+    var accountOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         // 打开时读一次。四件事都不在画帧的线程上做事: 通道与无障碍要起几个 settings/cmd 子进程;
@@ -453,6 +464,8 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
         AccessibilitySetting.refreshState()
         WakeWordDownload.refresh(context)
         SpeechModelDownload.refresh(context)
+        // 账号那一行 (2026-11-14): 一次问清楚"登录了没有 / Key 有没有", 页面那头读完报回来
+        PortalAccount.refresh()
     }
 
     // 两个下载器的进度都是它们自己的 Compose 状态, 读一下就是订阅: 每收一块它们改一次 received,
@@ -506,6 +519,7 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
             title = stringResource(R.string.ready_wake),
             detail = modelDetail(
                 downloading = wakePhase == WakeWordDownload.Phase.DOWNLOADING,
+                paused = wakePhase == WakeWordDownload.Phase.PAUSED,
                 failed = wakePhase == WakeWordDownload.Phase.FAILED,
                 present = wakePresent,
                 bytes = wakeBytes,
@@ -522,6 +536,7 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
             title = stringResource(R.string.ready_speech),
             detail = modelDetail(
                 downloading = speechPhase == SpeechModelDownload.Phase.DOWNLOADING,
+                paused = speechPhase == SpeechModelDownload.Phase.PAUSED,
                 failed = speechPhase == SpeechModelDownload.Phase.FAILED,
                 present = speechPresent,
                 bytes = speechBytes,
@@ -535,12 +550,17 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
         ),
     )
 
-    // 进度**把「选择权限」也算进去** (2026-11-07 主人: "没有完成权限时却显示准备完毕") —— 它虽然
-    // 不是 ReadyStep (没有四档状态), 但它确实有一件事没办, 而顶部那句"全部就绪"是给整张卡下的
-    // 结论: 权限没看过就报就绪, 等于把最后一步藏起来了。所以分母是四件 + 这一件
-    val done = steps.count { it.state == ReadyState.DONE } + if (permissionsDone) 1 else 0
-    val total = steps.size + 1
-    val missing = total - done
+    // 有序清单 (2026-11-14 主人: "进度条要按顺序从上往下走, 上面有未完成的应先卡住进度条…不能跳过"):
+    // 四件 + 选择权限 + 账号, 按依赖顺序排; `firstPending` 是**第一个没办的位置**
+    //
+    // 环与竖轨只走到这里 —— 上面还有没办的, 下面就算办好了也不许把进度条带过去 (那正是"跳过").
+    // 顶栏那句「还差 N 步」仍按**真实没办的件数**算: 它说的是"还差几件", 不是"走到哪"
+    val flags = steps.map { it.state == ReadyState.DONE } +
+        listOf(permissionsDone, PortalAccount.ready)
+    val firstPending = flags.indexOfFirst { !it }.let { if (it < 0) flags.size else it }
+    val done = firstPending
+    val total = flags.size
+    val missing = flags.count { !it }
 
     // 过门记录 (cf33e06): 这张卡是唯一同时看得见这几项的地方, 埋点跟着它走就不必再挂别的 watcher。
     // 只记前两件 —— 四件里只有通道与无障碍在「五道门」那张表上有位置, 两个模型是随时可删可下的东西,
@@ -566,13 +586,68 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
 
     ReadyHead(done = done, total = total, missing = missing)
 
+    // 模型那两件的下载动作: 底部那颗按钮 / 行自己 (下载中点一下 = 暂停) / 继续 都走同一条
+    val startDownload: (ReadyAction) -> Unit = { action ->
+        when (action) {
+            ReadyAction.WakeDownload -> scope.launch {
+                // download() 是同步阻塞的一趟网络, 不能落在画帧的线程上
+                withContext(Dispatchers.IO) {
+                    runCatching { WakeWordDownload.download(context) }
+                    // 模型没下过时 keywords.txt 也还没写过: 补上缺省那张词表,
+                    // 否则"模型就绪"了而服务照样起不来 (设置页那一条同理)
+                    if (LwWakeWord.names(context).isEmpty()) {
+                        LwWakeWord.setWords(context, WakeWordWords.defaultText())
+                    }
+                }
+            }
+
+            ReadyAction.SpeechDownload -> scope.launch {
+                withContext(Dispatchers.IO) {
+                    runCatching { SpeechModelDownload.download(context) }
+                }
+            }
+
+            else -> Unit
+        }
+    }
+
     steps.forEachIndexed { index, step ->
         // 用下标当身份: 四件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
+        val downloading = step.state == ReadyState.RUNNING
+        val paused = step.state == ReadyState.PAUSED
+        val isDownload = step.action == ReadyAction.WakeDownload || step.action == ReadyAction.SpeechDownload
         ReadyRow(
             step = step,
             index = index,
             // 轨道要接着往下走到「选择权限」那个节点, 所以末行不再收口
             last = false,
+            // 前面的都办完了, 路才铺到这一行 (上面有缺口就停在那儿)
+            reached = index <= firstPending,
+            // 下载中点这一行 = 暂停; 暂停后再点 = 接着下 (主人 2026-11-15: "点击正在下载可暂停")
+            onTap = when {
+                !isDownload -> null
+                downloading -> ({
+                    if (step.action == ReadyAction.WakeDownload) {
+                        WakeWordDownload.pause()
+                    } else {
+                        SpeechModelDownload.pause()
+                    }
+                })
+                paused -> ({ startDownload(step.action) })
+                else -> null
+            },
+            // 暂停之后右边那一格给一颗 ×: 点了就把这次下载作废 (半条文件一起清掉)
+            onCancel = if (paused) {
+                ({
+                    if (step.action == ReadyAction.WakeDownload) {
+                        WakeWordDownload.cancel(context)
+                    } else {
+                        SpeechModelDownload.cancel(context)
+                    }
+                })
+            } else {
+                null
+            },
             modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
         )
     }
@@ -586,7 +661,35 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
         detail = stringResource(R.string.ready_permissions_summary),
         index = steps.size,
         done = permissionsDone,
+        // 下面还跟着「账号」那一行: 这一段轨道必须接着往下画, 收口在这儿的话
+        // 账号那颗点就悬在半空 (主人 2026-11-15: "帐号左边的点没有融入上方进度条")
+        last = false,
+        // 路没铺到这儿就点不开: 上面还有没办的, 不许跳过 (同一件事的第二个后果)
+        reached = steps.size <= firstPending,
         onClick = onPermissions,
+    )
+
+    // 竖轨上再往下那一格: 「账号」 (2026-11-14 主人: "把登录加入新手引导")。形态与「选择权限」同款,
+    // 点开是**原生**那一窗 (登录 / 填 Key / 稍后)
+    if (accountOpen) {
+        AccountGuideDialog(
+            onDismiss = {
+                accountOpen = false
+                PortalAccount.settle()
+            },
+        )
+    }
+    ReadyLinkRow(
+        title = stringResource(R.string.ready_account),
+        detail = accountDetail(),
+        index = steps.size + 1,
+        done = PortalAccount.ready,
+        reached = steps.size + 1 <= firstPending,
+        onClick = {
+            accountOpen = true
+            // 打开就问一次: 这一行可能停在"还没问过"
+            PortalAccount.refresh()
+        },
     )
 
     // 没有"下一步"时整块不画 (四件都办完就是这样): 不该留一块空框
@@ -597,24 +700,8 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
                 when (action) {
                     ReadyAction.Connect -> ChannelSetting.connect()
                     ReadyAction.Accessibility -> AccessibilitySetting.set(true)
-                    ReadyAction.WakeDownload -> scope.launch {
-                        // download() 是同步阻塞的一趟网络, 不能落在画帧的线程上
-                        withContext(Dispatchers.IO) {
-                            runCatching { WakeWordDownload.download(context) }
-                            // 模型没下过时 keywords.txt 也还没写过: 补上缺省那张词表,
-                            // 否则"模型就绪"了而服务照样起不来 (设置页那一条同理)
-                            if (LwWakeWord.names(context).isEmpty()) {
-                                LwWakeWord.setWords(context, WakeWordWords.defaultText())
-                            }
-                        }
-                    }
-
-                    ReadyAction.SpeechDownload -> scope.launch {
-                        withContext(Dispatchers.IO) {
-                            runCatching { SpeechModelDownload.download(context) }
-                        }
-                    }
-
+                    // 下载 / 继续: 与行上那一下是同一条路
+                    ReadyAction.WakeDownload, ReadyAction.SpeechDownload -> startDownload(action)
                     ReadyAction.None -> Unit
                 }
             },
@@ -713,118 +800,46 @@ private fun ReadyRing(done: Int, total: Int, modifier: Modifier = Modifier) {
 }
 
 /**
- * 体检表里的一行: 节点、名称、现在什么样、以及一条**一直占着位**的进度槽
+ * 竖轨上的一行 —— **六项共用这一份** (2026-11-14 主人: "登陆没有进入左边进度条与上边同一类型, 统一一下")
  *
- * 两个动效: 首次进来按 [index] 依次淡入, 以及**刚做完时弹一下** —— 后者只在 false→true 那一次触发,
- * 不是"做完的项一直在抖"
+ * 上面四件 (通道 / 无障碍 / 唤醒 / 语音) 与下面两个入口行 (选择权限 / 账号) 走的是同一套几何: 同一个 x 上的
+ * 节点、同一条竖轨、同一个进度槽与右侧小格。**唯一的参数差别是 `nodeState` 与 `onClick`** —— 于是"某一项
+ * 办没办"只由状态说, 不因为它是"步骤"还是"入口"就换一种画法
  *
- * 进度槽与右侧百分比格在所有状态下都占着位置: 开始下载时那一行不该长高, 整张卡也不该跟着重排
- */
-/**
- * 竖轨上的一个入口行: 有节点、有轨道、整行可点, 但没有状态
+ * 轨道那一段由 [reached] 说: 前面的都办完了, 路才铺到这一行; 上面有缺口就停在那儿 (不能跳过)
+ * **同一个判断还管"许不许点"** —— 路没铺到的行点不开, 于是"跳过"在视觉与手感上都不会发生
+ * 节点仍按这一行自己的状态画 —— 两件事分开, 于是跨过缺口在视觉上不会发生
  *
- * **为什么单开一个函数而不复用 [ReadyRow]**: [ReadyRow] 那一行的身份是 `ReadyStep` (四档状态、
- * 进度弧、失败色、做完弹一下), 而这一行没有状态可报 —— 强行塞一个假的 `ReadyState` 会让环的分母、
- * "还差几步"、以及下载进度那几条逻辑全部跟着它算。所以两条共用的只有几何: 同一个 x 上的节点、同一
- * 条轨道、同一套入场动效
- *
- * 节点的画法是一条圆环加一个右箭头, 意思是"这一行会带你到别处", 与上面四件的勾/圈/环区分开
+ * @param title 这一行叫什么
+ * @param detail 现在什么样 (下载中会在这里写"正在下载")
+ * @param index 第几行 (入场差开 + 第一行不画顶段轨道)
+ * @param last 最后一行: 不再往下画轨道
+ * @param reached 路铺到这一行了没有 (见上面那段)
+ * @param nodeState 这一行自己的状态 (勾 / 进度弧 / 错误色 / 红横杠)
+ * @param progress 进度 (0~1), 只有下载中才有意义
+ * @param percent 右侧那一格的字 (null = 空着, 但格子照旧占位)
+ * @param exit 点这一行做什么 (null = 不可点)
+ * @param cancel 右侧那一格里的 × 做什么 (null = 不画 ×, 画 [percent])
+ * @param modifier 外部修饰
  */
 @Composable
-private fun ReadyLinkRow(
+private fun ReadyRailRow(
     title: String,
     detail: String,
     index: Int,
-    done: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val enter = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        try {
-            delay(index * RowStaggerMillis)
-            enter.animateTo(1f, tween(durationMillis = RowEnterMillis, easing = FastOutSlowInEasing))
-        } finally {
-            if (enter.value < 1f) enter.snapTo(1f)
-        }
-    }
-
-    val colors = MiuixTheme.colorScheme
-    // 角色映射 (2026-11-07 按 ui skill 重定, 主人同日: "选择权限颜色不对"):
-    //
-    //   未办 → 与四件**同一档** (浅圈), 已办 → 与四件**同一档** (实心主色 + 勾)。这一行不另画第五种
-    //          节点: 2026-11-07 主人先嫌"灰得像禁用", 试过"主色描边 + 箭头"之后又定成"保持一致" ——
-    //          一串同款圆圈里插一个箭头, 反而它最突兀
-    //
-    // 文字不跟着变: 标题始终 onSurface, 副标题始终淡化一档 —— 变化的只有节点与轨道, 否则一行字在
-    // "办过"前后换色, 会在滚动的竖轨里显得像另一项
-    val accent = colors.primary
-    val dim = colors.onSurface.copy(alpha = 0.28f)
-    // 轨道与 [ReadyRow] 同一个口径 (办过的那一段跟着主色走), 末行也只画到节点为止
-    val rail = if (done) accent.copy(alpha = 0.45f) else dim
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = RowMinHeight)
-            .clickable(onClick = onClick)
-            .drawBehind {
-                val x = NodeCenterX.toPx()
-                // 上一行画到自己的底, 这一行再从顶画到节点上缘 —— 两段接得上
-                drawLine(
-                    color = rail,
-                    start = Offset(x, 0f),
-                    end = Offset(x, (NodeCenterY - NodeRadius - 2.dp).toPx()),
-                    strokeWidth = 2.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-            }
-            .graphicsLayer { alpha = enter.value },
-    ) {
-        Canvas(
-            modifier = Modifier
-                .width(NodeSlotWidth)
-                .height(NodeCenterY + NodeRadius + 2.dp),
-        ) {
-            // **与四件完全一致** (2026-11-07 主人: "选择权限未完成时应该也和其它的一样, 保持一致"):
-            // 没办就是四件那种浅圈, 办过就是实心勾 —— 这一行不另发明第五种节点画法。原来那个"主色
-            // 描边 + 箭头"是想用箭头当"可点"的暗号, 但四件里没有谁的节点长得像箭头, 于是在一串同款
-            // 圆圈里它反而最突兀; 而"这一行能点"本来就由整行的点击区与小字说明承担
-            drawStepNode(
-                state = if (done) ReadyState.DONE else ReadyState.TODO,
-                progress = 1f,
-                accent = accent,
-                onAccent = colors.surface,
-                dim = dim,
-                error = colors.error,
-            )
-        }
-        Spacer(Modifier.width(NodeGap))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MiuixTheme.textStyles.body1,
-                color = colors.onSurface,
-            )
-            Text(
-                text = detail,
-                style = MiuixTheme.textStyles.body2,
-                color = colors.onSurface.copy(alpha = 0.5f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ReadyRow(
-    step: ReadyStep,
-    index: Int,
     last: Boolean,
+    reached: Boolean,
+    nodeState: ReadyState,
+    progress: Float = 0f,
+    percent: String? = null,
+    exit: (() -> Unit)? = null,
+    cancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val enter = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         try {
-            // 差开一点, 五行才有"依次"的样子; 间隔比单行动画短, 五行串起来不超过 500ms
+            // 差开一点, 六行才有"依次"的样子; 间隔比单行动画短, 六行串起来不超过 600ms
             delay(index * RowStaggerMillis)
             enter.animateTo(1f, tween(durationMillis = RowEnterMillis, easing = FastOutSlowInEasing))
         } finally {
@@ -833,11 +848,16 @@ private fun ReadyRow(
         }
     }
 
+    // 路还没铺到的行**不显示它自己的状态** (主人 2026-11-15: "进度条没到不允许显示下一步的状态"):
+    // 节点退成那一道极暗的空圈, 副标题也换成一句中性的 —— 勾、红横杠、进度、"已就绪 5.3 MB" 全不预支
+    val shown = if (reached) nodeState else ReadyState.LOCKED
+    val shownDetail = if (reached) detail else stringResource(R.string.ready_not_yet)
+
+    // 刚做完那一下弹一下 (只在 false→true 那一次): 一进来就已经做完的项不该弹
     val pop = remember { Animatable(1f) }
-    // 上一次看到的值。初值取当前值: 一进来就已经做完的项不该弹, 只有"当着你的面做完"才弹
-    var wasDone by remember { mutableStateOf(step.state == ReadyState.DONE) }
-    LaunchedEffect(step.state) {
-        val now = step.state == ReadyState.DONE
+    var wasDone by remember { mutableStateOf(shown == ReadyState.DONE) }
+    LaunchedEffect(shown) {
+        val now = shown == ReadyState.DONE
         if (now && !wasDone) {
             pop.animateTo(PopScale, tween(durationMillis = 120))
             pop.animateTo(
@@ -850,11 +870,20 @@ private fun ReadyRow(
 
     val colors = MiuixTheme.colorScheme
     val dim = colors.onSurface.copy(alpha = 0.28f)
-    val rail = if (step.state == ReadyState.DONE) colors.primary.copy(alpha = 0.45f) else dim
+    val rail = if (reached) colors.primary.copy(alpha = 0.45f) else dim
+    // 路没铺到的行点不开; 铺到了才有那一层点击
+    val open = reached
     Row(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = RowMinHeight)
+            .then(
+                if (exit == null || !open) {
+                    Modifier
+                } else {
+                    Modifier.clickable(role = Role.Button, onClick = exit)
+                },
+            )
             // 轨道画在行自己身上: 行知道自己多高, 于是"从节点到行底"这条线不用去量外面的布局。
             // 上一行画到自己的底, 这一行再从顶画到节点上缘 —— 两段接得上, 靠中间的节点看是一条线
             .drawBehind {
@@ -883,6 +912,7 @@ private fun ReadyRow(
                 scaleX = pop.value
                 scaleY = pop.value
             },
+        verticalAlignment = Alignment.Top,
     ) {
         // 节点槽: 固定的一格, 四种状态都画在这里, 换状态不会挤动右边的字
         Canvas(
@@ -891,8 +921,8 @@ private fun ReadyRow(
                 .height(NodeCenterY + NodeRadius + 2.dp),
         ) {
             drawStepNode(
-                state = step.state,
-                progress = step.progress,
+                state = shown,
+                progress = progress,
                 accent = colors.primary,
                 onAccent = colors.surface,
                 dim = dim,
@@ -902,40 +932,47 @@ private fun ReadyRow(
         Spacer(Modifier.width(NodeGap))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = step.title,
+                text = title,
                 style = MiuixTheme.textStyles.body1,
                 color = colors.onSurface,
             )
             Text(
-                text = step.detail,
+                text = shownDetail,
                 style = MiuixTheme.textStyles.body2,
-                color = if (step.state == ReadyState.FAILED) {
-                    colors.error
-                } else {
-                    colors.onSurfaceVariantSummary
-                },
+                color = if (shown == ReadyState.FAILED) colors.error else colors.onSurfaceVariantSummary,
             )
-            // 进度槽: 一直占着这三 dp, 只有下载中才画东西
+            // 进度槽: 一直占着这三 dp, 只有下载中才画东西 —— 六行同一个几何, 开始下载时卡片不长高
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 6.dp)
                     .height(NodeBarHeight),
             ) {
-                if (step.state == ReadyState.RUNNING) {
-                    ReadyBar(progress = step.progress, modifier = Modifier.fillMaxSize())
+                if (shown == ReadyState.RUNNING) {
+                    ReadyBar(progress = progress, modifier = Modifier.fillMaxSize())
                 }
             }
         }
-        // 百分比格: 定宽, 只有下载中才有字 —— 出现与消失都不重排这一行
+        // 右侧那一格: 定宽, 只有下载中才有字 —— 出现与消失都不重排这一行
         Box(
             modifier = Modifier
                 .width(PercentSlotWidth)
                 .padding(top = 2.dp),
         ) {
-            if (step.state == ReadyState.RUNNING) {
-                Text(
-                    text = stringResource(R.string.ready_percent, (step.progress * 100).toInt()),
+            when {
+                // 暂停之后这里是一颗 ×: 点它就把这次下载作废 (主人 2026-11-15: "x, 可取消")
+                cancel != null && reached -> Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClick = cancel),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CancelCross(color = colors.onSurfaceVariantSummary)
+                }
+
+                percent != null && reached -> Text(
+                    text = percent,
                     style = MiuixTheme.textStyles.footnote1,
                     color = colors.primary,
                 )
@@ -944,7 +981,108 @@ private fun ReadyRow(
     }
 }
 
-/** 节点: 做完的打勾, 下载中的走进度弧, 失败的描一圈错误色, 没办的只留一道浅圈 */
+/** 一颗 × : 两道斜线, 与这个文件里别的图形同一套画法 (不引图标库) */
+@Composable
+private fun CancelCross(color: Color) {
+    Canvas(modifier = Modifier.size(12.dp)) {
+        val stroke = 1.8.dp.toPx()
+        drawLine(
+            color = color,
+            start = Offset(0f, 0f),
+            end = Offset(size.width, size.height),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = color,
+            start = Offset(size.width, 0f),
+            end = Offset(0f, size.height),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
+/**
+ * 四件依赖里的一行: 把 [ReadyStep] 翻译成共用那一行的参数
+ *
+ * 进度槽与右侧百分比格按"下载中"给字; 其余状态下它们是空的, 但格子照旧占位
+ * @param step 这一件的状态与文案
+ * @param index 第几行
+ * @param last 最后一行 (不再往下画轨道)
+ * @param modifier 外部修饰
+ * @param reached 路铺到这一行了没有 (见 [ReadyRailRow])
+ * @param onTap 下载中 / 暂停时点这一行 (暂停 / 继续), null = 不可点
+ * @param onCancel 暂停后右侧那颗 × 做什么
+ */
+@Composable
+private fun ReadyRow(
+    step: ReadyStep,
+    index: Int,
+    last: Boolean,
+    modifier: Modifier = Modifier,
+    reached: Boolean = false,
+    onTap: (() -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
+) {
+    ReadyRailRow(
+        title = step.title,
+        detail = step.detail,
+        index = index,
+        last = last,
+        reached = reached,
+        nodeState = step.state,
+        progress = step.progress,
+        percent = if (step.state == ReadyState.RUNNING) {
+            stringResource(R.string.ready_percent, (step.progress * 100).toInt())
+        } else {
+            null
+        },
+        exit = onTap,
+        cancel = onCancel,
+        modifier = modifier,
+    )
+}
+
+/**
+ * 竖轨上的一个入口行: 「选择权限」「账号」 (点开是设置页 / 原生那一窗)
+ *
+ * 与上面四件**同一份实现** ([ReadyRailRow]), 只是没有下载进度、多一个点击 — 主人 2026-11-14:
+ * "登陆没有进入左边进度条与上边同一类型, 统一一下"
+ * @param title 这一行叫什么
+ * @param detail 副标题
+ * @param index 第几行
+ * @param done 办过没有 (决定节点画勾还是红横杠)
+ * @param onClick 点这一行
+ * @param modifier 外部修饰
+ * @param last 最后一行 (下面没有行了才 true, 否则轨道会断在半空)
+ * @param reached 路铺到这一行了没有 —— 没铺到就点不开
+ */
+@Composable
+private fun ReadyLinkRow(
+    title: String,
+    detail: String,
+    index: Int,
+    done: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    last: Boolean = true,
+    reached: Boolean = false,
+) {
+    ReadyRailRow(
+        title = title,
+        detail = detail,
+        index = index,
+        last = last,
+        reached = reached,
+        nodeState = if (done) ReadyState.DONE else ReadyState.TODO,
+        exit = onClick,
+        modifier = modifier,
+    )
+}
+
+
+/** 节点: 做完的打勾, 下载中的走进度弧, 失败的描一圈错误色 + 横杠, 没办的暗圈里一道红横杠, 没到的只剩极暗空圈 */
 private fun DrawScope.drawStepNode(
     state: ReadyState,
     progress: Float,
@@ -1000,12 +1138,53 @@ private fun DrawScope.drawStepNode(
             )
         }
 
-        ReadyState.TODO -> drawCircle(
-            color = dim,
+        ReadyState.TODO -> {
+            drawCircle(
+                color = dim,
+                radius = radius - stroke / 2,
+                center = center,
+                style = Stroke(stroke),
+            )
+            // 没办的事也要看得见: 中间一道红横杠 (主人 2026-11-15: "有问题, 没完成的应当用红色
+            // 横杠表示, 比如这个模型没有下载也要表示")。圈还是暗的 —— 圈说"还没动", 杠说"这里缺东西"
+            drawLine(
+                color = error,
+                start = Offset(center.x - radius * 0.44f, center.y),
+                end = Offset(center.x + radius * 0.44f, center.y),
+                strokeWidth = 1.7.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
+        }
+
+        // 还没轮到这一行: 只留一道**极暗**的空圈 —— 打勾 / 红横杠 / 进度弧一个都不画, 因为它自己的
+        // 状态在这一刻不该被人看见 (主人 2026-11-15: "进度条没到不允许显示下一步的状态")
+        ReadyState.LOCKED -> drawCircle(
+            color = dim.copy(alpha = 0.14f),
             radius = radius - stroke / 2,
             center = center,
             style = Stroke(stroke),
         )
+
+        // 暂停: 圈里两道竖杠 (与"打勾"同一套笔画语言) —— 它说的是"停在这儿了, 不是下了坏文件"
+        ReadyState.PAUSED -> {
+            drawCircle(color = dim, radius = radius - stroke / 2, center = center, style = Stroke(stroke))
+            val bar = 1.7.dp.toPx()
+            val half = radius * 0.36f
+            drawLine(
+                color = accent,
+                start = Offset(center.x - radius * 0.2f, center.y - half),
+                end = Offset(center.x - radius * 0.2f, center.y + half),
+                strokeWidth = bar,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = accent,
+                start = Offset(center.x + radius * 0.2f, center.y - half),
+                end = Offset(center.x + radius * 0.2f, center.y + half),
+                strokeWidth = bar,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 
@@ -1046,9 +1225,12 @@ private fun ReadyBar(progress: Float, modifier: Modifier = Modifier) {
 private fun ReadyActionRow(next: ReadyStep, onAction: (ReadyAction) -> Unit) {
     val colors = MiuixTheme.colorScheme
     val running = next.state == ReadyState.RUNNING
+    val paused = next.state == ReadyState.PAUSED
     val failed = next.state == ReadyState.FAILED
     val label = when {
         running -> stringResource(R.string.ready_action_running, (next.progress * 100).toInt())
+        // 暂停之后这颗按钮就是"继续": 再按一下从断点接着下 (2026-11-15)
+        paused -> stringResource(R.string.ready_action_resume, next.title)
         next.action == ReadyAction.Connect -> stringResource(R.string.ready_action_connect)
         next.action == ReadyAction.Accessibility -> stringResource(R.string.ready_action_accessibility)
         // 只有模型那两件有"重试"这一说; 通道与无障碍失败还是那一句原话
@@ -1057,7 +1239,7 @@ private fun ReadyActionRow(next: ReadyStep, onAction: (ReadyAction) -> Unit) {
     }
     // 右边那串字是**这一步要花多少**: 唤醒词 5.3 MB, 语音 240 MB —— 别让人按下去才知道
     val hint = when {
-        running -> ""
+        running || paused -> ""
         next.action == ReadyAction.WakeDownload || next.action == ReadyAction.SpeechDownload ->
             stringResource(R.string.ready_mb, "%.1f".format(next.bytes / 1024.0 / 1024.0))
 
@@ -1135,6 +1317,7 @@ private fun ReadyActionRow(next: ReadyStep, onAction: (ReadyAction) -> Unit) {
 /** 下载器的 phase → 卡片的状态。IDLE 时再看一眼磁盘: 下好了却没走 refresh 的那一次也算数 */
 private fun wakeState(phase: WakeWordDownload.Phase, present: Boolean): ReadyState = when (phase) {
     WakeWordDownload.Phase.DOWNLOADING -> ReadyState.RUNNING
+    WakeWordDownload.Phase.PAUSED -> ReadyState.PAUSED
     WakeWordDownload.Phase.FAILED -> ReadyState.FAILED
     WakeWordDownload.Phase.READY -> ReadyState.DONE
     WakeWordDownload.Phase.IDLE -> if (present) ReadyState.DONE else ReadyState.TODO
@@ -1143,6 +1326,7 @@ private fun wakeState(phase: WakeWordDownload.Phase, present: Boolean): ReadySta
 /** 语音模型那一套同义的 phase */
 private fun speechState(phase: SpeechModelDownload.Phase, present: Boolean): ReadyState = when (phase) {
     SpeechModelDownload.Phase.DOWNLOADING -> ReadyState.RUNNING
+    SpeechModelDownload.Phase.PAUSED -> ReadyState.PAUSED
     SpeechModelDownload.Phase.FAILED -> ReadyState.FAILED
     SpeechModelDownload.Phase.READY -> ReadyState.DONE
     SpeechModelDownload.Phase.IDLE -> if (present) ReadyState.DONE else ReadyState.TODO
@@ -1156,6 +1340,7 @@ private fun speechState(phase: SpeechModelDownload.Phase, present: Boolean): Rea
 @Composable
 private fun modelDetail(
     downloading: Boolean,
+    paused: Boolean,
     failed: Boolean,
     present: Boolean,
     bytes: Long,
@@ -1165,6 +1350,13 @@ private fun modelDetail(
 ): String = when {
     downloading -> stringResource(
         R.string.ready_model_downloading,
+        "%.1f".format(received / 1024.0 / 1024.0),
+        "%.1f".format((if (total > 0L) total else bytes) / 1024.0 / 1024.0),
+    )
+
+    // 暂停: 把"停在哪"说清 —— 已下的那一段留着, 右侧那一格是 × (可取消)
+    paused -> stringResource(
+        R.string.ready_model_paused,
         "%.1f".format(received / 1024.0 / 1024.0),
         "%.1f".format((if (total > 0L) total else bytes) / 1024.0 / 1024.0),
     )
@@ -1190,7 +1382,7 @@ private data class ReadyStep(
 )
 
 /** 四档状态: 没办 / 正在下 / 做完了 / 试过没成 */
-private enum class ReadyState { TODO, RUNNING, DONE, FAILED }
+private enum class ReadyState { TODO, RUNNING, PAUSED, DONE, FAILED, LOCKED }
 
 /**
  * 点一下办掉的那件事: 每一项只有一件, 走的是各自现成的入口
@@ -1222,7 +1414,6 @@ private val NodeBarHeight = 3.dp
 
 /** 右侧百分比那一格的宽度 (定宽, 出现与消失都不重排) */
 private val PercentSlotWidth = 40.dp
-
 /** 一行至少这么高: 节点、两行字与进度槽都在里面, 也不挤 */
 private val RowMinHeight = 56.dp
 
@@ -1240,3 +1431,291 @@ private const val RowStaggerMillis = 90L
 
 /** 环与进度条追一次用多久 */
 private const val RingMillis = 600
+
+
+/**
+ * 「账号」那一行的副标题 (2026-11-14)
+ *
+ * 先说"登录了谁", 再说"正在问 / 刚失败 / Key 写进去了"; 点了「稍后」而还没登录时写「稍后在 dsh 后台完成」
+ *
+ * 2026-11-15 起已登录那一档把**模型名**一起说出来 (宿主 status 现算的账号首个可用模型): 只说"已登录"
+ * 会让人以为模型就能跑, 而事实上 dsh 那条 Key 路线与账号路线是两回事
+ * @returns 给人看的那一句
+ */
+@Composable
+private fun accountDetail(): String = when {
+    PortalAccount.phase == AccountPhase.SIGNED_IN && PortalAccount.model.isNotEmpty() ->
+        stringResource(
+            R.string.ready_account_signed_in_model,
+            PortalAccount.label.ifEmpty { "DeepSeek" },
+            PortalAccount.model,
+        )
+    PortalAccount.phase == AccountPhase.SIGNED_IN ->
+        stringResource(R.string.ready_account_signed_in, PortalAccount.label.ifEmpty { "DeepSeek" })
+    PortalAccount.phase == AccountPhase.WORKING -> stringResource(R.string.ready_account_working)
+    PortalAccount.phase == AccountPhase.FAILED ->
+        stringResource(R.string.ready_account_failed, PortalAccount.reason.ifEmpty { "-" })
+    PortalAccount.keyConfigured -> stringResource(R.string.ready_account_key_done)
+    PortalAccount.deferred -> stringResource(R.string.ready_account_later_detail)
+    else -> stringResource(R.string.ready_account_signed_out)
+}
+
+/**
+ * 「账号」窗顶上那一块身份: 一枚节点 + 两行 (账号 / 现状)
+ *
+ * 节点用的是卡片同一套画法 ([drawStepNode]) —— 新窗不另发明一套图形语言, 一眼就知道它说的是那张体检表
+ * 里同一件事
+ */
+@Composable
+private fun AccountIdentity() {
+    val colors = MiuixTheme.colorScheme
+    val state = when {
+        PortalAccount.ready -> ReadyState.DONE
+        PortalAccount.phase == AccountPhase.FAILED -> ReadyState.FAILED
+        PortalAccount.phase == AccountPhase.WORKING -> ReadyState.RUNNING
+        else -> ReadyState.TODO
+    }
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(colors.primary.copy(alpha = 0.10f), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(modifier = Modifier.size(24.dp)) {
+                drawStepNode(
+                    state = state,
+                    progress = 1f,
+                    accent = colors.primary,
+                    onAccent = colors.surface,
+                    dim = colors.onSurface.copy(alpha = 0.28f),
+                    error = colors.error,
+                )
+            }
+        }
+        Spacer(Modifier.width(UiSpacing.Large))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.ready_account),
+                style = MiuixTheme.textStyles.title3,
+                color = colors.onSurface,
+            )
+            Text(
+                text = accountDetail(),
+                style = MiuixTheme.textStyles.body2,
+                color = colors.onSurfaceVariantSummary,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            // 登录之后再补一行"到底用哪个模型": 那句话是宿主现算的, 目录还没下来时整行不画
+            if (PortalAccount.model.isNotEmpty() && PortalAccount.phase == AccountPhase.SIGNED_IN) {
+                Text(
+                    text = stringResource(R.string.ready_account_model, PortalAccount.model),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = colors.primary,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 一条 1dp 的分隔: 与设置页那条同形, 但不引它那套刻度 */
+@Composable
+private fun AccountHairline() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = UiSpacing.PageItem)
+            .height(1.dp)
+            .background(MiuixTheme.colorScheme.dividerLine),
+    )
+}
+
+/** 右侧那颗 › : 两笔画出来, 不引图标库 (与卡片里别处的画法一致) */
+@Composable
+private fun AccountChevron() {
+    val color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+    Canvas(modifier = Modifier.size(16.dp)) {
+        val stroke = 1.6.dp.toPx()
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.36f, size.height * 0.28f),
+            end = Offset(size.width * 0.62f, size.height * 0.5f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.62f, size.height * 0.5f),
+            end = Offset(size.width * 0.36f, size.height * 0.72f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
+/** 一行动作: 标题 + 一句说明 + › (整行可点) */
+@Composable
+private fun AccountActionRow(title: String, summary: String, onClick: () -> Unit) {
+    val colors = MiuixTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = RowMinHeight)
+            .clickable(role = Role.Button, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, style = MiuixTheme.textStyles.body1, color = colors.onSurface)
+            Text(
+                text = summary,
+                style = MiuixTheme.textStyles.body2,
+                color = colors.onSurfaceVariantSummary,
+            )
+        }
+        AccountChevron()
+    }
+}
+
+/**
+ * 主按钮: 与卡片底下那颗「下载…」同一套 (16dp 圆角 / 主色 6% 底 + 描边 / 50dp 高)
+ * @param label 按钮上那句
+ * @param onClick 点它做什么
+ */
+@Composable
+private fun AccountPrimary(label: String, onClick: () -> Unit) {
+    val accent = MiuixTheme.colorScheme.primary
+    val shape = RoundedCornerShape(16.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = UiSpacing.PageItem)
+            .clip(shape)
+            .background(accent.copy(alpha = 0.06f))
+            .border(1.dp, accent.copy(alpha = 0.45f), shape)
+            .clickable(role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = ActionHeight),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text = label, style = MiuixTheme.textStyles.body1, color = accent)
+        }
+    }
+}
+
+/**
+ * 首启引导那张「账号」窗 (2026-11-14 主人: "把登录加入新手引导, 界面按 Luwi 的美学重做")
+ *
+ * 三层: **身份** (节点 + 账号 + 现状) → **动作** (填一把 API Key) → **主按钮** (去登录) 与
+ * **第三颗** (稍后在后台 dsh 完成 / 已登录). 全部用项目已有的原语 (Miuix 的 `Text` / `TextButton` /
+ * `Canvas` + `InputDialog` 外壳), 不引 material3、不引图标库
+ *
+ * 那个授权地址是 dsh 宿主造的 (`POST /lw-account`, 见 `host-plugin`), 交给**系统浏览器**打开: 换 token
+ * 那一步落在 app 里的回环回调上, 所以浏览器登录完切回来这一行自己就变了 ([PortalAccount] 在 ON_RESUME
+ * 再问一次)
+ * @param onDismiss 关窗
+ */
+@Composable
+private fun AccountGuideDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var keyMode by remember { mutableStateOf(false) }
+    var key by remember { mutableStateOf("") }
+
+    // 授权地址一到就交给系统浏览器, 同时取走它 (回来不再开第二遍)
+    LaunchedEffect(PortalAccount.openUrl) {
+        val target = PortalAccount.takeUrl() ?: return@LaunchedEffect
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target))) }
+            .onFailure { Log.w("LwAccountGate", "no browser for the sign-in page: ${it.message}") }
+    }
+    // 从浏览器回来那一下再问一次: "登录完就回来, 这里会自己变"
+    val lifecycle = LocalLifecycleOwner.current
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) PortalAccount.refresh()
+        }
+        lifecycle.lifecycle.addObserver(observer)
+        onDispose { lifecycle.lifecycle.removeObserver(observer) }
+    }
+
+    InputDialog(
+        title = stringResource(if (keyMode) R.string.ready_account_key else R.string.ready_account_title),
+        onDismissRequest = onDismiss,
+    ) {
+        if (keyMode) {
+            SuperTextField(
+                value = key,
+                onValueChange = { key = it },
+                label = stringResource(R.string.ready_account_key_hint),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // 留空保存就是清掉这一把 (与宿主 `credentials.unset` 那条路对齐)
+            Text(
+                text = stringResource(R.string.ready_account_key_clear),
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                modifier = Modifier.padding(top = UiSpacing.Medium),
+            )
+            Row(modifier = Modifier.fillMaxWidth().padding(top = UiSpacing.PageItem)) {
+                TextButton(
+                    text = stringResource(R.string.ready_account_cancel),
+                    onClick = { keyMode = false },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    text = stringResource(R.string.ready_account_save),
+                    onClick = {
+                        PortalAccount.saveKey(key)
+                        keyMode = false
+                    },
+                    modifier = Modifier.weight(1f).padding(start = UiSpacing.Medium),
+                )
+            }
+        } else {
+            AccountIdentity()
+            if (PortalAccount.ready) {
+                // 已登录: 底下这颗是**可点**的 —— 点它就是关窗。没有它这一档在屏上就只剩一个看处
+                // (返回键与点外面虽然也能关, 但屏上没有一颗写着"退出"的东西) 2026-11-14 主人
+                TextButton(
+                    text = stringResource(R.string.ready_account_signed_in_state),
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = UiSpacing.Large),
+                )
+            } else {
+                AccountHairline()
+                AccountActionRow(
+                    title = stringResource(R.string.ready_account_key),
+                    summary = stringResource(R.string.ready_account_key_summary),
+                    onClick = { keyMode = true },
+                )
+                AccountPrimary(
+                    label = stringResource(R.string.ready_account_cta),
+                    onClick = { PortalAccount.login() },
+                )
+                // 第三颗: 这一趟先不登录 —— 关窗走人, 稍后去 dsh 后台办 (进度条仍卡在这一格)
+                TextButton(
+                    text = stringResource(R.string.ready_account_later),
+                    onClick = {
+                        PortalAccount.defer(context)
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = UiSpacing.Medium),
+                )
+                if (PortalAccount.phase == AccountPhase.WORKING) {
+                    Text(
+                        text = stringResource(R.string.ready_account_waiting),
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(top = UiSpacing.Medium),
+                    )
+                }
+            }
+        }
+    }
+}

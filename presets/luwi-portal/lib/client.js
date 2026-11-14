@@ -4039,21 +4039,27 @@ window.__ModuleLoader__.load({
         // 这一行叫「唤醒」: 2026-11-13 主人把叫法统一了, 与 `sim.json` 的 `wake` 段一个口径
         els.drawer.appendChild(kv('唤醒', router.tick && router.tick.enabled === true ? '开着 (25-55 分一次)' : '关着'))
 
+        // 2026-11-14 主人: "checks 改成检测项, 后面的数字只显示已有检测项即可" —— 那个 `/ 3`
+        // 从来没当过闸 (宿主只按 12 截断库存), 摆在面板上只会被读成"还差三条", 所以整格去掉
         var checks = Array.isArray(router.checks) ? router.checks : []
-        els.drawer.appendChild(h('h3', null, 'checks (' + checks.length + ' / 3)'))
+        els.drawer.appendChild(h('h3', null, '检测项 (' + checks.length + ')'))
         if (checks.length === 0) {
-          els.drawer.appendChild(kv('内容', '探索还没交来'))
+          els.drawer.appendChild(kv('内容', '探索还没交过检测项'))
         }
         for (var i = 0; i < checks.length; i++) {
           var one = checks[i] || {}
           var line = h('div', 'lwp-check')
           var body = h('p', null, one.what || one.label || '一条检测项')
-          // 判法那一行是给人看的读数: `when.kind` 与门槛分钟数 (与宿主 routerCheckHit 同一套说法)
+          // 判法那一行是给人看的读数: 宿主写的是 `when.kind` / `when.minutes` / `when.package`
+          // (2026-11-14 修: 原来读 `one.minutes` / `one.packageName`, 两个字段宿主从来不写, 于是
+          // 分钟数与包名一帧都没显示过), 判法本身也换成中文, 与标题同一个口径
           var when = one.when || {}
+          var kindText = { usage: '用满', time: '到点', event: '日历前' }[when.kind] || String(when.kind)
           var detail = []
-          if (when.kind) detail.push(String(when.kind))
-          if (one.minutes) detail.push(String(one.minutes) + ' 分')
-          if (one.packageName) detail.push(String(one.packageName))
+          if (when.kind) detail.push(kindText)
+          if (one.at) detail.push(String(one.at))
+          if (when.minutes) detail.push(String(when.minutes) + ' 分')
+          if (when.package) detail.push(String(when.package))
           if (detail.length > 0) body.appendChild(h('small', null, detail.join(' · ')))
           line.appendChild(body)
           var done = h('button', null, '已处理')
@@ -5101,6 +5107,89 @@ window.__ModuleLoader__.load({
         stickFlow()
       }
 
+      /* ── 账号: 首启引导那一行要的三件事 (2026-11-14) ─────────────────────────── */
+
+      /**
+       * 把一次账号动作的结果送回宿主 (Kotlin 那侧 `PortalBridge.lwAccountResult`)
+       * @param action `status` / `login` / `key`
+       * @param body 结果本体
+       */
+      function reportAccount(action, body) {
+        var payload = body || {}
+        payload.action = action
+        try {
+          call('lwAccountResult', JSON.stringify(payload))
+        } catch (error) {
+          console.log('[luwi-portal] account report failed: ' + describeError(error))
+        }
+      }
+
+      /**
+       * 问一次宿主那条 `/lw-account` 路由 (2026-11-14)
+       *
+       * **为什么不走 `remote.account` / `remote.credentials`**: 那是 dsh 开给**自家账号页**的缝,
+       * 第三方插件直接调会一声不响地挂住 (真机读数: 12 s 没有回音)。这条路由是宿主进程里那条直路 ——
+       * 它后面就是 `deepseekAccount` 与 `credentials` 两个服务本身
+       * @param op `status` / `login` / `key`
+       * @param body 另外几个字段 (`key` 那一档用)
+       * @returns 宿主回的那一段对象 (失败也是对象: `{ok:false, error}`)
+       */
+      function askHostAccount(op, body) {
+        var payload = body || {}
+        payload.op = op
+        var locale = 'zh'
+        try {
+          locale = ctx.locale.getSnapshot().active || 'zh'
+        } catch (_noLocale) {
+          locale = 'zh'
+        }
+        payload.locale = locale
+        // 登录那条要宿主知道"回调落在哪": 换 token 的那一步发生在这一页的 origin 上
+        if (op === 'login') payload.origin = window.location.origin
+        return fetch('/lw-account', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(function (answer) { return answer.json() })
+      }
+
+      /** 读一次账号状态: 登录了没有 / 账号档模型那条凭据写了没有 (两条都由宿主一起答) */
+      function accountStatus() {
+        askHostAccount('status').then(function (result) {
+          reportAccount('status', result || { ok: false, error: 'no reply' })
+        }, function (error) {
+          reportAccount('status', { ok: false, error: describeError(error) })
+        })
+      }
+
+      /**
+       * 起一次登录: 宿主要一个授权地址, 这一侧把它交给系统浏览器 (2026-11-14)
+       *
+       * 宿主那条回环回调就是这一页的 origin —— 浏览器里登录完之后, 换 token 那一步仍然在 app 的 host
+       * 里完成, 回来读一次状态就能看到已登录
+       */
+      function accountLogin() {
+        reportAccount('login', { ok: true, pending: true })
+        askHostAccount('login').then(function (result) {
+          reportAccount('login', result || { ok: false, error: 'no reply' })
+        }, function (error) {
+          reportAccount('login', { ok: false, error: describeError(error) })
+        })
+      }
+
+      /**
+       * 写一把 API Key: 与 dsh Models 页同一个 ref, 由宿主写进它自己的凭据服务
+       * @param key 用户粘进来的那个串 (去首尾空白; 空串 = 请宿主清掉这一把)
+       */
+      function accountKey(key) {
+        var value = typeof key === 'string' ? key.trim() : ''
+        askHostAccount('key', { key: value }).then(function (result) {
+          reportAccount('key', result || { ok: false, error: 'no reply' })
+        }, function (error) {
+          reportAccount('key', { ok: false, error: describeError(error) })
+        })
+      }
+
       function unmount() {
         mounted = false
         // 撤掉之后 DOM 是新的: 记着的那个高度不再对应当前那一层, 挂载时由 `portalIme` 重新问
@@ -5298,7 +5387,36 @@ window.__ModuleLoader__.load({
           // `lw/out` 下任何一份变了都推这一下: 主动场那一份也在同一个目录里 (2026-11-12 #38)
           loadEcho(false)
         },
-        isOpen: function () { return mounted },
+        /**
+         * 账号三件事 (2026-11-14): `status` / `login` / `key`
+         *
+         * 宿主那侧 (原生引导窗) 用 `evaluateJavascript` 调它, 结果走 `lwAccountResult` 回来 ——
+         * 一条动作一个来回, 页面上不留状态
+         * @param action `status` / `login` / `key`
+         * @param payload `key` 那一档是 `{"key":"…"}` (字符串或对象都认)
+         */
+        account: function (action, payload) {
+          var body = payload
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body)
+            } catch (_badJson) {
+              body = {}
+            }
+          }
+          // **一步都不许静默**: 上一版没有这层 try, 同步抛 (例如这个 profile 没给 `remote.account`)
+          // 就既没有结果也没有日志, 原生那一行永远停在"正在取账号状态…" (2026-11-14 真机踩到)
+          try {
+            // 三条都转发给宿主那条路由 (见 [askHostAccount]): 页面这一侧没有要自己算的东西
+            if (action === 'status') accountStatus()
+            else if (action === 'login') accountLogin()
+            else if (action === 'key') accountKey(body && body.key)
+            else reportAccount(String(action), { ok: false, error: 'unknown action' })
+          } catch (error) {
+            console.log('[luwi-portal] account ' + action + ' threw: ' + describeError(error))
+            reportAccount(String(action), { ok: false, error: describeError(error) })
+          }
+        },
         /**
          * 弹窗关掉之后收一次最新读数 (2026-11-13)
          *
@@ -5340,8 +5458,19 @@ window.__ModuleLoader__.load({
          * 弹窗里改的就是那几行 (冷却 / 唤醒 / 下一趟), 不拉就会停在旧数
          */
         onSettingsClosed: function () { portal.refresh() },
+        /**
+         * 账号三件事 (2026-11-14): 原生引导那一行借这一页调 dsh 的登录 / 凭据接口
+         *
+         * **必须在这里再转一次**: `window.__LUWI_PORTAL__` 是一张白名单, 只把这里列出来的方法交给
+         * 宿主 —— 少了这一行, 原生 `evaluateJavascript` 那句会因为 `account` 是 undefined 而**一声
+         * 不响地什么都不做** (2026-11-14 真机: 那一行永远停在"正在取账号状态…")
+         * @param action `status` / `login` / `key`
+         * @param payload `key` 那一档是 `{key}`
+         */
+        account: function (action, payload) { portal.account(action, payload) },
       }
     }
+
 
     function apply(ctx) {
       // 一层挂不上不该把别的插件一起带走 (dsh 的日志只有一句 "1 entry did not activate"),
@@ -5382,7 +5511,6 @@ window.__ModuleLoader__.load({
     return module.exports
   },
 })
-
 
 
 

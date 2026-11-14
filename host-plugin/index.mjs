@@ -275,6 +275,32 @@ export function apply(ctx) {
   } catch (error) {
     warn(ctx, `the lw/out route was not registered: ${error?.message ?? error}`)
   }
+
+  // 账号那条路 (2026-11-14): 原生引导里的「登录 DeepSeek 账号 / 填一把 API Key」借它直接进宿主服务。
+  // 页面那侧的 `remote.account` 是 dsh 给自家账号页开的缝, 第三方插件调不动 (真机 12 s 无回音)
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_ACCOUNT_ROUTE,
+            handler: serveLwAccount(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-account.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/account route was not registered: ${error?.message ?? error}`)
+  }
 }
 
 /**
@@ -1771,6 +1797,8 @@ function startModeModel(ctx) {
   onSessionEvent(ctx, (session, event) => {
     if (event.type !== 'turn/start') return
     if (session.meta?.origin === 'subagent') return
+    // 登录之后模型那一笔的兜底: 每轮一次 (幂等 + 60 s 节流), 视频模式里它自己会跳过
+    void lwAccountAdoptModel(ctx).catch(() => {})
     // 对端投影的那一轮不是在这台机器上跑的: 它不该换本地那一对模型 (见 isPeerProjection)
     if (isPeerProjection(session)) return
     const mode = activeMode()
@@ -1794,6 +1822,10 @@ function startModeModel(ctx) {
   })
   void writeModelCatalog(ctx).catch((error) => {
     warn(ctx, `the model catalog was not written: ${error?.message ?? error}`)
+  })
+  // 已经登录的机器: 起来就把默认与会话收到账号模型上 (读不到就只记一笔, 不挡启动)
+  void lwAccountAdoptModel(ctx).catch((error) => {
+    warn(ctx, `the account model was not adopted: ${error?.message ?? error}`)
   })
   // 应用配了自建端点的话, 起来就把它挂上 (第一次进视频模式不必等那 3 s 轮询)
   void ensureVideoRoute(ctx).catch((error) => {
@@ -7662,6 +7694,348 @@ async function lwSpeakLine(script, waitMs) {
  */
 const LW_OUT_ROUTE = '/lw-out'
 
+/* ── 账号 (2026-11-14): 原生引导那一行借这条路走 dsh 自己的登录 / 凭据接口 ───────────── */
+
+/**
+ * 账号那条路由的名字 (页面 `fetch('/lw-account')` 拼的是同一串)
+ *
+ * **为什么要一条路由**: 页面那侧 (`remote.account`) 是 dsh 开给**自家账号页**的缝 —— 第三方插件直接
+ * 调, 真机上 12 秒没有半点回音 (2026-11-14 实测)。而 `deepseekAccount` 与 `credentials` 这两个服务
+ * 就在**宿主进程里** (余额那条链一直用着前者), 于是原生引导窗 → 页面 → 这条路由 → 宿主服务,
+ * 一条直路, 不经过那一层访问授权
+ */
+const LW_ACCOUNT_ROUTE = '/lw-account'
+
+/** 「填一把 API Key」写的是 dsh 官方那一条凭据 (与 Models 页同一个 ref) */
+const LW_ACCOUNT_KEY_REF = 'DEEPSEEK_API_KEY'
+
+/** 一次请求最多读这么多字节: 只有 `op` / `key` / `origin` / `locale` 四个字段 */
+const LW_ACCOUNT_BODY_MAX = 8 * 1024
+
+/** 等授权地址等多久 (与 GUI 的 `BrowserLogin` 同一个尺度) */
+const LW_ACCOUNT_URL_TIMEOUT_MS = 12_000
+
+/**
+ * 那把 Key 写了没有
+ *
+ * 只读回"有没有", 内容一个字节都不往外带 (`credentials.resolve` 给的就是那个值, 这里只判真值)
+ * @param credentials 宿主凭据服务 (可能不在)
+ * @returns 写了为 true
+ */
+async function lwAccountKeyPresent(credentials) {
+  if (!credentials || typeof credentials.resolve !== 'function') return false
+  try {
+    const value = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+    return typeof value === 'string' && value !== ''
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 等账户流里第一帧带授权地址的
+ *
+ * `startSignIn` 回的那一帧不一定带地址 (dsh 自己那页也是"先开标签页, 后一帧才 replace 到地址"),
+ * 所以跟一段流; 到点回空串
+ * @param account 宿主账号服务
+ * @param timeoutMs 最多等多久
+ * @returns 授权地址, 没等到为 ''
+ */
+async function lwAccountAwaitUrl(account, timeoutMs) {
+  if (!account || typeof account.watch !== 'function') return ''
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    try {
+      controller.abort()
+    } catch {
+      // 已经结束了
+    }
+  }, timeoutMs)
+  try {
+    for await (const view of account.watch(controller.signal)) {
+      const url = view?.attempt?.authorizeUrl
+      if (typeof url === 'string' && url !== '') return url
+      if (view?.status === 'credential-stored') return ''
+    }
+    return ''
+  } catch {
+    return ''
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 账号那一条路要的 Key 路线: 会话钉在这条 route 上又没有 Key, 就是"登录了却报 no API key"那一幕 */
+const LW_ACCOUNT_STALE_ROUTE = 'deepseek-official'
+
+/** 账号收尾那份读数: `$DSH_HOME/lw/account-model.json` (status 与引导卡都读它) */
+const LW_ACCOUNT_MODEL_FILE = 'account-model.json'
+
+/** 同一个结论多久之内不重复算一遍: turn/start 每轮都会问, 60 s 够用且不挡人 */
+const LW_ACCOUNT_ADOPT_MS = 60 * 1000
+
+/** 收尾那一步的账 (内存): 节流 / 防并发 / 上一次的结论 */
+const lwAccountAdoptState = { at: 0, running: false, last: null, lastError: null }
+
+/**
+ * 上一次落盘的账号模型结论
+ * @returns {object|null} 文件不在或读不动就是 null
+ */
+function readAccountModel() {
+  const path = homePath('lw', LW_ACCOUNT_MODEL_FILE)
+  if (path === null) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把结论落盘 (原子写: `.tmp` + rename, 与 [writeModelCatalog] 同一个写法)
+ * @param payload 那一段 JSON
+ * @returns 写完为 true
+ */
+async function writeAccountModel(payload) {
+  const path = homePath('lw', LW_ACCOUNT_MODEL_FILE)
+  if (path === null) return false
+  const temporary = temporaryName(path)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`)
+    await rename(temporary, path)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: the account model readout was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/**
+ * 登录之后把「默认模型」与「活着的会话」收到账号那条 route 上 (2026-11-15)
+ *
+ * 上游这件事本来有人做: dsh 的 `sessionController.initializeDefaultModel()` —— 但它的触发点在
+ * **client** 那一侧的账号状态流里 (`ui-settings-account`), 整条流被 `remoteAccess.whenAccess(
+ * 'account/watch')` 包着, 而 Luwi 的门户是第三方页面, 那条授权拿不到 (真机上 `remote.account`
+ * 会静默挂住), 于是登录能成、模型却还钉在 `deepseek-official` 上, 一发言就报
+ * `no API key for provider route "deepseek-official"`。这里补的就是那一半, 判据与上游同一条:
+ * **别的 provider 配了 key 就保留原默认** (见 `session-controller/src/catalog.ts` 的
+ * `hasProviderApiKey`), 只有没 key 时才把默认换成账号的首个可用模型
+ *
+ * 三处调用 (都幂等): 起来一次 / 打开账号窗那一次 `status` / 每轮 `turn/start` 兜底
+ * @param ctx 宿主插件 context
+ * @returns {object|null} 这一次的结论, 什么都没做 (节流中 / 没服务) 就是上一次那份
+ */
+async function lwAccountAdoptModel(ctx) {
+  if (lwAccountAdoptState.running) return lwAccountAdoptState.last
+  if (Date.now() - lwAccountAdoptState.at < LW_ACCOUNT_ADOPT_MS) return lwAccountAdoptState.last
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (!account || typeof account.getState !== 'function') return null
+  // 视频模式自己那套 (`applyModeModelToSession`) 管模型, 这里不许抢
+  if (activeMode() === MODE_VIDEO) return lwAccountAdoptState.last
+  const controller = ctx.get('sessionController')
+  const defaults = ctx.get('agentDefaultModel')
+  if (!controller || typeof controller.modelCatalog !== 'function') return null
+  lwAccountAdoptState.running = true
+  lwAccountAdoptState.at = Date.now()
+  const payload = {
+    v: 1, at: lwAccountAdoptState.at, ok: false, provider: '', model: '', label: '', changed: false, sessions: 0,
+  }
+  try {
+    const state = await account.getState()
+    if (state?.status !== 'credential-stored') {
+      payload.reason = 'not signed in'
+    } else {
+      const catalog = await controller.modelCatalog()
+      const group = (catalog?.groups ?? [])
+        .find((one) => one?.id === 'deepseek-account' && (one?.models?.length ?? 0) > 0)
+      const pick = group?.models?.[0]
+      if (!pick) {
+        // 账号模型目录要 token 去问: 拿不到时如实说, 一个字节都不写
+        payload.reason = 'the account lists no models yet'
+      } else {
+        const provider = 'deepseek-account'
+        const model = String(pick.id)
+        payload.provider = provider
+        payload.model = model
+        payload.label = String(pick.name ?? model)
+        payload.ok = true
+        const target = {
+          provider,
+          model,
+          ...pick.reasoning?.defaultEffort === undefined
+            ? {}
+            : { reasoningEffort: pick.reasoning.defaultEffort },
+        }
+        const keyConfigured = await lwAccountKeyPresent(ctx.get('credentials'))
+        if (!keyConfigured && typeof defaults?.saveSelection === 'function') {
+          const current = typeof defaults.currentSelection === 'function' ? defaults.currentSelection() : null
+          if (!current || current.provider !== provider || current.model !== model) {
+            await defaults.saveSelection(target)
+            payload.changed = true
+          }
+        }
+        // 活着的会话里钉在 Key 那条 route 上的, 当场切过来 —— **只碰活着的**: `resolveAgent` 会把
+        // 冷会话恢复起来, 那等于替主人开一场 (与 `restoreModeModelSessions` 同一条判据)
+        if (typeof controller.list === 'function' && typeof controller.selectModel === 'function') {
+          const listed = await controller.list({}, new AbortController().signal)
+          const live = (listed?.items ?? []).filter((item) => item && item.agentAvailable === true
+            && item.origin !== 'subagent' && !item.parentSessionId)
+          for (const item of live) {
+            try {
+              const sessionId = String(item.sessionId)
+              const resolved = await ctx.agents.withoutInitiator(() => controller.resolveAgent(sessionId))
+              if ('error' in resolved) continue
+              const currentModel = readSessionModel(ctx, resolved.agent)
+              if (!currentModel || currentModel.provider !== LW_ACCOUNT_STALE_ROUTE) continue
+              await controller.selectModel({ sessionId, provider, model })
+              payload.sessions += 1
+            } catch (error) {
+              // 单场切不动不算整件事失败: 下一轮 `turn/start` 还会再试一次
+              console.warn(`luwi-channel: a session could not move onto the account model: ${error?.message ?? error}`)
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    payload.reason = `reading the account model failed: ${error?.message ?? error}`
+    lwAccountAdoptState.lastError = payload.reason
+  } finally {
+    lwAccountAdoptState.running = false
+  }
+  lwAccountAdoptState.last = payload
+  await writeAccountModel(payload)
+  return payload
+}
+
+/**
+ * 账号那三件事的宿主实现
+ * @param ctx 宿主插件 context
+ * @param body 解析过的那一段 JSON: `{op, key?, origin?, locale?}`
+ * @returns 回给页面的那一段 JSON
+ */
+async function handleLwAccount(ctx, body) {
+  const op = typeof body?.op === 'string' ? body.op.trim() : ''
+  const account = ctx.get(ACCOUNT_SEAM)
+  const credentials = ctx.get('credentials')
+  const client = {
+    version: 'luwi',
+    locale: typeof body?.locale === 'string' && body.locale !== '' ? body.locale : 'zh',
+    timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+  }
+  if (op === 'status') {
+    const keyConfigured = await lwAccountKeyPresent(credentials)
+    if (!account || typeof account.getState !== 'function') {
+      // 这条部署没挂账号缝: 不是错误, 只是"登录这条路这里没有" (Key 那条照旧)
+      return { ok: true, signedIn: false, label: '', keyConfigured, seam: false, modelsReady: false, model: null }
+    }
+    // 打开账号窗正是"登录刚从浏览器回来"的那一刻: 顺手把默认与会话收到账号模型上 (幂等, 60 s 节流)
+    const adopted = await lwAccountAdoptModel(ctx).catch(() => null)
+    const state = await account.getState()
+    const signedIn = state?.status === 'credential-stored'
+    let label = ''
+    if (signedIn && typeof account.getProfile === 'function') {
+      const profile = await account.getProfile(client).catch(() => null)
+      if (profile?.status === 'ready') label = String(profile.value?.name ?? profile.value?.contact ?? '')
+    }
+    // 这一趟被节流掉时回上一次落盘的结论, 不让卡片在"知道"与"不知道"之间闪
+    const cached = adopted?.ok === true ? null : readAccountModel()
+    const model = adopted?.ok === true
+      ? { provider: adopted.provider, model: adopted.model, label: adopted.label }
+      : cached?.ok === true
+        ? { provider: String(cached.provider ?? ''), model: String(cached.model ?? ''), label: String(cached.label ?? '') }
+        : null
+    return { ok: true, signedIn, label, keyConfigured, seam: true, modelsReady: model !== null, model }
+  }
+  if (op === 'login') {
+    if (!account || typeof account.startSignIn !== 'function') {
+      return { ok: false, error: '这条部署没有挂 DeepSeek 账号缝, 请改用 API Key' }
+    }
+    const origin = typeof body?.origin === 'string' ? body.origin : ''
+    // 回调必须落在回环上: 别人的 origin 拿去换 token 就等于把登录交给别人
+    if (!origin.startsWith('http://127.0.0.1:') && !origin.startsWith('http://localhost:')) {
+      return { ok: false, error: 'the caller did not say a loopback origin' }
+    }
+    const view = await account.startSignIn(client, origin, 'web')
+    const first = view?.attempt?.authorizeUrl
+    if (typeof first === 'string' && first !== '') return { ok: true, url: first }
+    const url = await lwAccountAwaitUrl(account, LW_ACCOUNT_URL_TIMEOUT_MS)
+    return url === '' ? { ok: false, error: '浏览器登录这一趟没有回音' } : { ok: true, url }
+  }
+  if (op === 'key') {
+    const key = typeof body?.key === 'string' ? body.key.trim() : ''
+    if (!credentials || typeof credentials.set !== 'function') {
+      return { ok: false, error: 'this host has no credentials service' }
+    }
+    // 空串 = 清掉这把 Key (引导窗里"留空保存"就是这个意思): 不把空值写进凭据, 而是摘掉那一条
+    if (key === '') {
+      if (typeof credentials.unset !== 'function') return { ok: false, error: 'this host cannot clear a credential' }
+      await credentials.unset(LW_ACCOUNT_KEY_REF)
+      return { ok: true, cleared: true }
+    }
+    await credentials.set(LW_ACCOUNT_KEY_REF, key)
+    return { ok: true }
+  }
+  return { ok: false, error: `unknown op ${JSON.stringify(op)}` }
+}
+
+/**
+ * `/lw-account` 那条路由: POST 一段 JSON, 回一段 JSON
+ *
+ * 只认回环两头 (与 `/lw-out` 同一条信任边界), 只收 POST, 正文有上限
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwAccount(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    let raw = ''
+    try {
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > LW_ACCOUNT_BODY_MAX) {
+          reply(413, { ok: false, error: 'body too large' })
+          return
+        }
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    let body = null
+    try {
+      body = raw === '' ? {} : JSON.parse(raw)
+    } catch {
+      reply(400, { ok: false, error: 'bad json' })
+      return
+    }
+    try {
+      reply(200, await handleLwAccount(ctx, body))
+    } catch (error) {
+      warn(ctx, `the account request failed: ${error?.message ?? error}`)
+      reply(200, { ok: false, error: error?.message ?? String(error) })
+    }
+  }
+}
+
 /** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */
 const LW_OUT_IMAGE_TYPES = Object.freeze({
   png: 'image/png',
@@ -8551,19 +8925,26 @@ function judgeRouter(input) {
   // **探索交来的检测项** (2026-11-07 晚, 主人: "检测的内容应由探索时加上"): 分数排在"未了的事"
   // 之后、"随口问一句"之前 —— 它是她自己看出来的规律, 不如主人亲口交代的事硬, 但比没话找话要紧。
   // 去重键跟着命中一起回来 (2026-11-10): 事件型那一条是"一次发生一个键", 不是"一天一个键"
+  //
+  // 2026-11-14 主人: 一场主动对话要**结合多个检测项**, 不能只挑一条 —— 所以命中的每一条都收进
+  // `hits` (按 `checks` 顺序), 由 routerStartLine 按发送上限派给那一场; `candidates` 仍只决定
+  // "这一拍要不要开口、从哪条切进去"
+  const hits = []
   for (const one of Array.isArray(input?.checks) ? input.checks : []) {
     const hit = routerCheckHit(one, input, now)
     if (!hit) continue
     const id = String(one?.id ?? '')
     if (!id) continue
     if (String((input?.checksSaid ?? {})[id] ?? '') === hit.key) continue
+    const what = String(one?.what ?? '那件事')
+    hits.push({ id, key: hit.key, what, fact: hit.fact })
     candidates.push({
       kind: 'check',
       score: 3,
       to: 'ball',
       id,
       key: hit.key,
-      brief: `${String(one?.what ?? '那件事')} · ${hit.fact}`,
+      brief: `${what} · ${hit.fact}`,
     })
   }
   if (candidates.length === 0) {
@@ -8594,6 +8975,8 @@ function judgeRouter(input) {
     ...(best.key ? { key: best.key } : {}),
     brief: best.brief,
     why: best.brief,
+    // 只有"从检测项切进去"的那一档才带这一格: 说游戏 / 说未了的事时, 检测项不该挤进同一场
+    ...(best.kind === 'check' && hits.length > 0 ? { hits } : {}),
   }
 }
 
@@ -10652,6 +11035,8 @@ async function readRouterInputs() {
     rules: { ...(state?.rules ?? {}), ...simRouterRules(sim) },
     checks: Array.isArray(state?.checks) ? state.checks : [],
     checksSaid: state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {},
+    // 一场主动对话最多发几条 (`send` 段): 2026-11-14 主人 —— 检测项在那一场里占几条, 由这个上限决定
+    send: sim?.send && typeof sim.send === 'object' ? sim.send : {},
     // 事件型检测项的唯一输入 (2026-11-10): 读不到就是 available: false, 那条判法不命中
     calendar: await readCalendarWindow(Date.now()),
   }
@@ -10692,21 +11077,83 @@ function routerLine(decision) {
 }
 
 /**
+ * 一场主动对话的"发几条 / 检测项占几条" (纯函数, 2026-11-14)
+ *
+ * 主人的口径: **一次主动对话要结合多个检测项, 可以少, 但不能没有** —— 而"几个"不另设参数,
+ * 由发送上限(`sim.json` 的 `send` 段)算出来: 一场最多发 N 条, 检测项至多占一半(向上取整),
+ * 至少一条。
+ *
+ * N 跟着 `burstEnabled` 走: 关掉分条就是一句, 那时检测项也只有一条名额 —— 否则就是"要求她说
+ * 六条, 可链路只放一条"。上界 6 与 `SimSetting.Default.SEND_BURST_MAX` 同一个数(`check-sim` 盯两处相等)
+ *
+ * | N | 1 | 2 | 3 | 4 | 5 | 6 |
+ * | 检测项 | 1 | 1 | 2 | 2 | 3 | 3 |
+ */
+function routerCheckQuota(send) {
+  const burst = send?.burstEnabled !== false
+  const raw = Number(send?.burstMaxMessages ?? 6)
+  const wanted = Number.isFinite(raw) ? Math.round(raw) : 6
+  const maxMessages = burst ? Math.min(6, Math.max(1, wanted)) : 1
+  const checkMessages = Math.min(maxMessages, Math.ceil(maxMessages / 2))
+  return { maxMessages, checkMessages }
+}
+
+/**
  * 叫醒一场主动对话时的开场正文
  *
  * **brief 不是台词**: 它是"为什么现在说"的事实, 说成什么人话由这一场决定 —— 所以这里明确要求
  * 它别复述这一行
+ *
+ * 2026-11-14 主人: 一次主动对话要**结合多个检测项** —— 于是这里多两段: 这一拍真触发了的那几条
+ * (按判断层给的 `hits`), 以及她此刻盯着的全部检测项 (当背景), 末尾按 [routerCheckQuota] 派配额。
+ * 配额写死在提示词里, 因为"发几条"这一侧只有 `send` 段知道; 而"至少一条落在检测项上"是一条
+ * 硬要求, 不是建议
  */
-function routerStartLine(decision) {
+function routerStartLine(decision, checks = [], checksSaid = {}, quota = { maxMessages: 1, checkMessages: 1 }) {
+  const all = (Array.isArray(checks) ? checks : [])
+    .filter((one) => one && one.enabled !== false && String(one?.what ?? '').trim() !== '')
+  const rows = all.map((one) => {
+    const kind = String(one?.when?.kind ?? '')
+    const at = String(one?.at ?? '')
+    const said = checksSaid && checksSaid[String(one?.id ?? '')] ? ' · 已经说过' : ''
+    return `- ${String(one.what).trim()}${kind ? ` (${kind}${at ? ` ${at}` : ''})` : ''}${said}`
+  })
+  const hitOf = new Map((Array.isArray(decision?.hits) ? decision.hits : []).map((one) => [String(one.id), one]))
+  const fired = all
+    .filter((one) => hitOf.has(String(one?.id ?? '')))
+    .map((one) => {
+      const hit = hitOf.get(String(one.id)) ?? {}
+      return `- ${String(one.what).trim()}: ${String(hit.fact ?? '')}`
+    })
+  const maxMessages = Math.max(1, Number(quota?.maxMessages ?? 1) || 1)
+  const checkMessages = Math.min(maxMessages, Math.max(0, Number(quota?.checkMessages ?? 0) || 0))
+  const quotaLines = all.length === 0
+    ? ['这一场没有检测项可提 —— 想说别的就说别的.']
+    : [
+        `这一场最多发 ${maxMessages} 条消息; 其中 ${checkMessages} 条要落在检测项上:`,
+        '- 至少 1 条, 一条都不提不算数; 也不许多过那几条',
+        '- 一条消息只说一件事: 两条检测项就两条消息, 不要并成一句, 也不要列出这张单子',
+        '- 先说这一拍真触发了的, 其余的当背景知道着就够了',
+      ]
   return [
     `[她的判断] ${decision.kind}: ${decision.brief}`,
     '开场不要复述这一行, 也不要说"我注意到" —— 直接说那句人话, 一两句',
     '说完就停, 不追问; 想记住的事用 lw_wish 记下来',
+    '',
+    ...(fired.length > 0 ? ['这一拍真触发了的:', ...fired, ''] : []),
+    ...(rows.length > 0 ? ['你此刻盯着的检测项 (全部):', ...rows, ''] : []),
+    ...quotaLines,
   ].join('\n')
 }
 
-/** 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那一条"这一次说过了" */
-async function routerMarkSaid(decision) {
+/**
+ * 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那几条"这一次说过了"
+ *
+ * 2026-11-14: 一场可能被派了多条检测项 —— 她实际说了几条宿主无从知道, 所以按**派单**记账
+ * (取 `hits` 的前 `checkMessages` 条, 与开场那一份配额逐条对齐). 宁可少说一次, 也不要连着
+ * 两拍说同一件事
+ */
+async function routerMarkSaid(decision, quota = { checkMessages: 1 }) {
   const home = process.env.DSH_HOME
   if (!home) return
   const now = Date.now()
@@ -10715,9 +11162,13 @@ async function routerMarkSaid(decision) {
   const saidBefore = (state?.checksSaid && typeof state.checksSaid === 'object') ? state.checksSaid : {}
   // 键来自判断那一侧 (usage / time 是当天, event 是 `日期@startMs`): 这里只负责照抄
   const saidKey = typeof decision?.key === 'string' && decision.key !== '' ? decision.key : day
-  const checksSaid = decision?.kind === 'check' && decision?.id
-    ? { ...saidBefore, [String(decision.id)]: saidKey }
-    : saidBefore
+  const assigned = (Array.isArray(decision?.hits) ? decision.hits : [])
+    .slice(0, Math.max(1, Number(quota?.checkMessages ?? 1) || 1))
+  const checksSaid = assigned.length > 0
+    ? { ...saidBefore, ...Object.fromEntries(assigned.map((one) => [String(one.id), String(one.key)])) }
+    : (decision?.kind === 'check' && decision?.id
+      ? { ...saidBefore, [String(decision.id)]: saidKey }
+      : saidBefore)
   await writeRouterJson(routerStatePath(), {
     ...state,
     v: 1,
@@ -10834,18 +11285,22 @@ async function routerTick(ctx) {
     await writeRouterJson(routerStatePath(), { ...state, v: 1, at: inputs.now, last: decision })
     return { said: false, why: decision.why }
   }
+  // 这一场能发几条 / 检测项占几条: 由 `send` 段算 (2026-11-14), 开场与记账用的是同一个数
+  const quota = routerCheckQuota(inputs.send)
+  const opening = routerStartLine(decision, inputs.checks, inputs.checksSaid, quota)
   const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
   if (decision.to === 'ball') {
     const line = routerLine(decision)
     if (line) {
       if (inBall) reportSay(line)
       // 球那一场不在 (冷启动 / 宿主刚起来): 走一场主动对话, 否则这句话没有落脚处
-      else await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
+      else await startProactive(ctx, { text: opening, via: 'router' })
     }
   } else {
-    await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
+    await startProactive(ctx, { text: opening, via: 'router' })
   }
-  await routerMarkSaid(decision)
+  // 直推只有一句, 所以那一条路只记一条; 开成对话才按 `quota` 派单记账
+  await routerMarkSaid(decision, inBall ? { checkMessages: 1 } : quota)
   console.log(`luwi-channel: the router spoke (${decision.kind}: ${decision.brief})`)
   return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
 }
