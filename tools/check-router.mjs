@@ -490,5 +490,97 @@ check('缺省值表是冻结的', Object.isFrozen(ROUTER_DEFAULTS), true)
 check('规则全空也能跑, 不抛', typeof judgeRouter({ now: NOW }).say, 'boolean')
 check('日期账按本地时区算', routerDayKey(NOW), '2026-11-07')
 
+/* ── 七、一场主动对话结合几条检测项 (2026-11-14) ──────────────────────────── */
+
+/*
+ * 主人那一句: "一次主动对话应结合多个检测项进行对话, 可以少, 但不能没有, 应从可发送消息条数的
+ * 上限来决定含检测项的占比" —— 于是两件东西可测: 配额公式 (`routerCheckQuota`) 与开场正文
+ * (`routerStartLine`). 两段各自切源码跑, 不复制第二份
+ */
+
+const quotaAt = host.indexOf('function routerCheckQuota')
+const markAt = host.indexOf('async function routerMarkSaid', quotaAt)
+const startAt = host.indexOf('function routerStartLine', quotaAt)
+if (quotaAt < 0 || markAt < 0 || startAt < 0 || startAt > markAt) {
+  console.error('FAIL the quota / start-line block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const { routerCheckQuota, routerStartLine } = new Function(
+  `${host.slice(quotaAt, markAt)}\nreturn { routerCheckQuota, routerStartLine }`,
+)()
+
+check('配额: 六条上限时检测项占三条', routerCheckQuota({ burstEnabled: true, burstMaxMessages: 6 }), {
+  maxMessages: 6,
+  checkMessages: 3,
+})
+check('配额: 两条上限时占一条', routerCheckQuota({ burstEnabled: true, burstMaxMessages: 2 }), {
+  maxMessages: 2,
+  checkMessages: 1,
+})
+check('配额: 一条上限时就是那一条', routerCheckQuota({ burstEnabled: true, burstMaxMessages: 1 }), {
+  maxMessages: 1,
+  checkMessages: 1,
+})
+check('配额: 关掉分条就只发一句', routerCheckQuota({ burstEnabled: false, burstMaxMessages: 6 }), {
+  maxMessages: 1,
+  checkMessages: 1,
+})
+check('配额: 没有 sim 时按缺省 6 条算', routerCheckQuota(undefined), { maxMessages: 6, checkMessages: 3 })
+check('配额: 坏值也落在 1..6 里', routerCheckQuota({ burstMaxMessages: 999 }), {
+  maxMessages: 6,
+  checkMessages: 3,
+})
+
+const twoHits = judgeRouter(base({
+  lastSpokenAt: NOW - 5 * HOUR,
+  checks: [
+    { ...checkTime, id: 'cA', what: '出门前问一句' },
+    { ...checkTime, id: 'cB', what: '到点提醒喝水', at: '20:00' },
+  ],
+}))
+check('两条都命中时整组带回来 (不只第一条)', [twoHits.kind, twoHits.hits.length], ['check', 2])
+check('hits 保持 checks 的顺序', twoHits.hits.map((one) => one.id), ['cA', 'cB'])
+
+const oneOff = judgeRouter(base({
+  lastSpokenAt: NOW - 5 * HOUR,
+  checks: [
+    { ...checkTime, id: 'cA', what: '出门前问一句' },
+    { ...checkTime, id: 'cB', what: '关掉的那条', enabled: false },
+  ],
+}))
+check('关掉的那条不进 hits', oneOff.hits.map((one) => one.id), ['cA'])
+
+const alreadySaid = judgeRouter(base({
+  lastSpokenAt: NOW - 5 * HOUR,
+  checks: [checkTime],
+  checksSaid: { c2: '2026-11-07' },
+}))
+check('说过的也不进 hits', alreadySaid.hits, undefined)
+
+const wishWins = judgeRouter(base({
+  lastSpokenAt: NOW - 5 * HOUR,
+  wishes: [{ id: 'cet4', what: '考四级', due: in37, said: [] }],
+  checks: [checkTime],
+}))
+check('未了的事胜出时不掺检测项', [wishWins.kind, wishWins.hits], ['wish', undefined])
+
+const opening = routerStartLine(twoHits, [
+  { id: 'cA', what: '出门前问一句', when: { kind: 'time' }, at: '07:40', enabled: true },
+  { id: 'cB', what: '打游戏太久', when: { kind: 'usage', minutes: 60 }, enabled: true },
+  { id: 'cC', what: '背景那条', when: { kind: 'time' }, at: '09:00', enabled: true },
+], {}, { maxMessages: 6, checkMessages: 3 })
+check('开场把全部检测项都列出来', ['出门前问一句', '打游戏太久', '背景那条'].every((one) => opening.includes(one)), true)
+check('开场只说命中那几条', opening.includes('这一拍真触发了的'), true)
+check('开场带配额 (6 条 / 3 条)', opening.includes('最多发 6 条消息') && opening.includes('其中 3 条要落在检测项上'), true)
+check('开场写清"至少 1 条"', opening.includes('至少 1 条'), true)
+
+const emptyOpening = routerStartLine(
+  { kind: 'chat', brief: '随口问一句' },
+  [],
+  {},
+  { maxMessages: 6, checkMessages: 3 },
+)
+check('没有检测项时不硬凑配额', emptyOpening.includes('没有检测项可提'), true)
+
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)

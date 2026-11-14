@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,21 +53,18 @@ private val SIM_GROUPS = listOf("wake", "send", "router", "sticker")
 private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS
 
 /**
- * 焦点词 → 该滚到第几个 item
+ * 门户面板进来的**可见组** (2026-11-14 主人: "活动板块除探索和判断里已有的, 剩下缺少的都加到判断的设置里, 包括表情包数量")
  *
- * 一组占两个 item (小标题 + 卡片), 所以 `组序 × 2`; 认不出来的词 (含 `top`) 从顶上开始 —— 页面
- * 不用处理失败分支, 最坏就是"从头看"
- * @param focus 门户给的词 (`explore` / `proactive` / `router` / `top`)
- * @param withActivity 门户那一侧 (多两组) 还是设置页那一侧
+ * - 探索面板: 只有 `explore` 一组 (她每天自己看手机那一摊)
+ * - 判断面板: **活动里除探索之外的全归它** —— 主动对话 / 主动程度 / 开口节奏与分条 / 判断层 / 表情
+ *   (面板上那六行读数在 `wake` + `router` 里, 而"说几条、一张表情多大"也是她开口那套的一部分)
+ * - 设置页 (`withActivity = false`): 仍是原来四组, 一个字节不改
+ * - 认不出来的词: 也退"活动里除探索"这一份 —— 门户只有那两颗按钮, 不必处理失败分支
  */
-private fun groupIndex(focus: String, withActivity: Boolean): Int {
-    val groups = if (withActivity) ACTIVITY_GROUPS else SIM_GROUPS
-    val wanted = when (focus.trim()) {
-        "explore", "proactive", "router" -> focus.trim()
-        else -> "top"
-    }
-    val at = groups.indexOf(wanted)
-    return if (at <= 0) 0 else at * 2
+private fun visibleGroups(focus: String, withActivity: Boolean): List<String> = when {
+    !withActivity -> SIM_GROUPS
+    focus.trim() == "explore" -> listOf("explore")
+    else -> ACTIVITY_GROUPS.filter { it != "explore" }
 }
 
 /**
@@ -89,10 +85,13 @@ private fun groupIndex(focus: String, withActivity: Boolean): Int {
  * 落 `$DSH_HOME/lw/sim.json` (见 [SimSetting]); 改完立刻生效, 宿主下一次判断就按新的来
  *
  * **2026-11-13: 一份实现, 三个入口** (主人: "判断和探索面板的设置按钮…加在打开唤醒/刷新 的右侧")
- * —— 门户判断面板 / 门户探索面板 / 设置 → 活动 → 更多设置 都调这里。门户那两个多两组 ([withActivity]
- * 打开: 探索 / 主动对话), 并按 [focus] 滚到对应那一组。**不另开第二个弹窗壳**: 抄第二份参数页就是灾难
- * @param focus 门户那两颗按钮给的词 (`explore` / `proactive` / `router` / `top`), 决定滚到第几组
- * @param withActivity 门户进来时为真: 多出「探索」「主动对话」两组 (设置页那四个入口不重复列)
+ * —— 门户判断面板 / 门户探索面板 / 设置 → 活动 → 更多设置 都调这里。**不另开第二个弹窗壳**:
+ * 抄第二份参数页就是灾难
+ *
+ * **2026-11-14: 门户那两颗各管半边** —— 探索面板只摆 `explore`; 判断面板摆活动里剩下的全部
+ * (主动对话 / 主动程度 / 开口节奏与分条 / 判断层 / 表情); 不再按 [focus] 滚到某一组, 从头看
+ * @param focus 门户那两颗按钮给的词 (`explore` / `router`; 设置页是 `top`), 决定摆哪半边
+ * @param withActivity 门户进来时为真: 摆活动板块 (探索 / 主动对话 两组本来只在门户侧出现)
  * @param onDismiss 关窗
  */
 @Composable
@@ -108,12 +107,11 @@ fun SimSettingsDialog(
     var message by remember { mutableStateOf<String?>(null) }
     var editingFrom by remember { mutableStateOf(false) }
     var editingTo by remember { mutableStateOf(false) }
-    // 一组 = 小标题 + 卡片两个 item, 所以下标是"组序 × 2"; 下标表只有这一处
+    // 可见组由 focus 决定 (2026-11-14): 探索面板只看探索, 判断面板看活动里剩下的全部
+    val visible = visibleGroups(focus, withActivity)
+    // 2026-11-14: 不再按 focus 滚到某一组 —— 判断面板现在有五组, 一进来就滚到最后那组
+    // ("判断层") 会让人以为只剩一组; 从头看, 顺序就是"主动对话 -> 主动程度 -> 分条 -> 判断层 -> 表情"
     val listState = rememberLazyListState()
-    LaunchedEffect(focus, withActivity) {
-        val index = groupIndex(focus, withActivity)
-        if (index > 0) listState.scrollToItem(index)
-    }
 
     fun commit(next: SimSetting.Plan = plan) {
         plan = next
@@ -142,7 +140,12 @@ fun SimSettingsDialog(
                 //
                 // 2026-11-13: 门户进来时多两组 (探索 / 主动对话), 五个小标题 + 六张卡在原高度里太挤,
                 // 那一侧给 0.66 屏 (设置页那四个入口仍是 0.58, 一个像素没动)
-                .height((screenHeight * (if (withActivity) 0.66f else 0.58f)).dp),
+                // 2026-11-14: 门户那两颗「设置」各自只看自己那半 (1~2 组), 高度跟着收
+                .height((screenHeight * when {
+                    !withActivity -> 0.58f
+                    visible.size <= 2 -> 0.52f
+                    else -> 0.66f
+                }).dp),
         ) {
             LazyColumn(
                 contentPadding = PaddingValues(0.dp),
@@ -152,7 +155,9 @@ fun SimSettingsDialog(
 
             // 门户那两个入口多出来的两组 (2026-11-13): **搬的是设置页那一份 composable**, 不复制
             // —— `ExploreItems` / `ProactiveItems` 本来就只写各自的文件, 这里只是把它们换个壳摆出来
-            if (withActivity) {
+            // 可见性由 `visible` 决定 (2026-11-14): 组内缩进没跟着挪 —— 这几百行 whitespace
+            // 会把这次 review 淹掉, 而 `if` 不改变 LazyListScope 接收者, `item` 照样解析得到
+            if (visible.contains("explore")) {
                 item { SectionSmallTitle(stringResource(R.string.settings_activity_daily)) }
                 item {
                     Card {
@@ -161,6 +166,8 @@ fun SimSettingsDialog(
                         }
                     }
                 }
+            }
+            if (visible.contains("proactive")) {
                 item { SectionSmallTitle(stringResource(R.string.settings_activity_speak)) }
                 item {
                     Card {
@@ -172,6 +179,7 @@ fun SimSettingsDialog(
             }
 
             /* ── 一、主动程度 ───────────────────────────────────────────── */
+            if (visible.contains("wake")) {
             item { SectionSmallTitle(stringResource(R.string.settings_sim_wake_group)) }
             item {
                 Card {
@@ -248,7 +256,9 @@ fun SimSettingsDialog(
                 }
             }
 
+            }
             /* ── 二、开口节奏与分条 ─────────────────────────────────────── */
+            if (visible.contains("send")) {
             item { SectionSmallTitle(stringResource(R.string.settings_sim_send_group)) }
             item {
                 Card {
@@ -386,7 +396,9 @@ fun SimSettingsDialog(
                 }
             }
 
+            }
             /* ── 三、判断层: 阈值这一半归这里, 盯什么归探索 ──────────────── */
+            if (visible.contains("router")) {
             item { SectionSmallTitle(stringResource(R.string.settings_sim_router_group)) }
             item {
                 Card {
@@ -507,7 +519,9 @@ fun SimSettingsDialog(
                 }
             }
 
+            }
             /* ── 四、表情 (2026-11-10, 主人: "加表情包图片上限设置") ──────── */
+            if (visible.contains("sticker")) {
             item { SectionSmallTitle(stringResource(R.string.settings_sim_sticker_group)) }
             item {
                 Card {
@@ -541,6 +555,7 @@ fun SimSettingsDialog(
                         Note(stringResource(R.string.settings_sim_sticker_note))
                     }
                 }
+            }
             }
 
             message?.let { one ->
