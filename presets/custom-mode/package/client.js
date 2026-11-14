@@ -2,11 +2,10 @@
  * Browser half: 「自定义模式」settings page — the assistant manager.
  *
  * Blocks:
- *   0. 助手        — every custom mode this feature manages: pick one, create one, duplicate one, delete one.
- *   1. 模式名称    — the selected assistant's display name and description.
- *   2. 基础模式    — standard / ptc / minimal / cordis, per assistant.
- *   3. 插件开关    — one switch per composition row; groups show their children.
- *   4. 系统提示词  — the selected assistant's editable prompt text.
+ *   0. 助手        — which assistant is selected.
+ *   1. 当前助手    — prompt, name, five live base modes, plugin switches.
+ *   2. 新建助手    — Coding / Writing / Chat stay selectable. The official
+ *                  modes are shown beside them, and only Standard is lit.
  *
  * Three decisions worth knowing before editing this file:
  *
@@ -59,16 +58,78 @@ try {
        * truth, checked for key parity by test/locales.test.mjs).
        */
       const ZH = {
+        "update.heading": "插件更新",
+        "update.orphanHint": "以下助手已不在当前列表，但本页仍保留其未保存草稿，因此暂不能离页。",
+        "update.orphanName": "{name}（ID：{id}）",
+        "update.orphanView": "查看并保留草稿",
+        "update.orphanHide": "收起草稿",
+        "update.orphanCopy": "下方包含完整提示词、名称、描述、模式和覆盖项，可选中复制到本地文件保留。放弃仅移除本页内存草稿，不修改磁盘文件。",
+        "update.orphanDiscard": "放弃此草稿…",
+        "update.orphanConfirm": "确认放弃“{name}”（ID：{id}）的未保存草稿？请先复制保留需要的内容。放弃后无法从本页恢复；磁盘文件不会改动。",
+        "update.orphanAcknowledge": "我已保留需要的内容，确认放弃后无法从本页恢复。",
+        "update.orphanChanged": "草稿或助手列表已变化，未放弃任何内容。请重新查看并确认。",
+        "update.orphanDiscarded": "已放弃所确认的本页草稿；磁盘文件未改动。",
+        "update.running": "运行中的插件版本：{version}",
+        "update.unknown": "未知",
+        "update.check": "检查更新",
+        "update.checking": "正在检查…",
+        "update.inPlugins": "在插件管理中更新",
+        "update.details": "打开插件详情",
+        "update.guide": "更新指引",
+        "update.idle": "仅在点击检查时查询宿主配置的包仓库；不会自动安装。",
+        "update.unavailable": "当前连接未提供原生版本检查能力。可打开插件详情或查看更新指引。",
+        "update.permission": "此操作缺少宿主授权，或权限服务暂不可用。",
+        "update.updatePermission": "可以查看版本，但当前连接没有更新权限。",
+        "update.available": "可用更新：{version}。安装由官方插件管理处理。",
+        "update.current": "此次检查未返回更高版本。",
+        "update.filtered": "发现较新版本，但没有符合官方默认条件的稳定兼容版本。",
+        "update.partial": "结果未覆盖全部新版本，暂未找到可推荐的更新。",
+        "update.omitted": "另有 {count} 个较新版本未列出。",
+        "update.disk": "磁盘安装版本：{version}；它可能尚未在运行中加载。",
+        "update.managed": "此安装无法使用原生包仓库更新，请通过原来源或插件详情管理；不会自动切换来源。",
+        "update.notFound": "宿主插件列表中没有找到此插件，无法确认更新。",
+        "update.network": "宿主查询包仓库失败，请稍后重试；尚不能确认更新状态。",
+        "update.refused": "宿主未提供可用的版本列表，尚不能确认更新状态。",
+        "update.failed": "未能完成更新检查，请重试或打开插件详情查看。",
+        "update.finishOperation": "请等待当前操作完成后再离开此页。",
+        "update.finishRecovery": "请先完成重试读取或重试生效，再离开此页。",
+        "update.saveDrafts": "请先保存或主动放弃所有助手草稿及未提交的新建输入，再离开此页。",
+        "update.navigationFailed": "未能打开插件详情；草稿已保留，可稍后重试。",
+        "create.nextStep": "创建后可在上方继续编辑并保存；使用时，在新会话的模式菜单选择它。",
+        "btn.retryRead": "重试读取",
+        "btn.retrySync": "重试生效",
+        "api.savedButSyncFailed": "文件已保存，但这些助手尚未生效：{ids}。请点「重试生效」，无需重复原操作。",
+        "api.syncFailed": "这些助手仍未生效：{ids}。请重试；仍失败时查看宿主日志。",
+        "api.presetRegistrationSyncFailed": "尚未确认已保存的助手配置在宿主注册表中生效，请处理已有告警或查看宿主日志。",
+        "api.synchronized": "配置已生效。新会话请从模式菜单选择助手。",
+        "api.recoveryRequired": "助手文件需要恢复：{path}。请保留目录中的备份，并查看宿主日志中的恢复说明。",
+        "msg.completedReadFailed": "{result} 页面刷新失败。请点「重试读取」，无需重复原操作。",
+        "msg.synchronized": "配置已生效。",
+        "msg.syncFailed": "重新应用配置失败，请重试。",
+        "msg.loaded": "已载入到编辑器。尚未保存。",
+        "status.reading": "正在读取…",
+        "status.saving": "正在保存…",
+        "status.creating": "正在创建助手…",
+        "status.deleting": "正在删除助手…",
+        "status.reordering": "正在保存顺序…",
+        "status.repairing": "正在修复…",
+        "status.importing": "正在读取导入文件…",
+        "status.synchronizing": "正在应用配置…",
         "nav": "自定义模式",
         "assistant.heading": "助手",
-        "assistant.hint": "每个助手单独保存系统提示词、基础模式和插件开关。",
-        "posture.hint": "只用于新建，不改变当前助手。",
+        "assistant.hint": "选择要编辑的助手。每位助手独立保存系统提示词、基础模式和插件开关。",
+        "posture.hint": "选择起步姿态并命名，再点「新增助手」。",
+        "tree.posture": "起步",
+        "tree.base": "初始基础模式",
+        "tree.baseLocked": "新建助手从官方标准模式起步。建好后，可在「当前助手」调整基础模式。",
         "posture.develop.label": "开发",
-        "posture.develop.note": "新建后：标准模式，工具按出厂。",
+        "posture.develop.note": "官方标准模式，工具按出厂。",
         "posture.write.label": "写作",
-        "posture.write.note": "新建后：终端关闭，文件读写打开。",
+        "posture.write.note": "官方标准模式。终端关闭，文件读写打开。",
         "posture.chat.label": "聊天",
-        "posture.chat.note": "新建后：文件和终端关闭。",
+        "posture.chat.note": "官方标准模式。文件和终端关闭。",
+        "editor.heading": "当前助手",
+        "editor.hint": "正在编辑「{name}」。这里的选择只决定编辑对象；新会话请从模式菜单选择助手。",
         "assistant.empty": "还没有助手，用下面的输入框新建一个。",
         "assistant.loadingList": "正在读取助手列表…",
         "assistant.newPlaceholder": "新助手的名字（例如：写作助手）",
@@ -78,7 +139,10 @@ try {
         "assistant.brokenHint": "此模式在本机无法启动，不会出现在新会话菜单里。点「按本线修复」只关闭那些行。",
         "assistant.switchHint": "切换助手保留各自的未保存草稿；列表中的「未保存」标记即为此。",
         "btn.create": "新增助手",
-        "create.heading": "新建",
+        "btn.newAssistant": "新建助手…",
+        "assistant.duplicateSavedConfirm": "复制使用磁盘上已保存的配置，不包含当前未保存的修改。继续复制已保存版本？当前草稿会保留。",
+        "prompt.replaceConfirm": "替换当前提示词草稿？尚未保存的提示词会被替换，无法从保存历史中恢复。请先复制保留需要的内容。",
+        "create.heading": "新建助手",
         "btn.creating": "创建中…",
         "btn.duplicate": "复制",
         "btn.moveUp": "上移",
@@ -89,7 +153,7 @@ try {
         "btn.resetHint": "把编辑器换回此助手新建时保存的提示词。只改草稿，保存后才写入。",
         "btn.delete": "删除",
         "btn.cancel": "取消",
-        "msg.created": "已创建。刷新后，新会话的模式菜单里会出现它。",
+        "msg.created": "已创建。可继续编辑；使用时请在新会话的模式菜单选择它。",
         "msg.duplicated": "已复制。两份配置彼此独立。",
         "msg.deleted": "已删除。",
         "msg.createFailed": "创建失败",
@@ -126,10 +190,11 @@ try {
         "msg.repaired": "已修复",
         "meta.version": "插件版本",
         "meta.versionHint": "未钉版本时，可能装到较旧的发布。要换版本，按 README 钉版本重装，然后重启。",
-        "api.saved": "已保存（{name}，{mode}）。新会话使用新配置，当前会话不变。",
+        "api.saved": "已保存（{name}，{mode}）。下一步组装时会重读已保存的提示词。",
+        "api.conflict": "磁盘上的助手配置已经变了，这次没有写入。请先导出或复制保留草稿，再重新读取并合并修改。",
         "api.savedWithExclusiveRows": "已保存（{name}，{mode}）。已关闭不能同时启用的行：{rows}。",
-        "api.created": "已创建「{name}」。刷新后，新会话的模式菜单里会出现它。",
-        "api.savedPrompt": "已保存系统提示词（{name}）。下一步模型调用即生效。",
+        "api.created": "已创建「{name}」。可继续编辑；使用时请在新会话的模式菜单选择它。",
+        "api.savedPrompt": "已保存系统提示词（{name}）。下一步组装时会重读这个文件。",
         "api.duplicated": "已从「{from}」复制。两份互不影响。",
         "api.deleted": "已删除「{name}」。正在使用它的会话不受影响。",
         "api.reordered": "顺序已保存。新会话的模式菜单按此排列。",
@@ -164,6 +229,8 @@ try {
         "warn.approvalGateMissing": "当前版本没有审批事件。会话内改写提示词不会请求确认。",
         "warn.unresolvableRows": "有的行在本机无法启动，此模式不会出现在新会话菜单里。点「按本线修复」只关闭那些行。",
         "warn.presetBroken": "此模式无法启动，不会出现在新会话菜单里。点「按本线修复」。原因见下一行。",
+        "warn.presetRegistrationSyncFailed": "尚未确认这位助手已保存的配置在宿主注册表中生效。请先处理已有告警或查看宿主日志；无需重复保存。",
+        "warn.presetRegistrationRestartSuggested": "尚未确认这位助手已保存的配置在宿主注册表中生效。如刚更新或恢复插件，建议重启 DeepSeek Harness 后重新检查；无需重复保存。",
         "warn.badPromptVariable": "提示词里有不可用的变量。改掉后再保存，否则此模式的请求会失败。",
         "warn.duplicateRowIds": "组成文件里有重复的行 id。开关只作用于第一处。",
         "warn.predicateFailed": "有一行的平台条件无法计算，已按关闭处理。",
@@ -195,7 +262,7 @@ try {
         "name.placeholder": "自定义模式",
         "name.descriptionPlaceholder": "描述，显示在模式菜单里，可留空",
         "mode.heading": "基础模式",
-        "mode.hint": "选一套官方预设作为工具底。提示词以本页为准。",
+        "mode.hint": "五档都可以点。改的是当前这位助手。提示词仍以本页为准。",
         "rows.heading": "插件开关",
         "rows.filterPlaceholder": "按名称或 id 筛选",
         "cap.heading": "插件开关",
@@ -204,21 +271,21 @@ try {
         "cap.hint": "关闭的行，这个助手不会使用。",
         "rows.hint": "关闭的行，这个助手不会使用。",
         "prompt.heading": "系统提示词",
-        "prompt.hint": "保存后，下一步模型调用即生效。",
+        "prompt.hint": "保存后，下一步组装模型输入时重读这个文件。",
         "status.enabled": "已启用",
         "status.disabled": "已停用",
         "status.changed": "已改",
         "tag.essential": "核心",
         "tag.followPlatform": "随平台",
         "btn.save": "保存",
-        "btn.saving": "处理中…",
+        "btn.saving": "保存中…",
         "btn.reload": "重新读取",
         "btn.reloadDiscard": "放弃修改并重新读取",
         "btn.reloadConfirm": "放弃未保存的修改并重新读取？",
         "msg.unsaved": "有未保存的修改",
         "msg.readFailed": "读取失败",
         "msg.saveFailed": "保存失败",
-        "msg.saved": "已保存。新会话使用新配置，当前会话不变。",
+        "msg.saved": "已保存。下一步组装时会重读这个文件。",
         "status.detail": "{message}：{detail}",
         "row.persona.label": "身份（系统提示词）",
         "row.persona.note": "关闭后，此提示词不会生效。",
@@ -265,9 +332,13 @@ try {
         "row.skill-filesystem.label": "技能发现",
         "row.tool-cordis.label": "Cordis 运行时工具",
         "row.tool-cordis.note": "可读写 harness 运行时",
+        "row.tool-plugin-market.label": "插件市场检索",
+        "row.tool-plugin-market.note": "发现插件；安装与启停仍由插件管理工具负责",
         "row.tool-plugin-manager.label": "插件管理（安装 / 启停）",
         "row.tool-plugin-manager.note": "供模型安装或开关插件。",
         "row.tool-presentation.label": "PTC 工具呈现",
+        "row.tool-executor-ptc.label": "PTC 程序执行器",
+        "row.tool-executor-ptc.note": "通过 run_code 执行程序并调用工具，同时向模型提供工具 SDK。",
         "row.present.label": "交付文件（present）",
         "row.command-goal.label": "目标命令",
         "row.tool-goal.label": "目标",
@@ -292,16 +363,78 @@ try {
       }
 
       const EN = {
+        "update.heading": "Plugin updates",
+        "update.orphanHint": "These assistants left the current list, but this page still holds their unsaved drafts. Resolve them before leaving.",
+        "update.orphanName": "{name} (ID: {id})",
+        "update.orphanView": "View and keep draft",
+        "update.orphanHide": "Hide draft",
+        "update.orphanCopy": "The text below includes the full prompt, name, description, mode and overrides. Select and copy it to a local file to keep it. Discarding only removes this page's in-memory draft; files on disk are unchanged.",
+        "update.orphanDiscard": "Discard this draft…",
+        "update.orphanConfirm": "Discard the unsaved draft for \"{name}\" (ID: {id})? First copy any content you need to keep. This page cannot recover it after discarding; files on disk will remain unchanged.",
+        "update.orphanAcknowledge": "I have kept the content I need and understand this page cannot recover the discarded draft.",
+        "update.orphanChanged": "The draft or assistant list changed. Nothing was discarded. Review it again before confirming.",
+        "update.orphanDiscarded": "The confirmed draft was discarded from this page; files on disk are unchanged.",
+        "update.running": "Running plugin version: {version}",
+        "update.unknown": "unknown",
+        "update.check": "Check for updates",
+        "update.checking": "Checking…",
+        "update.inPlugins": "Update in Plugins",
+        "update.details": "Open plugin details",
+        "update.guide": "Update guide",
+        "update.idle": "Only a click checks the registries configured by the host; installation is never automatic.",
+        "update.unavailable": "This connection does not offer native version checks. Open plugin details or the update guide.",
+        "update.permission": "Host permission is missing for this action, or the access service is unavailable.",
+        "update.updatePermission": "You can view versions, but this connection does not have update permission.",
+        "update.available": "Update available: {version}. Official plugin management handles installation.",
+        "update.current": "This check returned no newer releases.",
+        "update.filtered": "Newer releases exist, but none meet the official default conditions for a stable compatible version.",
+        "update.partial": "The result omits some newer releases; no recommended update was found.",
+        "update.omitted": "{count} additional newer releases were omitted.",
+        "update.disk": "Installed on disk: {version}; this version may not be loaded in the running host yet.",
+        "update.managed": "Manage this installation through its original source or plugin details; it cannot use this native registry update path. The source will not be changed automatically.",
+        "update.notFound": "The host did not list this plugin, so its update status could not be determined.",
+        "update.network": "The host could not query the registry. Try again later; update status is unknown.",
+        "update.refused": "The host did not provide a usable version list; update status is unknown.",
+        "update.failed": "The update check could not finish. Retry or open plugin details.",
+        "update.finishOperation": "Wait for the current operation to finish before leaving this page.",
+        "update.finishRecovery": "Complete Retry refresh or Retry activation before leaving this page.",
+        "update.saveDrafts": "Save or explicitly discard all assistant drafts and unsubmitted new-assistant input before leaving this page.",
+        "update.navigationFailed": "Plugin details could not open. Your drafts are preserved; try again later.",
+        "create.nextStep": "After creating, edit and save above. To use the assistant, choose it in the mode menu for a new session.",
+        "btn.retryRead": "Retry refresh",
+        "btn.retrySync": "Retry activation",
+        "api.savedButSyncFailed": "Files are saved, but these assistants are not active yet: {ids}. Select Retry activation; you do not need to repeat the original action.",
+        "api.syncFailed": "These assistants are still not active: {ids}. Retry, then check the host log if the problem continues.",
+        "api.presetRegistrationSyncFailed": "The saved assistant configuration has not been confirmed in the host registry. Address existing warnings or check the host log.",
+        "api.synchronized": "Configuration is active. Choose an assistant in the mode menu for a new session.",
+        "api.recoveryRequired": "Assistant files need recovery: {path}. Keep the backups in that directory and check the host log for recovery details.",
+        "msg.completedReadFailed": "{result} The page could not refresh. Select Retry refresh; do not repeat the original action.",
+        "msg.synchronized": "Configuration is active.",
+        "msg.syncFailed": "Could not apply the configuration. Please retry.",
+        "msg.loaded": "Loaded into the editor. Not saved yet.",
+        "status.reading": "Reading…",
+        "status.saving": "Saving…",
+        "status.creating": "Creating assistant…",
+        "status.deleting": "Deleting assistant…",
+        "status.reordering": "Saving order…",
+        "status.repairing": "Repairing…",
+        "status.importing": "Reading import file…",
+        "status.synchronizing": "Applying configuration…",
         "nav": "Custom mode",
         "assistant.heading": "Assistants",
-        "assistant.hint": "Each assistant keeps its own system prompt, base mode and plugin switches.",
-        "posture.hint": "Applies only to the assistant you are about to create.",
+        "assistant.hint": "Choose an assistant to edit. Each keeps its own system prompt, base mode and plugin switches.",
+        "posture.hint": "Choose a starting posture and a name, then select New assistant.",
+        "tree.posture": "Starter",
+        "tree.base": "Starting base mode",
+        "tree.baseLocked": "New assistants start on the official Standard mode. You can change the base mode under This assistant after creating one.",
         "posture.develop.label": "Coding",
-        "posture.develop.note": "After create: Standard, tools as shipped.",
+        "posture.develop.note": "Official Standard mode, tools as shipped.",
         "posture.write.label": "Writing",
-        "posture.write.note": "After create: terminal off, file access on.",
+        "posture.write.note": "Official Standard mode. Terminal off, file access on.",
         "posture.chat.label": "Chat",
-        "posture.chat.note": "After create: files and terminal off.",
+        "posture.chat.note": "Official Standard mode. Files and terminal off.",
+        "editor.heading": "This assistant",
+        "editor.hint": "Editing {name}. This selection controls what you edit here; choose an assistant in the mode menu when starting a new session.",
         "assistant.empty": "No assistants yet — create one with the field below.",
         "assistant.loadingList": "Loading assistants…",
         "assistant.newPlaceholder": "Name of the new assistant (e.g. Writing assistant)",
@@ -311,6 +444,9 @@ try {
         "assistant.brokenHint": "This mode cannot start here, so it will not appear for a new session. Fix for this line turns off only those rows.",
         "assistant.switchHint": "Switching assistants keeps each draft; the \"Unsaved\" marker in the list is exactly that.",
         "btn.create": "New assistant",
+        "btn.newAssistant": "New assistant…",
+        "assistant.duplicateSavedConfirm": "Copy the saved configuration from disk? Unsaved changes are not included, and your current draft will be kept.",
+        "prompt.replaceConfirm": "Replace the current prompt draft? Unsaved prompt text will be replaced and cannot be recovered from saved history. Copy any content you need to keep first.",
         "create.heading": "New assistant",
         "btn.creating": "Creating…",
         "btn.duplicate": "Duplicate",
@@ -322,7 +458,7 @@ try {
         "btn.resetHint": "Restores the prompt saved when this assistant was created. The editor changes. Save writes it.",
         "btn.delete": "Delete",
         "btn.cancel": "Cancel",
-        "msg.created": "Created. Refresh once, then it appears in the mode menu for a new session.",
+        "msg.created": "Created. Continue editing here, then choose it in the mode menu for a new session.",
         "msg.duplicated": "Duplicated. The two are independent from here on.",
         "msg.deleted": "Deleted.",
         "msg.createFailed": "Could not create",
@@ -359,10 +495,11 @@ try {
         "msg.repaired": "Repaired",
         "meta.version": "Plugin version",
         "meta.versionHint": "Without a pinned version, an older release may be installed. To change it, reinstall with the version pin from the README, then restart.",
-        "api.saved": "Saved ({name}, {mode}). New sessions use it. The current session does not change.",
+        "api.saved": "Saved ({name}, {mode}). The next model step rereads the saved prompt.",
+        "api.conflict": "The assistant configuration on disk has changed. Nothing was written. Export or copy your draft, then reload and merge your changes.",
         "api.savedWithExclusiveRows": "Saved ({name}, {mode}). Turned off rows that cannot be on together: {rows}.",
-        "api.created": "Created {name}. Refresh once, then it appears in the mode menu for a new session.",
-        "api.savedPrompt": "System prompt saved ({name}). It applies on the next model step.",
+        "api.created": "Created {name}. Continue editing here, then choose it in the mode menu for a new session.",
+        "api.savedPrompt": "System prompt saved ({name}). The next model step rereads this file.",
         "api.duplicated": "Copied from {from}. The two are independent from now on.",
         "api.deleted": "Deleted {name}. Sessions already using it are unchanged.",
         "api.reordered": "Order saved. New sessions list modes in this order.",
@@ -400,6 +537,8 @@ try {
         "warn.approvalGateMissing": "This version has no approval event. In-session prompt edits are not confirmed.",
         "warn.unresolvableRows": "Some rows cannot start here, so this mode is absent from the new-session menu. Fix for this line turns off only those rows.",
         "warn.presetBroken": "This mode cannot start, so it will not appear for a new session. Use Fix for this line. The reason is on the next line.",
+        "warn.presetRegistrationSyncFailed": "This assistant's saved configuration has not been confirmed in the host registry. Address existing warnings or check the host log; you do not need to save again.",
+        "warn.presetRegistrationRestartSuggested": "This assistant's saved configuration has not been confirmed in the host registry. If the plugin was just updated or restored, consider restarting DeepSeek Harness, then check again; you do not need to save again.",
         "warn.badPromptVariable": "The prompt uses a variable that is not available. Fix it before saving.",
         "warn.duplicateRowIds": "A row id is repeated. A switch applies only to the first one.",
         "warn.predicateFailed": "A platform condition could not be evaluated. That row is treated as off.",
@@ -428,7 +567,7 @@ try {
         "name.placeholder": "Custom mode",
         "name.descriptionPlaceholder": "Description, shown in the mode menu. Optional.",
         "mode.heading": "Base mode",
-        "mode.hint": "Pick a shipped preset as the tool base. The prompt on this page still applies.",
+        "mode.hint": "All five can be chosen. This edits the assistant selected above. The prompt on this page still applies.",
         "rows.heading": "Plugin switches",
         "rows.filterPlaceholder": "Filter by name or id",
         "cap.heading": "Plugin switches",
@@ -437,21 +576,21 @@ try {
         "cap.hint": "A row that is off is not used by this assistant.",
         "rows.hint": "A row that is off is not used by this assistant.",
         "prompt.heading": "System prompt",
-        "prompt.hint": "After you save, the next model step uses this text.",
+        "prompt.hint": "After you save, the next model step rereads this file.",
         "status.enabled": "Enabled",
         "status.disabled": "Disabled",
         "status.changed": "changed",
         "tag.essential": "Core",
         "tag.followPlatform": "Platform",
         "btn.save": "Save",
-        "btn.saving": "Working…",
+        "btn.saving": "Saving…",
         "btn.reload": "Reload",
         "btn.reloadDiscard": "Discard edits and reload",
         "btn.reloadConfirm": "Discard unsaved edits and reload?",
         "msg.unsaved": "Unsaved changes",
         "msg.readFailed": "Load failed",
         "msg.saveFailed": "Save failed",
-        "msg.saved": "Saved. New sessions use it. The current session does not change.",
+        "msg.saved": "Saved. The next model step rereads this file.",
         "status.detail": "{message}: {detail}",
         "row.persona.label": "Identity (system prompt)",
         "row.persona.note": "Off: this prompt has no effect.",
@@ -498,9 +637,13 @@ try {
         "row.skill-filesystem.label": "Skill discovery",
         "row.tool-cordis.label": "Cordis runtime tools",
         "row.tool-cordis.note": "Can read and modify the running harness",
+        "row.tool-plugin-market.label": "Plugin marketplace search",
+        "row.tool-plugin-market.note": "Discovers plugins; installation and toggles remain with the plugin manager.",
         "row.tool-plugin-manager.label": "Plugin manager (install / toggle)",
         "row.tool-plugin-manager.note": "Lets the model install or toggle plugins.",
         "row.tool-presentation.label": "PTC tool presentation",
+        "row.tool-executor-ptc.label": "PTC program executor",
+        "row.tool-executor-ptc.note": "Runs programs and calls tools through run_code, and provides the tool SDK to the model.",
         "row.present.label": "Deliverables (present)",
         "row.command-goal.label": "Goal command",
         "row.tool-goal.label": "Goals",
@@ -586,6 +729,47 @@ try {
        * calls outside any component, and it must read the CURRENT language each time.
        */
       let localeRef
+
+      const UPDATE_PACKAGE = "dsh-custom-mode"
+      let updateServices = { manager: null, navigation: null, list: false, versions: false, update: false, accessKnown: false, revision: 0 }
+      const updateListeners = new Set()
+      const publishUpdateServices = (patch) => {
+        updateServices = { ...updateServices, ...patch, revision: updateServices.revision + 1 }
+        for (const listener of updateListeners) listener()
+      }
+
+      /** Optional Cordis scopes own these reads; old hosts never block the editor. */
+      function mountUpdateServices(ctx) {
+        if (typeof ctx.inject !== "function") return
+        ctx.inject(["remote", "remote.pluginManager"], (scope) => {
+          const manager = scope.remote.pluginManager
+          if (manager === null || manager === undefined) return
+          publishUpdateServices({ manager, list: false, versions: false, update: false, accessKnown: false })
+          scope.effect(() => () => {
+            if (updateServices.manager === manager) publishUpdateServices({ manager: null, list: false, versions: false, update: false, accessKnown: false })
+          })
+          scope.inject(["remoteAccess"], (accessScope) => {
+            if (typeof accessScope.remoteAccess.whenAccess !== "function") return
+            if (updateServices.manager === manager) publishUpdateServices({ accessKnown: true })
+            for (const [key, action] of [["list", "listBundles"], ["versions", "listVersions"], ["update", "updateBundle"]]) {
+              if (typeof manager[action] !== "function") continue
+              accessScope.effect(() => accessScope.remoteAccess.whenAccess("pluginManager/" + action, () => {
+                if (updateServices.manager === manager) publishUpdateServices({ [key]: true })
+                return () => {
+                  if (updateServices.manager === manager) publishUpdateServices({ [key]: false })
+                }
+              }))
+            }
+          })
+        })
+        ctx.inject(["pluginNavigation"], (scope) => {
+          const navigation = scope.get("pluginNavigation")
+          publishUpdateServices({ navigation })
+          scope.effect(() => () => {
+            if (updateServices.navigation === navigation) publishUpdateServices({ navigation: null })
+          })
+        })
+      }
 
       /**
        * Plain-element stand-ins for the shell's atoms.
@@ -746,33 +930,43 @@ try {
         ".cpfe-hint{display:flex;flex-direction:column;gap:2px;margin:0 0 6px}",
         ".cpfe-hint-line{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
         ".cpfe-hint-detail{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
-        // 描述：多行、自适应高度（没有多行输入组件，所以用 textarea + 同一批语义变量）
-        ".cpfe-desc{box-sizing:border-box;min-height:40px;max-height:120px;resize:vertical;padding:8px 12px;border-radius:var(--dsw-radius-md);border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;margin-bottom:0}",
+        // The native InlineEditor saves on Enter and autofocuses; document editing must keep
+        // Enter as a newline and manual Save. Use its exact surface/font tokens for these
+        // controlled textareas, with only document height and width as layout differences.
+        ".cpfe-desc,.cpfe-editor{box-sizing:border-box;min-width:0;margin:0;padding:3px 8px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-sm);outline:none;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xs-13);font-family:Inter,var(--dsw-font-family);overflow-y:auto}",
+        ".cpfe-desc:focus,.cpfe-editor:focus{border-color:var(--dsw-alias-state-business-primary)}",
+        ".cpfe-desc{min-height:40px;max-height:120px;resize:vertical}",
         ".cpfe-base-pending{color:var(--dsw-alias-state-warn-primary)}",
         ".cpfe-note{display:block;margin:8px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
-        ".cpfe-mono{display:block;margin:0;font-family:var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}",
+        ".cpfe-mono{display:block;margin:0;font:inherit;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}",
         ".cpfe-pills{display:flex;flex-wrap:wrap;gap:6px;align-items:center}",
         ".cpfe-pills > *{flex:0 0 auto;white-space:nowrap}",
         ".cpfe-pills button{white-space:nowrap}",
         ".cpfe-picker{display:flex;align-items:center;gap:8px;margin:2px 0 4px}",
-        // 壳的菜单浮层靠一个独立的 backing 元素上色（实测在 0.1.7-rc.2 + headless 下那块是透明的，
-        // 文字会"压"在下面的输入框上）。用官方 token 显式补一层底色，真实浏览器与 headless 一致。
-        ".cpfe-menu{background:var(--dsw-menu-surface-fill,var(--dsw-alias-bg-layer-3));border-radius:var(--dsw-radius-lg);box-shadow:var(--dsw-elevation-soft)}",
         ".cpfe-history{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}",
+        // Native Menu and Button keep their appearance; only the trigger's
+        // own text shrinks so long names cannot wrap outside its fixed height.
+        ".cpfe-selector-menu,.cpfe-selector{min-width:0;max-width:100%}",
+        ".cpfe-selector-label{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+        ".cpfe-selector-chevron{flex:0 0 auto}",
         ".cpfe-history-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
         ".cpfe-history-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
         ".cpfe-pill-wrap{display:inline-flex;align-items:center;gap:4px}",
         ".cpfe-actions{display:flex;flex-wrap:wrap;gap:var(--g);align-items:center;margin-top:4px}",
         ".cpfe-newrow{display:flex;gap:var(--g);align-items:center;flex-wrap:wrap;margin-top:10px}",
         ".cpfe-postures{display:flex;flex-direction:column;gap:6px}",
-        ".cpfe-create{display:flex;flex-direction:column;gap:6px;margin-top:8px}",
-        ".cpfe-field{display:flex;width:100%;margin-bottom:8px}",
+        ".cpfe-create{display:flex;flex-direction:column;gap:6px}",
+        ".cpfe-branch{display:flex;flex-direction:column;gap:16px;margin-top:8px;padding-left:12px;border-left:1px solid var(--dsw-alias-border-l1)}",
+        ".cpfe-node{display:flex;flex-direction:column;gap:4px}",
+        ".cpfe-node-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
+        // Native Input applies className to its padded wrapper span, so its
+        // outer box (not only the inner input) must fit the plugin column.
+        ".cpfe-field{display:flex;box-sizing:border-box;width:100%;min-width:0;max-width:100%;margin-bottom:8px}",
         ".cpfe-row-head{font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}",
         ".cpfe-row-switch{flex:0 0 auto}",
         ".cpfe-row-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}",
         ".cpfe-row-note{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".cpfe-row-toggle{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}",
-        ".cpfe-row-toggle:hover{background:var(--dsw-alias-bg-layer-2)}",
+        ".cpfe-row-toggle{flex:0 0 auto}",
         ".cpfe-row-open{border-color:var(--dsw-alias-border-l2)}",
         ".cpfe-row-detail{display:flex;flex-direction:column;gap:4px;margin:0 0 12px;padding:0 0 0 16px;border:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
         ".cpfe-detail-line{display:flex;gap:8px;min-width:0}",
@@ -780,7 +974,15 @@ try {
         ".cpfe-detail-value{min-width:0;overflow-wrap:anywhere}",
         ".cpfe-sec-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}",
         ".cpfe-sec-head .cpfe-actions{margin-top:0}",
-        ".cpfe-newinput{flex:1;min-width:200px}",
+        ".cpfe-update{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l1);margin-bottom:16px}",
+        ".cpfe-update-meta{flex:1 1 220px;min-width:0}",
+        ".cpfe-update-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%}",
+        // The shared atoms expose no Link or anchor-shaped Button. Keep a real anchor;
+        // use official settings UI typography/link tokens, not Markdown prose styles.
+        ".cpfe-update-guide{max-width:100%;overflow-wrap:anywhere;font:var(--dsw-font-s-strong-14);color:var(--dsw-alias-link);text-decoration:none}",
+        "@media (hover:hover){.cpfe-update-guide:hover{text-decoration:underline}}",
+        ".cpfe-update-note{overflow-wrap:anywhere}",
+        ".cpfe-newinput{box-sizing:border-box;flex:1 1 200px;min-width:0;max-width:100%}",
         // 单列、行高统一（对齐官方插件页的形态）；之前的自适应多列网格会让行高参差不齐。
         // ★ 对齐官方设置行（实测 0.1.7-rc.2 的行：padding 16px 0、无背景、无圆角，行间只有一条 1px
         //   分隔线）。原来是"圆角卡片 + 描边 + 灰底" —— 那正是廉价感最重的部分。
@@ -791,20 +993,18 @@ try {
         ".cpfe-kids{display:flex;flex-direction:column;margin-left:0;padding-left:16px}",
         ".cpfe-row-meta{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}",
         ".cpfe-row-badges{display:flex;align-items:center;gap:4px;flex:0 1 auto;min-width:0}",
-        ".cpfe-row{display:flex;gap:12px;align-items:center;box-sizing:border-box;min-height:0;padding:16px 0;border:0;border-radius:0;background:none}",
-        ".cpfe-editor{box-sizing:border-box;width:100%;min-height:120px;resize:vertical;padding:12px;border-radius:var(--dsw-radius-md);border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);font-size:13px;line-height:20px}",
+        ".cpfe-row{display:flex;gap:12px;align-items:center;box-sizing:border-box;min-height:74px;padding:16px 0;border:0;border-radius:0;background:none}",
+        ".cpfe-editor{width:100%;min-height:120px;resize:vertical}",
         ".cpfe-bar{display:flex;align-items:center;gap:var(--g);flex-wrap:wrap;margin-top:8px}",
-        ".cpfe-disclosure{appearance:none;display:inline-flex;align-items:center;gap:6px;margin:8px 0 0;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;font-weight:400;cursor:pointer}",
-        ".cpfe-filter{box-sizing:border-box;width:100%;height:36px;margin:0 0 8px;padding:0 12px;border-radius:var(--dsw-radius-md);border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px}",
+        ".cpfe-disclosure{align-self:flex-start;margin-top:8px}",
         ".cpfe .cpfe-danger{margin-left:auto}",
         ".cpfe-status{font-size:13px;line-height:20px}",
         ".cpfe-ok{color:var(--dsw-alias-label-secondary)}",
         ".cpfe-err{color:var(--dsw-alias-state-error-primary)}",
         ".cpfe-dirty{color:var(--dsw-alias-state-warn-primary)}",
-        ".cpfe-danger{color:var(--dsw-alias-state-error-primary)}",
         ".cpfe-meta-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0}",
         ".cpfe-version{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:nowrap}",
-        ".cpfe-path{font-family:var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}",
+        ".cpfe-path{font:inherit;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}",
         // ── fallback-path controls (unused when the shell provides the atoms) ──
         ".cpfe-btn{appearance:none;cursor:pointer;padding:0 14px;height:36px;border-radius:var(--dsw-radius-md);border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px}",
         ".cpfe-btn:disabled{opacity:.4;cursor:not-allowed}",
@@ -818,7 +1018,7 @@ try {
         // 光拦状态还不够：DOM 会先显示用户敲进去的字/翻过去的开关，等下一次重渲染才被拉回来 ——
         // 那就是"我明明改了，它自己弹回去了"。`pointer-events` 让点击根本到不了控件，
         // 视觉上也给一个明确的"此刻不能动"。
-        ".cpfe-busy .cpfe-switch,.cpfe-busy .cpfe-row-switch,.cpfe-busy .cpfe-row-toggle,.cpfe-busy .cpfe-input,.cpfe-busy .cpfe-field,.cpfe-busy .cpfe-editor,.cpfe-busy .cpfe-pill,.cpfe-busy .cpfe-selector{pointer-events:none;opacity:.65}",
+        ".cpfe-busy .cpfe-switch,.cpfe-busy .cpfe-row-switch,.cpfe-busy .cpfe-row-toggle,.cpfe-busy .cpfe-input,.cpfe-busy .cpfe-field,.cpfe-busy .cpfe-pill,.cpfe-busy .cpfe-selector{pointer-events:none}",
         ".cpfe-busy .cpfe-editor{cursor:progress}",
         ".cpfe-tag{font-size:12px;line-height:18px;padding:0 5px;border-radius:4px;border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}",
         ".cpfe-tag-success,.cpfe-tag-info{color:var(--dsw-alias-state-success-primary)}",
@@ -826,18 +1026,7 @@ try {
         ".cpfe-tag-danger{color:var(--dsw-alias-state-error-primary)}",
         ".cpfe-pill{appearance:none;cursor:pointer;height:28px;padding:0 12px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px}",
         ".cpfe-pill-on{border-color:var(--dsw-alias-label-primary);color:var(--dsw-alias-label-primary)}",
-        // ── 官方的「设置项下拉」形态 ────────────────────────────────────────────
-        // 实测（**0.1.7-rc.2 与 0.2.0-rc.2 各量一次，结论相同**）：官方的 `_selector` 是
-        //   height 36px · border-radius var(--dsw-radius-md) · background var(--dsw-alias-bg-module-platform)
-        //   · padding 0 14px · font-size 14px/line-height 22px · gap 12px，hover 换
-        //   var(--dsw-alias-interactive-bg-hover)。
-        // 壳的 Button 只有 primary / ghost / outline / toolbar 四种变体，没有"灰底选择器"这一种 ——
-        // 官方各设置页也是**各自定义** `_selector`（oY77xG / hVGvvW / _2XZxNq / T1PP_q 各一份、
-        // 度量完全一致），所以这里照同一套度量自绘，做法与官方一致。
-        // 双类选择器（`.cpfe .cpfe-selector`）用来压过壳 Button 的单类变体规则，
-        // 免得 `_ghost_` / `_sm_` 把灰底和高度覆盖掉。
-        ".cpfe .cpfe-selector{height:36px;padding:0 14px;gap:12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;font-weight:400}",
-        ".cpfe .cpfe-selector:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}",
+        // Menu surfaces and trigger Buttons keep the native atoms' own styles.
         // ── 告警区 ──────────────────────────────────────────────────────────────
         // 这一段此前**一条 CSS 都没有**（2026-10-02 逐表核对：样式表里 `cpfe-warn` 零规则），
         // 于是出现告警时它是一串没有排版的裸 `<p>`：没有行距、图标与文字不对齐、
@@ -848,11 +1037,15 @@ try {
         ".cpfe-warn svg{flex:0 0 auto;margin-top:2px}",
       ].join("")
 
-      /** Apply the page stylesheet once, keyed so a re-mount never duplicates it. */
+      /** Keep one stylesheet, replacing stale content when an HMR bundle arrives. */
       function ensureStyles() {
         if (typeof document === "undefined") return
         const tagId = "dsh-custom-mode/system-prompt"
-        if (document.querySelector('style[data-plugin-css="' + tagId + '"]') !== null) return
+        const existing = document.querySelector('style[data-plugin-css="' + tagId + '"]')
+        if (existing !== null) {
+          if (existing.textContent !== CSS) existing.textContent = CSS
+          return
+        }
         const tag = document.createElement("style")
         tag.dataset.plugin = "dsh-custom-mode"
         tag.dataset.pluginCss = tagId
@@ -871,6 +1064,7 @@ try {
         delete: ROUTE + "/delete",
         reorder: ROUTE + "/reorder",
         repair: ROUTE + "/repair",
+        sync: ROUTE + "/sync",
       }
 
       /** Every assistant this feature manages. */
@@ -949,6 +1143,39 @@ try {
           left.description === right.description &&
           JSON.stringify(left.overrides) === JSON.stringify(right.overrides)
         )
+      }
+
+      // Private to this module instance in this document. Leaving a settings
+      // section must not lose a draft; no prompt is written to browser storage.
+      const draftContexts = new WeakMap()
+      function mountDraftProtection(ctx) {
+        let session = draftContexts.get(ctx)
+        if (session === undefined) {
+          const memory = { entries: {}, selected: "", newName: "", syncNeeded: false, refreshNeeded: null }
+          session = { memory, owners: new Set(), beforeUnload: (event) => {
+            if (memory.newName === "" && Object.keys(memory.entries).length === 0) return
+            event.preventDefault()
+            event.returnValue = ""
+          } }
+          draftContexts.set(ctx, session)
+        }
+        ctx.effect(() => {
+          const owner = {}
+          session.owners.add(owner)
+          if (session.owners.size === 1 && typeof window.addEventListener === "function") window.addEventListener("beforeunload", session.beforeUnload)
+          return () => {
+            session.owners.delete(owner)
+            if (session.owners.size !== 0) return
+            if (typeof window.removeEventListener === "function") window.removeEventListener("beforeunload", session.beforeUnload)
+            session.memory.entries = {}
+            session.memory.selected = ""
+            session.memory.newName = ""
+            session.memory.syncNeeded = false
+            session.memory.refreshNeeded = null
+            draftContexts.delete(ctx)
+          }
+        }, "custom-mode: draft protection")
+        return session.memory
       }
 
       /** `「名称」副本`-style copy name, from a locale template. */
@@ -1039,9 +1266,10 @@ try {
                     : null,
                 ),
                 react.createElement(
-                  "button",
+                  A.Button,
                   {
-                    type: "button",
+                    variant: "ghost",
+                    size: "sm",
                     className: "cpfe-row-toggle",
                     "aria-expanded": open,
                     "aria-label": t(open ? "aria.collapse" : "aria.expand"),
@@ -1136,6 +1364,7 @@ try {
       }
 
       function CustomModeSection(props) {
+        const draftMemory = props.draftMemory
         // Compatibility: a shell that does not hand us a bound `t` (older or
         // changed settings contract) must still render real copy. Falling back to
         // the Chinese dictionary means the worst case is "Chinese text", never a
@@ -1198,14 +1427,52 @@ try {
           return t(fallbackKey)
         }
 
-        const [list, setList] = react.useState(null)
-        const [selected, setSelected] = react.useState("")
+        const [list, setListState] = react.useState(null)
+        const heldRoster = react.useRef(list)
+        const setList = (value) => { heldRoster.current = value; setListState(value) }
+        const [selected, setSelectedState] = react.useState(draftMemory.selected)
+        const setSelected = (value) => { draftMemory.selected = value; setSelectedState(value) }
         /** id → { payload, saved, value }: loaded state, baseline and live draft. */
-        const [entries, setEntries] = react.useState({})
+        const [entries, setEntriesState] = react.useState(draftMemory.entries)
+        const heldEntries = react.useRef(entries)
+        const setEntries = (next) => {
+          heldEntries.current = typeof next === "function" ? next(heldEntries.current) : next
+          draftMemory.entries = Object.fromEntries(Object.entries(heldEntries.current).filter(([, held]) => !sameDraft(held.value, held.saved)))
+          setEntriesState(heldEntries.current)
+        }
         const [status, setStatus] = react.useState("")
         const [failed, setFailed] = react.useState(false)
         const [busy, setBusy] = react.useState(false)
-        const [newName, setNewName] = react.useState("")
+        const [pending, setPending] = react.useState("")
+        const [syncNeeded, setSyncNeededState] = react.useState(draftMemory.syncNeeded)
+        const [refreshNeeded, setRefreshNeededState] = react.useState(draftMemory.refreshNeeded)
+        const navigationState = react.useRef({ syncNeeded, refreshNeeded, newName: draftMemory.newName })
+        const setSyncNeeded = (value) => { draftMemory.syncNeeded = value; navigationState.current.syncNeeded = value; setSyncNeededState(value) }
+        const setRefreshNeeded = (value) => { draftMemory.refreshNeeded = value; navigationState.current.refreshNeeded = value; setRefreshNeededState(value) }
+        // A ref closes the interval before React renders disabled controls. Only the
+        // owning operation may apply a response or release the busy state.
+        const operation = react.useRef({ alive: true, current: null })
+        const [newName, setNewNameState] = react.useState(draftMemory.newName)
+        const setNewName = (value) => { draftMemory.newName = value; navigationState.current.newName = value; setNewNameState(value) }
+        const createSection = react.useRef(null)
+        const createNameInput = react.useRef(null)
+        const editorSection = react.useRef(null)
+        const [focusCreated, setFocusCreated] = react.useState("")
+        const focusCreate = () => {
+          createSection.current?.scrollIntoView?.({ block: "start", behavior: "auto" })
+          createNameInput.current?.focus?.({ preventScroll: true })
+        }
+        const [runtimeVersion, setRuntimeVersion] = react.useState("")
+        const [updateResult, setUpdateResult] = react.useState(null)
+        const [updateNotice, setUpdateNotice] = react.useState("")
+        const [updateChecking, setUpdateChecking] = react.useState(false)
+        const [, setUpdateRevision] = react.useState(0)
+        const updateOperation = react.useRef({ alive: true, current: null })
+        const [orphanView, setOrphanView] = react.useState("")
+        const [orphanDialog, setOrphanDialog] = react.useState(null)
+        const [orphanAcknowledged, setOrphanAcknowledged] = react.useState(false)
+        const orphanConfirmation = react.useRef(null)
+        const orphanAcknowledgement = react.useRef(false)
         const [postureChoices, setPostureChoices] = react.useState([])
         const [posture, setPosture] = react.useState("develop")
         const [deleteOpen, setDeleteOpen] = react.useState(false)
@@ -1226,12 +1493,13 @@ try {
         /** 本机这条线上有无法解析的行时，一键把它们关掉（服务端复用保存同一条排版手术）。 */
         const repairRowsNow = async () => {
           if (draft === null) return
-          setBusy(true)
-          setFailed(false)
-          try {
-            const result = await postJson(ROUTES.repair, { id: selected })
-            if (result !== null && result.ok === true) {
-              setStatus(apiText(result, "msg.repaired"))
+          return runOperation("status.repairing", "msg.saveFailed", async (token) => {
+            const baseRevision = entry?.payload?.revision
+            const result = await postJson(ROUTES.repair, { id: selected,
+              ...(typeof baseRevision === "string" ? { baseRevision } : {}) })
+            if (!ownsOperation(token)) return
+            showResult(result, "msg.repaired", "msg.saveFailed")
+            if (result?.ok === true || result?.persisted === true) {
               // ★ 把修复折进**草稿**（issue #8）。
               //
               // 修复在磁盘上是生效的，但草稿里那几行仍然是"启用"。而 `reload()` 对脏草稿是
@@ -1241,21 +1509,21 @@ try {
               const repairedIds = Array.isArray(result.params?.repairedIds) ? result.params.repairedIds : []
               if (repairedIds.length > 0 && draft !== null) {
                 // 草稿里的 `overrides` 是"显式**启用**"语义，所以关闭 = false。
-                const nextOverrides = { ...draft.overrides }
-                for (const rowId of repairedIds) nextOverrides[rowId] = false
-                update({ overrides: nextOverrides }, { force: true })
+                setEntries((previous) => {
+                  const before = previous[selected]
+                  const overrides = { ...before.value.overrides }
+                  const savedOverrides = { ...before.saved.overrides }
+                  for (const rowId of repairedIds) { overrides[rowId] = false; savedOverrides[rowId] = false }
+                  const ownRevision = typeof result.revision === "string" && before.payload.revision === baseRevision
+                  return { ...previous, [selected]: { ...before,
+                    value: { ...before.value, overrides },
+                    ...(ownRevision ? { payload: { ...before.payload, revision: result.revision },
+                      saved: { ...before.saved, overrides: savedOverrides } } : {}) } }
+                })
               }
-              await reload()
-            } else {
-              setFailed(true)
-              setStatus(apiText(result, "msg.saveFailed"))
+              await refreshAfterWrite(result, "msg.repaired", selected, token, () => reload(selected, undefined, token))
             }
-          } catch {
-            setFailed(true)
-            setStatus(t("msg.saveFailed"))
-          } finally {
-            setBusy(false)
-          }
+          })
         }
 
         const toggleRowExpanded = (id) =>
@@ -1289,6 +1557,12 @@ try {
         const payload = entry === undefined ? null : entry.payload
         const editorReady = draft !== null && payload !== null
         const dirty = editorReady && !sameDraft(draft, entry.saved)
+        react.useEffect(() => {
+          if (focusCreated === "" || focusCreated !== selected || !editorReady) return
+          editorSection.current?.scrollIntoView?.({ block: "start", behavior: "auto" })
+          editorSection.current?.focus?.({ preventScroll: true })
+          setFocusCreated("")
+        }, [focusCreated, selected, editorReady])
 
         /** Which assistants hold unsaved edits — the list marks them. */
         const dirtyIds = new Set()
@@ -1299,6 +1573,52 @@ try {
 
         const describeError = (error) => String((error && error.message) || error)
 
+        const ownsOperation = (token) => operation.current.alive && operation.current.current === token
+        const runOperation = async (pendingKey, failureKey, action) => {
+          if (!operation.current.alive || operation.current.current !== null) return
+          const token = {}
+          operation.current.current = token
+          setBusy(true)
+          setPending(pendingKey)
+          try {
+            await action(token)
+          } catch (error) {
+            if (ownsOperation(token)) {
+              setFailed(true)
+              if (pendingKey === "status.reading" && list === null) setListFailed(true)
+              setStatus(fillPlaceholders(t("status.detail"), { message: t(failureKey), detail: describeError(error) }))
+            }
+          } finally {
+            if (ownsOperation(token)) {
+              operation.current.current = null
+              setBusy(false)
+              setPending("")
+            }
+          }
+        }
+
+        const showResult = (result, successKey, failureKey) => {
+          setFailed(result?.ok !== true)
+          setStatus(apiText(result, result?.ok === true ? successKey : failureKey))
+          if (result?.synchronized === false) setSyncNeeded(true)
+          else if (result?.synchronized === true) setSyncNeeded(false)
+        }
+
+        // Once the host confirms a mutation, a failed follow-up GET cannot turn
+        // that fact into a failed mutation or invite the user to repeat it.
+        const refreshAfterWrite = async (result, fallbackKey, targetId, token, refresh) => {
+          try {
+            await refresh()
+            if (ownsOperation(token)) setRefreshNeeded(null)
+          } catch (error) {
+            if (!ownsOperation(token)) return
+            setRefreshNeeded({ result, fallbackKey, targetId })
+            setFailed(true)
+            const message = fillPlaceholders(t("msg.completedReadFailed"), { result: apiText(result, fallbackKey) })
+            setStatus(fillPlaceholders(t("status.detail"), { message, detail: describeError(error) }))
+          }
+        }
+
         /**
          * Fetch one assistant into `entries`, keeping any unsaved draft it already has.
          *
@@ -1306,39 +1626,45 @@ try {
          * `force` is "re-read even if this entry is already in memory". Neither is set by
          * ordinary switching: moving between assistants must never race a half-typed prompt.
          */
-        const open = async (id, options) => {
+        const open = async (id, options, token) => {
+          if (!ownsOperation(token)) return
           if (typeof id !== "string" || id === "") return
           const force = options !== null && typeof options === "object" && options.force === true
           const discard = options !== null && typeof options === "object" && options.discard === true
           const held = entries[id]
           if (force !== true && held !== undefined) return
           const result = await fetchState(id)
+          if (!ownsOperation(token)) return
           if (result === null || result === undefined || result.ok !== true) {
-            setFailed(true)
-            setStatus(apiText(result, "msg.readFailed"))
-            return
+            throw new Error(apiText(result, "msg.readFailed"))
           }
           const fresh = draftOf(result)
           setEntries((previous) => {
             const before = previous[id]
-            const keep = discard !== true && before !== undefined && !sameDraft(before.value, before.saved) ? before.value : fresh
-            return { ...previous, [id]: { payload: result, saved: fresh, value: keep } }
+            const keep = discard !== true && before !== undefined && !sameDraft(before.value, before.saved)
+            // A dirty draft owns the revision it was loaded from. A read may
+            // discover someone else's change, but cannot authorize overwriting it.
+            if (keep && typeof before.payload?.revision === "string") return { ...previous, [id]: { ...before,
+              // Diagnostics may recover independently of this draft. Refresh
+              // those fields without changing its editable baseline or token.
+              value: { ...before.value, warnings: fresh.warnings, broken: fresh.broken, baseUnavailable: fresh.baseUnavailable } } }
+            return { ...previous, [id]: { payload: result, saved: fresh, value: keep ? before.value : fresh } }
           })
-          setFailed(false)
         }
 
         /** Re-read the assistant list and force-reload the one it settles on. */
-        const reload = async (preferId, options) => {
+        const reload = async (preferId, options, token) => {
+          if (!ownsOperation(token)) return
           const result = await fetchList()
+          if (!ownsOperation(token)) return
           if (result === null || result === undefined || result.ok !== true) {
-            setFailed(true)
             setListFailed(true)
-            setStatus(apiText(result, "msg.readFailed"))
-            return
+            throw new Error(apiText(result, "msg.readFailed"))
           }
           const assistants = Array.isArray(result.assistants) ? result.assistants : []
           const choices = Array.isArray(result.postures) ? result.postures.filter((item) => item !== null && typeof item === "object" && typeof item.id === "string") : []
           setListFailed(false)
+          if (typeof result.version === "string" && result.version !== "") setRuntimeVersion(result.version)
           setList(assistants)
           setPostureChoices(choices)
           setPosture((current) => (choices.some((item) => item.id === current) ? current : choices.length > 0 ? choices[0].id : "develop"))
@@ -1352,10 +1678,11 @@ try {
                   : ""
           setSelected(wanted)
           if (wanted === "") {
-            setEntries({})
+            // An empty remote roster does not discard the only in-memory copy of another draft.
+            setEntries((previous) => Object.fromEntries(Object.entries(previous).filter(([, held]) => !sameDraft(held.value, held.saved))))
             return
           }
-          await open(wanted, { force: true, discard: options !== null && typeof options === "object" && options.discard === true })
+          await open(wanted, { force: true, discard: options !== null && typeof options === "object" && options.discard === true }, token)
         }
 
         /**
@@ -1364,11 +1691,13 @@ try {
          * A save can rename an assistant but never changes ids, so the list needs a new
          * fetch while the selection, the payloads and every draft stay exactly as they are.
          */
-        const refreshNames = async () => {
+        const refreshNames = async (token) => {
           const result = await fetchList()
+          if (!ownsOperation(token)) return
           if (result !== null && result !== undefined && result.ok === true) {
+            if (typeof result.version === "string" && result.version !== "") setRuntimeVersion(result.version)
             setList(Array.isArray(result.assistants) ? result.assistants : [])
-          }
+          } else throw new Error(apiText(result, "msg.readFailed"))
         }
 
         /**
@@ -1387,24 +1716,156 @@ try {
         }, [])
 
         react.useEffect(() => {
-          let alive = true
-          ;(async () => {
-            setBusy(true)
-            try {
-              await reload("")
-            } catch (error) {
-              if (alive) {
-                setFailed(true)
-                setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.readFailed"), detail: describeError(error) }))
-              }
-            } finally {
-              if (alive) setBusy(false)
-            }
-          })()
+          operation.current.alive = true
+          runOperation("status.reading", "msg.readFailed", (token) => reload("", undefined, token))
           return () => {
-            alive = false
+            operation.current.alive = false
+            operation.current.current = null
           }
         }, [])
+
+        react.useEffect(() => {
+          updateOperation.current.alive = true
+          const changed = () => {
+            updateOperation.current.current = null
+            setUpdateChecking(false)
+            setUpdateResult(null)
+            setUpdateNotice("")
+            setUpdateRevision((value) => value + 1)
+          }
+          updateListeners.add(changed)
+          return () => {
+            updateListeners.delete(changed)
+            updateOperation.current.alive = false
+            updateOperation.current.current = null
+          }
+        }, [])
+
+        const hasNativeUpdates = (services) => typeof services.manager?.listBundles === "function" &&
+          typeof services.manager?.listVersions === "function" && typeof services.manager?.updateBundle === "function"
+        const ownsUpdateCheck = (token, services) => updateOperation.current.alive &&
+          updateOperation.current.current === token && updateServices.revision === services.revision
+        const checkUpdates = async () => {
+          if (!updateOperation.current.alive || operation.current.current !== null || updateOperation.current.current !== null) return
+          const services = updateServices
+          if (!hasNativeUpdates(services) || !services.list || !services.versions) return
+          const token = {}
+          updateOperation.current.current = token
+          setUpdateChecking(true)
+          setUpdateResult(null)
+          setUpdateNotice("")
+          const show = (key, details) => setUpdateResult({ key, ...details, revision: services.revision })
+          try {
+            const inventory = await services.manager.listBundles()
+            if (!ownsUpdateCheck(token, services)) return
+            if (inventory?.ok !== true || !Array.isArray(inventory.value)) throw new Error("inventory")
+            const bundle = inventory.value.find((item) => item?.name === UPDATE_PACKAGE)
+            if (bundle === undefined) { show("update.notFound"); return }
+            if (bundle.updatable !== true || bundle.installed !== true || bundle.availability !== "profile" ||
+                bundle.official !== false || bundle.readOnlyReason !== undefined || typeof bundle.source !== "string" ||
+                typeof bundle.version !== "string" || bundle.version === "") {
+              show("update.managed", { installed: bundle.version }); return
+            }
+            const answer = await services.manager.listVersions(UPDATE_PACKAGE, {})
+            if (!ownsUpdateCheck(token, services)) return
+            if (answer?.ok !== true || answer.value === null || typeof answer.value !== "object") throw new Error("versions")
+            const listing = answer.value
+            if (listing.status === "refused") {
+              show(listing.problem === "network" ? "update.network" : listing.problem === "not-updatable" ? "update.managed" : "update.refused")
+              return
+            }
+            if (listing.status !== "listed" || typeof listing.installed !== "string" || listing.installed !== bundle.version ||
+                !(listing.registry === null || typeof listing.registry === "string") || !Array.isArray(listing.attempts) ||
+                !Number.isInteger(listing.omitted) || listing.omitted < 0 || !Array.isArray(listing.versions) ||
+                !listing.versions.every((item) => item !== null && typeof item === "object" && typeof item.version === "string" &&
+                  item.version !== "" && typeof item.bundle === "boolean" && typeof item.prerelease === "boolean" && Array.isArray(item.tags))) {
+              throw new Error("incomplete listing")
+            }
+            // Match the official default candidate and trust the Host's semver ordering.
+            const candidate = listing.versions.find((item) => item.bundle && item.incompatible === undefined && item.deprecated === undefined && !item.prerelease)
+            show(candidate ? "update.available" : listing.omitted > 0 ? "update.partial" : listing.versions.length > 0 ? "update.filtered" : "update.current", {
+              candidate: candidate?.version, installed: listing.installed, omitted: listing.omitted,
+            })
+          } catch {
+            if (ownsUpdateCheck(token, services)) show("update.failed")
+          } finally {
+            if (ownsUpdateCheck(token, services)) {
+              updateOperation.current.current = null
+              setUpdateChecking(false)
+            }
+          }
+        }
+
+        /** Latest refs also guard a click before React commits the last keystroke. */
+        const updateNavigationBlock = () => {
+          if (operation.current.current !== null || busy || updateOperation.current.current !== null) return "update.finishOperation"
+          if (navigationState.current.syncNeeded || navigationState.current.refreshNeeded !== null) return "update.finishRecovery"
+          if (navigationState.current.newName !== "" || Object.values(heldEntries.current).some((held) => !sameDraft(held.value, held.saved))) return "update.saveDrafts"
+          return ""
+        }
+        const guardUpdateNavigation = () => {
+          if (!updateOperation.current.alive) return false
+          const block = updateNavigationBlock()
+          if (block !== "") { setUpdateNotice(block); return false }
+          return true
+        }
+        const openPluginDetails = () => {
+          if (!guardUpdateNavigation()) return
+          const services = updateServices
+          if (((hasNativeUpdates(services) || services.accessKnown) && !services.list) || typeof services.navigation?.openBundle !== "function" ||
+              (updateResult?.candidate && (updateResult.revision !== services.revision || !services.update))) {
+            setUpdateNotice("update.permission"); return
+          }
+          try { services.navigation.openBundle(UPDATE_PACKAGE) }
+          catch { setUpdateNotice("update.navigationFailed") }
+        }
+
+        const orphanDrafts = () => {
+          if (!Array.isArray(heldRoster.current)) return []
+          const visible = new Set(heldRoster.current.map((item) => item.id))
+          return Object.entries(heldEntries.current).filter(([id, held]) => !visible.has(id) && !sameDraft(held.value, held.saved))
+        }
+        const closeOrphanConfirmation = () => {
+          orphanConfirmation.current = null
+          orphanAcknowledgement.current = false
+          setOrphanAcknowledged(false)
+          setOrphanDialog(null)
+        }
+        const orphanActionBlock = () => operation.current.current !== null || busy || updateOperation.current.current !== null
+          ? "update.finishOperation"
+          : navigationState.current.syncNeeded || navigationState.current.refreshNeeded !== null ? "update.finishRecovery" : ""
+        const orphanSnapshotCurrent = (snapshot) => heldEntries.current === snapshot.entries && heldRoster.current === snapshot.roster &&
+          navigationState.current.newName === snapshot.newName && orphanDrafts().some(([id]) => id === snapshot.id)
+        const discardOrphan = (snapshot) => {
+          if (!updateOperation.current.alive || orphanConfirmation.current !== snapshot || !orphanAcknowledgement.current) return
+          const blocked = orphanActionBlock()
+          if (blocked || !orphanSnapshotCurrent(snapshot)) {
+            closeOrphanConfirmation()
+            setUpdateNotice(blocked || "update.orphanChanged")
+            return
+          }
+          setEntries((previous) => { const next = { ...previous }; delete next[snapshot.id]; return next })
+          closeOrphanConfirmation()
+          setOrphanView("")
+          setUpdateNotice("update.orphanDiscarded")
+        }
+        const askDiscardOrphan = (id, shown) => {
+          if (!updateOperation.current.alive) return
+          const snapshot = { ...shown, id }
+          const blocked = orphanActionBlock()
+          if (blocked || !orphanSnapshotCurrent(snapshot)) { setUpdateNotice(blocked || "update.orphanChanged"); return }
+          const value = snapshot.entries[id].value
+          snapshot.name = value.name || id
+          orphanConfirmation.current = snapshot
+          orphanAcknowledgement.current = false
+          setOrphanAcknowledged(false)
+          if (renderable(A.RiskConfirmation)) setOrphanDialog(snapshot)
+          else if (typeof window !== "undefined" && typeof window.confirm === "function" &&
+              window.confirm(fillPlaceholders(t("update.orphanConfirm"), { name: snapshot.name, id }))) {
+            orphanAcknowledgement.current = true
+            discardOrphan(snapshot)
+          } else closeOrphanConfirmation()
+        }
 
         /** Change one field of the selected assistant's draft. */
         const update = (patch, options) => {
@@ -1420,7 +1881,7 @@ try {
           //
           // `{ force: true }` 是给**内部**调用用的（例如「按本线修复」把结果折进草稿）：
           // 那不是用户输入，不受这条守护约束。
-          if (busy === true && options?.force !== true) return
+          if (operation.current.current !== null && options?.force !== true) return
           setEntries((previous) => {
             const current = previous[selected]
             if (current === undefined) return previous
@@ -1430,36 +1891,25 @@ try {
         }
 
         const pick = async (id) => {
-          if (id === selected) {
-            setBusy(true)
-            try {
-              await open(id, { force: true })
-            } catch (error) {
-              setFailed(true)
-              setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.readFailed"), detail: describeError(error) }))
-            } finally {
-              setBusy(false)
-            }
-            return
-          }
-          setSelected(id)
-          setDeleteOpen(false)
-          setAcknowledged(false)
-          setStatus("")
-          setBusy(true)
-          try {
-            await open(id)
-          } catch (error) {
-            setFailed(true)
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.readFailed"), detail: describeError(error) }))
-          } finally {
-            setBusy(false)
-          }
+          return runOperation("status.reading", "msg.readFailed", async (token) => {
+            setSelected(id)
+            setDeleteOpen(false)
+            setAcknowledged(false)
+            setStatus("")
+            setFailed(false)
+            await open(id, { force: id === selected }, token)
+          })
         }
+
+        const reread = (discard = false) => runOperation("status.reading", "msg.readFailed", async (token) => {
+          setStatus("")
+          setFailed(false)
+          await reload(selected, { discard }, token)
+        })
 
         /** Create a new assistant, or duplicate the selected one. */
         const create = async (options) => {
-          if (busy === true) return
+          if (operation.current.current !== null) return
           const from = options !== null && typeof options === "object" ? options.from : undefined
           const name =
             options !== null && typeof options === "object" && typeof options.name === "string"
@@ -1470,30 +1920,25 @@ try {
             setStatus(t("msg.nameRequired"))
             return
           }
-          setBusy(true)
-          try {
+          return runOperation("status.creating", "msg.createFailed", async (token) => {
             const body = { name, locale: activeLanguage(localeRef) }
             if (from !== undefined) body.from = from
             else if (postureChoices.some((item) => item.id === posture)) body.posture = posture
             const result = await postJson(ROUTES.create, body)
-            if (result !== null && result !== undefined && result.ok === true) {
-              setNewName("")
-              setFailed(false)
-              setStatus(apiText(result, from === undefined ? "msg.created" : "msg.duplicated"))
-              await reload(result.id)
-            } else {
-              setFailed(true)
-              setStatus(apiText(result, "msg.createFailed"))
+            if (!ownsOperation(token)) return
+            showResult(result, from === undefined ? "msg.created" : "msg.duplicated", "msg.createFailed")
+            if (result?.ok === true || result?.persisted === true) {
+              if (from === undefined) setNewName("")
+              setFocusCreated(result.id)
+              await refreshAfterWrite(result, from === undefined ? "msg.created" : "msg.duplicated", result.id, token, () => reload(result.id, undefined, token))
             }
-          } catch (error) {
-            setFailed(true)
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.createFailed"), detail: describeError(error) }))
-          } finally {
-            setBusy(false)
-          }
+          })
         }
 
-        const duplicate = () => create({ from: draft.id, name: copyName(t("assistant.copyName"), draft.name || draft.id) })
+        const duplicate = () => {
+          if (dirty && (typeof window.confirm !== "function" || !window.confirm(t("assistant.duplicateSavedConfirm")))) return
+          return create({ from: draft.id, name: copyName(t("assistant.copyName"), draft.name || draft.id) })
+        }
 
         /**
          * Move the selected assistant one slot in the picker order.
@@ -1502,23 +1947,22 @@ try {
          * (the default) and only the roster order changes.
          */
         const move = async (direction) => {
-          setBusy(true)
-          try {
-            const result = await postJson(ROUTES.reorder, { id: draft.id, direction })
-            if (result !== null && result !== undefined && result.ok === true) {
-              setFailed(false)
-              setStatus(apiText(result, "msg.reordered"))
-              await reload(draft.id)
-            } else {
-              setFailed(true)
-              setStatus(apiText(result, "msg.reorderFailed"))
+          return runOperation("status.reordering", "msg.reorderFailed", async (token) => {
+            const baseRevisions = Object.fromEntries(Object.entries(heldEntries.current)
+              .filter(([, held]) => typeof held.payload?.revision === "string")
+              .map(([id, held]) => [id, held.payload.revision]))
+            const result = await postJson(ROUTES.reorder, { id: draft.id, direction, baseRevisions })
+            if (!ownsOperation(token)) return
+            showResult(result, "msg.reordered", "msg.reorderFailed")
+            if (result?.ok === true || result?.persisted === true) {
+              setEntries((previous) => Object.fromEntries(Object.entries(previous).map(([id, held]) => {
+                const revision = result.revisions?.[id]
+                return [id, typeof revision === "string" && typeof baseRevisions[id] === "string" &&
+                  held.payload?.revision === baseRevisions[id] ? { ...held, payload: { ...held.payload, revision } } : held]
+              })))
+              await refreshAfterWrite(result, "msg.reordered", draft.id, token, () => reload(draft.id, undefined, token))
             }
-          } catch (error) {
-            setFailed(true)
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.reorderFailed"), detail: describe(error) }))
-          } finally {
-            setBusy(false)
-          }
+          })
         }
 
         /** Download the prompt being edited (client-side only — the host is not involved). */
@@ -1528,28 +1972,35 @@ try {
          * 只改**草稿**，不写盘：这样"一键回到官方"既立刻可见，又可被「重新读取」撤销 ——
          * 与页面其余部分一样，一切改动都要点保存才落盘。
          */
+        const allowPromptReplacement = () => {
+          const held = heldEntries.current[selected]
+          return held === undefined || sameDraft(held.value, held.saved) ||
+            (typeof window.confirm === "function" && window.confirm(t("prompt.replaceConfirm")))
+        }
         const resetPrompt = () => {
           const factory = typeof draft.factoryPrompt === "string" ? draft.factoryPrompt : ""
-          if (factory === "") return
+          if (factory === "" || !allowPromptReplacement()) return
           update({ prompt: factory })
         }
 
         /** 把某个历史版本载入编辑器。与「恢复出厂」同一条纪律：只改草稿，保存前不落盘。 */
         const loadVersion = async () => {
           const picked = typeof draft.historyPick === "string" ? draft.historyPick : ""
-          if (picked === "" || draft.id === undefined) return
-          try {
+          if (picked === "" || draft.id === undefined || !allowPromptReplacement()) return
+          return runOperation("status.reading", "msg.loadFailed", async (token) => {
             // 版本键是序号（时间戳会在同一毫秒内撞车 —— 单测就是那样抓到它的）。
             const response = await fetch(ROUTES.history + "?id=" + encodeURIComponent(draft.id) + "&n=" + encodeURIComponent(picked))
             const payload = await asJson(response)
+            if (!ownsOperation(token)) return
             if (payload === null || payload.ok !== true) {
+              setFailed(true)
               setStatus(t("msg.loadFailed"))
               return
             }
-            update({ prompt: payload.text })
-          } catch (error) {
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.loadFailed"), detail: describeError(error) }))
-          }
+            update({ prompt: payload.text }, { force: true })
+            setFailed(false)
+            setStatus(t("msg.loaded"))
+          })
         }
 
         const exportPrompt = () => {
@@ -1578,61 +2029,55 @@ try {
          * path (and the same `{{…}}` validation) as anything typed by hand — an import can
          * never silently publish a prompt the renderer would refuse.
          */
-        const importPrompt = (event) => {
+        const importPrompt = async (event) => {
           const input = event !== null && event !== undefined ? event.target : undefined
           const file = input !== null && input !== undefined && input.files !== undefined ? input.files[0] : undefined
           // Reset so picking the same file twice in a row fires `change` again.
           if (input !== null && input !== undefined) input.value = ""
+          if (operation.current.current !== null) return
           if (file === undefined || file === null) return
           if (file.size > 1_000_000) {
             setFailed(true)
             setStatus(t("msg.importTooLarge"))
             return
           }
-          const reader = new FileReader()
-          reader.onload = () => {
-            const text = typeof reader.result === "string" ? reader.result : ""
+          if (!allowPromptReplacement()) return
+          return runOperation("status.importing", "msg.importFailed", async (token) => {
+            const text = await new Promise((resolve, reject) => {
+              const reader = new FileReader()
+              reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "")
+              reader.onerror = () => reject(reader.error || new Error(t("msg.importFailed")))
+              reader.onabort = () => reject(new Error(t("msg.importFailed")))
+              reader.readAsText(file, "utf-8")
+            })
+            if (!ownsOperation(token)) return
             if (text.trim() === "") {
               setFailed(true)
               setStatus(t("msg.importEmpty"))
               return
             }
-            update({ prompt: text })
+            update({ prompt: text }, { force: true })
             setFailed(false)
             setStatus(t("msg.imported"))
-          }
-          reader.onerror = () => {
-            setFailed(true)
-            setStatus(t("msg.importFailed"))
-          }
-          reader.readAsText(file, "utf-8")
+          })
         }
 
         const remove = async (id) => {
-          setBusy(true)
-          try {
+          return runOperation("status.deleting", "msg.deleteFailed", async (token) => {
             const result = await postJson(ROUTES.delete, { id })
-            if (result !== null && result !== undefined && result.ok === true) {
+            if (!ownsOperation(token)) return
+            showResult(result, "msg.deleted", "msg.deleteFailed")
+            if (result?.ok === true || result?.persisted === true) {
               setDeleteOpen(false)
               setAcknowledged(false)
-              setFailed(false)
-              setStatus(apiText(result, "msg.deleted"))
               setEntries((previous) => {
                 const next = { ...previous }
                 delete next[id]
                 return next
               })
-              await reload("")
-            } else {
-              setFailed(true)
-              setStatus(apiText(result, "msg.deleteFailed"))
+              await refreshAfterWrite(result, "msg.deleted", "", token, () => reload("", undefined, token))
             }
-          } catch (error) {
-            setFailed(true)
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.deleteFailed"), detail: describeError(error) }))
-          } finally {
-            setBusy(false)
-          }
+          })
         }
 
         /**
@@ -1659,8 +2104,10 @@ try {
         }
 
         const save = async () => {
-          setBusy(true)
-          try {
+          if (draft === null || navigationState.current.refreshNeeded !== null || navigationState.current.syncNeeded) return
+          return runOperation("status.saving", "msg.saveFailed", async (token) => {
+            const savedHistory = entry?.saved?.history
+            const newest = Array.isArray(savedHistory) && savedHistory.length > 0 ? savedHistory[0].n : undefined
             const result = await postJson(ROUTES.state, {
               id: draft.id,
               mode: draft.mode,
@@ -1668,7 +2115,16 @@ try {
               prompt: draft.prompt,
               name: draft.name,
               description: draft.description,
+              ...(typeof entry?.payload?.revision === "string" ? { baseRevision: entry.payload.revision }
+                : typeof newest === "number" ? { baseN: newest } : {}),
             })
+            if (!ownsOperation(token)) return
+            if (result?.synchronized === false) setSyncNeeded(true)
+            else if (result?.synchronized === true) setSyncNeeded(false)
+            if ((result?.ok === true || result?.persisted === true) && typeof result.revision === "string") {
+              setEntries((previous) => ({ ...previous, [draft.id]: { ...previous[draft.id],
+                payload: { ...previous[draft.id].payload, revision: result.revision }, saved: draft } }))
+            }
             if (result !== null && result !== undefined && result.ok === true) {
               setFailed(false)
               const compositionChanged =
@@ -1681,77 +2137,118 @@ try {
               // The server normalises what it stores (trimmed name, recomputed overrides),
               // so the just-saved draft is replaced by what it actually wrote. Without this
               // the page would show 「已保存」 and 「未保存」 at the same time.
-              const fresh = await fetchState(draft.id)
-              if (fresh !== null && fresh !== undefined && fresh.ok === true) {
+              await refreshAfterWrite(spoken, "msg.saved", draft.id, token, async () => {
+                const fresh = await fetchState(draft.id)
+                if (!ownsOperation(token)) return
+                if (fresh?.ok !== true) throw new Error(apiText(fresh, "msg.readFailed"))
                 const normalized = draftOf(fresh)
                 setEntries((previous) => ({
                   ...previous,
                   [draft.id]: { payload: fresh, saved: normalized, value: normalized },
                 }))
-                await refreshNames()
-              } else {
-                await reload(draft.id, { discard: true })
-              }
+                await refreshNames(token)
+              })
             } else {
               setFailed(true)
               setStatus(apiText(result, "msg.saveFailed"))
             }
-          } catch (error) {
-            setFailed(true)
-            setStatus(fillPlaceholders(t("status.detail"), { message: t("msg.saveFailed"), detail: describeError(error) }))
-          } finally {
-            setBusy(false)
+          })
+        }
+
+        const retrySync = () => runOperation("status.synchronizing", "msg.syncFailed", async (token) => {
+          const result = await postJson(ROUTES.sync, {})
+          if (!ownsOperation(token)) return
+          showResult(result, "msg.synchronized", "msg.syncFailed")
+          if (result?.ok === true) {
+            await refreshAfterWrite(result, "msg.synchronized", selected, token, () => reload(selected, undefined, token))
           }
+        })
+
+        const retryRead = () => {
+          if (refreshNeeded === null) return
+          const { result, fallbackKey, targetId } = refreshNeeded
+          return runOperation("status.reading", "msg.readFailed", (token) =>
+            refreshAfterWrite(result, fallbackKey, targetId, token, async () => {
+              await reload(targetId, undefined, token)
+              if (ownsOperation(token)) showResult(result, fallbackKey, fallbackKey)
+            }),
+          )
         }
 
         const assistants = list === null ? [] : list
         const position = assistants.findIndex((item) => item.id === selected)
-        const statusClass = failed
+        const statusClass = busy
+          ? "cpfe-status"
+          : failed
           ? "cpfe-status cpfe-err"
           : dirty
             ? "cpfe-status cpfe-dirty"
             : "cpfe-status cpfe-ok"
-        const shown = dirty && status === "" ? t("msg.unsaved") : status
-
+        const shown = pending !== "" ? t(pending) : dirty && status === "" ? t("msg.unsaved") : status
+        const feedback = [
+          refreshNeeded !== null
+            ? react.createElement(A.Button, { variant: "outline", disabled: busy, onClick: retryRead }, t("btn.retryRead"))
+            : null,
+          refreshNeeded === null && !editorReady && failed && list !== null && selected !== ""
+            ? react.createElement(A.Button, { variant: "outline", disabled: busy, onClick: () => reread() }, t("btn.reload"))
+            : null,
+          syncNeeded
+            ? react.createElement(A.Button, { variant: "outline", disabled: busy, onClick: retrySync }, t("btn.retrySync"))
+            : null,
+          react.createElement("span", { className: statusClass, role: "status", "aria-live": "polite", "aria-atomic": true }, shown),
+        ]
         const createGroup = react.createElement(
           "section",
-          { className: "cpfe-create" },
+          { className: "cpfe-create", ref: createSection },
           react.createElement("h2", { className: "cpfe-h" }, t("create.heading")),
           react.createElement(SectionHint, { text: t("posture.hint") }),
-          postureChoices.length === 0
-            ? null
-            : react.createElement(
-                "div",
-                null,
-                react.createElement(
-                  "div",
-                  { className: "cpfe-pills", role: "radiogroup", "aria-label": t("posture.hint") },
-                  postureChoices.map((item) =>
-                    react.createElement(
-                      A.Pill,
-                      {
-                        key: item.id,
-                        active: item.id === posture,
-                        disabled: busy,
-                        "aria-pressed": item.id === posture,
-                        onClick: () => setPosture(item.id),
-                      },
-                      t("posture." + item.id + ".label", item.id),
-                    ),
-                  ),
-                ),
-                react.createElement("p", { className: "cpfe-note" }, t("posture." + posture + ".note", "")),
-              ),
           react.createElement(
             "div",
-            { className: "cpfe-newrow" },
+            { className: "cpfe-branch" },
+            postureChoices.length === 0
+              ? null
+              : react.createElement(
+                  "div",
+                  { className: "cpfe-node" },
+                  react.createElement("span", { className: "cpfe-node-label" }, t("tree.posture")),
+                  react.createElement(
+                    "div",
+                    { className: "cpfe-pills", role: "radiogroup", "aria-label": t("tree.posture") },
+                    postureChoices.map((item) =>
+                      react.createElement(
+                        A.Pill,
+                        {
+                          key: item.id,
+                          active: item.id === posture,
+                          disabled: busy,
+                          "aria-pressed": item.id === posture,
+                          onClick: () => setPosture(item.id),
+                        },
+                        t("posture." + item.id + ".label", item.id),
+                      ),
+                    ),
+                  ),
+                  react.createElement("p", { className: "cpfe-note" }, t("posture." + posture + ".note", "")),
+                ),
+            react.createElement(
+              "div",
+              { className: "cpfe-node" },
+              react.createElement("span", { className: "cpfe-node-label" }, t("tree.base")),
+              react.createElement("p", { className: "cpfe-note" }, t("tree.baseLocked")),
+            ),
+            react.createElement(
+              "div",
+              { className: "cpfe-newrow" },
             react.createElement(A.Input, {
+              ref: createNameInput,
               className: "cpfe-newinput",
               value: newName,
+              disabled: busy,
               placeholder: t("assistant.newPlaceholder"),
               "aria-label": t("assistant.newPlaceholder"),
               onKeyDown: (event) => {
-                if (event.key === "Enter" && busy !== true) create()
+                if (event.key === "Enter" && !event.isComposing && !event.nativeEvent?.isComposing &&
+                    event.keyCode !== 229 && event.nativeEvent?.keyCode !== 229 && busy !== true) create()
               },
               onChange: (event) => {
                 setNewName(event.target.value)
@@ -1766,16 +2263,84 @@ try {
                 disabled: busy,
                 onClick: () => create(),
               },
-              busy ? t("btn.creating") : t("btn.create"),
+              pending === "status.creating" ? t("btn.creating") : t("btn.create"),
             ),
+            ),
+            react.createElement("p", { className: "cpfe-note" }, t("create.nextStep")),
           ),
         )
 
         // ── assistant list ────────────────────────────────────────────────────
+        const nativeUpdates = hasNativeUpdates(updateServices)
+        const updateAllowed = nativeUpdates && updateServices.list && updateServices.versions
+        const checkedUpdate = updateResult?.revision === updateServices.revision ? updateResult : null
+        const navigationBlock = updateNavigationBlock()
+        const updateText = updateChecking ? t("update.checking") : checkedUpdate
+          ? fillPlaceholders(t(checkedUpdate.key), { version: checkedUpdate.candidate })
+          : !nativeUpdates ? t("update.unavailable") : !updateAllowed ? t("update.permission") : t("update.idle")
+        const shownOrphans = orphanDrafts()
+        const orphanSnapshot = { entries: heldEntries.current, roster: heldRoster.current, newName: navigationState.current.newName }
+        const updateSection = react.createElement(
+          "section", { className: "cpfe-update", "aria-label": t("update.heading"), "aria-busy": updateChecking },
+          react.createElement("div", { className: "cpfe-update-meta" },
+            react.createElement("h2", { className: "cpfe-h" }, t("update.heading")),
+            react.createElement("p", { className: "cpfe-version" }, fillPlaceholders(t("update.running"), { version: runtimeVersion || t("update.unknown") })),
+            react.createElement("p", { id: "cpfe-update-status", className: "cpfe-sub cpfe-update-note", role: "status", "aria-live": "polite", "aria-atomic": true }, updateText),
+            checkedUpdate?.installed && checkedUpdate.installed !== runtimeVersion
+              ? react.createElement("p", { className: "cpfe-sub cpfe-update-note" }, fillPlaceholders(t("update.disk"), { version: checkedUpdate.installed })) : null,
+            checkedUpdate?.omitted > 0
+              ? react.createElement("p", { className: "cpfe-sub" }, fillPlaceholders(t("update.omitted"), { count: checkedUpdate.omitted })) : null,
+            checkedUpdate?.candidate && !updateServices.update ? react.createElement("p", { className: "cpfe-sub" }, t("update.updatePermission")) : null,
+            updateNotice || navigationBlock ? react.createElement("p", { className: "cpfe-sub", role: "status" }, t(updateNotice || navigationBlock)) : null,
+            shownOrphans.length > 0 ? react.createElement("div", { className: "cpfe-warns cpfe-update-note" },
+              react.createElement("p", { className: "cpfe-sub" }, t("update.orphanHint")),
+              ...shownOrphans.map(([id, held]) => react.createElement("div", { key: id, className: "cpfe-node" },
+                react.createElement("span", { className: "cpfe-row-head" }, fillPlaceholders(t("update.orphanName"), { name: held.value.name || id, id })),
+                react.createElement(A.Button, { variant: "ghost", className: "cpfe-disclosure", "aria-expanded": orphanView === id,
+                  onClick: () => setOrphanView(orphanView === id ? "" : id) }, t(orphanView === id ? "update.orphanHide" : "update.orphanView")),
+                orphanView === id ? react.createElement("div", { className: "cpfe-node" },
+                  react.createElement("p", { className: "cpfe-sub" }, t("update.orphanCopy")),
+                  react.createElement("textarea", { className: "cpfe-editor cpfe-orphan-editor", readOnly: true, spellCheck: false,
+                    "aria-label": fillPlaceholders(t("update.orphanName"), { name: held.value.name || id, id }),
+                    value: JSON.stringify({ id, name: held.value.name, description: held.value.description, mode: held.value.mode, overrides: held.value.overrides, prompt: held.value.prompt }, null, 2) }),
+                  react.createElement(A.Button, { variant: "outline", className: "cpfe-disclosure", disabled: orphanActionBlock() !== "",
+                    onClick: () => askDiscardOrphan(id, orphanSnapshot) }, t("update.orphanDiscard")),
+                ) : null,
+              )),
+            ) : null,
+          ),
+          react.createElement("div", { className: "cpfe-update-actions" },
+            react.createElement(A.Button, {
+              variant: "outline", disabled: busy || updateChecking || !updateAllowed,
+              "aria-describedby": "cpfe-update-status", onClick: checkUpdates,
+            }, t(updateChecking ? "update.checking" : "update.check")),
+            react.createElement(A.Button, {
+              variant: "outline",
+              disabled: navigationBlock !== "" || ((nativeUpdates || updateServices.accessKnown) && !updateServices.list) || typeof updateServices.navigation?.openBundle !== "function" ||
+                (!!checkedUpdate?.candidate && !updateServices.update),
+              title: navigationBlock ? t(navigationBlock) : undefined,
+              onClick: openPluginDetails,
+            }, t(checkedUpdate?.candidate ? "update.inPlugins" : "update.details")),
+            react.createElement("a", {
+              className: "cpfe-update-guide",
+              href: "https://github.com/BOWLUNA/dsh-custom-mode/blob/main/README" + (activeLanguage(localeRef) === "zh" ? ".zh" : "") + ".md#plugin-updates",
+              target: "_blank", rel: "noopener noreferrer", "aria-disabled": navigationBlock !== "",
+              onClick: (event) => { if (!guardUpdateNavigation()) event.preventDefault() },
+            }, t("update.guide")),
+          ),
+        )
+
+        const selectedAssistantLabel = (assistants.find((item) => item.id === selected) || {}).name || selected || t("assistant.heading")
+        const pickedHistoryEntry = draft === null || draft.historyPick === "" ? undefined : draft.history.find((item) => String(item.n) === draft.historyPick)
+        const historySelectionLabel = pickedHistoryEntry === undefined
+          ? t("history.pick")
+          : formatWhen(pickedHistoryEntry.at) + " · " + t("history.by." + pickedHistoryEntry.by)
         const assistantList = react.createElement(
           "section",
           null,
-          react.createElement("h2", { className: "cpfe-h" }, t("assistant.heading")),
+          react.createElement("div", { className: "cpfe-sec-head" },
+            react.createElement("h2", { className: "cpfe-h" }, t("assistant.heading")),
+            react.createElement(A.Button, { variant: "outline", disabled: busy, onClick: focusCreate, "data-create-entry": true }, t("btn.newAssistant"))),
                 react.createElement(SectionHint, { text: t("assistant.hint") }),
           list === null
             ? react.createElement(
@@ -1783,7 +2348,7 @@ try {
                 null,
                 react.createElement("p", { className: "cpfe-sub" }, listFailed ? t("msg.readFailed") : t("assistant.loadingList")),
                 listFailed
-                  ? react.createElement(A.Button, { disabled: busy, onClick: () => reload("") }, t("btn.reload"))
+                  ? react.createElement(A.Button, { disabled: busy, onClick: () => reread() }, t("btn.reload"))
                   : null,
               )
             : assistants.length === 0
@@ -1797,27 +2362,28 @@ try {
                   renderable(A.Menu)
                     ? react.createElement(A.Menu, {
                         open: assistantOpen,
+                        className: "cpfe-selector-menu",
                         // ★ portal：不把浮层渲染在我们的容器里。设置面板有裁剪与叠层，非 portal 的
                         //   菜单会被裁掉表面，只剩文字"压"在下面的输入框上（实测截图如此）。
                         portal: true,
-                        listClassName: "cpfe-menu",
                         align: "start",
                         side: "bottom",
                         selectedId: selected,
                         anchor: react.createElement(
                           A.Button,
                           {
-                            variant: "ghost",
+                            variant: "toolbar",
                             className: "cpfe-selector",
+                            title: selectedAssistantLabel,
                             disabled: busy,
                             onClick: () => setAssistantOpen((open) => open !== true),
                           },
-                          (assistants.find((item) => item.id === selected) || {}).name || selected || t("assistant.heading"),
+                          react.createElement("span", { className: "cpfe-selector-label" }, selectedAssistantLabel),
                           // 官方设置项的下拉是「文字在左、chevron 在右」（实测「通用设置」页的
                           // 「工作区内修改 / 中文 / 详细」都是这个形态）⇒ 图标放在 children 末尾，
                           // 不走 `icon` prop —— 那个会渲染到文字**前面**，成为页面上唯一一个反向的下拉。
                           renderable(A.IconChevronDownOutline14)
-                            ? react.createElement(A.IconChevronDownOutline14, { size: 14 })
+                            ? react.createElement(A.IconChevronDownOutline14, { size: 14, className: "cpfe-selector-chevron", "aria-hidden": true })
                             : null,
                         ),
                         items: assistants.map((item) => ({
@@ -1923,7 +2489,6 @@ try {
                 ),
               )
             : null,
-          createGroup,
           typeof (assistants.find((item) => item.id === selected) || {}).broken === "string"
             ? react.createElement("p", { className: "cpfe-note" }, t("assistant.brokenHint"))
             : null,
@@ -1940,6 +2505,7 @@ try {
                 react.createElement(SectionHint, { text: t("name.hint") }),
                 react.createElement(A.Input, {
                   className: "cpfe-field",
+                  disabled: busy,
                   value: draft.name,
                   placeholder: t("name.placeholder"),
                   "aria-label": t("name.heading"),
@@ -1971,7 +2537,7 @@ try {
                   ? react.createElement("p", { className: "cpfe-note" }, t("mode.unavailable"))
                   : react.createElement(
                       "div",
-                      { className: "cpfe-pills" },
+                      { className: "cpfe-pills", "data-live": "base" },
                       payload.modes.map((mode) =>
                         react.createElement(
                           A.Pill,
@@ -2010,8 +2576,9 @@ try {
                   : react.createElement(
                       "div",
                       null,
-                      react.createElement("input", {
-                        className: "cpfe-filter",
+                      react.createElement(A.Input, {
+                        className: "cpfe-field cpfe-filter",
+                        disabled: busy,
                         value: rowQuery,
                         placeholder: t("rows.filterPlaceholder"),
                         "aria-label": t("rows.filterPlaceholder"),
@@ -2121,29 +2688,23 @@ try {
                       renderable(A.Menu)
                         ? react.createElement(A.Menu, {
                             open: historyOpen,
+                            className: "cpfe-selector-menu",
                             portal: true,
-                            listClassName: "cpfe-menu",
                             align: "start",
                             side: "bottom",
                             selectedId: draft.historyPick,
                             anchor: react.createElement(
                               A.Button,
                               {
-                                variant: "ghost",
+                                variant: "toolbar",
                                 className: "cpfe-selector",
+                                title: historySelectionLabel,
                                 disabled: busy,
                                 onClick: () => setHistoryOpen((open) => open !== true),
                               },
-                              draft.historyPick === ""
-                                ? t("history.pick")
-                                : (() => {
-                                    const entry = draft.history.find((item) => String(item.n) === draft.historyPick)
-                                    return entry === undefined
-                                      ? t("history.pick")
-                                      : formatWhen(entry.at) + " · " + t("history.by." + entry.by)
-                                  })(),
+                              react.createElement("span", { className: "cpfe-selector-label" }, historySelectionLabel),
                               renderable(A.IconChevronDownOutline14)
-                                ? react.createElement(A.IconChevronDownOutline14, { size: 14 })
+                                ? react.createElement(A.IconChevronDownOutline14, { size: 14, className: "cpfe-selector-chevron", "aria-hidden": true })
                                 : null,
                             ),
                             items: draft.history.map((entry) => ({
@@ -2192,9 +2753,10 @@ try {
           "div",
           // `cpfe-busy` 是 issue #6 的兜底：面板里**所有**会改草稿的控件在忙碌期间一律不可交互。
           // 逐个控件加 `disabled` 会漏（本轮就漏了行开关与描述框），一个根类 + 一条 CSS 反而漏不掉。
-          { className: busy === true ? "cpfe cpfe-busy" : "cpfe" },
+          { className: busy === true ? "cpfe cpfe-busy" : "cpfe", "aria-busy": busy === true },
+          updateSection,
           assistantList,
-          null,
+          editorReady ? null : react.createElement("div", { className: "cpfe-bar" }, ...feedback),
           // 配了却不生效的项：主动点名，而不是让用户对着"我明明写了"发呆。
           // `draft` 在没选中任何助手时是 null（列表还没加载完 / 一个都没有）—— 这里必须先守卫，
           // 否则整块设置页崩掉（实测：浏览器验收当场报 Cannot read properties of null）。
@@ -2247,9 +2809,17 @@ try {
                   ),
                 ),
               ),
-          ...(editorReady ? editorSections.filter((section) => section.key === "prompt") : []),
-          ...(editorReady ? editorSections.filter((section) => section.key === "name") : []),
-          react.createElement(
+          editorReady
+            ? react.createElement(
+                "section",
+                { ref: editorSection, tabIndex: -1, "data-assistant-editor": true },
+                react.createElement("h2", { className: "cpfe-h" }, t("editor.heading")),
+                react.createElement(SectionHint, { text: fillPlaceholders(t("editor.hint"), { name: draft.name || draft.id }) }),
+                react.createElement(
+                  "div",
+                  { className: "cpfe-branch" },
+                  editorSections.filter((section) => section.key === "prompt"),
+                  react.createElement(
             "div",
             { className: "cpfe-bar" },
             react.createElement(
@@ -2257,10 +2827,10 @@ try {
               {
                 variant: "primary",
                 icon: A.IconCheckOutline14 === undefined ? null : react.createElement(A.IconCheckOutline14),
-                disabled: busy || editorReady === false || dirty === false,
+                disabled: busy || syncNeeded || refreshNeeded !== null || editorReady === false || dirty === false,
                 onClick: save,
               },
-              busy ? t("btn.saving") : t("btn.save"),
+              pending === "status.saving" ? t("btn.saving") : t("btn.save"),
             ),
             react.createElement(
               A.Button,
@@ -2273,32 +2843,24 @@ try {
                 // one place that does.
                 onClick: () => {
                   if (dirty && typeof window !== "undefined" && window.confirm(t("btn.reloadConfirm")) !== true) return
-                  reload(selected, { discard: true })
+                  reread(true)
                 },
               },
               dirty ? t("btn.reloadDiscard") : t("btn.reload"),
             ),
-            react.createElement("span", { className: statusClass }, shown),
+            ...feedback,
           ),
-          editorReady
-            ? react.createElement(
-                "p",
-                {
-                  className: "cpfe-version",
-                  title: String(payload.compositionPath ?? "") + "\n" + t("meta.versionHint"),
-                },
-                "v" + String(payload.version ?? "?"),
-              )
-            : null,
+          ...(editorReady ? editorSections.filter((section) => section.key === "name") : []),
           ...(editorReady ? editorSections.filter((section) => section.key === "mode") : []),
           editorReady
             ? react.createElement(
                 "section",
                 null,
                 react.createElement(
-                  "button",
+                  A.Button,
                   {
-                    type: "button",
+                    variant: "ghost",
+                    disabled: busy,
                     "data-cap": "toggle",
                     className: "cpfe-disclosure",
                     "aria-expanded": capOpen,
@@ -2322,8 +2884,27 @@ try {
                   : null,
               )
             : null,
+                ),
+              )
+            : null,
+          createGroup,
           // The confirmation is a portal: rendering it here keeps every piece of this page's
           // state in one component.
+          renderable(A.RiskConfirmation) && orphanDialog !== null
+            ? react.createElement(A.RiskConfirmation, {
+                open: true, title: t("update.orphanDiscard"),
+                description: fillPlaceholders(t("update.orphanConfirm"), { name: orphanDialog.name, id: orphanDialog.id }),
+                acknowledgeLabel: t("update.orphanAcknowledge"), acknowledged: orphanAcknowledged,
+                onAcknowledgedChange: (value) => {
+                  if (!updateOperation.current.alive || orphanConfirmation.current !== orphanDialog) return
+                  orphanAcknowledgement.current = value === true
+                  setOrphanAcknowledged(value === true)
+                },
+                cancelLabel: t("btn.cancel"), closeLabel: t("btn.cancel"), confirmLabel: t("update.orphanDiscard"),
+                disabled: orphanActionBlock() !== "", onCancel: () => { if (updateOperation.current.alive && orphanConfirmation.current === orphanDialog) closeOrphanConfirmation() },
+                onConfirm: () => discardOrphan(orphanDialog),
+              })
+            : null,
           renderable(A.RiskConfirmation) && editorReady
             ? react.createElement(A.RiskConfirmation, {
                 open: deleteOpen,
@@ -2381,6 +2962,9 @@ try {
             console.warn("dsh-custom-mode: slots service unavailable; settings page not registered")
             return
           }
+          const draftMemory = mountDraftProtection(ctx)
+          try { mountUpdateServices(ctx) }
+          catch { console.warn("dsh-custom-mode: optional native update services unavailable") }
           slots.inject("settings.section", () => {
             // `locale: NS` is the shipped contract: the shell then hands the
             // component a bound `t` in props.
@@ -2396,7 +2980,7 @@ try {
                 label: () => translate("nav", undefined, navT === null ? undefined : navT),
                 locale: NS,
               },
-              CustomModeSection,
+              function CustomModeSettings(props) { return CustomModeSection({ ...props, draftMemory }) },
             )
           })
         } catch (error) {

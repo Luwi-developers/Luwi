@@ -667,7 +667,10 @@ console.log(`pack-host: ${webui} imports cleanly`)
 // 工具名仍是 `generate_image` / `edit_image`; 依赖仍是 `@deepseek-ai/schemastery` + `lucide-react`,
 // 树里那份 schemastery 是 3.19.0 (要求 ^3.18.4, 满足)。`docs/` 这一版只剩 0.1 MB (演示视频没了),
 // 裁剪照旧。真机读数: host 起得来、生图面板与模板栏渲染、历史记录空但可读 (这台机没生成过图)
-const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.15.6' }
+// **2026-11-13 升到 1.17.0**: 同一套逐条复核 —— 三处 homedir 仍是**恰好 3 次** (下面那道闸会拦)、
+// `src/templates/` 仍是 5 个离线快照、工具名仍是 `generate_image` / `edit_image`、
+// 依赖仍是 `@deepseek-ai/schemastery ^3.18.4` + `lucide-react ^1.41.0`。真机读数: 待装机复验
+const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.17.0' }
 
 /** 拉 npm 的那条 registry: 这台开发机上 registry.npmjs.org 不通, 缺省走 npmmirror */
 const npmRegistry = process.env.LW_NPM_REGISTRY ?? 'https://registry.npmmirror.com'
@@ -783,7 +786,12 @@ console.log(
 // `affective_context` 那一批)。四处补丁的锚点在 0.13.0 上**逐字核对后仍各命中一次**
 // —— `tools/check-mneme-patches.mjs --from npm --version 0.13.0` 就是那次核对的可重跑版;
 // 0.13.0 新增了 `lib/attachment-text.js` (图片块占位), 只在 lib 内, 裁 .map 时不会碰到
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.13.0' }
+// **2026-11-13 升到 0.15.0**: 三个酒馆排除锚点照旧各命中一次; 热记忆那条**上游自己修了**
+// (Issue #637 的 `omitPendingRound`, inject.js 传 `{ omitPendingRound: true }`), 旧补丁按
+// `retiredWhen` 自动退役 —— 补丁表里仍留着它, 只为 0.13.x 及更早的版本还能打。
+// 判据 `node tools/check-mneme-patches.mjs --from npm --version 0.15.0` → PASS
+// (applied 3 / already 1 / hot-memory 1 answered 0 unanswered)
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.15.0' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
