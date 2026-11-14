@@ -38,9 +38,12 @@ const card = await read(src('ui/ReadyCard.kt'))
 const settings = await read(src('ui/SettingsScreen.kt'))
 const host = await read(src('ui/HostScreen.kt'))
 const nav = await read(src('ui/AppNav.kt'))
+const wakeDownload = await read(src('wake/WakeWordDownload.kt'))
+const speechDownload = await read(src('voice/SpeechModelDownload.kt'))
 const activity = await read(src('MainActivity.kt'))
 const en = await read('app/src/main/res/values/strings.xml')
 const zh = await read('app/src/main/res/values-zh/strings.xml')
+const portalBridge = await read(src('ui/PortalBridge.kt'))
 
 let failures = 0
 let checks = 0
@@ -69,8 +72,9 @@ const code = card
 // 顺序靠"步骤标题"认: 每一件在 [steps] 里只出现一次, 而且顺序看得见
 const stepTitles = [...card.matchAll(/title\s*=\s*stringResource\(R\.string\.(ready_[a-z_]+)\)/gu)]
   .map((one) => one[1])
-  // `ready_permissions` 是竖轨上那个入口行的标题, 不是四件依赖之一 (它没有状态、不进环的分母)
-  .filter((key) => !key.startsWith('ready_permissions'))
+  // `ready_permissions` 是竖轨上那个入口行的标题, 不是四件依赖之一 (它没有状态、不进环的分母);
+// `ready_account` (2026-11-14) 与它同族: 也是竖轨上的入口行
+  .filter((key) => !key.startsWith('ready_permissions') && !key.startsWith('ready_account'))
 check(
   '四件的顺序: 特权通道 → 无障碍 → 唤醒模型 → 语音模型',
   stepTitles,
@@ -126,14 +130,17 @@ check(
   [true, true, true, true, true, true, true, true],
 )
 check(
-  '节点把四档都画了 (打勾 / 进度弧 / 错误色 / 浅圈)',
+  '节点把四档都画了 (打勾 / 进度弧 / 错误色 / 暗圈 + 红横杠)',
   [
     card.includes('ReadyState.DONE -> {'),
     card.includes('ReadyState.RUNNING -> {'),
     card.includes('ReadyState.FAILED -> {'),
-    card.includes('ReadyState.TODO -> drawCircle('),
+    // TODO 那支自 2026-11-15 起也带一道红横杠 (没办的要看得见, 见第十三节那条)
+    card.includes('ReadyState.TODO -> {'),
+    card.includes('ReadyState.TODO -> {')
+      && card.indexOf('color = error,', card.indexOf('ReadyState.TODO -> {')) > 0,
   ],
-  [true, true, true, true],
+  [true, true, true, true, true],
 )
 check(
   '下载中那一行给的是确定进度 (环 + 细条 + 百分比), 不是转圈',
@@ -230,13 +237,13 @@ check(
   '权限那一行的节点颜色与就绪判断 (2026-11-07 主人: 颜色不对 / 没办却说准备完毕)',
   [
     // 未办 / 已办都是四件同一档的节点: 不另画第五种 (2026-11-07 主人: "保持一致")
-    card.includes('state = if (done) ReadyState.DONE else ReadyState.TODO'),
+    card.includes('nodeState = if (done) ReadyState.DONE else ReadyState.TODO'),
     // 箭头那套已经撤了: 竖轨里不该再出现四件都没有的形状
     !card.includes('val half = NodeRadius.toPx() * 0.42f'),
     card.includes('onAccent = colors.surface'),
     // 就绪判断把这一件也算进去, 否则权限没看过也会说"全部就绪"
-    card.includes('if (permissionsDone) 1 else 0'),
-    card.includes('val total = steps.size + 1'),
+    card.includes('listOf(permissionsDone, PortalAccount.ready)'),
+    card.includes('val total = flags.size'),
     card.includes('ReadyHead(done = done, total = total, missing = missing)'),
     // 关掉那一窗才算办过, 而且跨启动记得住
     card.includes('PermissionsSeen.read'),
@@ -397,6 +404,198 @@ check(
     card.includes('delay(LOADING_BACKSTOP_MS)'),
   ],
   [true, true, true, true, true, true, true, true, true, true, true, true],
+)
+
+/* ── 十二、进度条按顺序卡住 (2026-11-14 主人: "上面有未完成的应先卡住进度条…不能跳过") ───────── */
+
+// 有序清单 = 四件 + 选择权限 + 账号; `firstPending` 是第一个没办的位置, 环与竖轨只走到这里。
+// 上面有缺口时下面的已办项带不动进度条 —— 那正是"跳过"
+check(
+  '进度条只按顺序推进 (缺口挡住后面的已办项)',
+  [
+    card.includes('val flags = steps.map { it.state == ReadyState.DONE } +'),
+    card.includes('listOf(permissionsDone, PortalAccount.ready)'),
+    card.includes('val firstPending = flags.indexOfFirst { !it }'),
+    card.includes('val done = firstPending'),
+    // 顶栏那句按真实未办件数算, 不虚报成前缀长度
+    card.includes('val missing = flags.count { !it }'),
+    card.includes('ReadyHead(done = done, total = total, missing = missing)'),
+    // 每行都有"路铺到这儿没有"这个参数, 节点仍按各自真状态画
+    card.includes('reached = index <= firstPending'),
+    card.includes('reached = steps.size <= firstPending'),
+    card.includes('reached = steps.size + 1 <= firstPending'),
+    card.includes('reached: Boolean = false,'),
+    card.includes('val rail = if (reached)'),
+  ],
+  [true, true, true, true, true, true, true, true, true, true, true],
+)
+
+// 2026-11-15 主人: "帐号左边的点没有融入上方进度条, 而且没到这个进度时不允许点击才对" ——
+// ① 选择权限那一行**不是末行** (下面跟着账号), 收口在这儿轨道就断在半空; 账号才是末行
+// ② 路没铺到 = 点不开 (同一个 `reached`, 一件事两个后果)
+// ③ 没完成的节点画**红横杠** (主人: "比如这个模型没有下载也要表示")
+check(
+  '轨道连着画 + 没铺到不许点 + 没完成有红横杠 (2026-11-15)',
+  [
+    card.includes('last = false,\n        // 路没铺到这儿就点不开'),
+    card.includes('last: Boolean = true,'),
+    card.includes('if (exit == null || !open)'),
+    card.includes('val open = reached'),
+    // TODO 那支多一道红色横杠
+    /ReadyState\.TODO -> \{[\s\S]{0,900}?color = error,/u.test(card),
+    // 账号那条不许再冒出 railLit 这种第二套判据
+    !card.includes('railLit'),
+  ],
+  [true, true, true, true, true, true],
+)
+
+// 让位那一段已撤回: 引导卡与 portalStatus 都不许再报"引导开着没有"
+check(
+  '引导闸那一套已撤回 (2026-11-14 晚)',
+  [card.includes('guideOpen'), card.includes('guideShown'), portalBridge.includes('"guide"')],
+  [false, false, false],
+)
+
+/* ── 十三、账号那一行 (2026-11-14) ─────────────────────────────────────────── */
+
+// 主人: "把登录加入新手引导" —— 引导卡里多一行「账号」, 点开是原生那一窗 (填 Key / 登录 / 稍后),
+// 三条路都落到 dsh 自己的服务上 (`host-plugin` 的 `/lw-account`)
+check(
+  '首启引导里有「账号」这一项 (2026-11-14)',
+  [
+    card.includes('R.string.ready_account\n') || card.includes('R.string.ready_account)'),
+    card.includes('private fun accountDetail()'),
+    card.includes('private fun AccountGuideDialog('),
+    card.includes('PortalAccount.login()'),
+    card.includes('PortalAccount.saveKey(key)'),
+    card.includes('PortalAccount.refresh()'),
+    card.includes('PortalAccount.defer(context)'),
+    // 第三颗按钮: 未登录时"稍后", 已登录后是一颗静态的「已登录」
+    card.includes('R.string.ready_account_later)'),
+    card.includes('R.string.ready_account_signed_in_state)'),
+    // 授权地址交给系统浏览器, 不在应用里再开一层
+    card.includes('Intent.ACTION_VIEW'),
+    // 从浏览器回来再问一次
+    card.includes('Lifecycle.Event.ON_RESUME'),
+    // 两档同一个窗, 不叠第二层
+    card.includes('InputDialog('),
+    card.includes('SuperTextField('),
+    // 新窗用卡片自己那套节点 + 主色描边按钮, 不引图标库
+    card.includes('private fun AccountIdentity()'),
+    card.includes('private fun AccountPrimary('),
+  ],
+  [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true],
+)
+
+// 两份 strings 都要有这一组键 (缺一边就是"切语言少一行")
+const accountKeys = [
+  'ready_account', 'ready_account_summary', 'ready_account_signed_in', 'ready_account_signed_out',
+  'ready_account_working', 'ready_account_key_done', 'ready_account_failed', 'ready_account_title',
+  'ready_account_login', 'ready_account_key', 'ready_account_key_hint', 'ready_account_save',
+  'ready_account_cancel', 'ready_account_key_clear', 'ready_account_waiting',
+  'ready_account_cta', 'ready_account_login_summary', 'ready_account_key_summary',
+  'ready_account_later', 'ready_account_later_detail', 'ready_account_signed_in_state',
+]
+check(
+  '账号那组字两份都在',
+  accountKeys.filter((key) => !en.includes(`name="${key}"`) || !zh.includes(`name="${key}"`)),
+  [],
+)
+
+// 2026-11-14 晚 (主人: "已登录要是可点的按钮, 没有退出引导窗口的按钮会卡死" + "统一进度条"): 已登录那颗
+// 必须是**可点的 TextButton 且点它关窗**; 六行走**同一份** [ReadyRailRow], 不再两套实现
+check(
+  '账号窗有出口 + 六行同一份轨道实现 (2026-11-14 晚)',
+  [
+    card.includes('private fun ReadyRailRow('),
+    // 两个包装都只调那一份核心
+    card.includes('ReadyRailRow('),
+    card.indexOf('private fun ReadyRow(') > 0 && card.indexOf('private fun ReadyLinkRow(') > 0,
+    // 已登录 = 可点关窗 (不再是静态一行)
+    card.includes('text = stringResource(R.string.ready_account_signed_in_state),'),
+    card.includes('onClick = onDismiss,'),
+    !card.includes('private fun AccountSignedRow'),
+  ],
+  [true, true, true, true, true, true],
+)
+
+/* ── 十四、没到的行不显示状态 (2026-11-15 主人: "进度条没到不允许显示下一步的状态") ─────────── */
+
+// 三条一起: ① 节点退成极暗空圈 (`LOCKED` 这一档只在 [ReadyRailRow] 里派生, 不进 flags)
+// ② 副标题换成中性一句, 勾 / 红横杠 / 进度 / "已就绪 5.3 MB" 全不预支 ③ 右侧百分比格也不给字
+check(
+  '没到的行不显示状态 (2026-11-15)',
+  [
+    card.includes('ReadyState.FAILED, LOCKED }') || card.includes('FAILED, LOCKED }'),
+    card.includes('val shown = if (reached) nodeState else ReadyState.LOCKED'),
+    card.includes('val shownDetail = if (reached) detail else stringResource(R.string.ready_not_yet)'),
+    card.includes('text = shownDetail,'),
+    card.includes('state = shown,'),
+    card.includes('if (shown == ReadyState.RUNNING)'),
+    card.includes('percent != null && reached -> Text('),
+    // 红横杠只在"到了但没办"那一档; 没到的那一支一个标记都不画
+    card.includes('dim.copy(alpha = 0.14f)'),
+    // LOCKED 不许进进度门控的账 (它不是一件"没办的事", 它是"还没轮到")
+    !card.includes('listOf(permissionsDone, PortalAccount.ready, '),
+  ],
+  [true, true, true, true, true, true, true, true, true],
+)
+
+// 登录之后那句要说全: 「已登录 名字 · 模型名」, 窗里再补一行「模型 …」——
+// 只说"已登录"会让人以为模型就能跑, 而 dsh 的 Key 路线与账号路线是两回事 (2026-11-15)
+check(
+  '账号那一行说清"登录了谁"与"用的哪个模型" (2026-11-15)',
+  [
+    card.includes('PortalAccount.phase == AccountPhase.SIGNED_IN && PortalAccount.model.isNotEmpty() ->'),
+    card.includes('R.string.ready_account_signed_in_model,'),
+    card.includes('R.string.ready_account_model, PortalAccount.model'),
+    // 没登录时仍回到原来那两句, 不虚报模型
+    card.includes('PortalAccount.phase == AccountPhase.SIGNED_IN ->'),
+  ],
+  [true, true, true, true],
+)
+/* ── 十五、下载可暂停 / 右侧 × 可取消 (2026-11-15 主人: "下载加个暂停, 点击正在下载可暂停…x, 可取消") ── */
+
+// 三个后果一起看: ① 两个下载器都有 PAUSED 与 Range 续传 (暂停不是白下) ② 卡片上"下载中点行 = 暂停,
+// 暂停后点行 = 继续, 右侧格给一颗 × = 作废" ③ 一路只许有**一趟**在跑 (暂停后立刻按继续会撞车)
+check(
+  '下载能暂停, 暂停能接着下, 右侧 × 能取消 (2026-11-15)',
+  [
+    // 两个下载器: PAUSED 这一档 + 三个动作
+    wakeDownload.includes('enum class Phase { IDLE, DOWNLOADING, PAUSED, READY, FAILED }'),
+    speechDownload.includes('enum class Phase { IDLE, DOWNLOADING, PAUSED, READY, FAILED }'),
+    wakeDownload.includes('fun pause()') && wakeDownload.includes('fun cancel(context: Context)'),
+    speechDownload.includes('fun pause()') && speechDownload.includes('fun cancel(context: Context)'),
+    // 暂停 = 断连接 (不然阻塞读还在收)
+    wakeDownload.includes('connection?.disconnect()'),
+    speechDownload.includes('call?.cancel()'),
+    // 续传: 有 .part 就发 Range, 服务器回 206 才接着写
+    wakeDownload.includes('setRequestProperty("Range", "bytes=$start-")'),
+    wakeDownload.includes('HttpURLConnection.HTTP_PARTIAL'),
+    speechDownload.includes('builder.header("Range", "bytes=$start-")'),
+    speechDownload.includes('response.code == 206'),
+    // 暂停留着 .part, 取消清掉
+    speechDownload.includes('partialOf(context, it).delete()'),
+    wakeDownload.includes('"${it.name}.part").delete()'),
+    // 一趟只许有一个: 暂停后立刻继续不能两个线程写同一个 .part
+    wakeDownload.includes('if (running) return'),
+    speechDownload.includes('if (running) return'),
+    // 暂停态不许被"看一眼磁盘"抹掉
+    wakeDownload.includes('phase == Phase.DOWNLOADING || phase == Phase.PAUSED) return'),
+    speechDownload.includes('phase == Phase.DOWNLOADING || phase == Phase.PAUSED) return'),
+    // 卡片: 第五档 + 行点击 + 右侧 × + 底部那颗按钮变「继续」
+    card.includes('TODO, RUNNING, PAUSED, DONE, FAILED, LOCKED }'),
+    card.includes('downloading -> ({'),
+    card.includes('paused -> ({ startDownload(step.action) })'),
+    card.includes('onCancel = if (paused) {'),
+    card.includes('private fun CancelCross('),
+    card.includes('cancel != null && reached -> Box('),
+    card.includes('R.string.ready_action_resume, next.title'),
+    card.includes('paused = wakePhase == WakeWordDownload.Phase.PAUSED,'),
+    card.includes('paused = speechPhase == SpeechModelDownload.Phase.PAUSED,'),
+    card.includes('R.string.ready_model_paused,'),
+  ],
+  Array(26).fill(true),
 )
 
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)

@@ -6586,6 +6586,10 @@ private fun WakeItems() {
             WakeWordDownload.phase == WakeWordDownload.Phase.FAILED ->
                 stringResource(R.string.settings_wake_failed, WakeWordDownload.detail)
 
+            // 暂停 (2026-11-15): 与体检卡那行同一句话 —— 再按一下就从断点接着下
+            WakeWordDownload.phase == WakeWordDownload.Phase.PAUSED ->
+                stringResource(R.string.ready_paused)
+
             ready == total -> stringResource(R.string.settings_wake_model_ready, total)
             ready == 0 -> stringResource(
                 R.string.settings_wake_model_missing,
@@ -6639,6 +6643,10 @@ private fun WakeItems() {
 
             SpeechModelDownload.phase == SpeechModelDownload.Phase.FAILED ->
                 stringResource(R.string.settings_wake_failed, SpeechModelDownload.detail)
+
+            // 暂停 (2026-11-15): 同上一行那一条
+            SpeechModelDownload.phase == SpeechModelDownload.Phase.PAUSED ->
+                stringResource(R.string.ready_paused)
 
             speechReady == speechTotal -> stringResource(
                 R.string.settings_wake_speech_ready,

@@ -1317,6 +1317,101 @@ else {
 expect('client.js onSettingsClosed', client, 'onSettingsClosed: function () { portal.refresh() }')
 expect('client.js refresh 露出来', client, 'refresh: refresh')
 
+
+// ── 四、撤回记录: 门户让位那一段已经整块撤掉 (2026-11-14 晚, 主人: "上面的改动复原回去") ──────────
+//
+// 这一段只留反向判据: 那一套 (让位 / 观察 dsh 模态窗 / 引导闸 / `guide` 那一格) 一个字节都不许再回来 ——
+// 登录改由引导里的「账号」一行承担 (见第五节), dsh 自己那扇窗回到改动前的样子
+
+const READY_CARD = 'app/src/main/java/io/github/yuloong07star/luwi/ui/ReadyCard.kt'
+const readyCard = read(READY_CARD)
+
+for (const gone of [
+  'yieldToDshDialog',
+  'resumeFromYield',
+  'watchDshDialogs',
+  'stopDshDialogs',
+  'syncDshDialogs',
+  'mountWhenPageClear',
+  'dshDialogUp',
+  "DSH_DIALOG",
+  'YIELD_SETTLE_MS',
+  'GUIDE_WAIT_TRIES',
+  'DIALOG_WAIT_TRIES',
+]) {
+  if (client.includes(gone)) failures.push(`client.js 里还有 ${JSON.stringify(gone)} —— 让位那一段已经撤掉了`)
+}
+if (!client.includes('yieldToDshDialog') && !client.includes('mountWhenPageClear')) {
+  notes.push('ok   门户让位 / 引导闸那一套已整块撤掉 (client.js 回到改动前)')
+}
+if (portalBridge.includes('"guide"')) failures.push('PortalBridge.kt 里还有 portalStatus 的 "guide" 那一格 (已撤回)')
+else notes.push('ok   PortalBridge 不再报 guide 那一格')
+if (readyCard.includes('guideOpen') || readyCard.includes('guideShown')) {
+  failures.push('ReadyCard.kt 里还有 guideOpen / guideShown (已撤回)')
+} else {
+  notes.push('ok   ReadyCard 不再报"引导开着没有"')
+}
+// ── 五、账号那一行 (2026-11-14) ────────────────────────────────────────────────
+//
+// 主人: "直接调用 dsh 的登陆接口, 在新手引导里加入登陆帐号的引导项" —— 原生那一行借这一页当客户端,
+// 三个动作 (status / login / key) 走 `__LUWI_PORTAL__.account`, 结果由 `lwAccountResult` 报回宿主
+
+expect('宿主那条路由用的是 dsh 那个凭据 ref', hostPlugin, "const LW_ACCOUNT_KEY_REF = 'DEEPSEEK_API_KEY'")
+expect('client.js 读账号状态', client, 'function accountStatus()')
+expect('client.js 起登录', client, 'function accountLogin()')
+expect('client.js 写 Key', client, 'function accountKey(key)')
+expect('client.js 登录问宿主那条路由', client, "askHostAccount('login')")
+expect('client.js 写 Key 也走那条路由', client, "askHostAccount('key', { key: value })")
+expect('client.js 结果报回宿主', client, "call('lwAccountResult', JSON.stringify(payload))")
+expect('client.js 露出 account 入口', client, 'account: function (action, payload)')
+// **白名单那一层也要有**: `window.__LUWI_PORTAL__` 只转列出来的方法, 少了这一行原生那句会一声不响
+expect('client.js 把 account 转进 __LUWI_PORTAL__', client, 'account: function (action, payload) { portal.account(action, payload) }')
+// 改走宿主那条路由之后, 页面这一侧不该再声明账号的 remote 服务 (声明了也没人用; 而它调不动正是
+// 2026-11-14 那次"登录 12 s 没有回音"的原因)
+if (client.includes("'remote.account'")) {
+  failures.push('client.js: 还在 inject 账号的 remote 服务 (现在走宿主 /lw-account 那条路由)')
+} else {
+  notes.push('ok   client.js 不再 inject 账号 remote (改走宿主路由)')
+}
+expect('client.js 那条路由的字面量', client, "fetch('/lw-account'")
+expect('PortalBridge 收账号结果', portalBridge, 'fun lwAccountResult(payload: String): String')
+
+const portalAccount = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalAccount.kt')
+expect('PortalAccount 收状态', portalAccount, 'fun adopt(payload: String)')
+expect('PortalAccount 有登录', portalAccount, "kick(\"'login'\")")
+expect('PortalAccount 有写 Key', portalAccount, 'fun saveKey(key: String)')
+expect('PortalAccount 交授权地址', portalAccount, 'fun takeUrl(): String?')
+expect('PortalAccount 只经 PortalState.run 下命令', portalAccount, 'PortalState.run')
+
+expect('宿主那条路由由 serveLwAccount 处理', hostPlugin, 'handler: serveLwAccount(ctx),')
+expect('宿主那条路由只收 POST', hostPlugin, "if (req.method !== 'POST') {")
+expect('宿主那条路由只认回环', hostPlugin, 'if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {')
+expect('宿主登录走 deepseekAccount.startSignIn', hostPlugin, 'account.startSignIn(client, origin, ')
+expect('宿主写 Key 走 credentials.set', hostPlugin, 'await credentials.set(LW_ACCOUNT_KEY_REF, key)')
+expect('宿主没有账号缝时说实话', hostPlugin, '这条部署没有挂 DeepSeek 账号缝, 请改用 API Key')
+
+// 登录之后模型那一笔 (2026-11-15 主人: "理论上登陆完应该可以使用 account 的模型, 不需要输入 api")
+//
+// 上游那件事挂在 **client** 的账号状态流里 (`ui-settings-account` → `initializeDefaultModel`), 整条流被
+// `remoteAccess.whenAccess('account/watch')` 包着, 第三方门户拿不到那条授权 —— 于是宿主侧补同一份语义
+expect('登录之后宿主自己把默认模型收到账号那条路', hostPlugin, 'async function lwAccountAdoptModel(ctx)')
+expect('收尾取的是账号模型目录', hostPlugin, 'const catalog = await controller.modelCatalog()')
+expect('账号 route 的名字写对', hostPlugin, "const provider = 'deepseek-account'")
+expect('默认模型写回走 saveSelection', hostPlugin, 'await defaults.saveSelection(target)')
+expect('活着的会话改走 selectModel', hostPlugin, 'await controller.selectModel({ sessionId, provider, model })')
+expect('只切钉在 Key 那条 route 上的会话', hostPlugin, "const LW_ACCOUNT_STALE_ROUTE = 'deepseek-official'")
+expect('有 Key 就保留原默认 (与上游同判据)', hostPlugin, 'if (!keyConfigured && typeof defaults?.saveSelection === \'function\')')
+expect('视频模式不抢模型', hostPlugin, 'if (activeMode() === MODE_VIDEO) return lwAccountAdoptState.last')
+expect('收尾每 60 s 只算一次', hostPlugin, 'const LW_ACCOUNT_ADOPT_MS = 60 * 1000')
+expect('收尾有结论落盘', hostPlugin, "const LW_ACCOUNT_MODEL_FILE = 'account-model.json'")
+expect('收尾是原子写', hostPlugin, 'await rename(temporary, path)')
+expect('打开账号窗那一次顺手收尾', hostPlugin, 'const adopted = await lwAccountAdoptModel(ctx).catch(() => null)')
+expect('status 报模型可用', hostPlugin, 'modelsReady: model !== null, model }')
+expect('每轮 turn/start 兜一次', hostPlugin, 'void lwAccountAdoptModel(ctx).catch(() => {})')
+expect('起来也收一次', hostPlugin, 'void lwAccountAdoptModel(ctx).catch((error) => {')
+expect('卡片收模型名', portalAccount, 'var model by mutableStateOf("")')
+expect('模型名从 status 的 model 里取', portalAccount, 'body.optJSONObject("model")?.optString("label")')
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
@@ -1327,4 +1422,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(`\ncheck-luwi-portal: 全部通过 (${String(notes.length)} 条)`)
+
 

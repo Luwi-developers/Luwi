@@ -92,7 +92,33 @@
 - **首启顺序: 加载界面 → 新手引导**: 页面 host 一就绪就挂 (含 dsh 自己的登录弹窗), 「开始使用」等
   加载界面收尾才弹 (页面画出来 / host 起不来 / `LOADING_BACKSTOP_MS` 45 s 兜底); #39 那条"引导期间
   不挂 WebView"已推翻 (2.8.0 #44), 判据 `check-ready-card` 第十一节 + `GettingStartedTest`
-- **画面在 `TopAppBar` 下面**: 看画面时整条顶栏不画 (`CollapsedHeight = 52.dp`), 菜单浮右上角, 静 3 秒淡出
+- **账号在原生引导里办** (2026-11-14): 引导卡竖轨最后一行是「账号」(与「选择权限」同款), 三个动作
+  (填一把 API Key / 登录 DeepSeek 账号 / 稍后在后台 dsh 完成) 走宿主那条 **`POST /lw-account`**
+  (`host-plugin`: `deepseekAccount.getState/startSignIn` + `credentials.set`, 空串 = `unset`) ——
+  页面那侧的 `remote.account` 是 dsh 开给自家账号页的缝, 第三方插件调它会一声不响地挂住; 页面只负责
+  转发 (`__LUWI_PORTAL__.account`) 并经 `PortalBridge.lwAccountResult` 报回原生; **门户不为 dsh 那扇
+  登录窗做任何让路** (那一套 2026-11-14 晚已整块撤掉), 判据 `check-luwi-portal` 第四/五节 +
+  `check-ready-card` 第十二/十三节, 方案 `docs/Luwi-账号进新手引导-方案-2026-11-14.md`
+- **竖轨进度按顺序卡住** (2026-11-14): 有序清单 = 四件 + 选择权限 + 账号; `firstPending` 是第一个没办的
+  位置, 环与竖轨只走到这里 (上面的缺口挡住下面的已办项), 顶栏「还差 N 步」仍按真实未办件数算;
+  **同一个 `reached` 也管"许不许点"** —— 路没铺到的行点不开 (不能跳过在视觉与手感上是同一件事);
+  **轨道必须连到底**: 只有最后一行的 `last` 才 true, 中间行收口就会让下一颗点悬在半空 (2026-11-15 修);
+  **没完成的节点画暗圈 + 红横杠** (不是只留浅圈, 缺模型要一眼看得出);
+  **没铺到的行不显示它自己的状态** (2026-11-15): `ReadyState.LOCKED` 只由 `ReadyRailRow` 派生 —— 极暗空圈 +
+  「还没到这一步」, 勾 / 红横杠 / 进度 / 右侧百分比一个都不预支, `LOCKED` 也不进 `flags`;
+  判据 `check-ready-card` 第十二 / 十四节
+- **账号模型那条收尾在宿主** (2026-11-15): 上游 `initializeDefaultModel` 挂在 client 的账号状态流上
+  (`remoteAccess.whenAccess('account/watch')`), 第三方门户拿不到那条授权, 于是登录通了、默认模型还钉在
+  `deepseek-official` 上 → 一发言就 `no API key`。宿主 `lwAccountAdoptModel` 补同一份语义 (没别的 provider
+  有 key 才切), 三处调: 起来 / `op=status` / 每轮 `turn/start`, 60 s 节流, 结论落
+  `$DSH_HOME/lw/account-model.json`; 卡片副标题「已登录 谁 · 模型名」; 判据 `check-luwi-portal` 第五节
+- **下载可暂停 / 可取消** (2026-11-15): 两个下载器 (`WakeWordDownload` / `SpeechModelDownload`) 的
+  `Phase` 多一档 `PAUSED` —— 暂停 = 断连接 + **保留 `.part`**, 继续时发 `Range` 从断点接 (整文件重算
+  sha256, 不做增量); 取消 = 清 `.part` 回 `IDLE`。卡片上: **下载中点那一行 = 暂停, 暂停后点行 = 继续,
+  右侧那一格变 × = 作废**; 底部的按钮暂停后变「继续 X」。三条坑: ① `call.cancel()` / `disconnect()`
+  抛的 IOException 是**人按的**, 要转成内部 `Stopped` 而不是记成镜像失败 ② 暂停后线程已退出, × 那一趟
+  没人接手, 得就地收尾 (`running` 为假) ③ 一趟只许一个在跑 (`gate` + `running`), 否则两个线程写同一个
+  `.part`; 判据 `check-ready-card` 第十五节
 - 缩进与段间距由 `scaffolds/LazyColumn.kt` 给; **Card 不写水平边距、不套 `padding(16.dp)`**; 按钮一律 `fillMaxWidth()`
 - **转场已取消**: `AppNav` 的 `transition` = `NavTransitions.None`, `dimAmount = 0f`; 横滑返回登记仍在, 别接回去
 - **主题全局、存档跟主题**: `config.defaultThemeId` 唯一一份, 首页 / 存档页 / 配置页 / 聊天页首帧都按它上色;
