@@ -82,13 +82,16 @@ const allowed = new Map((allow.branches ?? []).map((one) => [one.name, one]))
 
 const refs = gitOr([
   'for-each-ref',
-  '--format=%(refname)%09%(refname:short)%09%(committerdate:short)%09%(objectname)',
+  '--format=%(refname)%09%(refname:short)%09%(committerdate:short)%09%(objectname)%09%(symref)',
   'refs/heads',
   `refs/remotes/${MAIN_REMOTE}`,
 ])
   .split('\n')
   .map((line) => line.split('\t'))
-  .filter(([full]) => Boolean(full))
+  // 符号 ref (`refs/remotes/luwi/HEAD`) 是 main 的别名: 它的 short 名是 `luwi` (不带 `/HEAD`),
+  // 下面那条 endsWith('/HEAD') 拦不住它, 于是每趟都把它当成一条"领先 main 两个提交的游离分支"
+  // 报出来 (2026-11-14 撞上). 只按 symref 判, 别名一律不进表
+  .filter(([full, , , , symref]) => Boolean(full) && !symref)
 
 /** 只认本地分支与主仓远端分支; 远端那一份去掉前缀后与本地同名, 合并成一条 */
 const seen = new Map()

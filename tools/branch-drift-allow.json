@@ -1,6 +1,21 @@
 {
   "branches": [
     {
+      "name": "backup/38-0130",
+      "why": "三条内容都已在 main: packHostTree 原生崩溃补跑按文件精搬进 tools/pack-host.mjs (2026-11-13 那段注释就是它), #38 的门户主动投递被 PR #67 重做取代; 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-38",
+      "why": "同一个 #38: 两次派单的成果被 PR #67 重做取代, 分支 tip 只是 main 的旧 merge 提交",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "public/main",
+      "why": "公开树导出 (只读镜像, 内容随 PR 走, 本身不进 main)",
+      "since": "v2.7.10"
+    },
+    {
       "name": "agent/sa-950a18dd98b944973866dcadbf56498b",
       "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
       "since": "v2.7.10"
