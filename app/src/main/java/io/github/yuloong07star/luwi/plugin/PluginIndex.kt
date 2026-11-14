@@ -57,11 +57,16 @@ internal object PluginIndex {
      * (点安装只弹「需要 Luwi ≥ 2.7.10」), 所以先退回 2.7.9 发布时那一对 (七条全装得上);
      * 2.7.10 发布时再把这对抬回 `index-10` / `index-9` (那两个 tag 已在线上, 不用重推;
      * 注意 index-9 里 1.1.2 的 minLw 还是 2.8.0, 只当兜底用, 别当现行)
+     *
+     * **2026-11-14 抬到 `index-11` / `index-10`** (2.8.0 出包当天): 上面那句"2.7.10 发布时抬回"当时
+     * 没来得及做, 于是 2.7.10 与这次的 2.8.0 都还在读 10-18 那份 `index-8` —— 那一份里鲸鱼娘外观
+     * 只有 1.0.3, 而 index-11 里有 1.1.3 / 1.1.2 (一档多支动作是 2.7.10 起才画得开)。index-11 那九条
+     * 的 minLw 最高是 2.7.10, 2.8.0 的设备全部过得了版本闸; revoked 为空
      */
-    private const val REF_CURRENT = "index-8"
+    private const val REF_CURRENT = "index-11"
 
     /** 上一份内容 tag: 兜底 (新 tag 还没推上去 / 新 tag 那条链路坏了时, 旧的一份照样能用) */
-    private const val REF_PREVIOUS = "index-7"
+    private const val REF_PREVIOUS = "index-10"
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()

@@ -202,6 +202,14 @@ function pnpmEnvironment() {
     // chrome-devtools-frontend 的裸 .ts 导入, 而 host 树用不到那一段 —— 这一层直接跳过它。
     // Gradle 的 Exec 会覆盖环境白名单, 所以开关必须写在这里, 不能只靠调用方的 DSH_SKIP_DEVTOOLS
     DSH_SKIP_DEVTOOLS: process.env.DSH_SKIP_DEVTOOLS ?? '1',
+    // **一次从零打三百多个包的 client build 会撞 Node 默认的老空间上限** (2026-11-14 2.8.0 出包那轮:
+    // `FATAL ERROR: NewSpace::EnsureCurrentCapacity Allocation failed - JavaScript heap out of memory`,
+    // 那是 `scripts/build.ts` 里 tsc + 原生 bundler 一起跑的时刻, 机器还有 17 GB 空闲, 缺的是堆上限)。
+    // 这一条以前没暴露, 是因为 packHostTree 一直判 UP-TO-DATE —— 只有改过 pack-host.mjs 自己才会真跑。
+    // 调用方自己设了 NODE_OPTIONS 就尊重它, 别叠两层
+    NODE_OPTIONS: /\bmax-old-space-size\b/u.test(process.env.NODE_OPTIONS ?? '')
+      ? process.env.NODE_OPTIONS
+      : [process.env.NODE_OPTIONS, '--max-old-space-size=8192'].filter(Boolean).join(' '),
     // 本机 %LOCALAPPDATA%\npm-cache 对子进程会拒写 (npm install 的 mkdtemp 报 EPERM, 2026-11-06 实测);
     // Gradle 那一侧会显式传进来, 手工跑这一份时退到工作区的 .lwtmp 下
     npm_config_cache: process.env.npm_config_cache ?? ensureNpmCache(join(process.cwd(), '.lwtmp', 'npm-cache')),
@@ -670,7 +678,11 @@ console.log(`pack-host: ${webui} imports cleanly`)
 // **2026-11-13 升到 1.17.0**: 同一套逐条复核 —— 三处 homedir 仍是**恰好 3 次** (下面那道闸会拦)、
 // `src/templates/` 仍是 5 个离线快照、工具名仍是 `generate_image` / `edit_image`、
 // 依赖仍是 `@deepseek-ai/schemastery ^3.18.4` + `lucide-react ^1.41.0`。真机读数: 待装机复验
-const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.17.0' }
+// **2026-11-14 升到 1.17.2** (2.8.0 出包当天): 1.17.1 的提交里第一条就是 `fit the 0.2.x shell frame`
+// —— 本树基座正是 0.2.2, 1.17.0 在那一层可能对不上; 1.17.2 另带「恢复历史结果 / 修侧栏 tab / 参考图反推」。
+// 同一套逐条复核照旧: 三处 homedir 仍**恰好 3 次** (下面那道闸会拦)、`src/templates/` 仍是离线快照、
+// 工具名仍是 `generate_image` / `edit_image`、依赖仍是 schemastery + lucide-react。真机读数: 待装机复验
+const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.17.2' }
 
 /** 拉 npm 的那条 registry: 这台开发机上 registry.npmjs.org 不通, 缺省走 npmmirror */
 const npmRegistry = process.env.LW_NPM_REGISTRY ?? 'https://registry.npmmirror.com'
@@ -791,7 +803,9 @@ console.log(
 // `retiredWhen` 自动退役 —— 补丁表里仍留着它, 只为 0.13.x 及更早的版本还能打。
 // 判据 `node tools/check-mneme-patches.mjs --from npm --version 0.15.0` → PASS
 // (applied 3 / already 1 / hot-memory 1 answered 0 unanswered)
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.15.0' }
+// **2026-11-14 升到 0.15.1** (2.8.0 出包当天): 只改了它自己 wiki/claims 的验证基线 (工作区脏时记不住
+// 那一版改动), 与 Luwi 的面板与补丁面都无关; 判据重跑仍 PASS (applied 3 / already 1 / failed 0)
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.15.1' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
