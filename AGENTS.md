@@ -162,6 +162,10 @@
   那一段, 高亮跟着纵向滚动走; 段下标 = `SettingsListLeadingItems` + `SettingsSectionKeys` 的顺序 +
   `SettingsGroupTitleBefore` 那两处组标题 (页面上只有「常用」「能力」两处), **新加一段必须同时进
   `SettingsSectionKeys` 与 `SettingsSectionTitleRes`** (判据 `check-settings-sections.mjs` 第三节)
+- **跨门户记录那一段按时间合并** (2026-11-14): `mergeTimeline(carried, orderTimeline(…))` —— 记录那一段**不再**
+  盲接在头上 (盲拼接会把"冷启 / 换场那一拍只有她的行"的半截线冻进记录, 之后她的话整组压在自己的消息上面);
+  同一身份留 live 那份、按 `time` 稳定排、缺时间沉底、尾部 240 截; `carryRecord()` 在 `lastUsers === 0`
+  (节点还没加载) 时不抄; 方案 `docs/Luwi-门户时间线按时间合并-方案-2026-11-14.md`
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
   **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 零轮询; **会话钩子必须带 `{ global: true }`**

@@ -1120,6 +1120,13 @@ window.__ModuleLoader__.load({
       var outReleaseAt = 0
       /** 上一拍见过的 user 节点 `seq` (新的一条 = 新一轮 → 撤掉还没上屏的旧条) */
       var userKey = ''
+      /**
+       * 上一次 `nodesOf()` 读到的 user 节点个数 (2026-11-14)
+       *
+       * 只给 [carryRecord] 当闸门用: 0 说明 dsh 的节点还没加载出来 (冷启 / 换场那一拍), 这时抄记录
+       * 抄到的只有她的行 —— 冻进记录之后, 合并顺序就变成"她的话全在我上面"
+       */
+      var lastUsers = 0
       /** 上一次打出来的 档/是否画正文 记号 (只在变的时候 log 一行) */
       var shownPreset = ''
       /** 上一次打出来的节点种类串 (只在变的时候 log) */
@@ -1539,9 +1546,60 @@ window.__ModuleLoader__.load({
         return kept.length > RECORD_MAX ? kept.slice(kept.length - RECORD_MAX) : kept
       }
 
-      /** 换场之前先把屏上这些行抄进门户记录 (只有自动换场才抄, 见 [switchTo]) */
+      /**
+       * 把「门户记录」与「这一场刚排好的那条线」合成**一条按时间**的线 (2026-11-14)
+       *
+       * **以前是 `appendRecord(carried, ordered)`** —— 记录那一段无条件接在最前面, 之后再不重排。
+       * 冷启 / 自动换场的那一拍, 她的行是从 `lw/out/<会话>.jsonl` 同步读到的, 而 dsh 的 user 节点还在
+       * 异步加载, `nodesOf()` 这时只排得出她的话; `carryRecord()` 把这条**半截线**冻进记录, 于是
+       * 「她的话」整组压在自己的消息上面 (2026-11-14 主人截图: 12:18 嗯收到 / 12:30 在什么事 两条在上,
+       * 12:18 －－ / 12:30 你好 两条在下)。所以这里改成: 先按身份去重 (`live` 在前, 同一身份以**当前**
+       * 那份为准 —— 记录里是旧拷贝), 再**按墙上时钟排一遍**。
+       *
+       * 三条口径:
+       * 1. `time` 读得到的按升序; 同刻**稳定** (保持输入相对顺序) —— `orderTimeline` 已经按轮把
+       *    `user -> 她的行 -> error -> 兜底` 排好, 于是同刻的先后仍是那一套
+       * 2. `time` 读不到 (`<= 0`) 的整段沉到最后, 内部仍按原相对顺序
+       * 3. 排完从**尾部**截到 [RECORD_MAX] —— 留下的一定是最新的那一段
+       *
+       * @param {object[]} record 门户记录 (`carried`, 换场之前抄下来的那一段)
+       * @param {object[]} live 本场排好的那一条线 (`orderTimeline` 的输出)
+       * @returns {object[]} 按时间排好的一条线
+       */
+      function mergeTimeline(record, live) {
+        var kept = appendRecord(Array.isArray(live) ? live : [], record)
+        var known = []
+        var unknown = []
+        for (var i = 0; i < kept.length; i += 1) {
+          var item = kept[i]
+          if (!item) continue
+          var at = Number(item.time) || 0
+          if (at > 0) known.push({ item: item, at: at, at0: i })
+          else unknown.push(item)
+        }
+        known.sort(function (a, b) {
+          if (a.at !== b.at) return a.at - b.at
+          return a.at0 - b.at0
+        })
+        var out = []
+        for (var k = 0; k < known.length; k += 1) out.push(known[k].item)
+        for (var u = 0; u < unknown.length; u += 1) out.push(unknown[u])
+        return out.length > RECORD_MAX ? out.slice(out.length - RECORD_MAX) : out
+      }
+
+      /**
+       * 换场之前先把屏上这些行抄进门户记录 (只有自动换场才抄, 见 [switchTo])
+       *
+       * **2026-11-14: 这一拍还没有 user 节点就不抄** (`lastUsers === 0`) —— 那时屏上只有她的行
+       * (节点还在加载), 抄进去就是半截线; 换回来会重新从 `lw/out` 读一遍, 条数不会少
+       */
       function carryRecord() {
-        carried = appendRecord(carried, nodesOf())
+        var items = nodesOf()
+        if (lastUsers === 0 || items.length === 0) {
+          console.log('[luwi-portal] record not carried: no user node yet (users=' + String(lastUsers) + ')')
+          return
+        }
+        carried = mergeTimeline(carried, items)
       }
 
       /**
@@ -1970,14 +2028,21 @@ window.__ModuleLoader__.load({
        */
       function nodesOf() {
         // 这一场的节点还没到 (刚换场 / 场景还没恢复): 门户记录照画, 屏上不清空 (2026-11-12 #38)
-        if (chatTarget === null) return carried.slice()
+        if (chatTarget === null) {
+          lastUsers = 0
+          return carried.slice()
+        }
         var snapshot
         try {
           snapshot = chatTarget.getSnapshot()
         } catch (_noSnapshot) {
+          lastUsers = 0
           return []
         }
-        if (!snapshot) return []
+        if (!snapshot) {
+          lastUsers = 0
+          return []
+        }
         var legacy = snapshot.legacy || {}
         var nodes = Array.isArray(legacy.nodes) ? legacy.nodes : []
         var users = []
@@ -2140,8 +2205,11 @@ window.__ModuleLoader__.load({
             text: imageFails[f].text,
           })
         }
-        // 排好之后接在门户记录后面 (落实表 #38): 自动换场带过来那一段在最前, 条数只增不减
-        return appendRecord(carried, orderTimeline(users, rows, extras))
+        // 记下这一拍读到了几个 user 节点 (给 [carryRecord] 当闸门, 见 [lastUsers])
+        lastUsers = users.length
+        // 排好之后与门户记录**按时间**合成一条 (落实表 #38): 换场带过来那一段不再盲接在头上
+        // (2026-11-14: 主人报的"她的话整组压在我的消息上面"就是那条盲拼接造成的)
+        return mergeTimeline(carried, orderTimeline(users, rows, extras))
       }
 
       /**

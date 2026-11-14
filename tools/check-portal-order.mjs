@@ -191,11 +191,11 @@ if (!source.includes('sortAt') && !source.includes('sortFloor')) {
   failures.push('client.js: sortAt / sortFloor 还在 —— 缺时间的键仍可能排到已知时间前面')
 }
 
-// 2026-11-12 (#38): 排好的那一串再交给 `appendRecord` 接在门户记录后面 (自动换场带过来那一段)
-if (source.includes('return appendRecord(carried, orderTimeline(users, rows, extras))')) {
-  notes.push('ok   nodesOf: 交给 orderTimeline 按轮排, 再接在门户记录后面')
+// 2026-11-14: 排好的那一串**不再** `appendRecord` 盲接在记录前面 —— 按时间合并 (`mergeTimeline`)
+if (source.includes('return mergeTimeline(carried, orderTimeline(users, rows, extras))')) {
+  notes.push('ok   nodesOf: 交给 orderTimeline 按轮排, 再与门户记录按时间合并')
 } else {
-  failures.push('client.js: nodesOf 没有走 orderTimeline')
+  failures.push('client.js: nodesOf 没走 mergeTimeline (记录那一段会整组压在她的消息上面)')
 }
 
 if (source.includes('var allowFallback = !luwiFlow() || outLines.length === 0')) {
@@ -208,6 +208,119 @@ if (source.includes('pinnedTo: assistantOwner')) {
   notes.push('ok   兜底行钉在 assistantOwner (不再挂到最后一条 user 上)')
 } else {
   failures.push('client.js: 兜底行仍会改嫁到新消息')
+}
+
+// ── 六、门户记录与本场那条线按时间合并 (2026-11-14) ─────────────────────────
+//
+// 主人 2026-11-14 的截图: 「她的话」整组压在自己的消息上面 (12:18 嗯收到 / 12:30 在什么事 在上,
+// 12:18 －－ / 12:30 你好 在下)。根因是 `appendRecord(carried, …)` 把记录那一段盲接在头上:
+// 冷启 / 自动换场那一拍 user 节点还在加载, `nodesOf()` 只排得出她的行, 这条半截线被 `carryRecord()`
+// 冻进记录之后, 顺序就再也不会自己好。`mergeTimeline` 让两段**按时间**合成一条。
+//
+// 用例里的时刻是真机那一场 (`session-caa61eb2…`, 2026-11-14 12:18 / 12:30) 上读到的原值 ——
+// `user/message` 的 `time` 与 `lw/out/<会话>.jsonl` 的 `at`, 留着当回归样本
+
+const MERGE_U1 = 1794629931284
+const MERGE_R1 = 1794629935111
+const MERGE_U2 = 1794630638306
+const MERGE_R2 = 1794630639882
+
+/**
+ * 造一条时间线上的一项 (带身份, `mergeTimeline` 按 `id` 去重)
+ * @param label - 断言里用的短名
+ * @param who - user / assistant
+ * @param time - 那一项的时刻 (0 = 读不到)
+ * @param seq - 顺序号
+ * @param id - 稳定身份 (同身份只留一条)
+ * @returns 那一项
+ */
+function row(label, who, time, seq, id) {
+  return { label, who, time, seq, id }
+}
+
+const appendSource = sliceFunction('appendRecord')
+const mergeSource = sliceFunction('mergeTimeline')
+// eslint-disable-next-line no-new-func -- 这一份就是"跑源码里那两个函数", 不是模板
+const recordOf = new Function('RECORD_MAX', `${appendSource}\nreturn appendRecord`)(240)
+// eslint-disable-next-line no-new-func -- 同上
+const mergeTimeline = new Function('RECORD_MAX', 'appendRecord', `${mergeSource}\nreturn mergeTimeline`)(240, recordOf)
+
+/**
+ * 跑一条合并用例并比对顺序
+ * @param name - 用例名
+ * @param record - 门户记录那一段
+ * @param live - 本场那条线 (已经过 orderTimeline)
+ * @param expected - 期望的 label 序列
+ */
+function checkMerge(name, record, live, expected) {
+  const got = mergeTimeline(record, live).map(one => one.label)
+  if (got.join(',') === expected.join(',')) {
+    notes.push(`ok   ${name}: ${got.join(' -> ')}`)
+  } else {
+    failures.push(`${name}: expected ${expected.join(' -> ')}, got ${got.join(' -> ')}`)
+  }
+}
+
+const liveReal = [
+  row('u1', 'user', MERGE_U1, 16, 'user\u0001m1'),
+  row('r1', 'assistant', MERGE_R1, 1, 'out\u00011'),
+  row('u2', 'user', MERGE_U2, 39, 'user\u0001m2'),
+  row('r2', 'assistant', MERGE_R2, 2, 'out\u00012'),
+]
+
+checkMerge(
+  '回归: 记录里只有她的两行, 合并后按时间交错 (主人 2026-11-14 那一屏)',
+  [liveReal[1], liveReal[3]],
+  liveReal,
+  ['u1', 'r1', 'u2', 'r2'],
+)
+
+checkMerge(
+  '跨场历史 (记录那一段更早) 排在前面, 条数只增不减',
+  [row('h1', 'user', 1000, 3, 'user\u0001h1'), row('h2', 'assistant', 1200, 4, 'out\u0001h2')],
+  liveReal,
+  ['h1', 'h2', 'u1', 'r1', 'u2', 'r2'],
+)
+
+checkMerge(
+  '同刻稳定: 记录里那条与本场那条同一毫秒, 本场那条在前 (live 在前, 同刻不翻)',
+  [row('h1', 'user', MERGE_U2, 3, 'user\u0001h1')],
+  liveReal,
+  ['u1', 'r1', 'u2', 'h1', 'r2'],
+)
+
+checkMerge(
+  '缺时间的那条沉到最后 (不插到有时间的那几条中间)',
+  [row('n1', 'assistant', 0, 9, 'out\u00019')],
+  [row('u1', 'user', MERGE_U1, 16, 'user\u0001m1'), row('r1', 'assistant', MERGE_R1, 1, 'out\u00011')],
+  ['u1', 'r1', 'n1'],
+)
+
+const deduped = mergeTimeline(
+  [row('old-r1', 'assistant', MERGE_R1, 1, 'out\u00011')],
+  [row('r1', 'assistant', MERGE_R1, 1, 'out\u00011')],
+)
+if (deduped.length === 1 && deduped[0].label === 'r1') {
+  notes.push('ok   同一身份只留一条, 且留本场那份 (记录里的是旧拷贝)')
+} else {
+  failures.push(`同身份去重错了: ${JSON.stringify(deduped.map(one => one.label))}`)
+}
+
+const manyRecord = []
+for (let i = 0; i < 300; i += 1) manyRecord.push(row(`m${String(i)}`, 'user', 1000 + i, i, `user\u0001m${String(i)}`))
+const cappedMerge = mergeTimeline(manyRecord, [])
+if (cappedMerge.length === 240 && cappedMerge[cappedMerge.length - 1].label === 'm299') {
+  notes.push('ok   合并后仍按 240 条上限截尾 (留下的是最新的那一段)')
+} else {
+  failures.push(`合并后的上限/截尾不对: ${String(cappedMerge.length)} 条`)
+}
+
+// 记录的闸门: 那一拍没有 user 节点就不抄 (抄进去是半截线)
+const carrySource = sliceFunction('carryRecord')
+if (carrySource.includes('lastUsers === 0') && carrySource.includes('mergeTimeline(carried, items)')) {
+  notes.push('ok   carryRecord: 没有 user 节点就不抄记录, 抄的时候也按时间合并')
+} else {
+  failures.push('client.js: carryRecord 还会把半截线抄进记录 (她的行会整组压在自己的消息上面)')
 }
 
 for (const note of notes) console.log(note)
