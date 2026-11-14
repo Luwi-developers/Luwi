@@ -176,6 +176,18 @@ if (tavern) {
 
 /* ── 四、依赖与键集合 ─────────────────────────────────────────────────── */
 
+const sectionBar = await read('app/src/main/java/io/github/yuloong07star/luwi/scaffolds/settings/SettingsSectionBar.kt')
+
+check('索引条也守视觉纪律 (字阶 / 色值 / 阴影 / 不铺底)', [
+  /[0-9]+\.sp/u.test(sectionBar),
+  /Color\(0x/u.test(sectionBar),
+  /\.shadow\(/u.test(sectionBar),
+  /TabRow\(/u.test(sectionBar),
+  // 只有两处 fill: 整条的底 (遮住滚上来的内容) 与选中那颗的短线
+  count(sectionBar, /\.background\(/gu),
+  /background\(colorScheme\.background\)/u.test(sectionBar),
+], [false, false, false, false, 2, true])
+
 check('没有新增 UI 依赖 (material3 仍不是本项目的)', [
   /material3/u.test(build),
 ], [false])

@@ -198,6 +198,17 @@ internal class ScreenErrorOnce(private val windowMs: Long = SCREEN_ERROR_WINDOW_
 private val screenErrorOnce = ScreenErrorOnce()
 
 /**
+ * 虚拟屏那扇小窗现在收着没有
+ *
+ * 原来是这一页的一个 `remember` (标题栏的减号收掉, 菜单里那一项叫回来)。2026-11-14 起球菜单里
+ * 那一条也搬进了门户「⋯」抽屉, 而抽屉那一侧是 [PortalMenu] 一个 object —— 拿不到这一页的状态,
+ * 于是这一格挪到进程里, 三处 (小窗 / 球菜单 / 抽屉) 读的是同一份
+ */
+internal object ScreenWindow {
+    var hidden by mutableStateOf(false)
+}
+
+/**
  * 主页面: dsh 的 Web GUI 占满, 虚拟屏的画面浮在它上面
  *
  * 画面是一个可拖动的小窗而不是占一条高度: 屏在后台跑着, 人要能一边看着它一边用会话, 而占高度
@@ -221,11 +232,26 @@ fun HostScreen(modifier: Modifier = Modifier) {
     val preview = selected
 
     // 减号把整扇窗收掉, 收起来之后界面上一点痕迹都不留; 要它回来走 ⋮ 菜单里那一项
-    var windowHidden by remember { mutableStateOf(false) }
+    // 2026-11-14: 这一格挪到 [ScreenWindow] (门户「⋯」抽屉也要读它), 这里只留一个本地别名
+    val windowHidden = ScreenWindow.hidden
+    val setWindowHidden: (Boolean) -> Unit = { ScreenWindow.hidden = it }
     // 浮标菜单里的「Luwi反馈」: 与设置页 ⋮ 第一条同一个窗 (2026-10-29)
     var feedbackOpen by remember { mutableStateOf(false) }
     // 正在弹的那条虚拟屏错误, null 表示没有 (2.8.0 B2-c): 以前这里是一行常驻文字, 现在是一次性的
     var screenError by remember { mutableStateOf<String?>(null) }
+
+    // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
+    // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
+    val askTarget = PortalAsk.pending.value
+    LaunchedEffect(askTarget) {
+        when (askTarget) {
+            PortalAsk.Target.SETTINGS -> navigator.push(Screen.Settings)
+            PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
+            PortalAsk.Target.FEEDBACK -> feedbackOpen = true
+            null -> Unit
+        }
+        if (askTarget != null) PortalAsk.clear()
+    }
 
     // lastError 一变就判一次该不该弹: 同一句 30 s 内只弹一次 (⑩), 判过就把它记进 screenError
     LaunchedEffect(VirtualScreen.lastError) {
@@ -319,20 +345,26 @@ fun HostScreen(modifier: Modifier = Modifier) {
             if (preview != null && !windowHidden) {
                 FloatingScreenWindow(
                     screen = preview,
-                    onMinimize = { windowHidden = true },
+                    onMinimize = { setWindowHidden(true) },
                     modifier = Modifier.padding(innerPadding),
                 )
             }
-            // 浮标: 顶栏那个按钮的替身, 白底不透明、能拖到任何地方
-            FloatingBall(
-                selected = selected,
-                onSettings = { navigator.push(Screen.Settings) },
-                onTavern = { navigator.push(Screen.TavernHome) },
-                onFeedback = { feedbackOpen = true },
-                windowHidden = windowHidden,
-                onToggleWindow = { windowHidden = !windowHidden },
-                modifier = Modifier.padding(innerPadding),
-            )
+            // 浮标: 后台那一层的菜单入口, 白底不透明、能拖到任何地方
+            //
+            // **门户盖着 (前台) 就不画它** (2026-11-14 主人: "不再显示 luwi 的设置浮标"): 前台那一层
+            // 右上角有门户自己的 `⋯`, 球菜单里的东西全搬进去了 ([PortalMenu])。回到 dsh 后台时页面报
+            // `portalVisible false`, 这里立刻把它画回来 —— 后台没有门户头栏, 那时候球是唯一的门
+            if (!PortalState.open) {
+                FloatingBall(
+                    selected = selected,
+                    onSettings = { navigator.push(Screen.Settings) },
+                    onTavern = { navigator.push(Screen.TavernHome) },
+                    onFeedback = { feedbackOpen = true },
+                    windowHidden = windowHidden,
+                    onToggleWindow = { setWindowHidden(!windowHidden) },
+                    modifier = Modifier.padding(innerPadding),
+                )
+            }
             // 错误只弹一次 (2.8.0 B2-c ⑨): 与浮标同级, 所以**有没有屏在看都会弹** —— 以前那一行
             // 只在 `selected == null` 时出现, 于是"正看着一块坏屏"反倒没有任何提示
             screenError?.let { reason ->

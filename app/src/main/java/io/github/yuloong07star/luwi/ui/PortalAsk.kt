@@ -31,6 +31,28 @@ internal object PortalAsk {
         onMain { activitySettings.value = null }
     }
 
+    /**
+     * 门户「⋯」抽屉里那几件"要界面才办得了"的事 (2026-11-14)
+     *
+     * 开设置页 / 进酒馆 / 弹反馈窗都要 navigator 或主页那一层自己的状态, 而 `PortalMenu` 是一个 object,
+     * 拿不到 CompositionLocal —— 于是它只在这里落一个掷标, 由 `HostScreen` 的 `LaunchedEffect` 消费
+     * 完再清掉。同一刻只有一件 (点一下走一件, 抽屉会先收起)
+     */
+    enum class Target { SETTINGS, TAVERN, FEEDBACK }
+
+    /** 待办的那一件; 读它就会跟着重组 */
+    val pending = mutableStateOf<Target?>(null)
+
+    /** 页面请原生办一件事 */
+    fun ask(target: Target) {
+        onMain { pending.value = target }
+    }
+
+    /** 那件事已经办掉了 */
+    fun clear() {
+        onMain { pending.value = null }
+    }
+
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block()
         else Handler(Looper.getMainLooper()).post(block)

@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +32,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -141,6 +143,8 @@ import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsHairline
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsNote
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsPanel
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSectionBar
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSectionEntry
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSpace
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsTabs
 import io.github.yuloong07star.luwi.sync.ModeModel
@@ -282,6 +286,89 @@ internal val SettingsSectionKeys: List<String> = (SettingsSectionsAlwaysOpenKeys
     .filter { it != "tavern" || LuwiTavern.enabled }
 
 /**
+ * 顶部段名索引条用的段名 (2026-11-14 主人: "在 luwi 设置界面顶部加上可选的版块名, 点击后跳转到对应板块")
+ *
+ * 键与顺序必须与 [SettingsSectionKeys] 一致 —— 那一份管"页面上有哪些段", 这一份只负责段名资源,
+ * 两份走岔了就是"点某一段跳到另一段", 界面上一点异常都看不出来, 所以
+ * `tools/check-settings-sections.mjs` 逐个对齐 (顺序也管)
+ *
+ * 酒馆那一段的段名不叫 `settings_section_tavern` (它是 `settings_tavern_title`, 与它自己那一页同键),
+ * 两把键都在共享的 `strings.xml` 里, 所以这里不必碰 `LuwiTavern`
+ */
+internal val SettingsSectionTitleRes: Map<String, Int> = linkedMapOf(
+    "power" to R.string.settings_section_power,
+    "appearance" to R.string.settings_section_appearance,
+    "channel" to R.string.settings_section_channel,
+    "ball" to R.string.settings_section_ball,
+    "wake" to R.string.settings_section_wake,
+    "speak" to R.string.settings_section_speak,
+    "notifications" to R.string.settings_section_notifications,
+    "screenshot" to R.string.settings_section_screenshot,
+    "look" to R.string.settings_section_look,
+    "lock" to R.string.settings_section_lock,
+    "activity" to R.string.settings_section_activity,
+    "automation" to R.string.settings_section_automation,
+    "quick" to R.string.settings_section_quick,
+    "plugin" to R.string.settings_section_plugin,
+    "skills" to R.string.settings_section_skills,
+    "linux" to R.string.settings_section_linux,
+    "sync" to R.string.settings_section_sync,
+    "tavern" to R.string.settings_tavern_title,
+    "permissions" to R.string.settings_section_permissions,
+    "api" to R.string.settings_section_api,
+)
+
+/**
+ * 列表顶上那条「检查所需依赖」占掉的下标数
+ *
+ * 索引条要把"段名"翻成 [androidx.compose.foundation.lazy.LazyListState] 的 item 下标, 而那一条不是
+ * 段落, 于是它先吃掉一个下标 (见 [settingsSectionRowIndex])
+ */
+internal const val SettingsListLeadingItems = 1
+
+/**
+ * 组标题站在哪两段之前: 它们各占一个 item, 于是段的下标要为此多挪一格
+ *
+ * 页面上的 `GroupTitle` 只有「常用」与「能力」两处 (分别在 `appearance` 与 `notifications` 之前),
+ * 这一份与页面实况由 `tools/check-settings-sections.mjs` 对齐 —— 页面新插一处组标题而这里忘了写,
+ * 索引条就会整体偏一格
+ */
+internal val SettingsGroupTitleBefore: Set<String> = setOf("appearance", "notifications")
+
+/**
+ * 段名 → 它在列表里的下标; 不认识的段名回 null
+ *
+ * 纯算术: 前面每多一段就多一个 item, 遇到 [SettingsGroupTitleBefore] 里的段再多一个 (组标题自己)
+ */
+internal fun settingsSectionRowIndex(keys: List<String>, key: String): Int? {
+    var row = SettingsListLeadingItems
+    for (each in keys) {
+        if (each in SettingsGroupTitleBefore) row += 1
+        if (each == key) return row
+        row += 1
+    }
+    return null
+}
+
+/**
+ * 下标 → 那一段的段名: 索引条的高亮跟着纵向滚动走
+ *
+ * 组标题那一行算它上面那一段 (看的是"我现在正读到哪一段"), 顶上那条提示 (下标 0) 回 null
+ */
+internal fun settingsSectionAtRow(keys: List<String>, row: Int): String? {
+    if (row < SettingsListLeadingItems) return null
+    var at = SettingsListLeadingItems
+    var found: String? = null
+    for (each in keys) {
+        if (each in SettingsGroupTitleBefore) at += 1
+        if (at > row) break
+        found = each
+        at += 1
+    }
+    return found
+}
+
+/**
  * 缺省收起来的那几段 = 页面上所有段 - 白名单
  *
  * **D2**: 按"不在白名单里就收着"算, 于是以后新加的一段天然是收起来的。2026-10-08 那条注释写的是
@@ -410,6 +497,33 @@ fun SettingsScreen() {
         sessionCollapsed = collapsed
     }
 
+    // 顶部那条段名索引条 (2026-11-14 主人: "顶部加上可选的版块名, 点击后跳转到对应板块, 可以左右滑"):
+    // 它要能把列表滚过去, 于是滚动位置提到这一层; 高亮再由"现在最上面那一项"反推 —— 列表与条共用
+    // 同一个 [listState], 两边才不会各说各的
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // 高亮 = **视口最上面那一段**, 不是"上一次点了哪一颗": 点「接口」时列表已经到底, 它挤不到顶部,
+    // 这时亮着的是"现在正读的那一段" (快捷指令), 于是条上的高亮与眼睛看到的内容永远一致
+    val activeSection by remember {
+        derivedStateOf { settingsSectionAtRow(SettingsSectionKeys, listState.firstVisibleItemIndex) }
+    }
+    // 段名只在这里取一次: 条的 lambda 不在组合上下文里, stringResource 进不去
+    val sectionEntries: List<SettingsSectionEntry> = buildList {
+        SettingsSectionKeys.forEach { key ->
+            SettingsSectionTitleRes[key]?.let { add(SettingsSectionEntry(key, stringResource(it))) }
+        }
+    }
+    // 点段名: 收着的先展开 (跳到一条收着的标题上没有意义), 再滚到它
+    val jumpToSection: (String) -> Unit = { key ->
+        if (key in collapsed) {
+            collapsed = collapsed - key
+            sessionCollapsed = collapsed
+        }
+        settingsSectionRowIndex(SettingsSectionKeys, key)?.let { row ->
+            scope.launch { listState.animateScrollToItem(row) }
+        }
+    }
+
     // 「检查所需依赖」那一行弹出来的那张体检表 (2026-11-04 主人 #1②/#2): 与首启那个对话框是同一个
     // ([ReadyCardDialog]), 只是这里随时打得开
     var readyOpen by remember { mutableStateOf(false) }
@@ -422,112 +536,123 @@ fun SettingsScreen() {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
-                title = stringResource(R.string.settings_title),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = navigator.pop) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = stringResource(R.string.settings_back),
-                        )
-                    }
-                },
-                // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 账号 / 关于 / 要重启 host 才
-                // 生效的改动
-                // 页面上就不必每个面板各放一个按钮 (2026-10-08 加了前三条, 见开发计划 2.4 与 2.14)
-                // **G1-D 那几行「打开 <对端名>」2026-10-17 撤掉了** (主人: "没用就删掉"): 它载入的
-                // 是对端名片里手填的 publicUrl, 而电脑侧填的是回环地址 —— 手机上 127.0.0.1 指的是
-                // 自己 (实测那台真机只在 127.0.0.1:3080 上听本机 host, 也没有 adb reverse 隧道),
-                // 点开必白页; 真要看/操作电脑那份 GUI, 走浏览器与「（PC）」影子工作区那两条路
-                // (插件侧名片与 `/sync peers` 不受影响, 那两样是 G1-D 的读数面)
-                actions = {
-                    // 「更多」左边那一个刷新 2026-11-04 撤了 (主人 #4): 这一页的设置各段自己会读,
-                    // 而"当场重读一遍"与「检查所需依赖」那一行说的是同一件事
-                    OverlayIconDropdownMenu(
-                        entry = DropdownEntry(
-                            items = listOf(
-                                DropdownItem(
-                                    // 2026-11-08 主人: 自检排第一条 —— 它答的是"我这一层对不对",
-                                    // 而反馈答的是"我要说点什么", 先有读数再说话
-                                    text = stringResource(R.string.doctor_menu),
-                                    summary = stringResource(R.string.doctor_menu_summary),
-                                    onClick = { doctor = true },
-                                ),
-                                DropdownItem(
-                                    // 2.7.9 第 10 条 (2026-10-19 主人: 反馈入口放 ⋮ 的第一条):
-                                    // 后端还没就绪, 这一条走"复制 + 打开 New Issue 页"的本地兜底
-                                    text = stringResource(R.string.settings_menu_feedback),
-                                    summary = stringResource(R.string.settings_menu_feedback_summary),
-                                    onClick = { about = AboutPage.FEEDBACK },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_funnel),
-                                    summary = stringResource(R.string.settings_menu_funnel_summary),
-                                    // 只复制, 不上报: 这是给人回答"我到底卡在哪一步"用的那张表
-                                    onClick = {
-                                        context.getSystemService(ClipboardManager::class.java)
-                                            ?.setPrimaryClip(
-                                                ClipData.newPlainText(
-                                                    "Luwi funnel",
-                                                    Funnel.report(context),
-                                                ),
-                                            )
-                                        Toast.makeText(
-                                            context,
-                                            R.string.settings_api_copied,
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_update),
-                                    summary = stringResource(R.string.settings_about_update_summary),
-                                    onClick = {
-                                        UpdateCheck.reset()
-                                        about = AboutPage.UPDATE
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_account),
-                                    summary = stringResource(R.string.settings_menu_account_summary),
-                                    // 2026-10-25: 文案改成「账号」—— 打开的是官网登录页,
-                                    // 未登录先登录, 已登录会被那一页送去账号页, 从那里进酒馆签到或购买
-                                    onClick = {
-                                        openPage(context, SIGN_IN_URL)?.let { problem ->
-                                            Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_about),
-                                    summary = stringResource(
-                                        R.string.settings_about_version,
-                                        UpdateCheck.localVersionOf(context),
-                                        UpdateCheck.localCodeOf(context),
+            Column {
+                TopAppBar(
+                    title = stringResource(R.string.settings_title),
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = navigator.pop) {
+                            Icon(
+                                imageVector = MiuixIcons.Back,
+                                contentDescription = stringResource(R.string.settings_back),
+                            )
+                        }
+                    },
+                    // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 账号 / 关于 / 要重启 host 才
+                    // 生效的改动
+                    // 页面上就不必每个面板各放一个按钮 (2026-10-08 加了前三条, 见开发计划 2.4 与 2.14)
+                    // **G1-D 那几行「打开 <对端名>」2026-10-17 撤掉了** (主人: "没用就删掉"): 它载入的
+                    // 是对端名片里手填的 publicUrl, 而电脑侧填的是回环地址 —— 手机上 127.0.0.1 指的是
+                    // 自己 (实测那台真机只在 127.0.0.1:3080 上听本机 host, 也没有 adb reverse 隧道),
+                    // 点开必白页; 真要看/操作电脑那份 GUI, 走浏览器与「（PC）」影子工作区那两条路
+                    // (插件侧名片与 `/sync peers` 不受影响, 那两样是 G1-D 的读数面)
+                    actions = {
+                        // 「更多」左边那一个刷新 2026-11-04 撤了 (主人 #4): 这一页的设置各段自己会读,
+                        // 而"当场重读一遍"与「检查所需依赖」那一行说的是同一件事
+                        OverlayIconDropdownMenu(
+                            entry = DropdownEntry(
+                                items = listOf(
+                                    DropdownItem(
+                                        // 2026-11-08 主人: 自检排第一条 —— 它答的是"我这一层对不对",
+                                        // 而反馈答的是"我要说点什么", 先有读数再说话
+                                        text = stringResource(R.string.doctor_menu),
+                                        summary = stringResource(R.string.doctor_menu_summary),
+                                        onClick = { doctor = true },
                                     ),
-                                    onClick = { about = AboutPage.ABOUT },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_restart_host),
-                                    summary = stringResource(R.string.settings_restart_host_summary),
-                                    onClick = { DshHost.restart(context) },
+                                    DropdownItem(
+                                        // 2.7.9 第 10 条 (2026-10-19 主人: 反馈入口放 ⋮ 的第一条):
+                                        // 后端还没就绪, 这一条走"复制 + 打开 New Issue 页"的本地兜底
+                                        text = stringResource(R.string.settings_menu_feedback),
+                                        summary = stringResource(R.string.settings_menu_feedback_summary),
+                                        onClick = { about = AboutPage.FEEDBACK },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_funnel),
+                                        summary = stringResource(R.string.settings_menu_funnel_summary),
+                                        // 只复制, 不上报: 这是给人回答"我到底卡在哪一步"用的那张表
+                                        onClick = {
+                                            context.getSystemService(ClipboardManager::class.java)
+                                                ?.setPrimaryClip(
+                                                    ClipData.newPlainText(
+                                                        "Luwi funnel",
+                                                        Funnel.report(context),
+                                                    ),
+                                                )
+                                            Toast.makeText(
+                                                context,
+                                                R.string.settings_api_copied,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_update),
+                                        summary = stringResource(R.string.settings_about_update_summary),
+                                        onClick = {
+                                            UpdateCheck.reset()
+                                            about = AboutPage.UPDATE
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_account),
+                                        summary = stringResource(R.string.settings_menu_account_summary),
+                                        // 2026-10-25: 文案改成「账号」—— 打开的是官网登录页,
+                                        // 未登录先登录, 已登录会被那一页送去账号页, 从那里进酒馆签到或购买
+                                        onClick = {
+                                            openPage(context, SIGN_IN_URL)?.let { problem ->
+                                                Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_about),
+                                        summary = stringResource(
+                                            R.string.settings_about_version,
+                                            UpdateCheck.localVersionOf(context),
+                                            UpdateCheck.localCodeOf(context),
+                                        ),
+                                        onClick = { about = AboutPage.ABOUT },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_restart_host),
+                                        summary = stringResource(R.string.settings_restart_host_summary),
+                                        onClick = { DshHost.restart(context) },
+                                    ),
                                 ),
                             ),
-                        ),
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.More,
-                            contentDescription = stringResource(R.string.settings_more),
-                        )
-                    }
-                },
-            )
+                        ) {
+                            Icon(
+                                imageVector = MiuixIcons.More,
+                                contentDescription = stringResource(R.string.settings_more),
+                            )
+                        }
+                    },
+                )
+                // 顶部段名索引条 (2026-11-14 主人): 点段名跳过去, 左右滑着看全部 ——
+                // 二十段都收着的时候, 只有它是这一页的目录
+                SettingsSectionBar(
+                    entries = sectionEntries,
+                    activeKey = activeSection,
+                    onPick = jumpToSection,
+                )
+            }
         },
     ) { innerPadding ->
         LazyColumn(
             contentPadding = innerPadding,
             scrollBehavior = scrollBehavior,
+            // 顶栏那条段名索引条要能把这一页滚过去, 所以滚动位置提到外面那一层 (jumpToSection)
+            state = listState,
             // 2026-11-08 重做排版: 段与段之间的距离改由每一段自己给 (一条细线 + 展开态那 20dp),
             // 骨架这一层不再统一加 12dp - 否则收起态那二十行会被拉开, 一页装不下几个段, "目录"
             // 这个形态就没了。左右缩进也从全局那 12dp 收到本页自己的 16dp (SettingsSpace.Inset)
