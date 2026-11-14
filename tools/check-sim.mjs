@@ -287,8 +287,9 @@ check('那条弹窗的形状与插件能力那张一样 (OverlayDialog + 可滚�
   /fun SimSettingsDialog\(/.test(page),
   /OverlayDialog\(/.test(page),
   /show = true,/.test(page),
-  // 高度按屏算; 2026-11-13 起门户那一侧多两组, 用 0.66 (设置页仍是 0.58) —— 两种写法都认
-  /height\(\(screenHeight \* 0\.58f\)\.dp\)|height\(\(screenHeight \* \(if \(withActivity\) 0\.66f else 0\.58f\)\)\.dp\)/.test(page),
+  // 高度按屏算; 2026-11-14 起门户那两颗「设置」按可见组数收 (1~2 组 0.52 / 更多 0.66)
+  // —— 设置页那侧仍是 0.58, 认不出来的写法就红
+  /!withActivity -> 0\.58f/.test(page) && /visible\.size <= 2 -> 0\.52f/.test(page),
   /R\.string\.settings_sim_close/.test(page),
   /verticalScroll|LazyColumn\(/.test(page),
 ], [true, true, true, true, true, true])
@@ -350,6 +351,13 @@ check('新增的那些文案里没有裸 % (Android 会抛 UnknownFormatConversi
 check('设置页段数没变 (活动段还是那一段, 新的是一页而不是一段)', (await read(
   'app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt',
 )).includes('key = "activity"'), true)
+
+// 2026-11-14: 一场主动对话的条数上限由 `send.burstMaxMessages` 定, 宿主那侧写死了同一个上界 ——
+// 两边漂开就是"设置能选 6, 宿主只肯发 3"这种没人看得懂的现象
+check('宿主那侧的条数上界与 SEND_BURST_MAX 同数', [
+  host.includes('Math.min(6, Math.max(1, wanted))'),
+  kotlinConst(sim, 'SEND_BURST_MAX'),
+], [true, 6])
 
 console.log(`\n${count - failures} / ${count} checks passed`)
 if (failures > 0) process.exit(1)

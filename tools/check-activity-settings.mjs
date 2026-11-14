@@ -118,10 +118,22 @@ expect(
   simScreen,
   'private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS',
 )
-expect('focusIndex 那一条', simScreen, 'private fun groupIndex(focus: String, withActivity: Boolean): Int')
-expect('一组 = 两个 item', simScreen, 'return if (at <= 0) 0 else at * 2')
-expect('两组在 LazyColumn 最前', simScreen, 'if (withActivity) {\n                item { SectionSmallTitle')
-expect('门户侧高度另一档', simScreen, 'if (withActivity) 0.66f else 0.58f')
+// 2026-11-14 主人: "活动板块除探索和判断里已有的, 剩下缺少的都加到判断的设置里, 包括表情包数量"
+// —— 可见组由 focus 定: 探索面板只摆 explore, 判断面板吃下活动里剩下的全部
+expect('可见组那张表', simScreen, 'private fun visibleGroups(focus: String, withActivity: Boolean): List<String>')
+expect('探索面板只看一组', simScreen, 'focus.trim() == "explore" -> listOf("explore")')
+expect('判断面板吃下活动里剩下的全部', simScreen, 'else -> ACTIVITY_GROUPS.filter { it != "explore" }')
+expect('设置页仍是四组', simScreen, '!withActivity -> SIM_GROUPS')
+for (const group of ['explore', 'proactive', 'wake', 'send', 'router', 'sticker']) {
+  expect(`组 ${group} 有可见性守卫`, simScreen, `if (visible.contains("${group}")) {`)
+}
+expect('门户侧高度另一档', simScreen, 'visible.size <= 2 -> 0.52f')
+// 判断面板现在有五组, 一进来滚到最后那组会让人以为只剩一组 —— 所以不再按 focus 滚
+if (simScreen.includes('scrollToItem') || simScreen.includes('fun groupIndex')) {
+  failures.push('SimSettingsScreen: 还在按 focus 滚到某一组 (判断面板五组时会藏掉前四组)')
+} else {
+  notes.push('ok   不再按 focus 滚到某一组 (从头看)')
+}
 
 // ── 三、通路: 页面 → 原生 → 回执 ──────────────────────────────────────────────
 
