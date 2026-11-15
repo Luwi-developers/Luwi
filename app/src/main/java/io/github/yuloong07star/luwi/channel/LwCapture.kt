@@ -18,10 +18,15 @@ internal class LwCapture {
     /**
      * Capture the phone's own screen
      *
+     * @param png 要 PNG 还是要裸像素. PNG 是交给模型看的那张图; OCR 只要像素, raw 省掉编解码
      * @returns an empty string once a picture is there, otherwise why there is none
      */
-    fun capturePrimary(path: String): String =
-        written(run(SCREENCAP, "-p", fresh(path)), path, "the phone's own screen")
+    fun capturePrimary(path: String, png: Boolean = true): String =
+        written(
+            if (png) run(SCREENCAP, "-p", fresh(path)) else run(SCREENCAP, fresh(path)),
+            path,
+            if (png) "the phone's own screen" else "the phone's own screen, raw",
+        )
 
     /**
      * Clear what an earlier capture left at this path, and answer the path
