@@ -724,6 +724,13 @@ window.__ModuleLoader__.load({
       '.lwp-row[data-who="user"] .lwp-bubble{background:rgba(216,227,255,.94)}',
       '.lwp-row[data-who="error"] .lwp-bubble{background:rgba(252,232,232,.94)}}',
       '.lwp-time{font-size:11px;color:var(--dsw-alias-label-secondary,#9ca3af)}',
+      // 图片发送失败那一行 (2.8.1 #1): 气泡与「复制诊断」并排, 按钮靠右 —— 一行里只占一小块,
+      // 不把气泡挤窄; 窄屏上气泡仍先占满它的 78%, 按钮贴着它右边
+      '.lwp-fail{display:flex;align-items:flex-end;gap:8px;max-width:100%}',
+      '.lwp-fail .lwp-bubble{max-width:78%}',
+      '.lwp-fail .lwp-diag{flex:none;appearance:none;border:0;border-radius:12px;padding:6px 10px;',
+      'font:inherit;font-size:12px;white-space:nowrap;',
+      'color:var(--dsw-alias-state-error-primary,#b91c1c);background:rgba(220,38,38,.12)}',
       // 空态: 中间一张品牌标记 + 名字 (2026-11-08 主人: "对话界面中间显示 luwi 及其图标")
       // 光晕与浮动只做氛围, 不承载信息; 关掉动效也完全看得懂
       '#lwp-hero{position:relative;flex:1;min-height:180px;display:flex;flex-direction:column;',
@@ -2215,6 +2222,10 @@ window.__ModuleLoader__.load({
             id: imageFails[f].id,
             time: imageFails[f].at,
             text: imageFails[f].text,
+            // 四行诊断 (2.8.1 #1): 这条是本机的图片失败 (`fail`), 右侧才有那颗「复制诊断」——
+            // dsh 自己的 turn-error 两个字段都没有
+            fail: true,
+            diag: imageFails[f].diag,
           })
         }
         // 记下这一拍读到了几个 user 节点 (给 [carryRecord] 当闸门, 见 [lastUsers])
@@ -3435,6 +3446,8 @@ window.__ModuleLoader__.load({
           item.file ? String(item.file.name) + '|' + String(item.file.rel) : '',
           item.attach ? item.attach.join(',') : '',
           item.hasImage ? '1' : '', item.fallback ? '1' : '',
+          // 有四行诊断才画「复制诊断」, 这一位也进身份: 少了它, 诊断补上那一拍不会重建那一行
+          item.diag ? '1' : '',
         ].join('\u0001')
       }
 
@@ -3484,6 +3497,17 @@ window.__ModuleLoader__.load({
           // **话在上、文件在下** (主人 2026-11-09: "应该在句子下方") —— 与球那一侧同一条口径
           if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
           row.appendChild(fileChip(item.file, 'out'))
+        } else if (item.fail) {
+          // 图片发送失败那一泡 (2.8.1 #1): 气泡右侧多一颗「复制诊断」—— 四行 (机型 / Android /
+          // WebView / 图片) 一点就进剪贴板, 与失败那一刻 logcat 上那四行逐字同一份
+          // **按钮总在**: 诊断没取到也要让人点得着 (点了会照实说一句), 而不是静悄悄地少一块
+          var failRow = h('div', 'lwp-fail')
+          failRow.appendChild(h('div', 'lwp-bubble', item.text))
+          var diagButton = h('button', 'lwp-diag', '复制诊断')
+          diagButton.type = 'button'
+          diagButton.onclick = function () { copyImageDiag(item.id) }
+          failRow.appendChild(diagButton)
+          row.appendChild(failRow)
         } else {
           row.appendChild(h('div', 'lwp-bubble', item.text))
         }
@@ -4325,23 +4349,29 @@ window.__ModuleLoader__.load({
        * 含糊, 也不在屏上写一句没人对得上的话
        *
        * @param {string} reason 三种说法之一 (页面内部只传常量, 宿主那侧不必认识这些字)
+       * @param {string} [picture] 这一次那张图多大 (`未选择` = 人把选择器退出来了 / 压根没选)
        */
-      function imageFail(reason) {
+      function imageFail(reason, picture) {
         var text = String(reason === undefined || reason === null ? '' : reason)
         if (text !== IMAGE_FAIL.noCallback && text !== IMAGE_FAIL.tooBig && text !== IMAGE_FAIL.timeout) {
           text = IMAGE_FAIL.timeout
         }
         var at = Date.now()
+        // 四行诊断 (2.8.1 #1): 机型 / Android / WebView 只有宿主读得到, 所以那一份由它拼 —— 同一份
+        // **既进 logcat 又原样回存**到这条气泡上, 「复制诊断」复制的就是它, 两边才会逐字一致
+        var size = picture === undefined || picture === null ? '' : String(picture).trim()
+        if (size === '') size = '未选择'
+        var got = call('portalImageFail', JSON.stringify({ reason: text, image: size }))
+        var diag = got && typeof got.diag === 'string' ? got.diag : ''
         imageFails.push({
           id: 'imagefail\u0001' + String(at) + '\u0001' + String(imageFails.length),
           at: at,
           text: '图片发送失败：' + text,
+          diag: diag,
         })
         // 只留最近三条: 连着失败十次不该把整段对话顶走
         while (imageFails.length > 3) imageFails.shift()
         console.log('[luwi-portal] image send failed: ' + text)
-        // 读数那一半归宿主: 机型与 WebView 版本各一行进 logcat, 同一时刻与这条气泡对上 (判据就认这两行)
-        call('portalImageFail', text)
         renderFlow()
       }
 
@@ -4380,6 +4410,35 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 气泡右侧那颗「复制诊断」(2.8.1 #1)
+       *
+       * 复制的那四行**不是点击这一刻拼的**: 失败那一下宿主已经拼好一份 (同一份进了 logcat), 这里原样
+       * 交回去, 于是剪贴板与 logcat 同刻逐字一致, 走宿主 `portalCopyDiag` 而不是 `navigator.clipboard`
+       * —— 后者要有焦点、要算用户手势, 系统剪贴板才一定成 (与 [copyFilePath] 同一条路)
+       * @param {string} id 那条「图片发送失败」的身份 (见 [imageFail])
+       */
+      function copyImageDiag(id) {
+        var key = String(id === undefined || id === null ? '' : id)
+        var one = null
+        for (var i = 0; i < imageFails.length; i += 1) {
+          if (imageFails[i].id === key) {
+            one = imageFails[i]
+            break
+          }
+        }
+        if (one === null || one.diag === '') {
+          showNote('这条诊断没留下, 再失败一次', true)
+          return
+        }
+        var got = call('portalCopyDiag', one.diag)
+        if (!got || got.ok !== true) {
+          showNote(got && got.error ? String(got.error) : '复制不了这条诊断', true)
+          return
+        }
+        showNote('已复制诊断 ' + String(got.lines) + ' 行')
+      }
+
+      /**
        * 一条待发附件等字节的最长时间 (超了就地作废这一条, 并报「上传超时」)
        *
        * 计时器挂在条目自己身上 (`one.watch`), 收尾时由 [renderAttach] 顺手清掉 —— 状态不再是
@@ -4394,7 +4453,7 @@ window.__ModuleLoader__.load({
           one.status = 'error'
           one.error = '等太久了'
           renderAttach()
-          imageFail(IMAGE_FAIL.timeout)
+          imageFail(IMAGE_FAIL.timeout, sizeText(one.bytes))
         }, UPLOAD_WAIT_MS)
       }
 
@@ -4440,7 +4499,8 @@ window.__ModuleLoader__.load({
           var type = file && typeof file.type === 'string' ? file.type : ''
           // 太大在**读字节之前**就说: 读进来再报错, 那几秒的卡顿本身就是一条"没反应" (落实表 #35)
           if (Number(file && file.size ? file.size : 0) > MAX_STASH_BYTES) {
-            imageFail(IMAGE_FAIL.tooBig)
+            // 带上这一份多大: 四行诊断里的第四行就是它 (2.8.1 #1)
+            imageFail(IMAGE_FAIL.tooBig, sizeText(file && file.size ? file.size : 0))
             continue
           }
           if (type.indexOf('image/') === 0) readImage(file)
@@ -5561,6 +5621,11 @@ window.__ModuleLoader__.load({
          */
         pickState: pickState,
         /**
+         * 注入一次「图片发送失败」(2.8.1 #1): 与计时器到点那条路同一个函数 —— 判据靠它制造一次失败,
+         * 然后点气泡右侧那颗「复制诊断」
+         */
+        imageFail: imageFail,
+        /**
          * 宿主说"她说的话变了": 取增量入队 (方案 §3.4 的**触发源**)
          *
          * jsonl 不是 dsh 的快照, `chatTarget.subscribe` 不会因为它变化而触发 —— 没有这一条, 一轮工具
@@ -5643,6 +5708,16 @@ window.__ModuleLoader__.load({
          * 没有这一句, 页面上就分不清"还在等选择器"与"选了但 WebView 没回调" —— 后者正是 issue #53
          */
         pickState: function (state) { portal.pickState(state) },
+        /**
+         * 注入一次「图片发送失败」(2.8.1 #1)
+         *
+         * 判据要的是"注入一次 WebView 文件选择回调失败后, 气泡右侧出现「复制诊断」" —— 真机上制造
+         * 一次失败不一定顺手, 所以这里留一个口子: `__LUWI_PORTAL__.imageFail('webview 未回调')` 与
+         * 计时器到点走的是**同一条**路 (同一个三选一说法表, 同一份四行诊断)
+         * @param reason 三种说法之一, 别的按「上传超时」
+         * @param picture 这一张图多大; 省略 = `未选择`
+         */
+        imageFail: function (reason, picture) { portal.imageFail(reason, picture) },
         /**
          * 原生那个「更多设置」窗关掉了 (2026-11-13): 面板不关, 只是把读数重拉一遍 ——
          * 弹窗里改的就是那几行 (冷却 / 唤醒 / 下一趟), 不拉就会停在旧数
