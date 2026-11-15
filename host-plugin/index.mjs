@@ -13954,6 +13954,28 @@ function noteQuietRefresh() {
 }
 
 /**
+ * Which voice input this installation chose (2026-11-15, 2.8.1 #4)
+ *
+ * The onboarding offers two routes for the voice step: download the 240 MB SenseVoice model, or let
+ * the signed-in DeepSeek account carry voice input. The app writes that choice to
+ * `$DSH_HOME/lw/voice-source.json` (it is the only writer); this side only reads it so a mic press
+ * can say what is actually missing instead of always pointing at `lw_speech op=prepare`.
+ *
+ * Every read failure means `local` - a missing or broken file must not change how voice input works.
+ * @returns 'deepseek' when the account route was chosen, otherwise 'local'
+ */
+function voiceSourceChoice() {
+  const home = process.env.DSH_HOME
+  if (!home) return 'local'
+  try {
+    const body = JSON.parse(readFileSync(join(home, 'lw', 'voice-source.json'), 'utf8'))
+    return body?.source === 'deepseek' ? 'deepseek' : 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+/**
  * Register the provider the page's voice input button resolves to
  *
  * 与球同一个引擎 (2026-10-09): 下载那一栏走的是 SenseVoice 那 240 MB, 界面里的磁盘 / 内存 / 时间
@@ -14009,7 +14031,14 @@ function registerVoiceInput(ctx) {
       // 分岔的代价是别人为了按一次按钮要多下 1.6 GB, 而 GLM 的准是**点名要它**时才值得的
       const engine = SPEECH_ENGINE_SHERPA
       if (!info.present) {
-        throw new Error('the SenseVoice model is not downloaded yet: run lw_speech op=prepare once')
+        // 选了账号那条的机器不再被催那 240 MB (见 [voiceSourceChoice]): 这一句要说的是"这台机器
+        // 是哪种配法", 而不是一句永远一样的 `run lw_speech op=prepare`
+        throw new Error(
+          voiceSourceChoice() === 'deepseek'
+            ? 'this install uses DeepSeek voice input for speech and the local SenseVoice model is'
+              + ' not downloaded: run lw_speech op=prepare to add the local model as well'
+            : 'the SenseVoice model is not downloaded yet: run lw_speech op=prepare once',
+        )
       }
       const directory = info.directory
       await mkdir(directory, { recursive: true })

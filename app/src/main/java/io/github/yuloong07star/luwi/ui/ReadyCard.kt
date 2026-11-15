@@ -77,6 +77,7 @@ import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.voice.SpeechModelDownload
+import io.github.yuloong07star.luwi.voice.VoiceSource
 import io.github.yuloong07star.luwi.wake.WakeWordDownload
 import io.github.yuloong07star.luwi.wake.WakeWordWords
 import kotlinx.coroutines.Dispatchers
@@ -100,11 +101,16 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 再写一句话解释, 看线就知道。无障碍要靠特权进程写 secure setting, 模型要靠无障碍那条链被叫起来, 虚拟屏
  * 要靠特权进程建; 所以上面那件没通, 下面那件的按钮就是灰的: 先给他一个点得动的, 而不是一个点了报错的
  *
+ * **两档来源把「账号」提到了两个模型之前** (2026-11-15, 2.8.1 #4): 语音输入可以只靠已登录的 DeepSeek
+ * 账号 (不必下那 240 MB), 而账号本来就是模型能不能用的前提 —— 于是现在的行序是
+ * 特权通道 → 无障碍 → **账号** → 唤醒模型 → 语音模型 → 选择权限, 顺序由 [ReadyRail] 那份清单说了算
+ *
  * **模型这两件不自己下载**: 唤醒词与语音模型各有一个现成的下载器 ([WakeWordDownload] /
  * [SpeechModelDownload], 设置页那两条下载按钮背后就是它们), 它们自带 phase / received / total 三个
  * Compose 状态, 所以这里只是**订阅**进度、按一下调它们的 `download()` —— 不新开一套网络层, 也不自己算
  * 百分比。语音这一件只算 SenseVoice + silero VAD (约 240 MB); GLM-ASR 那套要大得多, 要点名才下,
- * 不算进这张体检表的必做项
+ * 不算进这张体检表的必做项。**语音那件是两档** (本地这 240 MB, 或者已登录的 DeepSeek 账号), 所以它
+ * 下面还有一颗「使用 DeepSeek 语音输入」—— 不下模型的机器这一件也算办过 (见 [VoiceSource])
  *
  * **为什么改成对话框**: 它原来内嵌在两处 (启动页底部一块、设置页「外观」下面一个 item), 都在页面的
  * 下半截, 而四件依赖排成一条竖轨之后比一屏还高 —— "还差几步"总有一半在屏幕外。对话框自己居中、自己
@@ -113,7 +119,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * **虚拟屏那一件只显示状态, 不再给按钮** (2026-11-04 主人 #3): 建屏是"用起来之后自然会发现"的事,
  * 不该是这张体检表上的最后一道 CTA。所以 [ReadyActionRow] 只在**四件可操作的事**里挑下一步
  *
- * 动效只干一件事: **让人看懂"这是一串有先后的事"**。五行依次淡入 (每行差 90ms, 顺序即依赖顺序),
+ * 动效只干一件事: **让人看懂"这是一串有先后的事"**。六行依次淡入 (每行差 90ms, 顺序即依赖顺序),
  * 某一行刚变成做完时弹一下, 下载中的那一行用确定进度 (节点环 + 细条 + 百分比), 不是转圈。除了那个环
  * 与下载进度, 没有别的东西在动, 也没有循环动画
  *
@@ -456,6 +462,9 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
     val accessibility = AccessibilitySetting.state
     // 账号那一窗开着没有 (2026-11-14): 与「选择权限」那一路同一个写法 —— 一行入口, 点开是设置页 / 弹窗
     var accountOpen by remember { mutableStateOf(false) }
+    // 语音输入选的是哪一条 (2026-11-15, 2.8.1 #4): 本地模型 / 已登录的 DeepSeek 账号。**读文件在 IO 上**
+    // (与两个下载器同一档), 初值就是缺省那条, 读到真值再翻 —— 一帧的差别不该卡在磁盘上
+    var voiceSource by remember { mutableStateOf(VoiceSource.LOCAL) }
 
     LaunchedEffect(Unit) {
         // 打开时读一次。四件事都不在画帧的线程上做事: 通道与无障碍要起几个 settings/cmd 子进程;
@@ -466,6 +475,7 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
         SpeechModelDownload.refresh(context)
         // 账号那一行 (2026-11-14): 一次问清楚"登录了没有 / Key 有没有", 页面那头读完报回来
         PortalAccount.refresh()
+        voiceSource = withContext(Dispatchers.IO) { VoiceSource.read(context) }
     }
 
     // 两个下载器的进度都是它们自己的 Compose 状态, 读一下就是订阅: 每收一块它们改一次 received,
@@ -479,6 +489,12 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
     val speechBytes = SpeechModelDownload.files.sumOf { it.bytes } + SpeechModelDownload.vad.bytes
     val wakeProgress = fraction(WakeWordDownload.received, WakeWordDownload.total)
     val speechProgress = fraction(SpeechModelDownload.received, SpeechModelDownload.total)
+    // 语音这一件有两档来源 (2026-11-15, 2.8.1 #4): 本地那 240 MB, 或者已登录的 DeepSeek 账号。
+    // 选了账号那条, 这一件就算办过 —— 它不需要本地模型
+    val speechByAccount = voiceSource == VoiceSource.DEEPSEEK
+    // 真的下起来了 (正在下 / 暂停) 时进度要照旧看得见: 这个选择不替下载器说话
+    val speechBusy = speechPhase == SpeechModelDownload.Phase.DOWNLOADING ||
+        speechPhase == SpeechModelDownload.Phase.PAUSED
 
     val steps = listOf(
         ReadyStep(
@@ -532,31 +548,54 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
             bytes = wakeBytes,
         ),
         ReadyStep(
-            state = speechState(speechPhase, speechPresent),
+            state = if (speechByAccount && !speechBusy) {
+                ReadyState.DONE
+            } else {
+                speechState(speechPhase, speechPresent)
+            },
             title = stringResource(R.string.ready_speech),
-            detail = modelDetail(
-                downloading = speechPhase == SpeechModelDownload.Phase.DOWNLOADING,
-                paused = speechPhase == SpeechModelDownload.Phase.PAUSED,
-                failed = speechPhase == SpeechModelDownload.Phase.FAILED,
-                present = speechPresent,
-                bytes = speechBytes,
-                received = SpeechModelDownload.received,
-                total = SpeechModelDownload.total,
-                reason = SpeechModelDownload.detail,
-            ),
-            progress = speechProgress,
+            // 没下、而且选的是账号那条: 这一行说的是"用哪条", 不再念那 240 MB 的账
+            detail = if (speechByAccount && !speechBusy && !speechPresent) {
+                stringResource(R.string.ready_speech_account)
+            } else {
+                modelDetail(
+                    downloading = speechPhase == SpeechModelDownload.Phase.DOWNLOADING,
+                    paused = speechPhase == SpeechModelDownload.Phase.PAUSED,
+                    failed = speechPhase == SpeechModelDownload.Phase.FAILED,
+                    present = speechPresent,
+                    bytes = speechBytes,
+                    received = SpeechModelDownload.received,
+                    total = SpeechModelDownload.total,
+                    reason = SpeechModelDownload.detail,
+                )
+            },
+            progress = if (speechByAccount && !speechBusy) 0f else speechProgress,
             action = ReadyAction.SpeechDownload,
             bytes = speechBytes,
         ),
     )
 
     // 有序清单 (2026-11-14 主人: "进度条要按顺序从上往下走, 上面有未完成的应先卡住进度条…不能跳过"):
-    // 四件 + 选择权限 + 账号, 按依赖顺序排; `firstPending` 是**第一个没办的位置**
+    // 清单单独列出来 (四件 + 两个入口行), `firstPending` 是**第一个没办的位置**
     //
-    // 环与竖轨只走到这里 —— 上面还有没办的, 下面就算办好了也不许把进度条带过去 (那正是"跳过").
-    // 顶栏那句「还差 N 步」仍按**真实没办的件数**算: 它说的是"还差几件", 不是"走到哪"
-    val flags = steps.map { it.state == ReadyState.DONE } +
-        listOf(permissionsDone, PortalAccount.ready)
+    // **登录现在排在两个模型下载之前** (2026-11-15, 2.8.1 #4): 语音输入可以只靠已登录的账号, 所以先让
+    // 人办账号, 再决定要不要为语音那 240 MB 花磁盘。有序清单 = 通道 → 无障碍 → 账号 → 唤醒模型 →
+    // 语音模型 → 选择权限
+    val rail = listOf(
+        ReadyRail.Slot(0),
+        ReadyRail.Slot(1),
+        ReadyRail.Account,
+        ReadyRail.Slot(2),
+        ReadyRail.Slot(3),
+        ReadyRail.Permissions,
+    )
+    val flags = rail.map { entry ->
+        when (entry) {
+            is ReadyRail.Slot -> steps[entry.index].state == ReadyState.DONE
+            ReadyRail.Account -> PortalAccount.ready
+            ReadyRail.Permissions -> permissionsDone
+        }
+    }
     val firstPending = flags.indexOfFirst { !it }.let { if (it < 0) flags.size else it }
     val done = firstPending
     val total = flags.size
@@ -571,8 +610,12 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
     }
 
     // **只给下一步该做的那一件**: 四件各给一个按钮不行 —— 用户会按顺序全按一遍, 而第二件往后
-    // 按下去只会报"特权通道还没通"
-    val next = steps.firstOrNull { it.state != ReadyState.DONE && it.action != ReadyAction.None }
+    // 按下去只会报"特权通道还没通"。而且它只从**路已经铺到**的那几行里挑: 账号还没办时, 底下那颗
+    // 按钮也不许越过它去催模型 (与行上那层门禁是同一件事)
+    val next = rail.withIndex()
+        .filter { (index, _) -> index <= firstPending }
+        .mapNotNull { (_, entry) -> (entry as? ReadyRail.Slot)?.let { steps[it.index] } }
+        .firstOrNull { it.state != ReadyState.DONE && it.action != ReadyAction.None }
 
     if (channel == null && accessibility == null) {
         // 还没读到就不摆四行: 两个 state 的初值都是 null, 否则刚打开会闪一下"还差 4 步", 一帧后变少
@@ -611,66 +654,82 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
         }
     }
 
-    steps.forEachIndexed { index, step ->
-        // 用下标当身份: 四件的顺序本来就是固定的依赖顺序, 下标就是这个顺序本身
-        val downloading = step.state == ReadyState.RUNNING
-        val paused = step.state == ReadyState.PAUSED
-        val isDownload = step.action == ReadyAction.WakeDownload || step.action == ReadyAction.SpeechDownload
-        ReadyRow(
-            step = step,
-            index = index,
-            // 轨道要接着往下走到「选择权限」那个节点, 所以末行不再收口
-            last = false,
-            // 前面的都办完了, 路才铺到这一行 (上面有缺口就停在那儿)
-            reached = index <= firstPending,
-            // 下载中点这一行 = 暂停; 暂停后再点 = 接着下 (主人 2026-11-15: "点击正在下载可暂停")
-            onTap = when {
-                !isDownload -> null
-                downloading -> ({
-                    if (step.action == ReadyAction.WakeDownload) {
-                        WakeWordDownload.pause()
+    // 竖轨按 [rail] 那个顺序画: 四件里的下标只是"第几件依赖" (顺序仍是通道 → 无障碍 → 唤醒 → 语音),
+    // 摆在第几行由清单说; 两个入口行 (账号 / 选择权限) 与四件走**同一份** [ReadyRailRow]
+    rail.forEachIndexed { index, entry ->
+        when (entry) {
+            is ReadyRail.Slot -> {
+                val step = steps[entry.index]
+                val downloading = step.state == ReadyState.RUNNING
+                val paused = step.state == ReadyState.PAUSED
+                val isDownload =
+                    step.action == ReadyAction.WakeDownload || step.action == ReadyAction.SpeechDownload
+                ReadyRow(
+                    step = step,
+                    index = index,
+                    // 轨道要接着往下走到下一个节点, 所以这些行都不收口 (只有清单末行收)
+                    last = false,
+                    // 前面的都办完了, 路才铺到这一行 (上面有缺口就停在那儿)
+                    reached = index <= firstPending,
+                    // 下载中点这一行 = 暂停; 暂停后再点 = 接着下 (主人 2026-11-15: "点击正在下载可暂停")
+                    onTap = when {
+                        !isDownload -> null
+                        downloading -> ({
+                            if (step.action == ReadyAction.WakeDownload) {
+                                WakeWordDownload.pause()
+                            } else {
+                                SpeechModelDownload.pause()
+                            }
+                        })
+                        paused -> ({ startDownload(step.action) })
+                        else -> null
+                    },
+                    // 暂停之后右边那一格给一颗 ×: 点了就把这次下载作废 (半条文件一起清掉)
+                    onCancel = if (paused) {
+                        ({
+                            if (step.action == ReadyAction.WakeDownload) {
+                                WakeWordDownload.cancel(context)
+                            } else {
+                                SpeechModelDownload.cancel(context)
+                            }
+                        })
                     } else {
-                        SpeechModelDownload.pause()
-                    }
-                })
-                paused -> ({ startDownload(step.action) })
-                else -> null
-            },
-            // 暂停之后右边那一格给一颗 ×: 点了就把这次下载作废 (半条文件一起清掉)
-            onCancel = if (paused) {
-                ({
-                    if (step.action == ReadyAction.WakeDownload) {
-                        WakeWordDownload.cancel(context)
-                    } else {
-                        SpeechModelDownload.cancel(context)
-                    }
-                })
-            } else {
-                null
-            },
-            modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
-        )
+                        null
+                    },
+                    modifier = Modifier.padding(top = if (index == 0) UiSpacing.Large else 0.dp),
+                )
+            }
+
+            // 账号那一行: 现在排在两个模型**之前** (2.8.1 #4) —— 先登录, 再决定要不要下本地语音模型
+            ReadyRail.Account -> ReadyLinkRow(
+                title = stringResource(R.string.ready_account),
+                detail = accountDetail(),
+                index = index,
+                done = PortalAccount.ready,
+                last = false,
+                reached = index <= firstPending,
+                onClick = {
+                    accountOpen = true
+                    // 打开就问一次: 这一行可能停在"还没问过"
+                    PortalAccount.refresh()
+                },
+            )
+
+            // 选择权限那一行是清单末行: 收口在这儿, 轨道才算连到底
+            ReadyRail.Permissions -> ReadyLinkRow(
+                title = stringResource(R.string.ready_permissions),
+                detail = stringResource(R.string.ready_permissions_summary),
+                index = index,
+                done = permissionsDone,
+                last = true,
+                // 路没铺到这儿就点不开: 上面还有没办的, 不许跳过 (同一件事的第二个后果)
+                reached = index <= firstPending,
+                onClick = onPermissions,
+            )
+        }
     }
 
-    // 竖轨上的第五个节点: 「选择权限」 (2026-11-07 主人: "也放在那个竖向进度条的下方, 到选择权限时
-    // 用户点击即可弹出窗口")。形态与上面四件一样 (同一个 x 上的节点 + 同一条轨道), 但它**不是**
-    // ReadyStep —— 没有状态、不进环的分母、也不参与"还差几步": 它是一行的入口, 点开是设置页
-    // 「权限」那一段本身, 关掉就回到这张体检表
-    ReadyLinkRow(
-        title = stringResource(R.string.ready_permissions),
-        detail = stringResource(R.string.ready_permissions_summary),
-        index = steps.size,
-        done = permissionsDone,
-        // 下面还跟着「账号」那一行: 这一段轨道必须接着往下画, 收口在这儿的话
-        // 账号那颗点就悬在半空 (主人 2026-11-15: "帐号左边的点没有融入上方进度条")
-        last = false,
-        // 路没铺到这儿就点不开: 上面还有没办的, 不许跳过 (同一件事的第二个后果)
-        reached = steps.size <= firstPending,
-        onClick = onPermissions,
-    )
-
-    // 竖轨上再往下那一格: 「账号」 (2026-11-14 主人: "把登录加入新手引导")。形态与「选择权限」同款,
-    // 点开是**原生**那一窗 (登录 / 填 Key / 稍后)
+    // 账号那一窗 (2026-11-14 主人: "把登录加入新手引导"): 点开是**原生**那一窗 (登录 / 填 Key / 稍后)
     if (accountOpen) {
         AccountGuideDialog(
             onDismiss = {
@@ -679,18 +738,6 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
             },
         )
     }
-    ReadyLinkRow(
-        title = stringResource(R.string.ready_account),
-        detail = accountDetail(),
-        index = steps.size + 1,
-        done = PortalAccount.ready,
-        reached = steps.size + 1 <= firstPending,
-        onClick = {
-            accountOpen = true
-            // 打开就问一次: 这一行可能停在"还没问过"
-            PortalAccount.refresh()
-        },
-    )
 
     // 没有"下一步"时整块不画 (四件都办完就是这样): 不该留一块空框
     if (next != null) {
@@ -704,6 +751,38 @@ private fun ReadyCardBody(permissionsDone: Boolean, onPermissions: () -> Unit, o
                     ReadyAction.WakeDownload, ReadyAction.SpeechDownload -> startDownload(action)
                     ReadyAction.None -> Unit
                 }
+            },
+        )
+    }
+
+    // 「下载语音输入模型」下面再加一颗 (2026-11-15 主人, 2.8.1 #4): 也可以直接用已登录 DeepSeek 账号的
+    // 语音输入, 于是这一行不再是"必须下那 240 MB"
+    //
+    // 两档都画在同一个位置: 没选账号那条时它是「使用 DeepSeek 语音输入」; 选了以后它翻成「改用本地语音
+    // 模型」, 于是这一步可来可回 —— 只给一次入口的话, 选错了就只能去设置页里找
+    if ((next?.action == ReadyAction.SpeechDownload && !speechBusy) || speechByAccount) {
+        val signedIn = PortalAccount.phase == AccountPhase.SIGNED_IN
+        ReadyVoiceChoice(
+            byAccount = speechByAccount,
+            signedIn = signedIn,
+            onUseAccount = {
+                scope.launch {
+                    voiceSource = withContext(Dispatchers.IO) {
+                        VoiceSource.choose(context, VoiceSource.DEEPSEEK)
+                    }
+                }
+            },
+            onUseLocal = {
+                scope.launch {
+                    voiceSource = withContext(Dispatchers.IO) {
+                        VoiceSource.choose(context, VoiceSource.LOCAL)
+                    }
+                }
+            },
+            onNeedSignIn = {
+                // 没登录就先把登录那一窗给他: 这颗按钮的前提是账号, 而不是把话说一半
+                accountOpen = true
+                PortalAccount.refresh()
             },
         )
     }
@@ -1314,6 +1393,81 @@ private fun ReadyActionRow(next: ReadyStep, onAction: (ReadyAction) -> Unit) {
     }
 }
 
+/**
+ * 「使用 DeepSeek 语音输入」那一颗 (2026-11-15 主人, 2.8.1 #4)
+ *
+ * 主人那一句: "「下载语音输入模型」按钮下面再加一颗「使用 DeepSeek 语音输入」" —— 于是语音这一步
+ * 从"必须下那 240 MB"变成**两档可选**。它排在主按钮下面、比主按钮轻一档 (只有描边, 没有底色):
+ * 主按钮仍然是"把本地那套下下来", 这一颗是"不下了, 用账号那条"
+ *
+ * 没登录时它**不是**一条死路: 点它开的是账号那一窗 (这一颗的前提就是账号, 与其写一句"不可用",
+ * 不如把人领到能办的那一步)。选了账号那条之后它翻成「改用本地语音模型」, 于是这一步可来可回
+ *
+ * @param byAccount 现在是不是账号那条
+ * @param signedIn DeepSeek 账号登录了没有
+ * @param onUseAccount 选账号那条
+ * @param onUseLocal 换回本地模型
+ * @param onNeedSignIn 还没登录时点它: 去登录
+ */
+@Composable
+private fun ReadyVoiceChoice(
+    byAccount: Boolean,
+    signedIn: Boolean,
+    onUseAccount: () -> Unit,
+    onUseLocal: () -> Unit,
+    onNeedSignIn: () -> Unit,
+) {
+    val colors = MiuixTheme.colorScheme
+    // 本地那一档要下多少: 与语音那一行同一个数 (SenseVoice + silero VAD)
+    val localBytes = SpeechModelDownload.files.sumOf { it.bytes } + SpeechModelDownload.vad.bytes
+    val label = if (byAccount) {
+        stringResource(R.string.ready_voice_local)
+    } else {
+        stringResource(R.string.ready_voice_account)
+    }
+    val summary = when {
+        byAccount -> stringResource(R.string.ready_voice_local_summary, "%.1f".format(localBytes / 1024.0 / 1024.0))
+        signedIn -> stringResource(R.string.ready_voice_account_summary)
+        else -> stringResource(R.string.ready_voice_sign_in)
+    }
+    val accent = colors.primary
+    val shape = RoundedCornerShape(16.dp)
+    val tap = when {
+        byAccount -> onUseLocal
+        signedIn -> onUseAccount
+        else -> onNeedSignIn
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = UiSpacing.Medium)
+            .clip(shape)
+            .border(1.dp, accent.copy(alpha = 0.28f), shape)
+            .clickable(role = Role.Button, onClick = tap),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = ActionHeight)
+                .padding(horizontal = UiSpacing.Large, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = label,
+                style = MiuixTheme.textStyles.body1,
+                color = accent,
+            )
+            Text(
+                text = summary,
+                style = MiuixTheme.textStyles.footnote1,
+                color = colors.onSurfaceVariantSummary,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
 /** 下载器的 phase → 卡片的状态。IDLE 时再看一眼磁盘: 下好了却没走 refresh 的那一次也算数 */
 private fun wakeState(phase: WakeWordDownload.Phase, present: Boolean): ReadyState = when (phase) {
     WakeWordDownload.Phase.DOWNLOADING -> ReadyState.RUNNING
@@ -1383,6 +1537,25 @@ private data class ReadyStep(
 
 /** 四档状态: 没办 / 正在下 / 做完了 / 试过没成 */
 private enum class ReadyState { TODO, RUNNING, PAUSED, DONE, FAILED, LOCKED }
+
+/**
+ * 竖轨上的一格: 四件依赖里的一件, 或者两个入口行 (账号 / 选择权限)
+ *
+ * 2026-11-15 (2.8.1 #4) 之前顺序是写死的 (`steps` 接着两个 `ReadyLinkRow`), 而主人要把**登录放到
+ * 两个模型下载之前** —— 于是顺序单独列在 [ReadyRail] 那个清单里, 行怎么画、进度怎么卡、下标是多少
+ * 全由它推出来。四件彼此的先后仍是依赖顺序 (通道 → 无障碍 → 唤醒 → 语音), 清单只是把它们摆到行上
+ */
+private sealed interface ReadyRail {
+
+    /** 四件里的第 [index] 件 (`steps` 里的下标) */
+    data class Slot(val index: Int) : ReadyRail
+
+    /** 「账号」入口行: 登录 / 填 Key / 稍后 */
+    data object Account : ReadyRail
+
+    /** 「选择权限」入口行: 点开是设置页权限那一段 */
+    data object Permissions : ReadyRail
+}
 
 /**
  * 点一下办掉的那件事: 每一项只有一件, 走的是各自现成的入口

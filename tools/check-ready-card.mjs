@@ -44,6 +44,10 @@ const activity = await read(src('MainActivity.kt'))
 const en = await read('app/src/main/res/values/strings.xml')
 const zh = await read('app/src/main/res/values-zh/strings.xml')
 const portalBridge = await read(src('ui/PortalBridge.kt'))
+// 2026-11-15 (2.8.1 #4): 语音输入那两档的选择落在这两处, 再被宿主那一份读一次
+const voiceSource = await read(src('voice/VoiceSource.kt'))
+const setup = await read(src('voice/ModelSetup.kt'))
+const hostPlugin = await read('host-plugin/index.mjs')
 
 let failures = 0
 let checks = 0
@@ -219,13 +223,14 @@ check(
     /internal fun PermissionsItems\(\)/u.test(settings),
     // 它不是 ReadyStep: 不进环的分母, 也不参与"还差几步"
     [...code.matchAll(/^\s+action = ReadyAction\./gmu)].length,
-    // 位置: 竖轨里的第五个节点 (2026-11-07 主人: "也放在那个竖向进度条的下方"), 不能掉到"下一步"
-    // 按钮后面去; 四行的末行不再收口 (`last = false`), 轨道才接得到它
+    // 位置: 竖轨里最后一个节点 (2026-11-07 主人: "也放在那个竖向进度条的下方"), 不能掉到"下一步"
+    // 按钮后面去; 2026-11-15 起它排在**账号之后** (登录挪到两个模型之前), 所以它是清单末行
     (() => {
-      const rows = card.indexOf('steps.forEachIndexed')
-      const link = card.indexOf('ReadyLinkRow(')
+      const rows = card.indexOf('rail.forEachIndexed')
+      const account = card.indexOf('ReadyRail.Account -> ReadyLinkRow(')
+      const permissions = card.indexOf('ReadyRail.Permissions -> ReadyLinkRow(')
       const next = card.indexOf('if (next != null)')
-      return rows >= 0 && link > rows && next > link && card.includes('last = false')
+      return rows >= 0 && account > rows && permissions > account && next > permissions
     })(),
     zh.includes('<string name="ready_permissions">选择权限</string>'),
     en.includes('<string name="ready_permissions">Choose permissions</string>'),
@@ -242,7 +247,7 @@ check(
     !card.includes('val half = NodeRadius.toPx() * 0.42f'),
     card.includes('onAccent = colors.surface'),
     // 就绪判断把这一件也算进去, 否则权限没看过也会说"全部就绪"
-    card.includes('listOf(permissionsDone, PortalAccount.ready)'),
+    card.includes('ReadyRail.Permissions -> permissionsDone'),
     card.includes('val total = flags.size'),
     card.includes('ReadyHead(done = done, total = total, missing = missing)'),
     // 关掉那一窗才算办过, 而且跨启动记得住
@@ -408,13 +413,15 @@ check(
 
 /* ── 十二、进度条按顺序卡住 (2026-11-14 主人: "上面有未完成的应先卡住进度条…不能跳过") ───────── */
 
-// 有序清单 = 四件 + 选择权限 + 账号; `firstPending` 是第一个没办的位置, 环与竖轨只走到这里。
-// 上面有缺口时下面的已办项带不动进度条 —— 那正是"跳过"
+// 有序清单 = 通道 → 无障碍 → 账号 → 唤醒模型 → 语音模型 → 选择权限 (2026-11-15, 2.8.1 #4: 登录挪到
+// 两个模型下载之前); `firstPending` 是第一个没办的位置, 环与竖轨只走到这里。上面有缺口时下面的已办项
+// 带不动进度条 —— 那正是"跳过"
 check(
   '进度条只按顺序推进 (缺口挡住后面的已办项)',
   [
-    card.includes('val flags = steps.map { it.state == ReadyState.DONE } +'),
-    card.includes('listOf(permissionsDone, PortalAccount.ready)'),
+    card.includes('val flags = rail.map { entry ->'),
+    card.includes('ReadyRail.Account -> PortalAccount.ready'),
+    card.includes('ReadyRail.Permissions -> permissionsDone'),
     card.includes('val firstPending = flags.indexOfFirst { !it }'),
     card.includes('val done = firstPending'),
     // 顶栏那句按真实未办件数算, 不虚报成前缀长度
@@ -422,22 +429,21 @@ check(
     card.includes('ReadyHead(done = done, total = total, missing = missing)'),
     // 每行都有"路铺到这儿没有"这个参数, 节点仍按各自真状态画
     card.includes('reached = index <= firstPending'),
-    card.includes('reached = steps.size <= firstPending'),
-    card.includes('reached = steps.size + 1 <= firstPending'),
     card.includes('reached: Boolean = false,'),
     card.includes('val rail = if (reached)'),
   ],
-  [true, true, true, true, true, true, true, true, true, true, true],
+  [true, true, true, true, true, true, true, true, true, true],
 )
 
 // 2026-11-15 主人: "帐号左边的点没有融入上方进度条, 而且没到这个进度时不允许点击才对" ——
-// ① 选择权限那一行**不是末行** (下面跟着账号), 收口在这儿轨道就断在半空; 账号才是末行
+// ① 轨道必须连到底: 只有清单末行 (选择权限) 收口, 账号与四件都 `last = false`
 // ② 路没铺到 = 点不开 (同一个 `reached`, 一件事两个后果)
 // ③ 没完成的节点画**红横杠** (主人: "比如这个模型没有下载也要表示")
 check(
   '轨道连着画 + 没铺到不许点 + 没完成有红横杠 (2026-11-15)',
   [
-    card.includes('last = false,\n        // 路没铺到这儿就点不开'),
+    /\/\/ 轨道要接着往下走到下一个节点[\s\S]{0,120}?last = false,/u.test(card),
+    /last = true,\s*\n\s*\/\/ 路没铺到这儿就点不开/u.test(card),
     card.includes('last: Boolean = true,'),
     card.includes('if (exit == null || !open)'),
     card.includes('val open = reached'),
@@ -446,7 +452,7 @@ check(
     // 账号那条不许再冒出 railLit 这种第二套判据
     !card.includes('railLit'),
   ],
-  [true, true, true, true, true, true],
+  [true, true, true, true, true, true, true],
 )
 
 // 让位那一段已撤回: 引导卡与 portalStatus 都不许再报"引导开着没有"
@@ -596,6 +602,54 @@ check(
     card.includes('R.string.ready_model_paused,'),
   ],
   Array(26).fill(true),
+)
+
+/* ── 十六、语音输入两档可选: 本地模型 / 已登录 DeepSeek 账号 (2026-11-15, 2.8.1 #4) ────────── */
+
+// 主人: "登录放在下载模型之前, 用户可选下载本地语音输入模型, 或直接用已登录 DeepSeek 账号的语音输入;
+// 「下载语音输入模型」按钮下面再加一颗「使用 DeepSeek 语音输入」"。四处一起看, 少一处这一步就只是一句文案:
+//   ① 有序清单里账号排在两个模型之前 (登录先办)
+//   ② 语音那件的状态/副标题按来源算, 选了账号那条就是办过 (不再要那 240 MB)
+//   ③ 主按钮下面那颗: 没选 → 用账号; 选了 → 换回本地; 没登录 → 去登录
+//   ④ 选择落一份两边都读的文件 (`VoiceSource`), 冷启动提醒也认它 (`ModelSetup`)
+check(
+  '语音输入两档可选 + 登录排在模型之前 (2026-11-15, 2.8.1 #4)',
+  [
+    // ① 清单顺序: 账号在唤醒/语音那两个 Slot 之前
+    (() => {
+      const list = card.slice(card.indexOf('val rail = listOf('), card.indexOf('val flags = rail.map'))
+      const account = list.indexOf('ReadyRail.Account')
+      const wake = list.indexOf('ReadyRail.Slot(2)')
+      const speech = list.indexOf('ReadyRail.Slot(3)')
+      return account > 0 && wake > account && speech > wake
+    })(),
+    // ② 语音那件两档
+    card.includes('val speechByAccount = voiceSource == VoiceSource.DEEPSEEK'),
+    /state = if \(speechByAccount && !speechBusy\) \{[\s\S]{0,120}?ReadyState\.DONE/u.test(card),
+    card.includes('stringResource(R.string.ready_speech_account)'),
+    // ③ 那颗副按钮
+    card.includes('private fun ReadyVoiceChoice('),
+    card.includes('next?.action == ReadyAction.SpeechDownload && !speechBusy) || speechByAccount'),
+    card.includes('R.string.ready_voice_account'),
+    card.includes('R.string.ready_voice_local'),
+    card.includes('VoiceSource.choose(context, VoiceSource.DEEPSEEK)'),
+    card.includes('VoiceSource.choose(context, VoiceSource.LOCAL)'),
+    // 没登录时点它是去登录, 不是一句"不可用"
+    card.includes('onNeedSignIn'),
+    // ④ 选择落文件, 冷启动提醒认它
+    card.includes('VoiceSource.read(context)'),
+    setup.includes('VoiceSource.satisfied(VoiceSource.read(context), SpeechModelDownload.present(context))'),
+    voiceSource.includes('const val DEEPSEEK = "deepseek"'),
+    voiceSource.includes('fun satisfied(choice: String, modelPresent: Boolean): Boolean'),
+    // 两份 strings 都要有这组字
+    ['ready_speech_account', 'ready_voice_account', 'ready_voice_account_summary', 'ready_voice_sign_in',
+      'ready_voice_local', 'ready_voice_local_summary']
+      .every((key) => enKeys.includes(key) && zhKeys.includes(key)),
+    // 宿主缺模型时按选择说原因 (不是永远念一句 prepare)
+    hostPlugin.includes('function voiceSourceChoice()'),
+    hostPlugin.includes("voiceSourceChoice() === 'deepseek'"),
+  ],
+  Array(18).fill(true),
 )
 
 console.log(failures === 0 ? `\n${checks} / ${checks} 条通过` : `\n${failures} / ${checks} 条判据不过`)
