@@ -65,6 +65,14 @@ internal object PortalFace {
     /** 原始文件上限: 超过这一份就不接了 (解码本身也要内存) */
     const val MAX_BYTES = 8L * 1024 * 1024
 
+    /**
+     * 裁之前那张预览图的最长边 (2026-11-15)
+     *
+     * 裁剪窗里那块最多一屏大, 2048 已经够两倍屏 —— 再大只是把内存摊开 (一张 8000 宽的样张按原尺寸
+     * 解出来是几百 MB)
+     */
+    const val PREVIEW_MAX_EDGE = 2048
+
     /** 编成 data URL 之后的上限: 再大就不交给页面 (那一下会把 WebView 的字符串层撑爆) */
     const val MAX_DATA_URL_CHARS = 1_200_000
 
@@ -157,26 +165,22 @@ internal object PortalFace {
     }
 
     /**
-     * 把选中的那张图落成头像, 回新的 [Face]
+     * 把已经裁好的那一张落成头像, 回新的 [Face]
+     *
+     * 2026-11-15 起裁剪在界面上做 (`ui/PortalCropDialog`): 这里收的是**已经裁好、按档缩过**的
+     * Bitmap, 不再自己解 uri —— 圆框里的构图是主人自己挑的, 这一层只负责压到上限、写盘、只留一张
      *
      * 与 [setWall] 同一条纪律: **先写新的, 写成了才删旧的** —— 换头像换到一半失败时, 原来那张还在
      */
-    fun setAvatar(context: Context, uri: Uri): Face? {
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { stream -> stream.readBytes() }
-        }.getOrNull() ?: return null
-        if (bytes.size > MAX_BYTES) return null
-        val decoded = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
-            ?: return null
-        val scaled = scaleDown(decoded, AVATAR_MAX_EDGE)
+    fun setAvatar(context: Context, cropped: Bitmap): Face? {
+        val scaled = scaleDown(cropped, AVATAR_MAX_EDGE)
         val name = "avatar-${System.currentTimeMillis()}.jpg"
         val target = File(imageDirectory(context), name)
         val written = runCatching {
             target.parentFile?.mkdirs()
             FileOutputStream(target).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, QUALITY, out) }
         }.isSuccess
-        if (scaled !== decoded) runCatching { scaled.recycle() }
-        runCatching { decoded.recycle() }
+        if (scaled !== cropped) runCatching { scaled.recycle() }
         if (!written) {
             runCatching { target.delete() }
             return null
@@ -207,28 +211,21 @@ internal object PortalFace {
     fun avatarDataUrl(context: Context): String? = encode(context, face(context).avatar)
 
     /**
-     * 把选中的那张图落盘, 回新的 [Face]
+     * 把已经裁好的那一张落成背景, 回新的 [Face]
      *
-     * **先写新的, 写成了才删旧的**: 选图选到一半失败时, 原来那张还在 (背景不该被一次失败的换图弄丢)
+     * **先写新的, 写成了才删旧的**: 换图换到一半失败时, 原来那张还在 (背景不该被一次失败的换图弄丢)
      *
-     * @return 落好之后的脸; 解不开 / 太大 / 写不进去都回 null, 由调用方如实说一句
+     * @return 落好之后的脸; 写不进去回 null, 由调用方如实说一句
      */
-    fun setWall(context: Context, uri: Uri): Face? {
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { stream -> stream.readBytes() }
-        }.getOrNull() ?: return null
-        if (bytes.size > MAX_BYTES) return null
-        val decoded = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
-            ?: return null
-        val scaled = scaleDown(decoded, MAX_EDGE)
+    fun setWall(context: Context, cropped: Bitmap): Face? {
+        val scaled = scaleDown(cropped, MAX_EDGE)
         val name = "wall-${System.currentTimeMillis()}.jpg"
         val target = File(imageDirectory(context), name)
         val written = runCatching {
             target.parentFile?.mkdirs()
             FileOutputStream(target).use { out -> scaled.compress(Bitmap.CompressFormat.JPEG, QUALITY, out) }
         }.isSuccess
-        if (scaled !== decoded) runCatching { scaled.recycle() }
-        runCatching { decoded.recycle() }
+        if (scaled !== cropped) runCatching { scaled.recycle() }
         if (!written) {
             runCatching { target.delete() }
             return null
@@ -241,6 +238,63 @@ internal object PortalFace {
         dropOthers(context, keep = name, pattern = WALL_NAME)
         return next
     }
+
+    /**
+     * 选图之后先解出能摆在裁剪窗里的那一张 (2026-11-15)
+     *
+     * 两步解码: 先 `inJustDecodeBounds` 读尺寸, 再按 [sampleSizeFor] 抽着解 —— 一张 8000 宽的
+     * 手机样张直接 `decodeStream` 会先吃掉几百 MB, 那一下在设置页里就是一次白屏甚至闪退
+     *
+     * 两道闸都留着: 原始文件超过 [MAX_BYTES] 就不接 (解码本身也要内存), 解出来的最长边不超过
+     * [maxEdge] (裁剪窗里那块最多也就一屏大, 更大的只是白占内存)
+     *
+     * @return 解好的图; 读不动 / 太大 / 解不开都回 null, 由调用方说一句
+     */
+    fun decodeBounded(context: Context, uri: Uri, maxEdge: Int = PREVIEW_MAX_EDGE): Bitmap? {
+        val declared = runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        }.getOrNull() ?: -1L
+        if (declared > MAX_BYTES) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(longest, maxEdge)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return runCatching {
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+        }.getOrNull()
+    }
+
+    /** 抽到最长边不超过 [maxEdge] 的最小 2 的幂 (1 / 2 / 4 / 8 …) */
+    fun sampleSizeFor(longest: Int, maxEdge: Int): Int {
+        if (longest <= 0 || maxEdge <= 0) return 1
+        var sample = 1
+        while (longest / sample > maxEdge) sample *= 2
+        return sample
+    }
+
+    /**
+     * 把框里那一块切下来 (2026-11-15)
+     *
+     * **只切不缩**: 落盘尺寸不是一个要人选的档 (主人: "要求双指放大缩小, 不加那个固定像素"), 框里
+     * 看得见的那一块就是源图的那一块; 真要收尺寸时由 [setAvatar] / [setWall] 各自的上限兜一次
+     *
+     * 切图在调用方的 IO 上做: 一张 1600 的图 `createBitmap` 是几十毫秒, 落界面线程就是一次可见的卡顿
+     *
+     * @return 切好的那一张 (调用方负责 recycle); 矩形越界 / 切不动都回 null
+     */
+    fun cut(source: Bitmap, rect: PortalCrop.Rect): Bitmap? = runCatching {
+        val left = rect.left.coerceIn(0, source.width - 1)
+        val top = rect.top.coerceIn(0, source.height - 1)
+        val width = rect.width.coerceIn(1, source.width - left)
+        val height = rect.height.coerceIn(1, source.height - top)
+        Bitmap.createBitmap(source, left, top, width, height)
+    }.getOrNull()
 
     /** 清掉背景: 先改那份设置, 再删文件 (设置写成之前都不算换过) */
     fun clearWall(context: Context): Face? {

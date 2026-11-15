@@ -136,6 +136,9 @@
     <string name="settings_portal_wall_failed">That image could not be read; pick another one</string>
     <string name="settings_portal_alpha">Background opacity</string>
     <string name="settings_portal_alpha_summary">%1$d%% opaque; 0 uses the plain theme colour</string>
+    <string name="settings_portal_crop_avatar">Crop the avatar</string>
+    <string name="settings_portal_crop_wall">Crop the background</string>
+    <string name="settings_portal_crop_hint">Drag with one finger to frame it, pinch to zoom; what you see in the frame is what gets saved</string>
 
     <string name="settings_section_channel">Privileged channel</string>
     <string name="settings_section_channel_summary">Anything that touches or reads the screen needs it</string>

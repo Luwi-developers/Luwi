@@ -991,8 +991,13 @@ window.__ModuleLoader__.load({
       '#lwp-drawer .lwp-check small{display:block;color:var(--dsw-alias-label-secondary,#6b7280);font-size:11px}',
       '#lwp-drawer button{appearance:none;border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
       'background:transparent;color:inherit;border-radius:8px;padding:3px 8px;font:inherit;font-size:12px}',
-      '#lwp-drawer .lwp-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}',
-      '#lwp-drawer .lwp-actions button{padding:6px 12px}',
+      '#lwp-drawer .lwp-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;',
+      // 2026-11-15: 检测项一多, 动作行会滚出抽屉的可视区 —— 那看起来就是"按钮点不动"。
+      // 钉在抽屉底部 (sticky), 玻璃底自己铺一层, 下面的行滚过去也不会透出来
+      'position:sticky;bottom:0;padding-top:8px;padding-bottom:2px;',
+      'background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
+      '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur)}',
+      '#lwp-drawer .lwp-actions button{min-height:36px;padding:6px 14px;font-size:13px}',
     ].join('')
 
     // ── 门户本体 ──────────────────────────────────────────────────────────────
@@ -1012,6 +1017,13 @@ window.__ModuleLoader__.load({
       var sessionId = null
       var status = null
       var drawer = ''
+      /**
+       * 判断抽屉里那一句"这一下有没有出去" (2026-11-15)
+       *
+       * `portalTick` / `portalTickEnabled` 都是同步桥调用, 但判断本身在宿主那一侧异步跑 —— 点上
+       * 之后屏上若一个字都不变, 与"按钮没接上"分不开。回执留 6 s, 之后自己收掉
+       */
+      var tickNote = ''
       // 「虚拟屏」那一项的二级项: 原生清单里的一项带 children 时暂存在这里, 抽屉切进 `screen` 态再画
       var screenItems = []
       var sending = false
@@ -1191,7 +1203,7 @@ window.__ModuleLoader__.load({
        * 人只能来群里问。**说法只有这三种** —— 页面与宿主 (logcat) 认的是同一张表
        */
       var IMAGE_FAIL = {
-        /** 点了 `+` 宿主没进 `onShowFileChooser`, 或者选择器回来是空的 (那正是 issue #53 的现场) */
+        /** 点了 `+` 宿主没进 `onShowFileChooser`, 或者选择器根本起不来 (issue #53 的另一半) */
         noCallback: 'webview 未回调',
         /** 选出来的那一份超过 [MAX_STASH_BYTES] */
         tooBig: '文件过大',
@@ -4166,7 +4178,15 @@ window.__ModuleLoader__.load({
           ? Math.round(Number(router.rules.preSleepWaitMs) / 60000) + ' 分'
           : '—'))
         // 这一行叫「唤醒」: 2026-11-13 主人把叫法统一了, 与 `sim.json` 的 `wake` 段一个口径
-        els.drawer.appendChild(kv('唤醒', router.tick && router.tick.enabled === true ? '开着 (25-55 分一次)' : '关着'))
+        // 2026-11-15: 开关态是 `router.json` 与 `sim.json` 的合成值, 从哪一侧来的也要说 —— 只说"开着"
+        // 时人分不清是这一页点开的, 还是「更多设置」里选的活跃
+        var tickOn = router.tick && router.tick.enabled === true
+        var tickBySim = router.tick && router.tick.bySim === true
+        els.drawer.appendChild(kv('唤醒', tickOn
+          ? (tickBySim ? '开着 (更多设置里选的活跃)' : '开着 (25-55 分一次)')
+          : '关着'))
+        // 点了之后那一句回执: 判断在宿主那一侧异步跑, 不写一行的话按下去与"没接上"同形
+        if (tickNote !== '') els.drawer.appendChild(kv('回执', tickNote))
 
         // 2026-11-14 主人: "checks 改成检测项, 后面的数字只显示已有检测项即可" —— 那个 `/ 3`
         // 从来没当过闸 (宿主只按 12 截断库存), 摆在面板上只会被读成"还差三条", 所以整格去掉
@@ -4205,14 +4225,49 @@ window.__ModuleLoader__.load({
         var actions = h('div', 'lwp-actions')
         var tick = h('button', null, '唤醒一下')
         tick.onclick = function () {
-          call('portalTick')
+          // 回执先落屏 (2026-11-15 主人: 「唤醒一下」点不动): 判断在宿主那一侧异步跑, 这一拍
+          // 屏上什么都不变的话, 按下去与"没接上"是同一个样子
+          var result = call('portalTick')
+          if (result === null) {
+            tickNote = ''
+            showNote('这一版宿主还不支持', true)
+            return
+          }
+          if (result.queued === false) {
+            tickNote = '这一下没投出去 (收件箱写不进去)'
+            showNote('这一下没投出去', true)
+          } else if (result.host === 'starting') {
+            tickNote = '宿主在起, 起好她就会看一眼'
+          } else {
+            tickNote = '已投出去 (第 ' + String(result.seq || 0) + ' 行), 她这一拍在判'
+          }
+          renderDrawer()
+          // 6 s 后收掉那一行: 回执是"这一下有没有出去", 不是常驻读数
+          setTimeout(function () {
+            if (drawer !== 'router' || tickNote === '') return
+            tickNote = ''
+            renderDrawer()
+          }, 6000)
           setTimeout(refresh, 600)
         }
         actions.appendChild(tick)
-        var toggle = h('button', null, router.tick && router.tick.enabled === true ? '关掉唤醒' : '打开唤醒')
+        // 开关: 它回的就是**写完之后**的那一份快照, 于是就地重画, 不必等下一次补拍
+        // (2026-11-15: 关掉唤醒要连 sim.json 的"活跃"一起收, 否则合成值仍开, 按钮看着没反应)
+        var toggle = h('button', null, tickOn ? '关掉唤醒' : '打开唤醒')
         toggle.onclick = function () {
-          call('portalTickEnabled', !(router.tick && router.tick.enabled === true))
-          setTimeout(refresh, 300)
+          var fresh = call('portalTickEnabled', !tickOn)
+          if (fresh === null) {
+            showNote('这一版宿主还不支持', true)
+            return
+          }
+          status = fresh
+          tickNote = tickOn ? '唤醒关掉了 (更多设置里那一档也收了)' : '唤醒开着, 25-55 分一次'
+          renderDrawer()
+          setTimeout(function () {
+            if (drawer !== 'router' || tickNote === '') return
+            tickNote = ''
+            renderDrawer()
+          }, 6000)
         }
         actions.appendChild(toggle)
         // 第三颗挂在动作行最右 (主人 2026-11-13 点名的位置), 落判断层那一组
@@ -4311,14 +4366,16 @@ window.__ModuleLoader__.load({
        *
        * - `shown`: `onShowFileChooser` 真的进来了 —— 选择器起来了, 撤掉计时器
        * - `picked`: 选好的文件已经交回页面 (随后就到了 change)
-       * - `empty` / `none`: 选择器回来是空的 / 起不来 —— 这两种在页面上与"没回调"一样是**没有反应**,
-       *   也就是 issue #53 报的那一下, 直接说清
+       * - `empty`: 选择器回来了但是空的 —— **人自己退出来的** (2026-11-15 主人: "没有选择直接
+       *   退出...要求这种情况下不要显示这个报错")。这一档只撤计时器, 屏上不留一个字: 取消是
+       *   主人自己的动作, 不是一次失败
+       * - `none`: 选择器起不来 (没有能接这个 intent 的应用) —— 这一档才是真的"点了没反应", 要说
        * @param {string} state 宿主给的那一个词
        */
       function pickState(state) {
         var what = String(state === undefined || state === null ? '' : state)
         disarmPickWatch()
-        if (what === 'shown' || what === 'picked') return
+        if (what === 'shown' || what === 'picked' || what === 'empty') return
         imageFail(IMAGE_FAIL.noCallback)
       }
 

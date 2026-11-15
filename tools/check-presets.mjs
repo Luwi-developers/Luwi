@@ -136,6 +136,28 @@ expect(/const val DEFAULT_PRESET = "luwi"/.test(kotlin), 'CustomPresets.DEFAULT_
 expect(/ROW_LUWI to "luwi"/.test(kotlin), 'CustomPresets.PRESET_ROWS 里缺少 preset-luwi')
 expect(/const presets = \['luwi'/.test(pack), "pack-host.mjs 的 presets 数组应该以 'luwi' 开头")
 
+// ⑥ 问答工具一律不挂 (2026-11-15 主人: "禁止问答工具, 出现需要进入对话才能选择回答, 用户在前台
+//    看不到") —— 那一档的选项卡长在 dsh 自己的会话界面里, 门户 / 球盖着时前台看不见, 一问就卡住。
+//    这里钉的是"行在就必须 disabled": 上游同步把那一行带回来时, 这一条会当场红
+const askUserBlock = (text) => {
+  const at = text.indexOf('- id: tool-ask-user')
+  if (at < 0) return null
+  const rest = text.slice(at + '- id: tool-ask-user'.length)
+  const next = rest.search(/\n\s*- id: /)
+  return next < 0 ? rest : rest.slice(0, next)
+}
+const tiers = [['presets/luwi/cordis.patch.yml', preset], ['presets/explore/cordis.patch.yml', explore]]
+const proactive = read('presets/proactive/cordis.patch.yml')
+if (proactive !== '') tiers.push(['presets/proactive/cordis.patch.yml', proactive])
+for (const [name, body] of tiers) {
+  const block = askUserBlock(body)
+  if (block === null) {
+    notes.push(`${name}: 没有 tool-ask-user 这一行 (不挂 = 禁了)`)
+    continue
+  }
+  expect(/disabled: true/.test(block), `${name}: tool-ask-user 必须写 disabled: true (问答卡在前台看不见)`)
+}
+
 notes.push(`persona 正文 ${((preset.slice(preset.indexOf('prefix: |-'), preset.indexOf('suffix: |-'))).split('\n').length - 1)} 行`)
 notes.push('人格卡在运行时读 (`{{lw_persona}}` + `$DSH_HOME/lw/persona/xiaojingyu.md`)')
 notes.push(`工具表 ${luwiTools.split('\n').length} 行 (与 explore 逐行相同)`)

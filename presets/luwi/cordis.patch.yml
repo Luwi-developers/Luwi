@@ -19,7 +19,7 @@
 # 同时推一份给浮球 (一处写, 两处显示)
 - insert:
     - id: preset-luwi
-      # lw-preset: luwi-2026-11-10-live-persona
+      # lw-preset: luwi-2026-11-15-no-ask-user
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: luwi
@@ -219,6 +219,9 @@
                   maxRounds: 64
           - id: tool-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
+            # 2026-11-15 主人: "禁止问答工具, 出现需要进入对话才能选择回答, 用户在前台看不到" ——
+            # 那个选项卡长在 dsh 自己的会话界面里, 门户 / 球盖着时前台根本看不见, 一问就卡在那里
+            disabled: true
           - id: tool-todo
             name: '@deepseek-ai/dsh-tool-todo'
             config:
