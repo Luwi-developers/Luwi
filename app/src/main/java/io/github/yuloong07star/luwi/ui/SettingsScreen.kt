@@ -154,6 +154,7 @@ import io.github.yuloong07star.luwi.sync.SyncSetting
 import io.github.yuloong07star.luwi.theme.ThemeSettings
 import io.github.yuloong07star.luwi.theme.ThemeStore
 import io.github.yuloong07star.luwi.tool.LwEdgeSpeech
+import io.github.yuloong07star.luwi.tool.LwDeepseekSpeech
 import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwPlugin
 import io.github.yuloong07star.luwi.tool.LwPower
@@ -5796,6 +5797,8 @@ private fun SpeakItems() {
     val onDevice = SpeakSettings.engine == SpeakSettings.Engine.ON_DEVICE
     val edge = SpeakSettings.usesEdge()
     val api = SpeakSettings.engine == SpeakSettings.Engine.API
+    // 第五条 (2026-11-15, 2.8.1 #5): DeepSeek 官方 TTS —— **登录即可用**, 不填地址也不填密钥
+    val deepseek = SpeakSettings.usesDeepseek()
     ArrowPreference(
         title = stringResource(R.string.settings_speak_engine_system),
         summary = stringResource(
@@ -5837,6 +5840,19 @@ private fun SpeakItems() {
             else -> stringResource(R.string.settings_speak_engine_api_summary)
         },
         onClick = { SpeakSettings.setEngine(context, SpeakSettings.Engine.API) },
+    )
+    ArrowPreference(
+        title = stringResource(R.string.settings_speak_engine_deepseek),
+        summary = if (deepseek) {
+            val label = LwDeepseekSpeech.VOICES
+                .firstOrNull { it.first == SpeakSettings.deepseekVoice }
+                ?.second
+                ?: SpeakSettings.deepseekVoice
+            stringResource(R.string.settings_speak_engine_deepseek_using, label)
+        } else {
+            stringResource(R.string.settings_speak_engine_deepseek_summary)
+        },
+        onClick = { SpeakSettings.setEngine(context, SpeakSettings.Engine.DEEPSEEK) },
     )
 
     if (onDevice) {
@@ -6065,6 +6081,50 @@ private fun SpeakItems() {
         ArrowPreference(
             title = stringResource(R.string.settings_speak_volume),
             summary = stringResource(R.string.settings_speak_online_volume),
+            onClick = { openSoundSettings(context) },
+        )
+    } else if (deepseek) {
+        // DeepSeek 官方那条 (2026-11-15, 2.8.1 #5): 这一页只定音色 —— 地址与密钥都在宿主那边 (账号那枚
+        // 令牌不出宿主进程), 所以这里没有输入框, 只有"登录着没有"与两个官方音色。没登录不是死路:
+        // 念的时候宿主会回一句"还没登录", 与本段第一行说的是同一件事
+        val signedIn = PortalAccount.phase == AccountPhase.SIGNED_IN
+        ArrowPreference(
+            title = stringResource(R.string.settings_speak_deepseek_account),
+            summary = when (PortalAccount.phase) {
+                AccountPhase.SIGNED_IN -> stringResource(
+                    R.string.settings_speak_deepseek_signed_in,
+                    PortalAccount.label.ifBlank { "DeepSeek" },
+                )
+
+                AccountPhase.SIGNED_OUT -> stringResource(R.string.settings_speak_deepseek_signed_out)
+                else -> stringResource(R.string.settings_speak_deepseek_login_unknown)
+            },
+            // 点一下现问一次 (页面在就答; 页面还没起来时它自己也有一句"界面还没起来")
+            onClick = { PortalAccount.refresh() },
+        )
+        if (!signedIn) {
+            // 没登录时把话说全: 这条引擎的音源在官方那侧, 没有本地兜底
+            ArrowPreference(
+                title = stringResource(R.string.settings_speak_deepseek_where),
+                summary = stringResource(R.string.settings_speak_deepseek_where_summary),
+                onClick = { PortalAccount.refresh() },
+            )
+        }
+        LwDeepseekSpeech.VOICES.forEach { (id, label) ->
+            ArrowPreference(
+                title = label,
+                summary = if (SpeakSettings.deepseekVoice == id) {
+                    stringResource(R.string.settings_speak_voice_current)
+                } else {
+                    stringResource(R.string.settings_speak_voice_pick)
+                },
+                onClick = { SpeakSettings.setDeepseekVoice(context, id) },
+            )
+        }
+        // 响度与节奏都不在应用手里: 这一行说实话, 点它去系统声音设置 (媒体音量在那里)
+        ArrowPreference(
+            title = stringResource(R.string.settings_speak_volume),
+            summary = stringResource(R.string.settings_speak_deepseek_volume),
             onClick = { openSoundSettings(context) },
         )
     } else {

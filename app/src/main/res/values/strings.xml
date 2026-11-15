@@ -500,6 +500,16 @@
     <string name="settings_speak_preview_summary">Says one line with the voice and rate above, so the choice can be judged by ear</string>
     <string name="settings_speak_preview_failed">Nothing came out: %1$s</string>
     <string name="settings_speak_sample">This is how a reply will be spoken.</string>
+    <string name="settings_speak_engine_deepseek">DeepSeek official voice (signed-in account)</string>
+    <string name="settings_speak_engine_deepseek_summary">Needs a signed-in DeepSeek account; there is no address or key to fill in</string>
+    <string name="settings_speak_engine_deepseek_using">Currently speaking with %1$s</string>
+    <string name="settings_speak_deepseek_account">DeepSeek account</string>
+    <string name="settings_speak_deepseek_signed_in">Signed in as %1$s; tap to ask again</string>
+    <string name="settings_speak_deepseek_signed_out">Not signed in yet</string>
+    <string name="settings_speak_deepseek_login_unknown">Tap to ask whether the account is signed in</string>
+    <string name="settings_speak_deepseek_where">Where the sign-in lives</string>
+    <string name="settings_speak_deepseek_where_summary">The account row in the getting-started card, which the portal can open again; nothing else has to be configured</string>
+    <string name="settings_speak_deepseek_volume">Loudness follows media volume; the official endpoint sets its own pace and bills per character</string>
 
     <string name="settings_section_lock">Lock screen</string>
     <string name="settings_section_lock_summary">Wake on a dark screen, then your own unlock</string>

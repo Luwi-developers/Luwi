@@ -197,7 +197,8 @@ internal object LwSpeak {
             dropped = readQueue.size
             readQueue.clear()
             waiting = readQueue.size
-            speaking = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+            speaking = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking ||
+                LwDeepseekTts.speaking
         }
         if (dropped > 0) readDropped.addAndGet(dropped)
         return buildJsonObject {
@@ -506,6 +507,11 @@ internal object LwSpeak {
             put("readAloud", SpeakSettings.readAloud)
             put("onDeviceModel", SpeakSettings.model ?: "")
             put("edgeVoice", SpeakSettings.edgeVoice)
+            // DeepSeek 官方那条 (2026-11-15): 只有音色是这一侧能定的; 端点与"登录了没有"归宿主,
+            // 所以这里照报端点本身 (它是公开的一串, 不是密钥), 令牌仍然一个字节都不报
+            put("deepseekVoice", SpeakSettings.deepseekVoice)
+            put("deepseekVoices", LwDeepseekSpeech.VOICES.joinToString(", ") { "${it.first}=${it.second}" })
+            put("deepseekEndpoint", LwDeepseekSpeech.ENDPOINT)
             // API 那条: 地址与模型/音色照报, **密钥只报"有没有"** (它不该出现在任何回执或日志里)
             put("apiUrl", apiConfig.url)
             put("apiKeySet", apiConfig.key.isNotBlank())
@@ -681,6 +687,7 @@ internal object LwSpeak {
     private fun readingWith(): String = when {
         SpeakSettings.usesOnDevice() -> "on-device"
         SpeakSettings.usesEdge() -> "edge"
+        SpeakSettings.usesDeepseek() -> "deepseek"
         SpeakSettings.engine == SpeakSettings.Engine.API -> "api"
         else -> "system"
     }
@@ -688,7 +695,7 @@ internal object LwSpeak {
     /**
      * 一次点名里的引擎与音色 (2026-10-29)
      *
-     * 卡上那一位可以写成 `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id`;
+     * 卡上那一位可以写成 `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id` / `ds:音色`;
      * 没有前缀就是老写法 (引擎跟设置页, 音色原样交给系统 / API 那条)
      */
     internal data class VoiceRef(val engine: SpeakSettings.Engine?, val voice: String)
@@ -702,6 +709,7 @@ internal object LwSpeak {
             "dev", "device", "on-device" -> SpeakSettings.Engine.ON_DEVICE
             "edge" -> SpeakSettings.Engine.EDGE
             "api" -> SpeakSettings.Engine.API
+            "ds", "deepseek" -> SpeakSettings.Engine.DEEPSEEK
             else -> null
         }
         return if (engine == null) VoiceRef(null, text) else VoiceRef(engine, text.substring(at + 1).trim())
@@ -745,6 +753,48 @@ internal object LwSpeak {
                 put("voice", voice.name)
                 put("rate", speed.toDouble())
                 put("volume", volume.toDouble())
+                put("text", text)
+                put("characters", text.length)
+                put("detail", answer)
+            }
+        }
+        // DeepSeek 官方那条 (2026-11-15, 2.8.1 #5): **令牌不在这一侧** —— 稿子与音色交给宿主那条回环
+        // 路由, 宿主用账号那枚令牌去官方接口合成, 音频原样回来 (见 LwDeepseekTts 顶上那张分工图)。
+        // 所以这条引擎没有地址栏、没有密钥框: 登录过就直接有声音
+        if (engine == SpeakSettings.Engine.DEEPSEEK) {
+            val wanted = LwDeepseekSpeech.voiceOf(askedVoice, SpeakSettings.deepseekVoice)
+            val answer = LwDeepseekTts.speak(context, text, wanted)
+            val failed = !answer.startsWith("said ")
+            // 播放器在本进程 (LwVoiceClip): 与其它在线引擎同一套判据
+            if (!failed) stampTail(run, text, system = false)
+            // 官方那条没有语速参数 (也没有音量参数): 点了滑块就要如实说没生效
+            val askedRate = request.numberOrNull("rate") != null || !SpeakSettings.followsSystem
+            val askedVolume = request.numberOrNull("volume") != null
+            val voiceIgnored = askedVoice.isNotBlank() && !LwDeepseekSpeech.known(askedVoice)
+            return buildJsonObject {
+                put("spoken", !failed)
+                put("readingWith", "deepseek")
+                put("voice", wanted)
+                val entry = LwDeepseekSpeech.VOICES.firstOrNull { it.first == wanted }
+                put("voiceName", entry?.second.orEmpty())
+                put("rateIgnored", askedRate)
+                if (askedRate) {
+                    put(
+                        "rateNote",
+                        "the DeepSeek engine sets its own pace, so the speech rate did not apply",
+                    )
+                }
+                put("volumeIgnored", askedVolume)
+                if (askedVolume) {
+                    put(
+                        "volumeNote",
+                        "the DeepSeek engine keeps its own loudness, so that number did not apply",
+                    )
+                }
+                put("voiceIgnored", voiceIgnored)
+                if (voiceIgnored) {
+                    put("voiceNote", "the DeepSeek engine only knows stella and tide; that id was not sent")
+                }
                 put("text", text)
                 put("characters", text.length)
                 put("detail", answer)
@@ -928,8 +978,9 @@ internal object LwSpeak {
         // 预录填音也一起停 (它在另一条声轨上, 系统引擎的 stop 碰不到它)
         LwClips.stop()
         val onDevice = LwTts.stop()
-        // 在线那两条: 谁在放谁就停 (它们的播放器在 LwVoiceClip 里, 两条引擎各自记着自己的那一次)
-        val online = LwEdgeTts.stop() ?: LwApiTts.stop()
+        // 在线那几条: 谁在放谁就停 (它们的播放器在 LwVoiceClip 里, 每条引擎各自记着自己的那一次)。
+        // DeepSeek 那条排在最前: 它与 API 那条共用同一个播放器, 先问它才轮得到 API 那一句
+        val online = LwDeepseekTts.stop() ?: LwEdgeTts.stop() ?: LwApiTts.stop()
         val tts = synchronized(lock) { engine }
         val result = tts?.stop()
         // 掐断了就不能让那道半双工的闸一直关着
@@ -956,7 +1007,8 @@ internal object LwSpeak {
 
     /** 现在有没有在念: ⋮ 菜单那条「停止朗读」据此决定要不要说自己没东西可停 */
     internal val speakingNow: Boolean
-        get() = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+        get() = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking ||
+            LwDeepseekTts.speaking
 
     /**
      * **她此刻还在出声吗** —— 半双工那道闸与"说的时候关麦"都认这一条, 不认 [speakingNow]
@@ -975,8 +1027,8 @@ internal object LwSpeak {
      * 成"只按预算"**, 绝不回退到媒体流那一条
      */
     internal fun talking(context: Context): Boolean {
-        // 自带那条与两条在线引擎: 播放器在进程内, 精确
-        val onThisProcess = LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+        // 自带那条与三条在线引擎: 播放器在进程内, 精确
+        val onThisProcess = LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking || LwDeepseekTts.speaking
         // 系统那条: 只有它才去问"带我们那份属性的活跃播放"
         val ownPlayback = lastWasSystem && SystemSpeech.playing(context)
         return SpeechTail.holding(
