@@ -286,31 +286,67 @@ internal class PortalBridge(private val context: Context) {
     fun portalIme(): String = JSONObject().put("px", PortalState.imePx).toString()
 
     /**
-     * 页面报"这张图没发出去" (落实表 #35, 2026-11-12)
+     * 页面报"这张图没发出去" (落实表 #35, 2026-11-12; 四行诊断 2.8.1 #1)
      *
-     * 只做一件事: 把原因与**机型 + WebView 版本各一行**写进 logcat。issue #53 里用户在群里报
-     * "选图 → 点确定 → 没反应" 时, 维护者手上就只有这三样能对上 —— 机型读 `Build`, 版本读
-     * [WebCompat.info] (与开屏那行 `webview …` 同一份读数)
+     * 两件事: 把原因写进 logcat, 再把**同一份四行诊断**回给页面 —— 机型读 `Build`, Android 读
+     * `Build.VERSION`, WebView 读 [WebCompat.info] (与开屏那行 `webview …` 同一份读数), 第四行是这一
+     * 次那张图多大 (`未选择` = 人把选择器退出来了 / 压根没选), **四行只在这一处拼**: 同一份既进 logcat
+     * 又回存到那条气泡上, 那颗「复制诊断」复制的就是它, 于是剪贴板与 logcat 逐字一致
      *
-     * **为什么三样都由页面报**: 三种原因里两种 (`文件过大` / `上传超时`) 只有页面知道; 第三种
-     * (`webview 未回调`) 也是页面在计时器到点后报的 —— 一条口径, 不必在两边各写一遍
-     * @param reason 页面给的那句话 ('webview 未回调' / '文件过大' / '上传超时')
-     * @return `{ok:true}` (页面不看, 留给将来对账)
+     * @param payload `{reason, image}` 的 JSON —— reason 是页面那三选一的说法, image 是这一张图的大小
+     * @return `{ok:true, diag:"…"}`; diag 是四行, 行间 `\n`
      */
     @JavascriptInterface
-    fun portalImageFail(reason: String): String {
-        val text = reason.trim().ifEmpty { UNKNOWN_FAIL }
+    fun portalImageFail(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull() ?: JSONObject()
+        val text = body.optString("reason").trim().ifEmpty { UNKNOWN_FAIL }
         Log.w(LOOK_TAG, "image send failed: $text")
-        Log.i(
-            LOOK_TAG,
-            "device ${Build.MANUFACTURER} ${Build.MODEL}, android ${Build.VERSION.RELEASE}" +
-                " (sdk ${Build.VERSION.SDK_INT})",
-        )
+        val diag = diagLines(body.optString("image"))
+        for (line in diag) Log.i(LOOK_TAG, line)
+        return JSONObject().put("ok", true).put("diag", diag.joinToString("\n")).toString()
+    }
+
+    /**
+     * 四行诊断 (2026-11-15, 2.8.1 #1): 机型 / Android / WebView / 图片
+     *
+     * 只在这一处拼 —— [portalImageFail] 与 [portalCopyDiag] 各读一次就会漂, 而判据要的是"粘贴与
+     * logcat 同刻逐字一致"
+     * @param picture 这一张图多大 (`未选择` = 没选); 空串按 `未选择` 说
+     */
+    private fun diagLines(picture: String): List<String> {
         val info = runCatching { WebCompat.info(context.applicationContext) }.getOrNull()
         // 读不到版本就照实说 "unknown": 那一行是给人拿去对账的, 空着比写错更糟
         val label = info?.label.orEmpty().ifEmpty { UNKNOWN_FAIL }
-        Log.i(LOOK_TAG, "webview $label (major ${info?.major ?: 0})")
-        return JSONObject().put("ok", true).toString()
+        val size = picture.trim().ifEmpty { UNKNOWN_PICTURE }
+        return listOf(
+            "机型: ${Build.MANUFACTURER} ${Build.MODEL}",
+            "Android: ${Build.VERSION.RELEASE} (sdk ${Build.VERSION.SDK_INT})",
+            "WebView: $label (major ${info?.major ?: 0})",
+            "图片: $size",
+        )
+    }
+
+    /**
+     * 「复制诊断」(2026-11-15, 2.8.1 #1): 把气泡上那四行原样放进系统剪贴板
+     *
+     * 剪贴板写在 app 这一侧 (与 [portalCopyPath] 同一条): WebView 里的 `navigator.clipboard` 要有焦点、
+     * 要算用户手势, 而系统剪贴板一定成, **四行不是这里拼的** —— 页面交回来的就是失败那一刻那一份,
+     * 所以粘贴出来的字与 logcat 逐字相同, 复制这一下再落一遍同四行: "同刻"指的就是这一下
+     *
+     * @param diag 四行, 行间 `\n`
+     * @return `{ok:true, lines:4}`; 不是四行 / 剪贴板不在时 `{ok:false, error:"…"}`
+     */
+    @JavascriptInterface
+    fun portalCopyDiag(diag: String): String {
+        val lines = diag.split("\n").filter { it.isNotEmpty() }
+        if (lines.size != DIAG_LINES) return refused("这份诊断不是 $DIAG_LINES 行")
+        val manager = context.getSystemService(ClipboardManager::class.java)
+            ?: return refused("系统的剪贴板不在")
+        runCatching {
+            manager.setPrimaryClip(ClipData.newPlainText(CLIP_DIAG_LABEL, diag))
+        }.getOrElse { return refused("剪贴板写不进去") }
+        for (line in lines) Log.i(LOOK_TAG, line)
+        return JSONObject().put("ok", true).put("lines", lines.size).toString()
     }
 
     /**
@@ -755,7 +791,16 @@ internal class PortalBridge(private val context: Context) {
         /** [portalImageFail] 收到一句空原因时的兜底 (页面不会给空串, 但这行日志不能是空的) */
         const val UNKNOWN_FAIL = "unknown"
 
+        /** 第四行「图片」没有可说的 (人把选择器退出来了 / 压根没选) —— 判据认的就是这四个字 */
+        const val UNKNOWN_PICTURE = "未选择"
+
+        /** 四行诊断的行数 (机型 / Android / WebView / 图片): 少一行就不许进剪贴板 */
+        const val DIAG_LINES = 4
+
         /** 复制路径那一下剪贴板上的说明 (Android 13 起系统会在左下角给一眼预览) */
         const val CLIP_LABEL = "Luwi path"
+
+        /** 「复制诊断」那一下剪贴板上的说明 (2.8.1 #1) */
+        const val CLIP_DIAG_LABEL = "Luwi diag"
     }
 }

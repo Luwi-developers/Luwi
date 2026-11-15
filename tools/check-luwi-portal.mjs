@@ -794,8 +794,8 @@ if (failTableSource === '' || imageFailSource === '') {
     failures.push('client.js: pickFile 没有在 click 之前挂计时器 —— WebView 不回调时还是静默')
   }
   const onFilesSource = takeFunction('onFilesChosen')
-  if (onFilesSource.includes('imageFail(IMAGE_FAIL.tooBig)')
-    && onFilesSource.indexOf('imageFail(IMAGE_FAIL.tooBig)') < onFilesSource.indexOf('readImage(file)')) {
+  if (onFilesSource.includes('imageFail(IMAGE_FAIL.tooBig, sizeText(')
+    && onFilesSource.indexOf('imageFail(IMAGE_FAIL.tooBig, sizeText(') < onFilesSource.indexOf('readImage(file)')) {
     notes.push('ok   文件过大在读字节之前就报 (不是读完再报)')
   } else {
     failures.push('client.js: onFilesChosen 没有在读字节之前判大小')
@@ -808,7 +808,7 @@ if (failTableSource === '' || imageFailSource === '') {
   // 宿主那侧的口径: 四个词 + 一处 JS 入口 + logcat 两行
   expect('client.js', client, 'pickState: pickState')
   expect('client.js', client, 'pickState: function (state)')
-  expect('client.js', client, "call('portalImageFail', text)")
+  expect('client.js', client, "call('portalImageFail', JSON.stringify({ reason: text, image: size }))")
   expect('client.js', client, 'id: imageFails[f].id')
   expect('HostScreen.kt', screen, "pickState('$state')")
   expect('HostScreen.kt', screen, 'private const val PICK_SHOWN = "shown"')
@@ -819,10 +819,10 @@ if (failTableSource === '' || imageFailSource === '') {
   expect('HostScreen.kt', screen, 'view.pickState(PICK_NONE)')
   expect('HostScreen.kt', screen, 'view.pickState(PICK_EMPTY)')
   expect('HostScreen.kt', screen, 'view.pickState(PICK_PICKED)')
-  expect('PortalBridge.kt', portalBridge, 'fun portalImageFail(reason: String): String')
+  expect('PortalBridge.kt', portalBridge, 'fun portalImageFail(payload: String): String')
   expect('PortalBridge.kt', portalBridge, 'Log.w(LOOK_TAG, "image send failed: $text")')
-  expect('PortalBridge.kt', portalBridge, 'device ${Build.MANUFACTURER} ${Build.MODEL}')
-  expect('PortalBridge.kt', portalBridge, 'webview $label (major ${info?.major ?: 0})')
+  expect('PortalBridge.kt', portalBridge, '"机型: ${Build.MANUFACTURER} ${Build.MODEL}"')
+  expect('PortalBridge.kt', portalBridge, '"WebView: $label (major ${info?.major ?: 0})"')
 
   // 宿主回话那一支: `shown` / `picked` / `empty` 只撤计时器, 只有 `none` 要报 ——
   // 2026-11-15 主人: "点击附件进入选择界面时没有选择直接退出会出现图片发送失败: webview 未回调,
@@ -850,6 +850,120 @@ if (failTableSource === '' || imageFailSource === '') {
     }
     if (disarms === 4) notes.push('ok   pickState: 四种回话都先撤计时器 (不会二次报)')
     else failures.push(`client.js: pickState 撤计时器的次数不是 4 (实际 ${String(disarms)})`)
+  }
+}
+
+// ── 十二·二、失败气泡右侧那颗「复制诊断」: 四行照抄 logcat (2.8.1 #1) ─────────────
+//
+// 主人报图片发不出去时, 群里对不上的就是"哪台机 / 哪个 WebView / 那条图多大" —— 失败气泡右侧加一颗
+// 「复制诊断」, 一点就把四行放进剪贴板 (机型 / Android / WebView / 图片). 四行**只在宿主那一处拼**
+// (`PortalBridge.diagLines`), 同一份既进 logcat 又原样回存到那条气泡上, 所以粘贴与 logcat 逐字一致;
+// 没选图 (人把选择器退出来了) 时第四行写「图片: 未选择」. 这一条钉三件:
+// ① 按钮与复制那条路真的接上 (源码) ② imageFail 把宿主回的四行原样存下 ③ copyImageDiag 原样交回去
+
+const copyDiagSource = takeFunction('copyImageDiag')
+const diagFailSource = takeFunction('imageFail')
+if (copyDiagSource === '' || diagFailSource === '') {
+  failures.push('client.js: 抽不出 imageFail / copyImageDiag —— 气泡上没有「复制诊断」')
+} else {
+  // ① 源码: 按钮画在气泡那一行的右侧, 复制走宿主剪贴板, 四行只在宿主那一处拼
+  expect('client.js: 复制诊断那颗按钮', client, "h('button', 'lwp-diag', '复制诊断')")
+  const diagRowAt = client.indexOf("h('div', 'lwp-fail')")
+  const diagButtonAt = client.indexOf("h('button', 'lwp-diag', '复制诊断')")
+  if (diagRowAt > 0 && diagButtonAt > diagRowAt) {
+    notes.push('ok   复制诊断那颗按钮挂在气泡右侧 (lwp-fail 那一行: 先气泡, 后按钮)')
+  } else {
+    failures.push('client.js: 「复制诊断」没有挂在气泡右侧 (lwp-fail 那一行)')
+  }
+  expect('client.js: 按钮点的是哪一条诊断', client, 'copyImageDiag(item.id)')
+  expect('client.js: 复制走宿主剪贴板', client, "call('portalCopyDiag', one.diag)")
+  expect('client.js: 那一行的样式', client, '.lwp-fail .lwp-diag{')
+  expect('PortalBridge.kt: 四行只拼一处', portalBridge, 'private fun diagLines(picture: String): List<String>')
+  expect('PortalBridge.kt: Android 那一行', portalBridge, '"Android: ${Build.VERSION.RELEASE} (sdk ${Build.VERSION.SDK_INT})"')
+  expect('PortalBridge.kt: 图片那一行', portalBridge, '"图片: $size"')
+  expect('PortalBridge.kt: 没选图那四个字', portalBridge, 'const val UNKNOWN_PICTURE = "未选择"')
+  expect('PortalBridge.kt: 复制诊断那座桥', portalBridge, 'fun portalCopyDiag(diag: String): String')
+  expect('PortalBridge.kt: 不是四行不许进剪贴板', portalBridge, 'if (lines.size != DIAG_LINES) return refused(')
+  expect('PortalBridge.kt: 剪贴板写的是那四行', portalBridge, 'manager.setPrimaryClip(ClipData.newPlainText(CLIP_DIAG_LABEL, diag))')
+
+  // ② 真跑: 宿主回一份四行 -> 气泡上存的就是那一份 (原样, 不重拼)
+  const hostDiag = [
+    '机型: Xiaomi 22041216C',
+    'Android: 15 (sdk 35)',
+    'WebView: 132.0.0.0 (major 132)',
+    '图片: 2.4 MB',
+  ].join('\n')
+  const diagStored = []
+  const diagCalls = []
+  const diagImageFail = new Function('IMAGE_FAIL', 'imageFails', 'call', 'renderFlow',
+    `${diagFailSource}\nreturn imageFail`)(
+    { noCallback: 'webview 未回调', tooBig: '文件过大', timeout: '上传超时' },
+    diagStored,
+    (method, arg) => {
+      diagCalls.push({ method, arg })
+      return { ok: true, diag: hostDiag }
+    },
+    () => {},
+  )
+  diagImageFail('文件过大', '2.4 MB')
+  if (diagCalls.length === 1 && diagCalls[0].method === 'portalImageFail') {
+    notes.push('ok   失败那一下走宿主汇总 (portalImageFail)')
+  } else {
+    failures.push(`client.js: imageFail 没有走宿主 (调了 ${JSON.stringify(diagCalls.map((one) => one.method))})`)
+  }
+  let diagPayload = {}
+  try {
+    diagPayload = JSON.parse(String(diagCalls[0] && diagCalls[0].arg))
+  } catch (_badDiagPayload) {
+    failures.push('client.js: imageFail 交给宿主的不是 JSON (宿主读不到 reason / image)')
+  }
+  if (diagPayload.reason === '文件过大' && diagPayload.image === '2.4 MB') {
+    notes.push('ok   交给宿主的 payload 带原因与图片大小')
+  } else {
+    failures.push(`client.js: payload 不对 (${JSON.stringify(diagPayload)})`)
+  }
+  if (diagStored.length === 1 && diagStored[0].diag === hostDiag) {
+    notes.push('ok   气泡上存的就是宿主那四行 (原样, 不重拼一次)')
+  } else {
+    failures.push('client.js: 气泡没有原样存下宿主那四行')
+  }
+  const diagLines = String(diagStored[0] && diagStored[0].diag).split('\n')
+  if (diagLines.length === 4) notes.push('ok   诊断恰好四行 (机型 / Android / WebView / 图片)')
+  else failures.push(`client.js: 诊断行数不是 4 (${JSON.stringify(diagStored[0] && diagStored[0].diag)})`)
+
+  // 没选图那一档 (人把选择器退出来了): 第四行必须是「图片: 未选择」
+  diagCalls.length = 0
+  diagImageFail('webview 未回调')
+  let cancelPayload = {}
+  try {
+    cancelPayload = JSON.parse(String(diagCalls[0] && diagCalls[0].arg))
+  } catch (_badCancelPayload) {
+    failures.push('client.js: 没选图那一档交给宿主的不是 JSON')
+  }
+  if (cancelPayload.image === '未选择') {
+    notes.push('ok   没选图那一档交上去的是「未选择」(第四行 = 图片: 未选择)')
+  } else {
+    failures.push(`client.js: 没选图时 image 传的是 ${JSON.stringify(cancelPayload.image)}, 应为「未选择」`)
+  }
+
+  // ③ 复制那一下: 把存下的那一份原样交给宿主, 成功了留一句回执
+  const copyCalls = []
+  const copyNotes = []
+  const diagCopy = new Function('imageFails', 'call', 'showNote',
+    `${copyDiagSource}\nreturn copyImageDiag`)(diagStored, (method, arg) => {
+    copyCalls.push({ method, arg })
+    return { ok: true, lines: 4 }
+  }, (text) => { copyNotes.push(text) })
+  diagCopy(diagStored[0].id)
+  if (copyCalls.length === 1 && copyCalls[0].method === 'portalCopyDiag' && copyCalls[0].arg === hostDiag) {
+    notes.push('ok   复制那一下原样交回那四行 (与 logcat 同一份)')
+  } else {
+    failures.push('client.js: copyImageDiag 没有把存下的四行原样交给 portalCopyDiag')
+  }
+  if (copyNotes.length === 1 && copyNotes[0] === '已复制诊断 4 行') {
+    notes.push('ok   复制成功留一句回执 (已复制诊断 4 行)')
+  } else {
+    failures.push(`client.js: 复制成功没有回执 (${JSON.stringify(copyNotes)})`)
   }
 }
 
