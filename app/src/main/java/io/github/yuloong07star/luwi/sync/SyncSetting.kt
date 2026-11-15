@@ -478,17 +478,19 @@ internal object SyncSetting {
     private fun peerUrlProblem(value: String): String? {
         if (value.isEmpty()) return null
         if (value.any { it.isWhitespace() }) return "地址里不能有空格或换行"
-        return if (value.startsWith("http://") || value.startsWith("https://")) {
-            null
-        } else {
-            "对端地址要以 http:// 或 https:// 开头 (留空 = 从对端名片里取)"
+        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            return "对端地址要以 http:// 或 https:// 开头 (留空 = 从对端名片里取)"
         }
+        return PlainHttp.problem(value)
     }
 
     private fun publicUrlProblem(value: String): String? {
         if (value.isEmpty()) return null
         if (value.any { it.isWhitespace() }) return "地址里不能有空格或换行"
-        return if (value.startsWith("http://") || value.startsWith("https://")) null else "本机地址要以 http:// 或 https:// 开头"
+        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            return "本机地址要以 http:// 或 https:// 开头"
+        }
+        return PlainHttp.problem(value)
     }
 
     private fun nameProblem(value: String): String? {

@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   哪些东西不跟着 Android 12+ 的数据迁移走
+   cloud-backup: 上云的自动备份 —— 凭据、会话、截图与记忆都不去
+   device-transfer: 换机时的本机直传 —— 凭据不去 (新机重新登录), 会话可以带过去
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="file" path="dsh-home/.credentials.yaml" />
+        <exclude domain="file" path="dsh-home/sessions" />
+        <exclude domain="file" path="dsh-home/lw" />
+        <exclude domain="file" path="dsh-home/memory" />
+        <exclude domain="file" path="ocr" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="file" path="dsh-home/.credentials.yaml" />
+        <exclude domain="file" path="dsh-home/lw" />
+        <exclude domain="file" path="ocr" />
     </device-transfer>
-    -->
 </data-extraction-rules>
