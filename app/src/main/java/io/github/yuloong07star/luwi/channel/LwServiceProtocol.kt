@@ -553,14 +553,19 @@ class LwServiceProxy(private val remote: IBinder) {
      * The file is written by the privileged process, so the caller has to be able to read what
      * that uid leaves behind - which holds for the app's own directories and nothing else
      *
+     * @param png 要 PNG 还是要裸像素 (`screencap` 的两种输出). PNG 是给模型看的那张图要的;
+     *   OCR 只想拿到像素, 走 raw 能省掉编码与解码两遍, 手机自己那块屏实测差 300ms 以上
+     *
      * @returns an empty string once a picture is there, otherwise why there is none: 那句话要能分开
      *   "屏已经不在"与"屏在而这一帧没画出来", 两件事的处置完全不同, 所以这里回的是理由而不是布尔
      */
-    fun screenshot(displayId: Int, path: String): String = transact(
+    fun screenshot(displayId: Int, path: String, png: Boolean = true): String = transact(
         code = LwServiceProtocol.SCREENSHOT,
         write = {
             writeInt(displayId)
             writeString(path)
+            // 新加的开关放在最后, 老写法只写前面两样时对方读不到它, 按 PNG 处理
+            writeInt(if (png) 1 else 0)
         },
         read = { readString().orEmpty() },
     )
