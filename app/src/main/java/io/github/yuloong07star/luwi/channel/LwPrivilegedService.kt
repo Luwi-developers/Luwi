@@ -132,10 +132,12 @@ class LwPrivilegedService(private val context: Context?) : Binder() {
             LwServiceProtocol.SCREENSHOT -> answering(data, reply) {
                 val displayId = data.readInt()
                 val path = data.readString().orEmpty()
+                // 新版调用方多带一个"要不要 PNG": OCR 那条路要 raw, 省掉编解码
+                val png = if (data.dataAvail() > 0) data.readInt() != 0 else true
                 // 虚拟屏的截图已经不走这里了: 它们的帧就在 app 进程里 (FrameCache), 拍一张只是把
                 // 那一帧写下来。这里只剩手机自己那块屏 —— 它是唯一需要 shell uid 才拍得到的
                 val problem = if (displayId == LwServiceProtocol.MAIN_DISPLAY) {
-                    capture.capturePrimary(path)
+                    capture.capturePrimary(path, png)
                 } else {
                     "displayId $displayId is one of our virtual screens, and its pictures are now" +
                         " taken inside the app; ask the app for a screenshot instead of the channel"

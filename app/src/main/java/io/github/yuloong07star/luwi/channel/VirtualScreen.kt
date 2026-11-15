@@ -18,6 +18,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.workspace.Workspace
 import java.io.File
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -133,6 +136,15 @@ object VirtualScreen {
     @Volatile
     private var pictures: File? = null
 
+    /**
+     * OCR 那条路取的裸像素
+     *
+     * 与模型看的那张 PNG 不是一个文件: OCR 要的是像素不是文件, 走 raw 能省掉 `screencap` 的 PNG
+     * 编码与这边的解码 (k40 上实测一次省三百毫秒以上); 换一个名字只是让两件事并发时互不覆盖
+     */
+    @Volatile
+    private var picturesRaw: File? = null
+
     /** The app, kept for the one thing here that needs to name a directory of its own */
     @Volatile
     private var application: Context? = null
@@ -173,6 +185,7 @@ object VirtualScreen {
         val scratch = File(SHELL_SCRATCH)
         val directory = if (scratch.isDirectory) scratch else context.applicationContext.cacheDir
         pictures = File(directory, "$PICTURE_PREFIX${UUID.randomUUID()}$PICTURE_SUFFIX")
+        picturesRaw = File(directory, "$PICTURE_PREFIX${UUID.randomUUID()}$RAW_SUFFIX")
     }
 
     /**
@@ -737,13 +750,13 @@ object VirtualScreen {
      *
      * @returns why the picture never matched, or null once one did
      */
-    private fun captureSettled(screen: ScreenState, staging: File): String? {
+    private fun captureSettled(screen: ScreenState, staging: File, png: Boolean = true): String? {
         var last = "nothing"
         repeat(CAPTURE_ATTEMPTS) { attempt ->
             // 特权侧回的是"为什么没有图": 屏没了, 与屏在而应用还没画上去, 是两件事
-            val problem = requireService().screenshot(screen.displayId, staging.absolutePath)
+            val problem = requireService().screenshot(screen.displayId, staging.absolutePath, png)
             if (problem.isNotEmpty()) return problem
-            val size = Picture.sizeOf(staging) ?: return null
+            val size = frameSize(staging, png) ?: return null
             if (size.first == screen.width && size.second == screen.height) return null
             last = "${size.first}x${size.second}"
             Log.i(TAG, "display ${screen.displayId} is ${screen.width}x${screen.height} but the" +
@@ -752,6 +765,79 @@ object VirtualScreen {
         }
         return "the device is still handing back a $last picture of a ${screen.width}x" +
             "${screen.height} screen, which is the frame from before it changed size: take it again"
+    }
+
+    /**
+     * 一张截图里的宽高
+     *
+     * PNG 交给 `BitmapFactory` 读头 (它只读头, 不解全图); raw 没有可读的容器, 只能自己从文件头
+     * 里解出宽高 —— 而尺寸对不对是 [captureSettled] 判断"这一帧是不是换尺寸前那张"的唯一依据
+     */
+    private fun frameSize(file: File, png: Boolean): Pair<Int, Int>? =
+        if (png) Picture.sizeOf(file) else rawHeader(file)?.first
+
+    /**
+     * 一张 `screencap` 的裸像素图, 读不出来时 null
+     *
+     * `screencap` 不带 `-p` 时写的是"一段尺寸信息 + RGBA 像素", 尺寸信息在 Android 版本之间换过
+     * 样子 (二进制头与文本行都见过), 所以两种都试; 对不上就把文件交还给 PNG 那条路 —— 猜错格式
+     * 浪费的是一整张图, 比慢一点糟
+     */
+    private fun rawFrame(file: File): Bitmap? {
+        val length = file.length()
+        if (length <= 0L) return null
+        return try {
+            val (size, skip) = rawHeader(file) ?: return null
+            val (width, height) = size
+            val pixels = ByteArray(width * height * 4)
+            RandomAccessFile(file, "r").use { stream ->
+                stream.seek(skip.toLong())
+                stream.readFully(pixels)
+            }
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+                copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+            }
+        } catch (problem: Throwable) {
+            Log.w(TAG, "could not read ${file.name} as raw pixels", problem)
+            null
+        }
+    }
+
+    /**
+     * 裸像素文件开头的"这张图多大", 与像素从第几个字节开始
+     *
+     * @returns (宽, 高) 与头的长度, 或者 null 当这个文件不是一个能整张装进来的 raw 帧
+     */
+    private fun rawHeader(file: File): Pair<Pair<Int, Int>, Int>? {
+        val length = file.length()
+        if (length <= 0L) return null
+        val head = ByteArray(min(64L, length).toInt())
+        RandomAccessFile(file, "r").use { it.readFully(head) }
+
+        // 二进制头: 宽, 高, 格式 (小端 uint32), 有的版本再跟一个 colorspace
+        for (skip in intArrayOf(12, 16)) {
+            if (head.size < skip) continue
+            val buffer = ByteBuffer.wrap(head, 0, skip).order(ByteOrder.LITTLE_ENDIAN)
+            val width = buffer.int
+            val height = buffer.int
+            if (width !in 1..MAX_DISPLAY_SIDE || height !in 1..MAX_DISPLAY_SIDE) continue
+            if (length == skip.toLong() + width.toLong() * height * 4) return (width to height) to skip
+        }
+
+        // 文本头: 宽高格式写成数字, 一行或三行都见过; 头的长度由"总字节减去像素"反推
+        val numbers = Regex("\\d+").findAll(String(head, Charsets.US_ASCII))
+            .mapNotNull { it.value.toIntOrNull() }
+            .take(3)
+            .toList()
+        if (numbers.size == 3) {
+            val width = numbers[0]
+            val height = numbers[1]
+            if (width in 1..MAX_DISPLAY_SIDE && height in 1..MAX_DISPLAY_SIDE) {
+                val skip = length - width.toLong() * height * 4
+                if (skip in 8L..64L) return (width to height) to skip.toInt()
+            }
+        }
+        return null
     }
 
     /** Where captured pictures are left: inside the workspace, under a directory of our own */
@@ -799,16 +885,17 @@ object VirtualScreen {
     fun capture(screen: ScreenState): Bitmap? {
         return try {
             if (screen.displayId == MAIN_DISPLAY) {
-                val staging = pictures ?: run {
+                val staging = picturesRaw ?: run {
                     lastError = "no directory to write a picture into"
                     return null
                 }
-                val stale = captureSettled(screen, staging)
+                val stale = captureSettled(screen, staging, png = false)
                 if (stale != null) {
                     lastError = stale
                     return null
                 }
-                BitmapFactory.decodeFile(staging.absolutePath)
+                // raw 读不出来时再按 PNG 解一遍: 万一那头还是老版本, 只认 `-p`, 写回来的仍是 PNG
+                rawFrame(staging) ?: BitmapFactory.decodeFile(staging.absolutePath)
             } else {
                 frames[screen.displayId]?.latest()
             }.also { bitmap ->
@@ -855,6 +942,9 @@ object VirtualScreen {
     private const val PICTURE_PREFIX = "lw-screen-"
 
     private const val PICTURE_SUFFIX = ".png"
+
+    /** 裸像素那份暂存文件的后缀: 内容不是 PNG, 名字也不该叫 PNG */
+    private const val RAW_SUFFIX = ".raw"
 
     /** Where in the workspace pictures are kept, which the model can read and the user can open */
     private const val SCREENSHOTS = "screenshots"
