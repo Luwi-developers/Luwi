@@ -356,7 +356,11 @@ android {
         // 到时先释放自己建的虚拟屏 / 手机直连优先原生 API 与 Intent (常见动作不建屏, 快应用失败即 unsupported) /
         // 主动对话从探索里拆开 (保 30 分钟闸, 取消每日次数上限) / 规则引擎加日历临近, 电量与通知摘要,
         // 规则搬进 rules/ 且 settings.json 不再当规则读
-        versionCode = 19
+        // 2.8.0 r4 (2026-11-15 主人: "用这个包作为 2.8.0 发版包"): 门户「判断」抽屉两颗按钮真的能点 /
+        // 问答工具不挂 / 取消选图不报错 / 头像与背景都过裁剪窗 (双指放大缩小, 没有固定像素档)。
+        // **签名不动** (仍是那把旧 debug key), 于是 2.7.10 与 r3 都能直接覆盖安装, 会话与凭据都不丢;
+        // 彻底换签名留到 2.8.1
+        versionCode = 20
         versionName = "2.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

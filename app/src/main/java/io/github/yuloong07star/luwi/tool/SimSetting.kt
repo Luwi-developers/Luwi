@@ -298,6 +298,45 @@ internal object SimSetting {
         })
     }
 
+    /**
+     * 只改 `wake.mode` 这一个键 (2026-11-15)
+     *
+     * 门户「判断」抽屉那颗「关掉唤醒」走这里: 那一行的开关态是 `router.json` 的 `tick.enabled` **与**
+     * 这一格的合成值 ([RouterTick.enabled]), 只写前者的话"活跃"那一档还在, 于是按了关不掉 —— 屏上
+     * 看起来就是"按钮点不动" (方案 2026-11-15)
+     *
+     * **为什么不复用 [save]**: 它按 [Plan] 整份 encode, 会抹掉将来版本加的键与主人手改的未知键;
+     * 这一趟只动一格, 其余的读回来原样搬回去 (与 `RouterTick.setEnabled` 同一个写法)
+     * @param mode 只有 [MODE_ACTIVE] 与 [MODE_DIVING] 两种, 别的字面量按潜水算
+     * @returns 写进去了没有
+     */
+    fun setWakeMode(context: Context, mode: String): Boolean {
+        val wanted = if (mode == MODE_ACTIVE) MODE_ACTIVE else MODE_DIVING
+        val target = file(context)
+        val root = runCatching {
+            target.takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it) as? JsonObject }
+        }.getOrNull() ?: JsonObject(emptyMap())
+        val wake = root["wake"] as? JsonObject ?: JsonObject(emptyMap())
+        val payload = buildJsonObject {
+            root.forEach { (key, value) -> if (key != "wake") put(key, value) }
+            put("wake", buildJsonObject {
+                wake.forEach { (key, value) -> if (key != "mode") put(key, value) }
+                put("mode", wanted)
+            })
+        }
+        return runCatching {
+            target.parentFile?.mkdirs()
+            val text = json.encodeToString(JsonObject.serializer(), payload) + "\n"
+            val temporary = File(target.parentFile, "${target.name}.tmp")
+            temporary.writeText(text)
+            if (!temporary.renameTo(target)) {
+                target.writeText(text)
+                temporary.delete()
+            }
+            true
+        }.getOrDefault(false)
+    }
+
     fun save(context: Context, plan: Plan): Boolean {
         val target = file(context)
         val root = toJson(plan)

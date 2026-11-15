@@ -1766,9 +1766,10 @@ private const val PAGE_BACK_MS = 500L
 /**
  * 选图那一路的四个词 (落实表 #35, 2026-11-12): 页面 `__LUWI_PORTAL__.pickState(state)` 认的就是这一套
  *
- * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选好的文件交回页面 / `empty` =
- * 回来是空的 / `none` = 选择器起不来; **后两个在屏上都是"点了没反应"** —— 那正是 issue #53 报的
- * 那一下, 所以都要让页面说一句「图片发送失败：webview 未回调」
+ * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选好的文件交回页面 /
+ * `empty` = 回来是空的 (**人自己退出来的**, 页面上一个字都不写 —— 2026-11-15 主人: "没有选择直接
+ * 退出...要求这种情况下不要显示这个报错") / `none` = 选择器起不来 (这一档才是真的"点了没反应",
+ * 页面说一句「图片发送失败：webview 未回调」)
  */
 private const val PICK_SHOWN = "shown"
 private const val PICK_PICKED = "picked"

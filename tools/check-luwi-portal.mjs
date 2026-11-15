@@ -824,7 +824,9 @@ if (failTableSource === '' || imageFailSource === '') {
   expect('PortalBridge.kt', portalBridge, 'device ${Build.MANUFACTURER} ${Build.MODEL}')
   expect('PortalBridge.kt', portalBridge, 'webview $label (major ${info?.major ?: 0})')
 
-  // 宿主回话那一支: 只有 shown / picked 撤计时器, empty / none 要报
+  // 宿主回话那一支: `shown` / `picked` / `empty` 只撤计时器, 只有 `none` 要报 ——
+  // 2026-11-15 主人: "点击附件进入选择界面时没有选择直接退出会出现图片发送失败: webview 未回调,
+  // 要求这种情况下不要显示这个报错" (取消是主人自己的动作, 不是一次失败)
   if (pickStateSource === '') {
     failures.push('client.js: 抽不出 pickState (宿主那句回话没人接)')
   } else {
@@ -836,12 +838,15 @@ if (failTableSource === '' || imageFailSource === '') {
     pickState('picked')
     if (reasons.length === 0) notes.push('ok   pickState: shown / picked 只撤计时器, 不报失败')
     else failures.push(`client.js: pickState 对 shown/picked 也报了失败 (${reasons.join(',')})`)
+    // `empty` = 人选了又退出来: 屏上不该留一句失败
     pickState('empty')
+    if (reasons.length === 0) notes.push('ok   pickState: empty (人自己取消) 静默, 不报失败')
+    else failures.push(`client.js: pickState 对 empty 也报了失败 (${reasons.join(',')})`)
     pickState('none')
-    if (reasons.length === 2 && reasons.every((one) => one === table.noCallback)) {
-      notes.push('ok   pickState: empty / none 都报「webview 未回调」(选择器没结果 / 起不来)')
+    if (reasons.length === 1 && reasons[0] === table.noCallback) {
+      notes.push('ok   pickState: none (选择器起不来) 报「webview 未回调」')
     } else {
-      failures.push(`client.js: pickState 对 empty/none 没报「webview 未回调」(实际 ${reasons.join(',')})`)
+      failures.push(`client.js: pickState 对 none 没报「webview 未回调」(实际 ${reasons.join(',')})`)
     }
     if (disarms === 4) notes.push('ok   pickState: 四种回话都先撤计时器 (不会二次报)')
     else failures.push(`client.js: pickState 撤计时器的次数不是 4 (实际 ${String(disarms)})`)
@@ -1463,6 +1468,33 @@ if (/if \(!portal\.isOpen\(\)\) portal\.mount\(\)/u.test(client)) {
 } else {
   notes.push('ok   「回到前台」不再问 portal.isOpen')
 }
+
+// ── 十六、判断抽屉那两颗按钮 (2026-11-15 主人: "关掉唤醒和唤醒一下无法点击") ────
+//
+// 两句抱怨背后是两件可量的事: ① 开关态是 `router.json` 与 `sim.json` 的**合成值**, 只写前者时
+// 按「关掉唤醒」按钮文案不变, 看上去就是点不动 ② 「唤醒一下」投完一行就再无回音, 屏上什么都不变,
+// 与"没接上"同形。于是这里钉三处: 关的时候 sim 也收 / 点了有回执 / 动作行钉在抽屉底部 (检测项一多
+// 就滚出可视区的另一档)
+
+const simSetting = read('app/src/main/java/io/github/yuloong07star/luwi/tool/SimSetting.kt')
+
+expect('PortalBridge.kt', portalBridge, 'put("bySim"')
+expect('PortalBridge.kt', portalBridge, 'SimSetting.setWakeMode(')
+expect('PortalBridge.kt', portalBridge, 'SimSetting.MODE_DIVING')
+expect('PortalBridge.kt', portalBridge, 'put("host"')
+expect('PortalBridge.kt', portalBridge, 'ExploreSchedule.wakeHost(')
+expect('PortalBridge.kt', portalBridge, 'Log.i(LOOK_TAG, "portal tick: queued')
+expect('PortalBridge.kt', portalBridge, '"portal tick switch -> ')
+expect('SimSetting.kt', simSetting, 'fun setWakeMode(context: Context, mode: String): Boolean')
+// 关掉唤醒那一趟必须落成潜水 (否则 `RouterTick.enabled` 的合成值仍是开)
+expect('SimSetting.kt', simSetting, 'MODE_DIVING')
+expect('client.js', client, "call('portalTickEnabled', !tickOn)")
+expect('client.js', client, "result.host === 'starting'")
+expect('client.js', client, "tickNote = '已投出去")
+expect('client.js', client, 'position:sticky')
+// 开关态与"哪一侧来的"两句话都得在, 否则 `bySim` 白给
+expect('client.js', client, "'开着 (更多设置里选的活跃)'")
+expect('client.js', client, "'开着 (25-55 分一次)'")
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 

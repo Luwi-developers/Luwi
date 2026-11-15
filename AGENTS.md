@@ -9,10 +9,18 @@
 
 - **2.7.10 冻结**: `D:\apk\archive\releases\Luwi-2.7.10-frozen-20261030-r2.apk`, 250,390,159 字节, sha256
   `F89348B9…`, 2026-11-01 周日发, 一字节都不许改
+- **2.8.0 发版包 = r4** (2026-11-15 主人: "用这个包作为 2.8.0 发版包"):
+  `archive\releases\Luwi-2.8.0-frozen-20261115-r4.apk`, **241,340,796 字节**, sha256
+  `be411842a45bb4810839407f710ed7654976597874068bef4eec564b42bbb8a3`, **versionCode 20 / versionName 2.8.0**,
+  `debuggable=false`, 签名 `CN=Android Debug 652084a9…` —— 与 2.7.10 / r3 **逐字节同一个证书**, 所以两者都能
+  直接覆盖安装, 会话 / 凭据 / 设置一个都不丢 (真机实测: 覆盖后 4 场历史、模型选择、`lw/sim.json` 都在);
+  这一版的内容 = 门户「判断」抽屉两颗按钮真的能点 + 问答工具不挂 + 取消选图不报错 + 头像与背景都过裁剪窗
+  (双指放大缩小, 没有固定像素档)。r1 / r2 / r3 原地留着
 - 发布只认 `archive\releases\` 副本 (`app-release.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
 - 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包), `debuggable=false`;
   **签名仍是那把旧 debug key** (`CN=Android Debug`) —— 换 key 会让 2.7.10 装不上 2.8.0, 只能卸载重装,
-  `files/dsh-home` (会话 / 凭据 / 设置) 跟着丢; 换 key 归 2.9.0, 且必须走 `apksigner` 的 v3 lineage
+  `files/dsh-home` (会话 / 凭据 / 设置) 跟着丢; **彻底换签名留到 2.8.1** (2026-11-15 主人定, 原记的 2.9.0 作废),
+  且必须走 `apksigner` 的 v3 lineage
   (`tools/lw-make-release-keystore.ps1` 已备好那把 `CN=Luwi Release` 的新 key, key 与口令都不进仓库)
 - 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定 / 不可调试) —— **换 key = 全员卸载重装**,
   并跑 `python tools/apk-bytes.py <apk>` 验无归属区间 (最大那条只应几 KB)
@@ -130,6 +138,13 @@
 - **门户那张脸归设置 → 外观**: 「背景」「背景透明度」落 `$DSH_HOME/lw/face.json` + `lw/face/<名字>.jpg`
   (`tool/PortalFace.kt` 唯一写者, 换图只留一张), 页面走 `PortalBridge.portalLook()` 取 data URL (键是文件名),
   改完调 `__LUWI_PORTAL__.reloadLook()`
+- **头像与背景都必须先过裁剪窗** (2026-11-15): 选图只到 `PortalFace.decodeBounded` (inSampleSize 预缩到 2048),
+  裁与手势在 `ui/PortalCropDialog` (头像圆框 1:1 / 背景按屏比例, 因为页面是 `cover`), 算术全在 `tool/PortalCrop`
+  (纯函数, `PortalCropTest`); 切图与压缩在 IO 上 (`PortalFace.cut`), **`setWall` / `setAvatar` 收的是裁好的
+  Bitmap**, 不再是 uri。**没有"保存尺寸"档** (主人 2026-11-15: "要求双指放大缩小, 不加那个固定像素"),
+  落盘尺寸由 `setWall` / `setAvatar` 各自的上限收 (1600 / 512); **框用 `pointerInput(Unit)` + 单一
+  `mutableStateOf` State**: `remember(box)` 会把 State 换掉, 而手势 lambda 捕获的是旧的 —— 症状是"日志有
+  pan, 画面纹丝不动" (真机踩过); 方图进 1:1 框时正好铺满, 拖不动是**对**的 (没有余量), 换横图才动
 - **输入卡照 dsh `InputBar`** (28px 圆角 / input-major 实底 / soft elevation): 底部只 **`+`** (上传图片与 docs) 与
   **模型 chip**; 命令菜单 / 权限选择 / 工作区 / 预设都不画; **默认完全权限** (`danger-full-access`, 每场拨一次 +
   首次写 `permission.defaultPreset`); 气泡与浮层**只引 dsh 玻璃 token** (`--dsw-menu-surface-fill` /
@@ -264,6 +279,10 @@
 - `displayId` 可省 = "手里那块" (预览选中 → 最新建 → 无虚拟屏才 0); 事件订阅不补
 - `lw_launch` 只走特权; 按键传名字; 打字优先 `ACTION_SET_TEXT`; `swipe` 均分 12 步、每步睡一帧
 - 验证: `tools/lw-bridge.ps1` / `tools/lw-plugin-call.mjs` / `tools/lw-device-turn.ps1`; **读图不能在 run-as 里验**
+- **问答工具不挂** (2026-11-15 主人: "禁止问答工具, 出现需要进入对话才能选择回答, 用户在前台看不到"):
+  `presets/luwi` / `presets/explore` 的 `tool-ask-user` 都是 `disabled: true` —— 那个选项卡长在 dsh 自己的会话
+  界面里, 门户 / 球盖着时前台看不见, 一问就卡住; 要问就在正文里问 (那句话会进门户的时间线); 判据
+  `check-presets.mjs` 第 ⑥ 节 (行在就必须 disabled)
 
 ## 主屏 / 语音 / 无障碍
 

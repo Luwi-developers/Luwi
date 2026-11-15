@@ -12,6 +12,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.host.DshHost
+import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.OutFile
 import io.github.yuloong07star.luwi.tool.OutPaths
@@ -179,7 +181,11 @@ internal class PortalBridge(private val context: Context) {
                 put("lastSpokenAt", router.optLong("lastSpokenAt", 0L))
                 put("checks", router.optJSONArray("checks") ?: JSONArray())
                 put("tick", JSONObject().apply {
+                    // **合成值**: 与 `RouterTick.enabled()` 同一个口径 (router.json 的 tick.enabled 或
+                    // sim.json 的 wake.mode = active), 于是页面上"她现在会不会被叫"是真的那个答案
                     put("enabled", RouterTick.enabled(context))
+                    // 而它是从哪一侧来的必须说清: 只写 router.json 的那一趟关不掉"活跃" (2026-11-15)
+                    put("bySim", SimSetting.plan(context).wake.active)
                 })
             })
             put("explore", JSONObject().apply {
@@ -391,21 +397,56 @@ internal class PortalBridge(private val context: Context) {
         return portalSession()
     }
 
-    /** 唤醒一下: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧 */
+    /**
+     * 唤醒一下: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧
+     *
+     * **回执要够用** (2026-11-15 主人: 「唤醒一下」点不动): 投出去只是第一步, 宿主在不在跑决定了
+     * 这一句什么时候被看见 —— 所以回 `host`:
+     *
+     * - `running`: 她这一拍就在判, 几秒内可能开口
+     * - `starting`: 宿主还没起来, 这一行已经在收件箱里, 起好了就会被消费 (异步拉起, 不等)
+     *
+     * **不在这里同步等宿主**: `ExploreSchedule.wakeHost` 会睡到就绪 (最长几十秒), 而这座桥跑在
+     * WebView 的 JavaBridge 线程上 —— 同步等就是把页面按死在那儿, 表现比"没反应"更糟
+     */
     @JavascriptInterface
     fun portalTick(): String {
         val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_ROUTER) }.getOrNull()
-        RouterTick.ensure(context)
+        runCatching { RouterTick.ensure(context) }
+        val running = DshHost.status is HostStatus.Running
+        if (!running) {
+            // 后台拉起来: 那一行留在收件箱里, 宿主一起来就消费 (与 RouterTick.fire 同一条路)
+            runCatching {
+                Thread({ runCatching { ExploreSchedule.wakeHost(context) } }, "lw-portal-tick").start()
+            }
+        }
+        Log.i(LOOK_TAG, "portal tick: queued #${seq ?: 0L} host=${if (running) "running" else "starting"}")
         return JSONObject().apply {
             put("queued", seq != null)
             put("seq", seq ?: 0L)
+            put("host", if (running) "running" else "starting")
         }.toString()
     }
 
-    /** 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长唤醒一次) */
+    /**
+     * 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长唤醒一次)
+     *
+     * **关的时候要连 `sim.json` 的 `wake.mode` 一起收** (`RouterTick.enabled` 是两者的或): 只写
+     * `router.json` 时「更多设置」里选的"活跃"还在, 合成值仍是开, 页面刷新回来按钮还写着「关掉唤醒」
+     * —— 那正是"点了没反应"的样子 (2026-11-15)
+     */
     @JavascriptInterface
     fun portalTickEnabled(on: Boolean): String {
-        RouterTick.setEnabled(context, on)
+        val written = RouterTick.setEnabled(context, on)
+        var simOff = false
+        if (!on && SimSetting.plan(context).wake.active) {
+            simOff = SimSetting.setWakeMode(context, SimSetting.MODE_DIVING)
+        }
+        Log.i(
+            LOOK_TAG,
+            "portal tick switch -> $on written=$written simOff=$simOff" +
+                " simActive=${SimSetting.plan(context).wake.active}",
+        )
         return portalStatus()
     }
 

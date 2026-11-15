@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -157,6 +158,7 @@ import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwPlugin
 import io.github.yuloong07star.luwi.tool.LwPower
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.tool.PortalCrop
 import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.LwTts
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -1023,34 +1025,81 @@ private fun PortalFaceItems() {
         PortalState.run?.invoke("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.reloadLook()")
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val next = withContext(Dispatchers.IO) { PortalFace.setWall(context, uri) }
-                if (next == null) {
-                    message = context.getString(R.string.settings_portal_wall_failed)
-                } else {
-                    message = null
-                    revision += 1
-                    pushLook()
+    // 选完图先解码, 再进裁剪窗 (2026-11-15 主人: "头像选择时没有选择裁剪尺寸的弹窗, 背景应当也加上")
+    // 两条路只在"落到哪一格"上不同, 解码 / 裁剪 / 落盘是同一套
+    var cropKind by remember { mutableStateOf<PortalCropKind?>(null) }
+    var cropSource by remember { mutableStateOf<Bitmap?>(null) }
+
+    fun failureOf(kind: PortalCropKind): String = context.getString(
+        if (kind == PortalCropKind.AVATAR) {
+            R.string.settings_portal_avatar_failed
+        } else {
+            R.string.settings_portal_wall_failed
+        },
+    )
+
+    fun startCrop(kind: PortalCropKind, uri: Uri) {
+        scope.launch {
+            val decoded = withContext(Dispatchers.IO) { PortalFace.decodeBounded(context, uri) }
+            if (decoded == null) {
+                message = failureOf(kind)
+                return@launch
+            }
+            cropSource = decoded
+            cropKind = kind
+        }
+    }
+
+    fun commitCrop(kind: PortalCropKind, source: Bitmap, rect: PortalCrop.Rect) {
+        scope.launch {
+            val next = withContext(Dispatchers.IO) {
+                val piece = PortalFace.cut(source, rect) ?: return@withContext null
+                try {
+                    if (kind == PortalCropKind.AVATAR) {
+                        PortalFace.setAvatar(context, piece)
+                    } else {
+                        PortalFace.setWall(context, piece)
+                    }
+                } finally {
+                    runCatching { piece.recycle() }
                 }
+            }
+            // 那份预览图只在裁剪窗活着的时候有用: 关窗之后它就是一整张几 MB 的位图
+            runCatching { source.recycle() }
+            if (next == null) {
+                message = failureOf(kind)
+            } else {
+                message = null
+                revision += 1
+                pushLook()
             }
         }
     }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) startCrop(PortalCropKind.WALL, uri)
+    }
     // 头像走同一个选择器 (2026-11-10): 它与背景是两笔账, 换一样不该动另一样
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val next = withContext(Dispatchers.IO) { PortalFace.setAvatar(context, uri) }
-                if (next == null) {
-                    message = context.getString(R.string.settings_portal_avatar_failed)
-                } else {
-                    message = null
-                    revision += 1
-                    pushLook()
-                }
-            }
-        }
+        if (uri != null) startCrop(PortalCropKind.AVATAR, uri)
+    }
+    val croppingKind = cropKind
+    val croppingSource = cropSource
+    if (croppingKind != null && croppingSource != null) {
+        PortalCropDialog(
+            kind = croppingKind,
+            source = croppingSource,
+            onDismiss = {
+                cropKind = null
+                cropSource = null
+                runCatching { croppingSource.recycle() }
+            },
+            onDone = { rect ->
+                cropKind = null
+                cropSource = null
+                commitCrop(croppingKind, croppingSource, rect)
+            },
+        )
     }
     var editingName by rememberSaveable { mutableStateOf(false) }
 
