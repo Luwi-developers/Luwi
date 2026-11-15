@@ -49,6 +49,18 @@ object LwOcr {
 
     private const val TAG = "LwOcr"
 
+    /**
+     * 云端 OCR 的开关: 名字留着, 值恒为 false
+     *
+     * 主人 2026-11-15 12:45 拍板: 屏幕画面默认绝不上传, 读屏 (含连续帧与虚拟屏截图) 这条路只用端侧
+     * 模型, 也不做「本地优先 + 云端兜底」。这一格就是那道边界 —— `OcrBatchTest` 钉住它, 谁把它改成
+     * true 单测当场红; 2.x 也不给它界面, 所以它连设置项都不是
+     */
+    const val allowCloud: Boolean = false
+
+    /** 回给 host 的引擎名: 读屏恒本地, 云端那一支在 2.x 里不存在 */
+    const val ENGINE: String = "local"
+
     /** 解出来的模型放哪, 与 host 树一个套路: assets 里是打包产物, 首次用到才落到沙盒 */
     private const val DIR = "ocr"
 
@@ -659,6 +671,8 @@ object LwOcr {
                 lines.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
             }
             val recTotalMs = (System.nanoTime() - recStarted) / 1_000_000
+            // 出网边界的判据: 读到几行就打几行, 与桥回给 host 的那份 JSON 同源 (屏幕画面不上传)
+            Log.i(TAG, "engine=$ENGINE lines=${lines.size}")
             // recMs 现在是**总时间**: 以前算的是"每次调用平均", 33 框 x 10ms 会被误读成 10ms,
             // 而它其实是 330ms 那一整块
             note = "det ${detMs}ms / rec ${recTotalMs}ms / ${boxes.size} 框 → ${lines.size} 行" +

@@ -2491,7 +2491,9 @@ const TOOLS = [
       + 'WebGL view - has no control tree, but its text is still on the screen. Every line comes '
       + 'back with the rectangle it occupies in the screen\'s own pixels, so lw_tap(x=..., y=...) '
       + 'can press it; the centre is given too. It reads Chinese and English, runs on the device '
-      + 'with no network and no cloud, and unlike lw_screenshot it does **not** scale the picture '
+      + 'with no network and no cloud - the engine is always "local" and the picture never leaves '
+      + 'the phone, because 2.x has no cloud reader at all - and unlike lw_screenshot it does '
+      + '**not** scale the picture '
       + 'down, so small text stays readable. Prefer lw_ui whenever that answers: it is exact and '
       + 'free, while this is a reading of a picture, and it can mistake an icon for a character '
       + '(those come back with a low score).',
@@ -6546,12 +6548,14 @@ function formatOcr(result) {
   const where = `displayId ${result.displayId}`
   if (result.error) return `could not read ${where}: ${result.error}`
   const lines = result.lines ?? []
+  // 引擎永远是 local: 屏幕画面默认不上传, 2.x 里连云端那一支代码都没有
+  const engine = result.engine ?? 'local'
   // recMs 是识别总时间, 不是每行平均值: 以前按每行报, 33 行的 330ms 会被说成 10ms
   const calls = Number(result.recCalls ?? 0)
   const cost = `${result.captureMs ?? 0}ms to capture, ${result.detMs ?? 0}ms to find the text, `
     + `${result.recMs ?? 0}ms to read it`
     + (calls > 0 ? ` in ${calls} pass${calls === 1 ? '' : 'es'}` : '')
-    + `, on ${result.backend}`
+    + `, on ${result.backend}, engine "${engine}"`
   const asleep = asleepLine(result)
   if (lines.length === 0) {
     return `no text was found on ${where} (${cost}). The screen may be blank or hold only`
