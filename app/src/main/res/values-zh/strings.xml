@@ -207,6 +207,12 @@
     <string name="ready_action_download">下载 %1$s</string>
     <string name="ready_action_retry">重新下载 %1$s</string>
     <string name="ready_action_running">正在下载 %1$d%%</string>
+    <string name="ready_speech_account">用 DeepSeek 账号的语音输入, 不下载本地模型</string>
+    <string name="ready_voice_account">使用 DeepSeek 语音输入</string>
+    <string name="ready_voice_account_summary">用已登录的 DeepSeek 账号转写, 不占本地空间</string>
+    <string name="ready_voice_sign_in">先登录 DeepSeek 账号 (点它去登录)</string>
+    <string name="ready_voice_local">改用本地语音模型</string>
+    <string name="ready_voice_local_summary">要下约 %1$s MB 的 SenseVoice</string>
     <string name="settings_channel_autostart">允许 Luwi 自启动</string>
     <string name="settings_channel_autostart_summary">只是一行跳转</string>
     <string name="settings_channel_autostart_failed">这台设备上没有能打开的那一页</string>

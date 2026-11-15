@@ -208,6 +208,12 @@
     <string name="ready_action_download">Download %1$s</string>
     <string name="ready_action_retry">Try %1$s again</string>
     <string name="ready_action_running">Downloading %1$d%%</string>
+    <string name="ready_speech_account">Voice input runs on the DeepSeek account, so nothing is downloaded</string>
+    <string name="ready_voice_account">Use DeepSeek voice input</string>
+    <string name="ready_voice_account_summary">Transcribed by the signed-in DeepSeek account, using no local storage</string>
+    <string name="ready_voice_sign_in">Sign in to DeepSeek first (tap to sign in)</string>
+    <string name="ready_voice_local">Use the local speech model</string>
+    <string name="ready_voice_local_summary">Downloads about %1$s MB of SenseVoice</string>
     <string name="settings_channel_autostart">Allow Luwi to start on boot</string>
     <string name="settings_channel_autostart_summary">A jump to the system page only</string>
     <string name="settings_channel_autostart_failed">This device has no page to open for it</string>
