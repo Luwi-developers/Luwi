@@ -8,5 +8,6 @@
     <exclude domain="file" path="dsh-home/sessions" />
     <exclude domain="file" path="dsh-home/lw" />
     <exclude domain="file" path="dsh-home/memory" />
+    <exclude domain="file" path="host" />
     <exclude domain="file" path="ocr" />
 </full-backup-content>
