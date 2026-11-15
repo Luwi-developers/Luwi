@@ -37,6 +37,7 @@ import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.text
 import io.github.yuloong07star.luwi.util.PermissionCatalog
 import io.github.yuloong07star.luwi.workspace.Workspace
+import kotlin.math.roundToInt
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -963,6 +964,8 @@ object PrivilegedBridge {
             if (bitmap == null) {
                 buildJsonObject {
                     put("displayId", screen.displayId)
+                    // 引擎名与成功那条路一样: 读屏恒本地, 取帧失败也不换成别的路
+                    put("engine", LwOcr.ENGINE)
                     put("lines", buildJsonArray {})
                     put("error", VirtualScreen.lastError ?: "capture failed")
                 }
@@ -994,6 +997,8 @@ object PrivilegedBridge {
                         put("width", bitmap.width)
                         put("height", bitmap.height)
                         put("backend", outcome.backend)
+                        // 顶层那一格说清这次是谁算的: 读屏这条路恒为 local (云端档 2.x 不存在)
+                        put("engine", LwOcr.ENGINE)
                         put("captureMs", captureMs)
                         put("detMs", outcome.detMs)
                         put("recMs", outcome.recMs)
@@ -1013,7 +1018,8 @@ object PrivilegedBridge {
                             for (line in outcome.lines) {
                                 add(buildJsonObject {
                                     put("text", line.text)
-                                    put("score", line.score.toDouble())
+                                    // 两位数就够读了: 小数点后六位既不帮判断, 也让答案更难扫
+                                    put("score", (line.score * 100f).roundToInt() / 100f)
                                     put("box", buildJsonArray {
                                         add(line.left)
                                         add(line.top)

@@ -9,6 +9,8 @@
  *   2. 有没有 Hexagon 用 `/dev/adsprpc-smd` 判, 不用 `Build.SOC_MODEL` 那串给人看的字
  *   3. 性能票是 burst -> high_performance -> default 的阶梯, strict 是 true -> false 的两轮
  *   4. `recMs` 是识别总时间, 插件里不能再写 "per line" (33 行的 330ms 会被说成 10ms)
+ *   5. 出网边界: 读屏恒本地 (`engine = "local"`), 云端开关是常量 false, privacy.md 只有一行
+ *      云端档且写明未启用 —— 三条任缺一条, 这条边就只是说法 (2026-11-15)
  *
  * 这些都不需要设备: 代码形状错了就是错了, 真机只负责量数字
  *
@@ -24,6 +26,15 @@ const ocr = await readFile(
 )
 const settings = await readFile(
   new URL('app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt', root),
+  'utf8',
+)
+const bridge = await readFile(
+  new URL('app/src/main/java/io/github/yuloong07star/luwi/channel/PrivilegedBridge.kt', root),
+  'utf8',
+)
+const privacy = await readFile(new URL('docs/privacy.md', root), 'utf8')
+const batchTest = await readFile(
+  new URL('app/src/test/java/io/github/yuloong07star/luwi/channel/OcrBatchTest.kt', root),
   'utf8',
 )
 const plugin = await readFile(new URL('host-plugin/index.mjs', root), 'utf8')
@@ -100,6 +111,42 @@ check('插件按总时间 + 调用次数说', [
   /per line/u.test(plugin.slice(plugin.indexOf('function formatOcr'), plugin.indexOf('function formatOcr') + 1200)),
   /result\.recCalls/u.test(plugin),
 ], [false, true])
+
+/* ── 六、出网边界: 读屏恒本地, 云端开关默认关 (2026-11-15) ───────────── */
+
+check('云端开关是常量 false', [
+  /const val allowCloud: Boolean = false/u.test(ocr),
+  /const val ENGINE: String = "local"/u.test(ocr),
+], [true, true])
+
+check('桥的答案顶层带 engine, 且没有云端分支', [
+  // 取帧失败那条路也要带, 否则读不到屏时 engine 会缺一格
+  [...bridge.matchAll(/put\("engine", LwOcr\.ENGINE\)/gu)].length,
+  /cloud/iu.test(bridge),
+], [2, false])
+
+check('logcat 的判据行是 engine=local lines=N', [
+  /Log\.i\(TAG, "engine=\$ENGINE lines=\$\{lines\.size\}"\)/u.test(ocr),
+], [true])
+
+check('每行的 score 收成两位小数', [
+  /put\("score", \(line\.score \* 100f\)\.roundToInt\(\) \/ 100f\)/u.test(bridge),
+], [true])
+
+check('privacy.md 出站表只有一行云端档, 且写明未启用', [
+  [...privacy.matchAll(/云端 OCR/gu)].length,
+  /\| 云端 OCR（未启用） \|/u.test(privacy),
+], [1, true])
+
+check('OcrBatchTest 钉住 allowCloud == false', [
+  /assertFalse\(LwOcr\.allowCloud\)/u.test(batchTest),
+  /assertEquals\("local", LwOcr\.ENGINE\)/u.test(batchTest),
+], [true, true])
+
+check('插件把引擎名念出来, 不假装有云端', [
+  /const engine = result\.engine \?\? 'local'/u.test(plugin),
+  /engine "\$\{engine\}"/u.test(plugin),
+], [true, true])
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
