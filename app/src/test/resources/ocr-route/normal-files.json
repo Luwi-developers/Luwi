@@ -1,0 +1,25 @@
+{
+  "name": "normal-files",
+  "about": "文件列表 16sp: 主串清楚, 右侧时间与占用偏低, 列表里混着 'OK' 这种两字招牌",
+  "screenLong": 2400,
+  "rows": [
+    { "text": "最近文件", "score": 0.97, "box": [60, 140, 300, 184], "keep": true },
+    { "text": "8", "score": 0.55, "box": [60, 240, 116, 296], "keep": false },
+    { "text": "会议纪要.docx", "score": 0.93, "box": [140, 250, 520, 294], "keep": true },
+    { "text": "2026-11-15 14:22", "score": 0.88, "box": [600, 250, 980, 286], "keep": true },
+    { "text": "8", "score": 0.57, "box": [60, 340, 116, 396], "keep": false },
+    { "text": "预算表.xlsx", "score": 0.91, "box": [140, 350, 420, 394], "keep": true },
+    { "text": "2026-11-12 09:05", "score": 0.86, "box": [600, 350, 980, 386], "keep": true },
+    { "text": "IMG_2041.jpg", "score": 0.90, "box": [140, 450, 460, 494], "keep": true },
+    { "text": "12.4 MB", "score": 0.87, "box": [780, 450, 980, 486], "keep": true },
+    { "text": "新建文件夹", "score": 0.94, "box": [60, 550, 300, 594], "keep": true },
+    { "text": ">", "score": 0.98, "box": [980, 570, 1010, 614], "keep": false },
+    { "text": "占用 2.1 GB", "score": 0.32, "box": [60, 650, 300, 694], "keep": true },
+    { "text": "清理建议", "score": 0.54, "box": [60, 750, 240, 794], "keep": true },
+    { "text": "8", "score": 0.60, "box": [60, 850, 104, 894], "keep": false },
+    { "text": "存储", "score": 0.96, "box": [60, 950, 180, 994], "keep": true },
+    { "text": "共享文件夹", "score": 0.71, "box": [140, 1050, 460, 1094], "keep": true },
+    { "text": "OK", "score": 0.56, "box": [600, 1050, 690, 1094], "keep": false },
+    { "text": "已选择 3 项", "score": 0.68, "box": [380, 1200, 700, 1244], "keep": true }
+  ]
+}

@@ -73,8 +73,8 @@ object LwOcr {
     /** 一次最多报这么多行, 免得把模型的上下文冲掉 */
     private const val MAX_LINES = 60
 
-    /** 认出来的字低于这个置信度就不要 (PaddleOCR 的 `drop_score` 是 0.5, 屏幕小字放宽一点) */
-    private const val MIN_TEXT_SCORE = 0.35f
+    /** 2.8.0 那根单阈值, 出处与说明在 `OcrRoute.LEGACY_MIN_SCORE`; 分档路由的 `route=legacy` 用它 */
+    private const val MIN_TEXT_SCORE = OcrRoute.LEGACY_MIN_SCORE
 
     /** 屏上小于这个边长的框不要 */
     private const val MIN_SCREEN_SIDE = 8
@@ -98,8 +98,8 @@ object LwOcr {
      */
     private val STRICT_TRIES = listOf(true, false)
 
-    /** 单个字至少要这么确定才留 (低于它的单字基本都是图标) */
-    private const val SINGLE_CHARACTER_SCORE = 0.75f
+    /** 单个字至少要这么确定才留 (低于它的单字基本都是图标); 出处 `OcrRoute.LEGACY_SINGLE` */
+    private const val SINGLE_CHARACTER_SCORE = OcrRoute.LEGACY_SINGLE
 
     // 官方 inference.yml 的 NormalizeImage: scale 1/255, mean/std 按 **BGR** 的顺序给
     private const val DET_MEAN_B = 0.485f
@@ -526,6 +526,10 @@ object LwOcr {
         /** 两个模型这次用的输入形状, 一眼看出装的是哪份模型 */
         val detInput: String = "",
         val recInput: String = "",
+        /** 这一帧被判成哪一档场景 (`OcrRoute.Scene`), 分档路由的读数 */
+        val scene: String = "",
+        /** 这次走的是分档路由还是 2.8.0 的单阈值 (`OcrRoute.Mode`) */
+        val route: String = "",
     )
 
     /**
@@ -534,8 +538,18 @@ object LwOcr {
      * 与 `lw_screenshot` 那条路的区别是**这里不缩图**: 模型的像素预算是给"看的模型"定的
      * (默认 640000, 1080x2400 缩成 536x1192), 而 12sp 的字缩一半就认不出来了。所以传进来的
      * 图应当是全分辨率的, 返回的坐标也就是那块屏自己的像素, 可以原样喂给 `lw_tap`
+     *
+     * @param route 一行留不留走哪条路: 缺省是分档路由 ([OcrRoute.Mode.CALIBRATED]), [OcrRoute.Mode.LEGACY]
+     *   是 2.8.0 那根全局单阈值 (回退开关)
+     * @param minScore 只在 [OcrRoute.Mode.LEGACY] 上用; 分档路由的门槛在 [OcrRoute.TABLE] 里, 按场景取
      */
-    fun recognize(bitmap: Bitmap, maxLines: Int = MAX_LINES, minScore: Float = MIN_TEXT_SCORE, captureMs: Long = 0): Outcome {
+    fun recognize(
+        bitmap: Bitmap,
+        maxLines: Int = MAX_LINES,
+        minScore: Float = MIN_TEXT_SCORE,
+        captureMs: Long = 0,
+        route: OcrRoute.Mode = OcrRoute.Mode.CALIBRATED,
+    ): Outcome {
         val unit = load()
         if (unit != Backend.NPU && unit != Backend.CPU) {
             return Outcome(emptyList(), unit.label, 0, 0, 0, note)
@@ -632,8 +646,10 @@ object LwOcr {
 
             val lines = ArrayList<Line>(boxes.size)
             val dropped = ArrayList<Line>()
+            // 先把认出来的行攒齐, 去留整帧一次判: 场景要看整帧中位行高, "同列邻居"要看整帧位置,
+            // 逐行看分数做不到这两件事 (2026-11-15, 2.8.1 #3)
+            val candidates = ArrayList<OcrRoute.Row>(boxes.size)
             for ((index, _) in boxes.withIndex()) {
-                if (lines.size >= maxLines) break
                 val rect = rects[index] ?: continue
                 val parts = byBox[index] ?: continue
                 val text: String
@@ -655,20 +671,22 @@ object LwOcr {
                     score = if (characters == 0) 0f else weighted / characters
                 }
                 if (text.isBlank()) continue
-                // 头像 / 表情 / 喇叭 / 底部导航都是近正方形、小、分数低的框; 抬分数线会先误杀夜里的灰字
-                // 设置页右侧那种单独的 ">" 箭头形状不方、分数又高, 由"只有符号"那一条收掉
-                if (
-                    OcrBoxes.isIconLike(rect.width(), rect.height(), score, screenLong) ||
-                    OcrBoxes.isSymbolOnly(text)
-                ) {
-                    dropped.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
-                    continue
+                candidates.add(OcrRoute.Row(text, score, rect.left, rect.top, rect.right, rect.bottom))
+            }
+            val decision = OcrRoute.route(candidates, screenLong, route, minScore)
+            // 头像 / 表情 / 喇叭 / 底部导航是近方形、小、分数低的框, 设置页右侧那种单独的 ">" 是只有符号的框;
+            // 这两类由 OcrRoute 按形状与场景判掉, 分数不够的那一类是"认错了", 不进调试图
+            for (index in candidates.indices) {
+                if (lines.size >= maxLines) break
+                val row = candidates[index]
+                val verdict = decision.verdicts[index]
+                val line = Line(row.text, row.score, row.left, row.top, row.right, row.bottom)
+                if (verdict.keep) {
+                    lines.add(line)
+                } else if (verdict.reason == OcrRoute.Reason.ICON || verdict.reason == OcrRoute.Reason.SYMBOL) {
+                    // 调试图只画"当图标丢掉"的那一类; 分数不够的是"认错了", 不是看错东西
+                    dropped.add(line)
                 }
-                if (score < minScore) continue
-                // 图标会被认成单个字, 分数也低 (实测 C / 8 / 心 / A 都在 0.5-0.7), 丢掉;
-                // 真的有意义的单字 (列表序号之类) 分数在 0.9 以上, 留得住
-                if (text.length == 1 && score < SINGLE_CHARACTER_SCORE) continue
-                lines.add(Line(text, score, rect.left, rect.top, rect.right, rect.bottom))
             }
             val recTotalMs = (System.nanoTime() - recStarted) / 1_000_000
             // 出网边界的判据: 读到几行就打几行, 与桥回给 host 的那份 JSON 同源 (屏幕画面不上传)
@@ -679,7 +697,8 @@ object LwOcr {
                 (if (dropped.size > 0) ", 丢 ${dropped.size}" else "") +
                 (if (deduped > 0) ", 并 $deduped" else "") +
                 (if (segmented > 0) ", 切 $segmented" else "") +
-                (if (batch > 1) ", batch $batch" else "")
+                (if (batch > 1) ", batch $batch" else "") +
+                ", 路由 ${decision.mode.label}/${decision.scene.label}"
             Outcome(
                 lines,
                 unit.label,
@@ -692,6 +711,8 @@ object LwOcr {
                 recTotalMs = recTotalMs,
                 detInput = "${detWidth}x$detHeight",
                 recInput = "${recShape[0]}x${recHeight}x$recWidth",
+                scene = decision.scene.label,
+                route = decision.mode.label,
             )
         } catch (problem: Throwable) {
             Log.w(TAG, "recognize failed: ${problem.message}")

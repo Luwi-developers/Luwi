@@ -2558,6 +2558,17 @@ const TOOLS = [
           + ' two file paths. Off by default because it costs a full-screen PNG per read - turn it'
           + ' on only when the filter itself is in question',
       },
+      route: {
+        type: 'string',
+        enum: ['calibrated', 'legacy'],
+        description: 'Which filter decides what counts as a line. `calibrated` (the default) reads'
+          + ' the whole frame first: it measures how large the text on that screen is, sorts the'
+          + ' screen into a dense / normal / large tier, and then judges each row on its score,'
+          + ' its length, its shape and the column it sits in, with a threshold fitted per tier.'
+          + ' `legacy` is the single global cutoff this replaced - it drops anything under 0.35'
+          + ' whatever the screen, which is also the way back if the new filter ever reads a'
+          + ' screen worse. Leave it out unless you are comparing the two',
+      },
       note: NOTE,
     },
     output: {
@@ -6644,6 +6655,8 @@ function formatOcr(result) {
     + `${result.recMs ?? 0}ms to read it`
     + (calls > 0 ? ` in ${calls} pass${calls === 1 ? '' : 'es'}` : '')
     + `, on ${result.backend}, engine "${engine}"`
+    // 分档路由：这一帧被判成哪一档，以及走的是分档还是旧单阈值（回退时一眼看得出）
+    + (result.scene ? `, ${result.scene} tier on the ${result.route} filter` : '')
   const asleep = asleepLine(result)
   if (lines.length === 0) {
     return `no text was found on ${where} (${cost}). The screen may be blank or hold only`

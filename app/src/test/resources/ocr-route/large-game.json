@@ -1,0 +1,21 @@
+{
+  "name": "large-game",
+  "about": "游戏 HUD 40sp: 大字分数天生高, 两字招牌 (LV / MP) 也一起高, 单阈值对它形同虚设",
+  "screenLong": 2400,
+  "rows": [
+    { "text": "开始游戏", "score": 0.97, "box": [200, 900, 880, 1010], "keep": true },
+    { "text": "继续游戏", "score": 0.95, "box": [200, 1100, 880, 1210], "keep": true },
+    { "text": "设置", "score": 0.93, "box": [200, 1300, 560, 1410], "keep": true },
+    { "text": "金币 1250", "score": 0.90, "box": [60, 200, 600, 300], "keep": true },
+    { "text": "LV", "score": 0.58, "box": [60, 400, 220, 500], "keep": false },
+    { "text": "×", "score": 0.96, "box": [980, 150, 1040, 210], "keep": false },
+    { "text": "8", "score": 0.55, "box": [980, 2100, 1040, 2160], "keep": false },
+    { "text": "本局 3:2", "score": 0.88, "box": [60, 1600, 600, 1700], "keep": true },
+    { "text": "8", "score": 0.72, "box": [900, 1600, 980, 1700], "keep": false },
+    { "text": "胜利", "score": 0.66, "box": [200, 1900, 560, 2010], "keep": true },
+    { "text": "排行榜", "score": 0.92, "box": [200, 2100, 760, 2210], "keep": true },
+    { "text": "MP", "score": 0.55, "box": [900, 1900, 1040, 2000], "keep": false },
+    { "text": "返回", "score": 0.89, "box": [60, 2250, 300, 2360], "keep": true },
+    { "text": "8", "score": 0.93, "box": [900, 2250, 980, 2350], "keep": true }
+  ]
+}
