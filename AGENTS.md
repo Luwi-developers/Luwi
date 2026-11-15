@@ -15,7 +15,9 @@
   `debuggable=false`, 签名 `CN=Android Debug 652084a9…` —— 与 2.7.10 / r3 **逐字节同一个证书**, 所以两者都能
   直接覆盖安装, 会话 / 凭据 / 设置一个都不丢 (真机实测: 覆盖后 4 场历史、模型选择、`lw/sim.json` 都在);
   这一版的内容 = 门户「判断」抽屉两颗按钮真的能点 + 问答工具不挂 + 取消选图不报错 + 头像与背景都过裁剪窗
-  (双指放大缩小, 没有固定像素档)。r1 / r2 / r3 原地留着
+  (双指放大缩小, 没有固定像素档)。r1 / r2 / r3 原地留着; 这一版走 **PR #90** 进 main (`agent/2.8.0-r4-portal-crop`),
+  merge commit `2069c82` —— **main 有分支保护, 直接推 heads/main 会被 422 挡**, 要 `lw-api-push.ps1 -Branch …` 推分支
+  再 `gh pr merge`
 - 发布只认 `archive\releases\` 副本 (`app-release.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
 - 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包), `debuggable=false`;
   **签名仍是那把旧 debug key** (`CN=Android Debug`) —— 换 key 会让 2.7.10 装不上 2.8.0, 只能卸载重装,
