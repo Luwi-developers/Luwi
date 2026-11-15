@@ -972,14 +972,19 @@ object PrivilegedBridge {
             } else {
                 try {
                     val minScore = request["minScore"]?.jsonPrimitive?.floatOrNull ?: Float.NaN
-                    val outcome = if (minScore.isNaN()) {
-                        if (maxLines > 0) {
-                            LwOcr.recognize(bitmap, maxLines, captureMs = captureMs)
-                        } else {
-                            LwOcr.recognize(bitmap, captureMs = captureMs)
-                        }
-                    } else {
-                        LwOcr.recognize(bitmap, maxLines.coerceAtLeast(1), minScore, captureMs)
+                    // 回退开关 (2.8.1 #3): 带 `minScore` 或 `route=legacy` 就整条退回 2.8.0 那根单阈值,
+                    // 不带就走分档路由。**不用重装 APK** —— 这是出事时把它接回去的那颗开关
+                    val legacy = request["route"]?.jsonPrimitive?.contentOrNull?.equals("legacy", true) == true
+                    val outcome = when {
+                        legacy || !minScore.isNaN() -> LwOcr.recognize(
+                            bitmap,
+                            maxLines.coerceAtLeast(1),
+                            if (minScore.isNaN()) OcrRoute.LEGACY_MIN_SCORE else minScore,
+                            captureMs,
+                            OcrRoute.Mode.LEGACY,
+                        )
+                        maxLines > 0 -> LwOcr.recognize(bitmap, maxLines, captureMs = captureMs)
+                        else -> LwOcr.recognize(bitmap, captureMs = captureMs)
                     }
                     // 调试图只在明确要的时候写: 350ms 一次的读屏轮询里每次都画一张全屏 PNG 太贵
                     val debug = request["debug"]?.jsonPrimitive?.booleanOrNull == true
@@ -1009,6 +1014,8 @@ object PrivilegedBridge {
                         put("recTotalMs", outcome.recTotalMs)
                         put("detInput", outcome.detInput)
                         put("recInput", outcome.recInput)
+                        put("scene", outcome.scene)
+                        put("route", outcome.route)
                         if (paths != null) {
                             put("debugImage", paths.first.absolutePath)
                             put("debugText", paths.second.absolutePath)

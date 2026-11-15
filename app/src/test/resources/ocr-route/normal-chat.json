@@ -1,0 +1,24 @@
+{
+  "name": "normal-chat",
+  "about": "聊天列表 16sp: 名字与时间清楚, 预览行在暗色下偏低",
+  "screenLong": 2400,
+  "rows": [
+    { "text": "微信", "score": 0.99, "box": [60, 150, 200, 206], "keep": true },
+    { "text": "8", "score": 0.60, "box": [60, 240, 116, 296], "keep": false },
+    { "text": "张三", "score": 0.96, "box": [140, 250, 260, 294], "keep": true },
+    { "text": "晚点聊", "score": 0.33, "box": [140, 300, 360, 344], "keep": true },
+    { "text": "李四", "score": 0.95, "box": [140, 360, 260, 404], "keep": true },
+    { "text": "文件已收", "score": 0.35, "box": [140, 410, 400, 454], "keep": true },
+    { "text": "3", "score": 0.94, "box": [980, 250, 1020, 294], "keep": true },
+    { "text": "12:03", "score": 0.90, "box": [900, 205, 1010, 239], "keep": true },
+    { "text": "王五", "score": 0.94, "box": [140, 480, 260, 524], "keep": true },
+    { "text": "在吗", "score": 0.92, "box": [140, 530, 300, 574], "keep": true },
+    { "text": "•••", "score": 0.97, "box": [140, 590, 220, 634], "keep": false },
+    { "text": "8", "score": 0.61, "box": [60, 640, 104, 684], "keep": false },
+    { "text": "群聊", "score": 0.93, "box": [140, 700, 260, 744], "keep": true },
+    { "text": "早", "score": 0.42, "box": [140, 750, 180, 794], "keep": false },
+    { "text": "会议改到三点", "score": 0.36, "box": [140, 800, 480, 844], "keep": true },
+    { "text": "12:04", "score": 0.89, "box": [900, 810, 1010, 844], "keep": true },
+    { "text": "对方正在输入…", "score": 0.34, "box": [140, 900, 520, 944], "keep": true }
+  ]
+}

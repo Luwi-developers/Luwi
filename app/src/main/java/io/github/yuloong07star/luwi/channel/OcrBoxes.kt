@@ -57,13 +57,20 @@ object OcrBoxes {
      * 夜间深色模式下的灰字, 所以只加形状这一条 —— 这也是 2026-10-28 那份改动里唯一没争议的一条
      *
      * @param screenLong 这块屏的长边 (像素), 尺寸判据按它的比例算, 分辨率无关
+     * @param iconScore 分数上限; 分档路由那一侧按场景传自己的那一档, 不传就是 2.8.0 的 [ICON_SCORE]
      */
-    fun isIconLike(widthPx: Int, heightPx: Int, score: Float, screenLong: Int): Boolean {
+    fun isIconLike(
+        widthPx: Int,
+        heightPx: Int,
+        score: Float,
+        screenLong: Int,
+        iconScore: Float = ICON_SCORE,
+    ): Boolean {
         val long = maxOf(widthPx, heightPx)
         if (long <= 0 || screenLong <= 0) return false
         if (long >= screenLong * ICON_MAX_RATIO) return false
         val square = abs(widthPx - heightPx).toFloat() / long < SQUARE_RATIO
-        return square && score < ICON_SCORE
+        return square && score < iconScore
     }
 
     /**

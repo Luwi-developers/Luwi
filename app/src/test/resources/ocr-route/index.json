@@ -1,0 +1,9 @@
+{
+  "frames": [
+    "dense-settings-light.json",
+    "dense-settings-dark.json",
+    "normal-chat.json",
+    "normal-files.json",
+    "large-game.json"
+  ]
+}
