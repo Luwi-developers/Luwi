@@ -1164,14 +1164,22 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         voiceHeardAt = System.currentTimeMillis()
     }
 
-    /** 出字那一段有没有模型: 没有就说清楚, 识别器那时**一个都不会建** (240 MB) */
+    /**
+     * 出字那一段有没有东西可用: 没有就说清楚, 识别器那时**一个都不会建** (240 MB)
+     *
+     * **按来源判** (2026-11-15, 2.8.1 #6): 选了 DeepSeek 官方语音输入的机器不需要那 240 MB —— 它缺的
+     * 只是登录, 而那是到真认的时候宿主才会说的事; 这一侧不能说"模型没下, 这条链不通", 那会把一个
+     * 能出字的配法说成坏的
+     */
     private fun prepareRecognition() {
-        val ready = LwSpeech.ready(this)
+        val ready = LwSpeech.readyFor(this)
         VoiceState.asrReady = ready
-        VoiceState.asrDetail = if (ready) {
-            "ready: the SenseVoice model is on disk and gets loaded by the first segment"
-        } else {
-            "the SenseVoice model is not downloaded yet: run lw_speech op=prepare once"
+        VoiceState.asrDetail = when {
+            !ready -> "the SenseVoice model is not downloaded yet: run lw_speech op=prepare once"
+            LwSpeech.engine(this) == LwSpeech.DEEPSEEK ->
+                "ready: the DeepSeek official voice input carries the transcription, so no model is"
+                    .plus(" needed on this phone (it needs a signed-in account)")
+            else -> "ready: the SenseVoice model is on disk and gets loaded by the first segment"
         }
         if (!ready) Log.w(TAG, VoiceState.asrDetail)
     }
@@ -1197,6 +1205,9 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
      */
     private fun preheat() {
         if (!VoiceState.asrReady) return
+        // 云端那一档没有可预热的东西 (2026-11-15, 2.8.1 #6): 它一块模型都不读, 那几秒的"热身"本来
+        // 就不存在 —— 真去调一次只会白占一个线程
+        if (LwSpeech.engine(this) == LwSpeech.DEEPSEEK) return
         if (!preheating.compareAndSet(false, true)) return
         Thread({
             try {

@@ -305,6 +305,12 @@
     <string name="settings_wake_speech_ready">In place: the recogniser and the segmenter, about %1$s in all</string>
     <string name="settings_wake_speech_missing">Not downloaded yet, about %1$s in all; tap to fetch it (Wi-Fi recommended)</string>
     <string name="settings_wake_speech_partial">%1$d of %2$d files are in place; tap to fetch the rest</string>
+    <string name="settings_voice_source_local">Voice input: on-device model</string>
+    <string name="settings_voice_source_local_using">In use: recognised on this phone, the recording never leaves it</string>
+    <string name="settings_voice_source_local_pick">Tap to use the local model (it needs the model above)</string>
+    <string name="settings_voice_source_deepseek">Voice input: DeepSeek official</string>
+    <string name="settings_voice_source_deepseek_using">In use: the recording goes to the DeepSeek account, so no model is needed</string>
+    <string name="settings_voice_source_deepseek_pick">Tap to use the official one (a signed-in account is enough)</string>
     <string name="bundled_notice_title">Do not update the bundled plugins yourself</string>
     <string name="bundled_notice_body">These are built into the host and shipped with each Luwi release: DeepSeek Harness, mneme, dsh-imagegen, and the Custom mode. Every Luwi update already brings them to the latest version that fits this build. Updating them on your own can lose data, and the risk is yours to bear.</string>
     <string name="bundled_notice_ok">I understand</string>

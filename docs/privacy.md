@@ -26,6 +26,7 @@
 | `hf-mirror.com`、`huggingface.co` | 下载语音识别与唤醒词模型 | GET 文件，不带任何标识 | 不下载模型（不使用语音） |
 | `api.open-meteo.com`、`geocoding-api.open-meteo.com` | 自动化的「天气」条件 | 城市名或经纬度 | 不做带天气条件的排期 |
 | `api.openai.com` | **只有**你自己在设置里填了 OpenAI 的 key，并用它来对话或朗读 | 你的请求正文 | 不填 OpenAI key（DeepSeek 走你自己的 key，直连服务商） |
+| `api.deepseek.com` | **只有**你选了「DeepSeek 官方语音」（朗读回答，`POST /v1/tools/tts`）或「DeepSeek 官方语音输入」（听你说话，`POST /v1/tools/asr`）这两档 | 朗读那段稿子，或**那一整段录音**（16 位 PCM wav，≤120 s 一片）；令牌由宿主带上，应用里没有它 | 换成系统 / 本地 / Edge 朗读，或把语音输入换回本地模型（设置 → 唤醒 → 语音输入） |
 | `fastly.jsdelivr.net`、`cdn.jsdelivr.net`、`gcore.jsdelivr.net`、`ghfast.top` | 插件索引、应用技能索引、语音模型 release 的镜像 | GET 文件 | 不装插件 / 不下载 |
 | `mirrors.aliyun.com` | 内置 Alpine 根文件系统（`lw_linux` 沙盒） | GET 文件 | 不用终端沙盒 |
 | `127.0.0.1` | 本机的 dsh 宿主与界面之间的通信 | 不出设备 | — |

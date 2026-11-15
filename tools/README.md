@@ -31,6 +31,8 @@
 | `check-wake-words.mjs` | 唤醒词表算法的两份实现不许漂开 (`WakeWordWords.kt` vs 插件里的 `wakeWordLine`) |
 | `check-model-files.mjs` | 两个模型的下载表不许漂开 (2026-10-28): 唤醒词 4 个文件 / 语音 2 个文件 + VAD 的 name·bytes·sha256 与镜像地址逐项对 `host-plugin/index.mjs`; 每次冷启动提醒一次、最多 3 次 (到数后不再检测)、下载编排、`AppNav` 与设置页入口、两份文案都在 |
 | `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话 |
+| `check-voice-asr.mjs` | 语音输入第三档 (2.8.1 #6) 的判据表: 端点与 `/lw-asr` 两处逐字相同 / 宿主那条路由真跑 (只收 POST、只认回环、≤8 MiB、RIFF 门、401 `signedIn=false`、multipart 的 `file` 字段与边界、上游错误把令牌抹掉) / 常驻链与页面麦克风都按 `lw/voice-source.json` 分岔 (`engine=deepseek` 不再要那 240 MB) / 设置页两行与两份 strings / `privacy.md` 出站表 / 接口文档 |
+| `check-speak-engine.mjs` | 语音输出那两件 (2.8.1 #5): 自动念缺省关 / 第五引擎 DeepSeek 官方 TTS 的端点与 `/lw-tts` 两处逐字相同, 且那条路由抽出来真跑 (未登录 401 / 令牌打官方 / 音色白名单 / 上游 500 抹令牌) |
 | `check-shot-params.mjs` | 取景与截图那几个数字的**唯一口径** (`docs/shot-params.md`) 与插件 / Kotlin / 提示词 / 技能 / 预置五处逐项对照 |
 | `check-video-gate.mjs` | 视频模式那两道闸 (屏幕类工具一律拒 / 相机同时只许一场会话用) 的判据表, 临时 `DSH_HOME` 自己搭 |
 | `check-single-screen.mjs` | 虚拟屏单槽那条硬限制的判据表 (2026-10-28): 特权侧建屏前先放已有的 / 应用侧先关旧再建 / 桥回被替换的 displayId / 插件把它写进描述与答案 / `displayId` 可省略但事件订阅不补 / 请求有超时 / `lw_wait_text` 在视频模式被拒 |
@@ -126,6 +128,8 @@ pwsh -File D:\apk\Luwi\tools\lw-doctor.ps1 -Serial emulator-5554
 cd D:\apk\Luwi
 node tools/check-host-plugin.mjs
 node tools/check-voice-commands.mjs
+node tools/check-voice-asr.mjs
+node tools/check-speak-engine.mjs
 node tools/check-auto-shot.mjs
 node tools/check-wake-words.mjs
 node tools/check-model-files.mjs

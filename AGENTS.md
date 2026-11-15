@@ -308,6 +308,13 @@
   (`{text, voice_id, format:wav, filter_markdown}`, **没有语速参数**) → 音频原样回应用, 由 `LwVoiceClip` 放;
   音色只有 `stella` / `tide` (`LwDeepseekSpeech` 白名单, 认不出退回缺省), 没登录时宿主回一句"还没登录";
   判据 `LwDeepseekSpeechTest`
+- **语音输入第三档 = DeepSeek 官方** (2026-11-15, 2.8.1 #6): 引导里选了「使用 DeepSeek 语音输入」的机器
+  (`lw/voice-source.json` 写 `deepseek`) 那一句话与页面那颗麦克风都走 `engine=deepseek` —— **本地一个模型都不碰**
+  (那 240 MB 不再是就绪的前提): 采样封成 16 位 PCM 单声道 wav, 按 **60 s 一片**切, 交回环 `POST /lw-asr`,
+  宿主拿 `deepseekAccount.resolveToken` (没登录退 `DEEPSEEK_API_KEY`) 以 multipart 的 `file` 字段转
+  `POST https://api.deepseek.com/v1/tools/asr` (官方上限 **8 MiB / 120 s**, **没有语种参数**), 回来的那句话过
+  `TranscriptClean` 再进收件箱; **令牌仍然只在宿主**, 设置页「唤醒」段两行可换 (本地 / 官方), 判据
+  `tools/check-voice-asr.mjs` + `LwDeepseekAsrTest`
 - 慢的根因是 30 秒静音垫: 改上游处只有 `LW_ASR_PAD_SECONDS` (缺省 4 s); **mel 长度按 8 帧对齐**; **GLM 必须 `-O3`**
   (`-O0` 慢四十倍), 补在 `native/CMakeLists.txt`
 - 无障碍: `LwAccessibility` → `ui`/`tapText`, **取树没有 binder**; `getWindowsOnAllDisplays()`; 匹配从窄到宽, 去重后

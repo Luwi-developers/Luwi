@@ -645,9 +645,10 @@ check(
     ['ready_speech_account', 'ready_voice_account', 'ready_voice_account_summary', 'ready_voice_sign_in',
       'ready_voice_local', 'ready_voice_local_summary']
       .every((key) => enKeys.includes(key) && zhKeys.includes(key)),
-    // 宿主缺模型时按选择说原因 (不是永远念一句 prepare)
+    // 宿主缺模型时按选择说原因 (不是永远念一句 prepare); 2.8.1 #6 起那个分岔改认常量, 不再写裸字面量
     hostPlugin.includes('function voiceSourceChoice()'),
-    hostPlugin.includes("voiceSourceChoice() === 'deepseek'"),
+    hostPlugin.includes("const SPEECH_ENGINE_DEEPSEEK = 'deepseek'")
+      && hostPlugin.includes('voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK'),
   ],
   Array(18).fill(true),
 )
