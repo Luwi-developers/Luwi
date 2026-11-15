@@ -252,16 +252,15 @@ internal object ModeModel {
         return if (FIELD_RE.matches(value)) null else "${what}只能用字母数字与 . _ : @ / + -"
     }
 
-    /** 接口地址: 空 = 合法 (那一档就是"不走自建端点"), 非空必须是 http(s) 的地址 */
+    /** 接口地址: 空 = 合法 (那一档就是"不走自建端点"), 非空必须是 http(s); http 只许本机与局域网 */
     private fun urlProblem(value: String): String? {
         if (value.isEmpty()) return null
         if (value.length > MAX_FIELD_LENGTH * 4) return "接口地址太长了"
         if (value.any { it.isWhitespace() }) return "接口地址里不能有空格或换行"
-        return if (value.startsWith("http://") || value.startsWith("https://")) {
-            null
-        } else {
-            "接口地址要以 http:// 或 https:// 开头"
+        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            return "接口地址要以 http:// 或 https:// 开头"
         }
+        return PlainHttp.problem(value)
     }
 
     /** API Key: 空 = 合法 (那个端点不要 key), 非空只收能进 HTTP 头的那几个字符 */
