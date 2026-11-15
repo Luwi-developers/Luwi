@@ -8,12 +8,13 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 两条在线引擎共用的"放一段拿回来的音频": 落一个临时文件 → MediaPlayer → 放完删掉
+ * 在线那几条引擎共用的"放一段拿回来的音频" (Edge / API TTS / DeepSeek 官方): 落一个临时文件 →
+ * MediaPlayer → 放完删掉
  *
  * 为什么走文件: 拿回来的是**编码过的**一整段 (mp3), `MediaPlayer` 认路径最省事; 文件落在应用自己的
  * cache 里, 放完就删, 不占用户空间也不用任何权限 —— 与自带那条 TTS 的做法一致
  *
- * 响度不在这一层改: 编码过的音频不解码就没有增益可加, 所以两条在线引擎的音量由服务与手机媒体音量
+ * 响度不在这一层改: 编码过的音频不解码就没有增益可加, 所以这几条在线引擎的音量由服务与手机媒体音量
  * 决定 (设置页那一段如实写着)
  */
 internal object LwVoiceClip {

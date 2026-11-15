@@ -40,20 +40,23 @@ object SpeakSettings {
     private const val AUTO_KEY = "speak-read-aloud"
     private const val VOLUME_KEY = "speak-volume"
     private const val EDGE_VOICE_KEY = "speak-edge-voice"
+    private const val DEEPSEEK_VOICE_KEY = "speak-deepseek-voice"
     private const val API_URL_KEY = "speak-api-url"
     private const val API_KEY_KEY = "speak-api-key"
     private const val API_MODEL_KEY = "speak-api-model"
     private const val API_VOICE_KEY = "speak-api-voice"
 
     /**
-     * 四条引擎
+     * 五条引擎
      *
      * - `SYSTEM`: ROM 自带那条, 即时、跟随系统音量, 音色只能在系统那一页挑
      * - `ON_DEVICE`: 主人自己导入的 sherpa-onnx 模型, 能换音色但慢一截
      * - `EDGE`: 微软 Edge 那条在线朗读接口, **免费、不要密钥**, 但接口没有承诺
      * - `API`: 自己填地址与密钥的 OpenAI 兼容接口 (`/v1/audio/speech`)
+     * - `DEEPSEEK`: DeepSeek 官方那条 TTS (`/v1/tools/tts`), **只要登录了账号就能用**: 令牌在宿主
+     *   手里, 应用这一侧不填地址也不填密钥 (2026-11-15, 2.8.1 #5)
      */
-    enum class Engine { SYSTEM, ON_DEVICE, EDGE, API }
+    enum class Engine { SYSTEM, ON_DEVICE, EDGE, API, DEEPSEEK }
 
     /** 语速的两端与吸附点, 与 `lw_speak` 的 rate 参数同一套范围 */
     val range: ClosedFloatingPointRange<Float> = 0.5f..2.0f
@@ -133,6 +136,23 @@ object SpeakSettings {
     fun usesEdge(): Boolean = engine == Engine.EDGE
 
     /**
+     * DeepSeek 官方那条用的音色 (`stella` 海星 / `tide` 暗潮)
+     *
+     * 官方只认这两个 id, 所以这里不让人填别的 (设置页也只列两行): 填一个官方没听过的串过去, 拿回来的
+     * 只会是一个 400 —— 那不是"可选", 是"配错了"
+     */
+    var deepseekVoice: String by mutableStateOf(LwDeepseekSpeech.DEFAULT_VOICE)
+        private set
+
+    /**
+     * 选了 DeepSeek 官方那条 (2026-11-15, 2.8.1 #5)
+     *
+     * **不看登录状态**: 登不登录是念的时候才知道的事 (令牌在本事那个宿主的进程里, 应用这一侧没有一份
+     * 现成的读数)。没登录时这条引擎会回一句"还没登录 DeepSeek 账号", 而不是先在设置页把人拦下来
+     */
+    fun usesDeepseek(): Boolean = engine == Engine.DEEPSEEK
+
+    /**
      * API 那一条的四样 (地址 / 密钥 / 模型 / 音色), 从偏好里读出来的实况
      *
      * 单独留一份是因为**接口文档要在"应用没有界面"的时候也写出实况**: 进程被系统重启时
@@ -164,13 +184,15 @@ object SpeakSettings {
     fun usesApi(): Boolean = engine == Engine.API && apiUrl.isNotBlank()
 
     /**
-     * 回答落定就自动念 (默认开)
+     * 回答落定就自动念 (**默认关**, 2026-11-15 主人: "默认关闭语音输出")
      *
-     * 关掉它只影响那条自动链: 模型点名要念 (`lw_speak`) 与设置页的试听照旧 —— 有时就是不想要它出声,
-     * 而"要它念一句"仍然该是能做到的。**这一条宿主那侧要去读** (自动念是宿主发起的), 所以它同时进
-     * `lw_speak op=status`
+     * 关着它只影响那条自动链: 模型点名要念 (`lw_speak`) 与设置页的试听照旧 —— 想听时仍然该是能听到的。
+     * **这一条宿主那侧要去读** (自动念是宿主发起的), 所以它同时进 `lw_speak op=status`
+     *
+     * 缺省原来是开 (2.8.0 及以前): 每一条回答都出声, 而手机上常常是"看着读"而不是"听着读" —— 一进会话
+     * 就先响一声, 那是替主人做主。现在缺省关, 要开就在设置里开一次, 选择跨启动记着
      */
-    var readAloud: Boolean by mutableStateOf(true)
+    var readAloud: Boolean by mutableStateOf(false)
         private set
 
     /** 出字那一刻要的那个数: null 表示"别动引擎的语速, 让它用系统那个" */
@@ -203,11 +225,16 @@ object SpeakSettings {
         engine = runCatching { Engine.valueOf(stored.getString(ENGINE_KEY, null).orEmpty()) }
             .getOrDefault(Engine.SYSTEM)
         model = stored.getString(MODEL_KEY, null)
-        readAloud = stored.getBoolean(AUTO_KEY, true)
+        // 缺省关 (2026-11-15): 没设过这一条的老机器也一起变成"不自动念", 这正是"默认关闭语音输出"
+        readAloud = stored.getBoolean(AUTO_KEY, false)
         volume = stored.getInt(VOLUME_KEY, VOLUME_UNITY.toInt()).toFloat()
             .coerceIn(volumeRange.start, volumeRange.endInclusive)
         edgeVoice = stored.getString(EDGE_VOICE_KEY, LwEdgeSpeech.DEFAULT_VOICE).orEmpty()
             .ifBlank { LwEdgeSpeech.DEFAULT_VOICE }
+        deepseekVoice = stored.getString(DEEPSEEK_VOICE_KEY, LwDeepseekSpeech.DEFAULT_VOICE)
+            .orEmpty()
+            .takeIf { LwDeepseekSpeech.known(it) }
+            ?: LwDeepseekSpeech.DEFAULT_VOICE
         // API 那四样只读一次磁盘, 与 [storedApi] 共用同一份缺省 (两处各写一遍就会漂)
         val api = storedApi(context)
         apiUrl = api.url
@@ -226,6 +253,17 @@ object SpeakSettings {
     fun setApiUrl(context: Context, value: String) {
         apiUrl = value.trim()
         preferences(context).edit().putString(API_URL_KEY, apiUrl).apply()
+    }
+
+    /**
+     * 收下 DeepSeek 官方那条的音色
+     *
+     * 官方只认 `stella` / `tide` 两个, 收到别的就退回缺省 —— 不把一个注定 400 的值存下来
+     */
+    fun setDeepseekVoice(context: Context, value: String) {
+        val wanted = value.trim()
+        deepseekVoice = if (LwDeepseekSpeech.known(wanted)) wanted else LwDeepseekSpeech.DEFAULT_VOICE
+        preferences(context).edit().putString(DEEPSEEK_VOICE_KEY, deepseekVoice).apply()
     }
 
     /** 收下 API 那条的密钥; 空 = 不带 Authorization (自建网关常常不要) */

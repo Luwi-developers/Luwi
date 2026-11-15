@@ -499,6 +499,16 @@
     <string name="settings_speak_preview_summary">用上面选的音色与语速说一句, 好让耳朵来定</string>
     <string name="settings_speak_preview_failed">没念出来: %1$s</string>
     <string name="settings_speak_sample">回答会以这个样子说出来。</string>
+    <string name="settings_speak_engine_deepseek">DeepSeek 官方语音 (登录即可用)</string>
+    <string name="settings_speak_engine_deepseek_summary">需要登录 DeepSeek 账号, 不用填地址与密钥</string>
+    <string name="settings_speak_engine_deepseek_using">正在用 %1$s 念</string>
+    <string name="settings_speak_deepseek_account">DeepSeek 账号</string>
+    <string name="settings_speak_deepseek_signed_in">已登录 %1$s; 点一下再问一次</string>
+    <string name="settings_speak_deepseek_signed_out">还没登录</string>
+    <string name="settings_speak_deepseek_login_unknown">点一下查现在登着没有</string>
+    <string name="settings_speak_deepseek_where">登录在哪办</string>
+    <string name="settings_speak_deepseek_where_summary">新手引导那张卡的「账号」那一行, 门户里也能再打开同一张卡; 除此之外不用配置什么</string>
+    <string name="settings_speak_deepseek_volume">响度跟随媒体音量; 语速由官方接口自己定, 按字符计费</string>
 
     <string name="settings_section_lock">锁屏</string>
     <string name="settings_section_lock_summary">熄屏也能叫醒, 按你的解锁走一遍</string>

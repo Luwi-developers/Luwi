@@ -301,6 +301,32 @@ export function apply(ctx) {
   } catch (error) {
     warn(ctx, `the lw/account route was not registered: ${error?.message ?? error}`)
   }
+
+  // 语音合成那条路 (2026-11-15, 2.8.1 #5): 应用把稿子交过来, 这一侧带上账号那枚令牌去调 DeepSeek 官方
+  // TTS, 音频原样转回去。令牌不出宿主进程, 所以应用那边"选这条引擎 = 登录过就能念"
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_TTS_ROUTE,
+            handler: serveLwTts(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-tts.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/tts route was not registered: ${error?.message ?? error}`)
+  }
 }
 
 /**
@@ -4377,7 +4403,10 @@ const TOOLS = [
       + 'engine keeps its own volume and follows the phone\'s media volume; an imported on-device '
       + 'voice reads at its own quiet level and has a volume (percent) the settings page owns; the '
       + 'free Edge online engine and a self-hosted OpenAI-compatible endpoint (address and key live '
-      + 'on the settings page) both take their loudness from the service they talk to. On that API '
+      + 'on the settings page) both take their loudness from the service they talk to. The fifth '
+      + 'engine is the official DeepSeek voice: it needs no address and no key, only a signed-in '
+      + 'DeepSeek account (or the API key from the getting-started card) — the token stays in this '
+      + 'host and the audio is relayed to the app, and that engine has no rate knob. On that API '
       + 'engine, op=speak takes an optional voice=<id or name> for one line. op=voice manages the '
       + 'voices designed through the provider: action=list shows them, action=add registers one '
       + '(id is what the provider calls it; name and model are optional), action=remove drops one. '
@@ -4476,9 +4505,12 @@ const TOOLS = [
           ? `the on-device voice ${answer.onDeviceModel}`
           : answer.readingWith === 'edge'
             ? `the Edge online voice ${answer.edgeVoice}`
-            : answer.readingWith === 'api'
-              ? `the API engine voice ${answer.apiVoice} (model ${answer.apiVoiceModel})`
-              : 'the system engine'
+            : answer.readingWith === 'deepseek'
+              ? `the official DeepSeek voice ${answer.deepseekVoice}` +
+                ` (${answer.deepseekEndpoint}; it needs a signed-in account, no key)`
+              : answer.readingWith === 'api'
+                ? `the API engine voice ${answer.apiVoice} (model ${answer.apiVoiceModel})`
+                : 'the system engine'
         return [
           `reading with: ${reading}`,
           `rate: ${answer.rateFollowsSystem ? 'whatever the system says' : `${answer.rate} x`}`
@@ -4513,15 +4545,18 @@ const TOOLS = [
         // 自带那条要报出用的是哪个音色目录; API 那条要报出音色与生效模型; 系统那条没有这一项
         const withVoice = answer.readingWith === 'on-device'
           ? ` with the on-device voice ${answer.voice}`
-          : answer.readingWith === 'api'
-            ? ` with voice ${answer.voice} on model ${answer.model}`
-            : ''
-        // 点了音量却没落到这条引擎上时要把这句带上: 不然模型以为它调过了, 而人听到的还是原样
+          : answer.readingWith === 'deepseek'
+            ? ` with the official DeepSeek voice ${answer.voice}`
+            : answer.readingWith === 'api'
+              ? ` with voice ${answer.voice} on model ${answer.model}`
+              : ''
+        // 点了音量/语速却没落到这条引擎上时要把这句带上: 不然模型以为它调过了, 而人听到的还是原样
         const volumeNote = answer.volumeIgnored && answer.volumeNote ? `; ${answer.volumeNote}` : ''
         const voiceNote = answer.voiceIgnored && answer.voiceNote ? `; ${answer.voiceNote}` : ''
+        const rateNote = answer.rateIgnored && answer.rateNote ? `; ${answer.rateNote}` : ''
         return `the engine took ${answer.characters} characters` + withVoice
           + (answer.pieces > 1 ? ` in ${answer.pieces} pieces` : '')
-          + ` and reported it finished${volumeNote}${voiceNote}`
+          + ` and reported it finished${volumeNote}${voiceNote}${rateNote}`
       }
       if (args.op === 'stop') {
         return answer.stopped
@@ -8040,8 +8075,186 @@ function serveLwAccount(ctx) {
   }
 }
 
-/** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */
-const LW_OUT_IMAGE_TYPES = Object.freeze({
+/* ── DeepSeek 官方 TTS (2026-11-15, 2.8.1 #5) ───────────────────────────────── */
+
+/**
+ * 语音合成那条路由
+ *
+ * **为什么合成在宿主这一侧**: 官方接口要 `Authorization: Bearer <令牌>`, 而账号那枚令牌只活在宿主进程里
+ * (dsh 的 `deepseekAccount`)。应用那边是明文偏好文件, 把令牌抄过去等于多一处要守的东西 —— 于是应用只
+ * 把稿子交过来, 拿回去的是音频字节, **令牌一个字节都不外带**。设置页因此不需要地址栏与密钥框:
+ * 选了这条引擎, 只要账号登录着就有声音
+ */
+const LW_TTS_ROUTE = '/lw-tts'
+
+/** 官方那条接口 (`POST`, 整段合成): 与 `LwDeepseekSpeech.ENDPOINT` 必须是同一串 */
+const LW_TTS_ENDPOINT = 'https://api.deepseek.com/v1/tools/tts'
+
+/** 一次请求最多读这么多: 官方自己的上限是 64 KiB 正文 */
+const LW_TTS_BODY_MAX = 64 * 1024
+
+/** 官方一次最多 10,000 个计费字符 (应用那一侧切得比这狠, 这里再挡一次) */
+const LW_TTS_TEXT_MAX = 10_000
+
+/** 官方给的两个音色: `stella` 海星 (女声, 缺省) 与 `tide` 暗潮 (男声) */
+const LW_TTS_VOICES = new Set(['stella', 'tide'])
+
+/** 合成一句长稿要几十秒, 给足 (超时算这一趟失败, 应用那边会说没念成) */
+const LW_TTS_TIMEOUT_MS = 90_000
+
+/**
+ * 这一趟用哪枚令牌
+ *
+ * 两条来源, 顺序是"账号优先":
+ *  1. `deepseekAccount.resolveToken(端点)` —— 登录过就有, 就是"只要有登录状态即可用"那一条
+ *  2. `credentials.resolve('DEEPSEEK_API_KEY')` —— 没登录但引导页填过一把 Key 的机器也能用
+ *
+ * 只返回令牌本身, **不返回来源里的任何别的东西**; 拿不到就回空串 (调用方据此说"还没登录")
+ * @param ctx 宿主插件 context
+ * @returns {Promise<{token: string, from: string}>} 令牌与它来自哪一条
+ */
+async function lwTtsToken(ctx) {
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (account && typeof account.resolveToken === 'function') {
+    try {
+      const token = await account.resolveToken(LW_TTS_ENDPOINT)
+      if (typeof token === 'string' && token !== '') return { token, from: 'account' }
+    } catch (error) {
+      warn(ctx, `the account token could not be read for speech: ${error?.message ?? error}`)
+    }
+  }
+  const credentials = ctx.get('credentials')
+  if (credentials && typeof credentials.resolve === 'function') {
+    try {
+      const key = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+      if (typeof key === 'string' && key !== '') return { token: key, from: 'key' }
+    } catch {
+      // 读不到就是没有: 下面那句"还没登录"已经说清了
+    }
+  }
+  return { token: '', from: '' }
+}
+
+/**
+ * `/lw-tts`: 收一段稿子, 回音频字节
+ *
+ * 只认回环两头、只收 POST、正文有上限; 成功时回的就是官方那一段音频 (Content-Type 照抄),
+ * 失败回一段 JSON (`{"ok":false,"error":"…"}`) —— 应用那边把 `error` 逐字说给主人听
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwTts(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload, headers) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+        ...headers,
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    let raw = ''
+    try {
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > LW_TTS_BODY_MAX) {
+          reply(413, { ok: false, error: 'body too large' })
+          return
+        }
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    let body = null
+    try {
+      body = raw === '' ? {} : JSON.parse(raw)
+    } catch {
+      reply(400, { ok: false, error: 'bad json' })
+      return
+    }
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (text === '') {
+      reply(400, { ok: false, error: 'there is nothing to say: the text is empty' })
+      return
+    }
+    if (text.length > LW_TTS_TEXT_MAX) {
+      reply(400, {
+        ok: false,
+        error: `the DeepSeek TTS takes at most ${LW_TTS_TEXT_MAX} characters at once, this one has ${text.length}`,
+      })
+      return
+    }
+    const asked = typeof body?.voice_id === 'string' ? body.voice_id.trim() : ''
+    const voice = LW_TTS_VOICES.has(asked) ? asked : 'stella'
+    const { token, from } = await lwTtsToken(ctx)
+    if (token === '') {
+      reply(401, {
+        ok: false,
+        signedIn: false,
+        error: 'not signed in: sign in to the DeepSeek account in Luwi (or fill an API key) to use the'
+          + ' official DeepSeek voice',
+      })
+      return
+    }
+    let upstream = null
+    try {
+      upstream = await fetch(LW_TTS_ENDPOINT, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        // 与 `LwDeepseekSpeech.requestBody` 同一份字段: 官方那条认 text / voice_id / format /
+        // filter_markdown, **没有语速参数** (它自己定节奏)
+        body: JSON.stringify({ text, voice_id: voice, format: 'wav', filter_markdown: true }),
+        signal: AbortSignal.timeout(LW_TTS_TIMEOUT_MS),
+      })
+    } catch (error) {
+      warn(ctx, `the DeepSeek TTS request failed: ${error?.message ?? error}`)
+      reply(502, { ok: false, error: `the DeepSeek TTS could not be reached: ${error?.message ?? error}` })
+      return
+    }
+    if (!upstream.ok) {
+      // 官方那句原文带得出去 (它不含令牌), 但先把令牌抹一遍: 上游若把请求头回显进错误里也只是空白
+      const detail = await upstream.text().catch(() => '')
+      const safe = detail.split(token).join('***').slice(0, 400)
+      reply(502, {
+        ok: false,
+        status: upstream.status,
+        error: `the DeepSeek TTS answered ${upstream.status}${safe === '' ? '' : `: ${safe}`}`,
+      })
+      return
+    }
+    let audio = null
+    try {
+      audio = Buffer.from(await upstream.arrayBuffer())
+    } catch (error) {
+      reply(502, { ok: false, error: `the DeepSeek TTS audio could not be read: ${error?.message ?? error}` })
+      return
+    }
+    if (audio.length === 0) {
+      reply(502, { ok: false, error: 'the DeepSeek TTS returned no audio' })
+      return
+    }
+    res.writeHead(200, {
+      'Content-Type': upstream.headers.get('content-type') ?? 'audio/wav',
+      'Content-Length': String(audio.length),
+      'Cache-Control': 'no-store',
+      'X-Lw-Token-Source': from,
+    })
+    res.end(audio)
+  }
+}
+
+/** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */const LW_OUT_IMAGE_TYPES = Object.freeze({
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
