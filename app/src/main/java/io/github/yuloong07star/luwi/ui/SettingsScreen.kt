@@ -108,6 +108,7 @@ import java.io.File
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.voice.VoiceSettings
 import io.github.yuloong07star.luwi.voice.SpeechModelDownload
+import io.github.yuloong07star.luwi.voice.VoiceSource
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.host.DshHost
@@ -6685,6 +6686,9 @@ private fun WakeItems() {
     var ready by remember { mutableStateOf(WakeWordDownload.readyCount(context)) }
     // 语音模型 (SenseVoice + VAD) 的下载状态: 与唤醒词那一行各一套, 但同一个段里
     var speechReady by remember { mutableStateOf(SpeechModelDownload.readyCount(context)) }
+    // 语音输入用哪一条 (2026-11-15, 2.8.1 #6): 引导里选过一次, 这里随时能换 —— 换的是
+    // `lw/voice-source.json`, 页面那颗麦克风与常驻链都认它
+    var voiceSource by remember { mutableStateOf(VoiceSource.read(context)) }
     var note by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf(false) }
     val total = WakeWordDownload.files.size
@@ -6708,6 +6712,7 @@ private fun WakeItems() {
             powerSave = LwWakeWord.powerSave(context)
             ready = WakeWordDownload.readyCount(context)
             speechReady = SpeechModelDownload.readyCount(context)
+            voiceSource = VoiceSource.read(context)
             names = LwWakeWord.names(context)
             delay(POLL_MS)
         }
@@ -6902,6 +6907,31 @@ private fun WakeItems() {
                         .getOrElse { it.message ?: it.toString() }
                 }
             }
+        },
+    )
+    // 语音输入用哪一条 (2026-11-15, 2.8.1 #6): 两行并排, 一行是本地模型, 一行是官方那一档 —— 与
+    // 「说话」那五条引擎同一个手感 (点一下就是选它), 换的就是引导里那一份 `lw/voice-source.json`
+    val accountVoice = voiceSource == VoiceSource.DEEPSEEK
+    ArrowPreference(
+        title = stringResource(R.string.settings_voice_source_local),
+        summary = stringResource(
+            if (accountVoice) R.string.settings_voice_source_local_pick
+            else R.string.settings_voice_source_local_using,
+        ),
+        onClick = {
+            voiceSource = VoiceSource.choose(context, VoiceSource.LOCAL)
+            note = "语音输入改用本地模型了; 下一次说话就按它认"
+        },
+    )
+    ArrowPreference(
+        title = stringResource(R.string.settings_voice_source_deepseek),
+        summary = stringResource(
+            if (accountVoice) R.string.settings_voice_source_deepseek_using
+            else R.string.settings_voice_source_deepseek_pick,
+        ),
+        onClick = {
+            voiceSource = VoiceSource.choose(context, VoiceSource.DEEPSEEK)
+            note = "语音输入改用 DeepSeek 官方了; 账号登录着就能出字, 那段录音会交给 DeepSeek"
         },
     )
     ArrowPreference(

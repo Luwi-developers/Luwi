@@ -304,6 +304,12 @@
     <string name="settings_wake_speech_ready">已就位: 识别模型 + 切段模型, 一共约 %1$s</string>
     <string name="settings_wake_speech_missing">还没下载, 一共约 %1$s; 点一下补上 (建议 Wi-Fi)</string>
     <string name="settings_wake_speech_partial">对了 %1$d/%2$d 个文件, 按一下补齐</string>
+    <string name="settings_voice_source_local">语音输入: 本地模型</string>
+    <string name="settings_voice_source_local_using">正在用: 这台手机自己认 (录音不出设备)</string>
+    <string name="settings_voice_source_local_pick">点一下改用本地模型 (要先下上面那份模型)</string>
+    <string name="settings_voice_source_deepseek">语音输入: DeepSeek 官方</string>
+    <string name="settings_voice_source_deepseek_using">正在用: 录音交给 DeepSeek 账号认, 不用下模型</string>
+    <string name="settings_voice_source_deepseek_pick">点一下改用官方那一档 (登录过账号就能用)</string>
     <string name="bundled_notice_title">不建议自行更新随包插件</string>
     <string name="bundled_notice_body">下面这几样是嵌在 host 里的, 随 Luwi 每一次更新一起换到最新且适配本版本的那一份: DeepSeek Harness / mneme / dsh-imagegen / 自定义模式。自行更新可能丢失数据 (记忆库这类带数据的最容易), 相关风险需自行承担。</string>
     <string name="bundled_notice_ok">我知道了</string>

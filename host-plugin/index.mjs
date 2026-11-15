@@ -327,6 +327,32 @@ export function apply(ctx) {
   } catch (error) {
     warn(ctx, `the lw/tts route was not registered: ${error?.message ?? error}`)
   }
+
+  // 语音输入那条路 (2026-11-15, 2.8.1 #6): 应用把一段 wav 交过来, 这一侧带上令牌去打 DeepSeek 官方
+  // `/v1/tools/asr`, 回来的那句话原样转回去 —— 与上面那条合成同一套分工 (令牌只住在这个进程里)
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_ASR_ROUTE,
+            handler: serveLwAsr(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-asr.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/asr route was not registered: ${error?.message ?? error}`)
+  }
 }
 
 /**
@@ -4303,18 +4329,24 @@ const TOOLS = [
   defineTool({
     name: 'lw_speech',
     description:
-      'Transcribe speech on this phone with no network and no API key: everything runs in the '
-      + 'app process, so the audio never leaves the device. Two engines, and engine= picks one: '
+      'Transcribe speech on this phone. Three engines, and engine= picks one: '
       + 'engine=glm is Zhipu GLM-ASR-Nano (1.5 B, Q4_K, samples at a time of CPU: a couple of '
       + 'seconds for a short phrase, ten seconds or more for a long sentence), which is the accurate '
-      + 'one and is reached only by naming it, and engine=sherpa is SenseVoice '
-      + '(Chinese, English, Cantonese, Japanese and Korean, with punctuation), which is the fast one '
-      + 'and the default everywhere - the GUI voice input button and the ball both use it. '
-      + 'op=status reports both engines and whether their models are on disk; op=prepare downloads '
-      + 'the one named, from the hf-mirror copy (huggingface.co itself is unreachable from this '
-      + 'phone) - GLM-ASR is about 1.6 GB, SenseVoice about 240 MB plus the 1.8 MB silero '
-      + 'voice-activity model that the one-sentence window cuts segments with; op=transcribe turns '
-      + 'one 16 kHz mono PCM16 WAV file into text.',
+      + 'one and is reached only by naming it; engine=sherpa is SenseVoice '
+      + '(Chinese, English, Cantonese, Japanese and Korean, with punctuation), which is the fast one; '
+      + 'and engine=deepseek is the official DeepSeek speech input, which runs no model on the phone '
+      + 'and instead sends the recording to `POST /v1/tools/asr` from this host, where the signed-in '
+      + 'account token lives (so it needs a signed-in account or the API key from the getting-started '
+      + 'card, and no model on disk). Both on-device engines keep the audio on the device; the '
+      + 'deepseek one does not, and nothing is sent until it is asked for. Which engine the GUI voice '
+      + 'input button and the ball use follows the choice made in getting started '
+      + '(`$DSH_HOME/lw/voice-source.json`): the local model, or the DeepSeek account. '
+      + 'op=status reports all three engines, which one is in use, and whether their models are on '
+      + 'disk; op=prepare downloads the model named, from the hf-mirror copy (huggingface.co itself is '
+      + 'unreachable from this phone) - GLM-ASR is about 1.6 GB, SenseVoice about 240 MB plus the '
+      + '1.8 MB silero voice-activity model that the one-sentence window cuts segments with, and '
+      + 'engine=deepseek has nothing to download; op=transcribe turns one 16 kHz mono PCM16 WAV file '
+      + 'into text.',
     parameters: {
       op: {
         type: 'string',
@@ -4324,9 +4356,10 @@ const TOOLS = [
       engine: {
         type: 'string',
         description:
-          'glm (accurate, 1.5 B, slow, and 1.6 GB of weights of its own) or sherpa (fast, small); '
-          + 'the default is sherpa, the same engine the GUI voice input button uses, and op=status '
-          + 'ignores this',
+          'glm (accurate, 1.5 B, slow, and 1.6 GB of weights of its own), sherpa (fast, small), or '
+          + 'deepseek (the official DeepSeek speech input: no model, needs a signed-in account, and '
+          + 'the recording leaves the phone); op=status ignores this, and leaving it out follows the '
+          + 'choice made in getting started',
       },
       wav: {
         type: 'string',
@@ -4344,7 +4377,11 @@ const TOOLS = [
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const engine = speechEngineOf(args.engine) ?? SPEECH_ENGINE_DEFAULT
+      const asked = speechEngineOf(args.engine)
+      // 没点名就照引导里做过的那个选择 (2026-11-15, 2.8.1 #6): 选了账号那条的机器, 一句话与页面那颗
+      // 麦克风走的是官方接口, 而不是"再下一份 240 MB"
+      const chosen = voiceSourceChoice()
+      const engine = asked ?? (chosen === SPEECH_ENGINE_DEEPSEEK ? SPEECH_ENGINE_DEEPSEEK : SPEECH_ENGINE_DEFAULT)
       if (args.op === 'status') {
         const info = await speechInspect()
         return [
@@ -4359,17 +4396,28 @@ const TOOLS = [
             ? `  Q4_K ${info.glm.modelBytes} bytes, audio encoder ${info.glm.mmprojBytes} bytes,`
               + ` loaded in memory: ${info.glm.loaded ? 'yes' : 'no'}`
             : '  op=prepare engine=glm fetches it (about 1.6 GB), then transcribe with engine=glm',
+          `DeepSeek speech input: POST ${LW_ASR_ENDPOINT}, relayed through the host route`
+            + ` ${LW_ASR_ROUTE} so the account token never leaves this process; no model on disk, and`
+            + ' the recording is the one thing that leaves the phone',
           info.vad
             ? `silero VAD downloaded: ${info.vadBytes} bytes at ${info.vadPath}`
             : `the silero VAD is missing (${info.vadBytes} bytes at ${info.vadPath}): the wake word`
               + ' still listens, but nothing gets cut into segments until op=prepare fetches it',
           `SenseVoice loaded in memory: ${info.loaded ? 'yes' : 'no'}`,
           `languages: ${info.languages}`,
-          `the voice input button in the GUI uses: ${SPEECH_ENGINE_DEFAULT}`,
+          `the voice input button in the GUI and the ball use: ${chosen === SPEECH_ENGINE_DEEPSEEK
+            ? `${SPEECH_ENGINE_DEEPSEEK} (chosen in getting started; no local model needed)`
+            : `${SPEECH_ENGINE_SHERPA} (chosen in getting started)`}`,
         ].join('\n')
       }
       if (args.op === 'prepare') {
-        if (engine === SPEECH_ENGINE_GLM) {
+        const wanted = asked ?? SPEECH_ENGINE_DEFAULT
+        if (wanted === SPEECH_ENGINE_DEEPSEEK) {
+          return 'engine=deepseek has nothing to download: the official DeepSeek speech input runs'
+            + ' in the cloud and only needs a signed-in account (or the API key from the'
+            + ' getting-started card); op=transcribe engine=deepseek can be used right now'
+        }
+        if (wanted === SPEECH_ENGINE_GLM) {
           const info = await speechPrepareGlm()
           return `the GLM-ASR-Nano model is ready in ${info.glm.directory}, about 1.6 GB of it;`
             + ' transcribe with engine=glm (the GUI voice input button stays on SenseVoice)'
@@ -4383,7 +4431,10 @@ const TOOLS = [
         const answer = await speechTranscribe(args.wav, args.language, engine)
         const detail = engine === SPEECH_ENGINE_GLM
           ? `${(answer.elapsedMs / 1000).toFixed(1)}s of CPU for the whole request`
-          : `${answer.seconds.toFixed(1)}s of audio, ${answer.language}`
+          : engine === SPEECH_ENGINE_DEEPSEEK
+            ? `${answer.durationMs} ms of audio (billed by the second),`
+              + ` ${(answer.elapsedMs / 1000).toFixed(1)}s of network time`
+            : `${answer.seconds.toFixed(1)}s of audio, ${answer.language}`
         return `${answer.text}\n\n(${detail}, ${answer.elapsedMs} ms)`
       }
       throw new Error(`op has to be status, prepare or transcribe, not "${args.op}"`)
@@ -4572,7 +4623,9 @@ const TOOLS = [
     name: 'lw_voice',
     description:
       'The voice inbox on this phone: the app cuts what you say into sentences with a silero VAD '
-      + '(3 s of silence ends one, 15 s at most each), transcribes each one on-device, and drops it '
+      + '(3 s of silence ends one, 15 s at most each), transcribes each one with the voice input '
+      + 'this install chose (the on-device SenseVoice model, or the DeepSeek official speech input '
+      + 'when getting started picked that one - `lw_speech op=status` says which), and drops it '
       + 'into a queue the host sends into the '
       + 'conversation as a `voice`-sourced message. Where a line lands is fixed: **the ball has a '
       + 'conversation of its own, in the `dsh-ball` folder of the workspace**, and every line either '
@@ -6832,6 +6885,17 @@ const SPEECH_ENGINE_SHERPA = 'sherpa'
 const SPEECH_ENGINE_GLM = 'glm'
 
 /**
+ * 第三档: DeepSeek 官方语音输入 (2026-11-15, 2.8.1 #6)
+ *
+ * 这一档**不在手机上跑模型**: 一段 wav 交给应用 → 回环 `/lw-asr` → 宿主带令牌打官方 `POST
+ * /v1/tools/asr`。所以它不需要那 240 MB, 也不需要唤醒词之外的任何本地件 —— 只要账号登录着。
+ *
+ * 引导里选了「使用 DeepSeek 语音输入」的机器 (#4 落的 `lw/voice-source.json`), 页面那颗麦克风与
+ * 常驻链都走这一档
+ */
+const SPEECH_ENGINE_DEEPSEEK = 'deepseek'
+
+/**
  * Which engine everything that does not name one uses, the page's own voice input button included
  *
  * SenseVoice, the same one the ball and the wake-word chain use (2026-10-09 主人定的口径: 输入框与
@@ -6937,6 +7001,7 @@ function speechEngineOf(value) {
   const asked = String(value ?? '').trim().toLowerCase()
   if (asked === SPEECH_ENGINE_GLM) return SPEECH_ENGINE_GLM
   if (asked === SPEECH_ENGINE_SHERPA) return SPEECH_ENGINE_SHERPA
+  if (asked === SPEECH_ENGINE_DEEPSEEK) return SPEECH_ENGINE_DEEPSEEK
   return null
 }
 
@@ -7056,6 +7121,10 @@ async function speechTranscribe(wav, language, engine = SPEECH_ENGINE_DEFAULT) {
       'the GLM-ASR model is not downloaded yet: run lw_speech op=prepare engine=glm once'
       + ' (about 1.6 GB), or ask for engine=sherpa to use the small one',
     )
+  }
+  // **deepseek 那一档不看盘上有什么** (2026-11-15, 2.8.1 #6): 它跑在云端, 缺的只是登录
+  if (engine === SPEECH_ENGINE_DEEPSEEK) {
+    return await call('speech', { op: 'transcribe', wav, language: language ?? 'auto', engine })
   }
   if (engine === SPEECH_ENGINE_SHERPA && !info.present) {
     throw new Error(
@@ -8072,6 +8141,208 @@ function serveLwAccount(ctx) {
       warn(ctx, `the account request failed: ${error?.message ?? error}`)
       reply(200, { ok: false, error: error?.message ?? String(error) })
     }
+  }
+}
+
+/* ── DeepSeek 官方语音识别 (2026-11-15, 2.8.1 #6) ───────────────────────────── */
+
+/**
+ * 语音识别那条路由
+ *
+ * **为什么转写在宿主这一侧**: 与合成同一个理由 (见下面那条 TTS) —— 官方接口要
+ * `Authorization: Bearer <令牌>`, 而令牌只活在宿主进程里。应用那边把一段 wav 原样交过来, 拿回去的是
+ * 一句话; **令牌一个字节都不外带**, 应用偏好里也没有它的容身处
+ *
+ * 这一条是"引导里选了「使用 DeepSeek 语音输入」之后真的能出字"那一步 (#4 落了选择, #6 落这条链)
+ */
+const LW_ASR_ROUTE = '/lw-asr'
+
+/** 官方那条接口: 与 `LwDeepseekAsr.ENDPOINT` 必须是同一串 (multipart 的 `file` 字段) */
+const LW_ASR_ENDPOINT = 'https://api.deepseek.com/v1/tools/asr'
+
+/**
+ * 一次最多收这么多字节
+ *
+ * 官方对**文件**的上限是 8 MiB, 而应用那边按 60 s 一段切 (16 kHz 单声道 16 bit 约 1.9 MB), 所以真正
+ * 走到这里的正文离上限很远; 这个数只是"别让一条失控的请求把内存吃掉"
+ */
+const LW_ASR_BODY_MAX = 8 * 1024 * 1024
+
+/** 官方一次最长 120 s 音频; 转写本身要十几秒, 加上传给它 120 s 的余量 */
+const LW_ASR_TIMEOUT_MS = 120_000
+
+/**
+ * 这一趟用哪枚令牌
+ *
+ * 与 TTS 那条同一个顺序 (**账号优先, 没登录退 API Key**)。这里独立一份而不是把 TTS 那个挪上来共用:
+ * TTS 那一段被 `tools/check-speak-engine.mjs` 整段抽出来真跑, 挪走它会连带那一份判据一起红; 两份
+ * 逐字同源由 `tools/check-voice-asr.mjs` 钉住
+ * @param ctx 宿主插件 context
+ * @returns {Promise<{token: string, from: string}>} 令牌与它来自哪一条
+ */
+async function lwAsrToken(ctx) {
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (account && typeof account.resolveToken === 'function') {
+    try {
+      const token = await account.resolveToken(LW_ASR_ENDPOINT)
+      if (typeof token === 'string' && token !== '') return { token, from: 'account' }
+    } catch (error) {
+      warn(ctx, `the account token could not be read for speech input: ${error?.message ?? error}`)
+    }
+  }
+  const credentials = ctx.get('credentials')
+  if (credentials && typeof credentials.resolve === 'function') {
+    try {
+      const key = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+      if (typeof key === 'string' && key !== '') return { token: key, from: 'key' }
+    } catch {
+      // 读不到就是没有: 下面那句"还没登录"已经说清了
+    }
+  }
+  return { token: '', from: '' }
+}
+
+/** 这一段是不是一个 wav (官方只认 16 位 PCM WAV 或 Ogg Opus; 应用这一侧只发 wav) */
+function lwAsrIsWav(bytes) {
+  if (bytes.length < 12) return false
+  return bytes.subarray(0, 4).toString('latin1') === 'RIFF'
+    && bytes.subarray(8, 12).toString('latin1') === 'WAVE'
+}
+
+/**
+ * 把一段 wav 包成官方要的 `multipart/form-data`
+ *
+ * 手写而不是用 `FormData` + `Blob`: 那几个全局在随包的那个 node 上不一定齐, 而这一段的形状是固定的
+ * (一个 `file` 字段), 拼起来的字节还能被判据逐字量 (见 `tools/check-voice-asr.mjs`)
+ * @param {Buffer} bytes wav 原本的字节
+ * @param {string} boundary 这一次的分界串
+ * @returns {Buffer} 可以直接当请求体的那一份
+ */
+function lwAsrMultipart(bytes, boundary) {
+  const head = Buffer.from(
+    `--${boundary}\r\n`
+      + 'Content-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
+      + 'Content-Type: audio/wav\r\n\r\n',
+    'utf8',
+  )
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
+  return Buffer.concat([head, bytes, tail])
+}
+
+/**
+ * `/lw-asr`: 收一段 wav, 回一句话
+ *
+ * 只认回环两头、只收 POST、正文有上限, 还要求那一段真的是 wav (官方对不是 16 位 PCM WAV 的会回 400,
+ * 在这一侧先说清比让官方去说省一次请求)。成功回 `{"ok":true,"text":…,"requestId":…,"durationMs":…}`,
+ * 失败回一段 JSON (`{"ok":false,"error":"…"}`) —— 应用那边把 `error` 逐字说给主人听
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwAsr(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload, headers) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+        ...headers,
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    const parts = []
+    let size = 0
+    try {
+      for await (const chunk of req) {
+        const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += piece.length
+        if (size > LW_ASR_BODY_MAX) {
+          reply(413, { ok: false, error: `the recording is larger than ${LW_ASR_BODY_MAX} bytes` })
+          return
+        }
+        parts.push(piece)
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    const audio = Buffer.concat(parts)
+    if (audio.length === 0) {
+      reply(400, { ok: false, error: 'there is nothing to transcribe: the body is empty' })
+      return
+    }
+    if (!lwAsrIsWav(audio)) {
+      reply(400, { ok: false, error: 'the recording is not a 16-bit PCM WAV: the bytes start with something else' })
+      return
+    }
+    const { token, from } = await lwAsrToken(ctx)
+    if (token === '') {
+      reply(401, {
+        ok: false,
+        signedIn: false,
+        error: 'not signed in: sign in to the DeepSeek account in Luwi (or fill an API key) to use the'
+          + ' official DeepSeek voice input',
+      })
+      return
+    }
+    const boundary = `----luwi${randomUUID().replace(/-/g, '')}`
+    let upstream = null
+    try {
+      upstream = await fetch(LW_ASR_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: lwAsrMultipart(audio, boundary),
+        signal: AbortSignal.timeout(LW_ASR_TIMEOUT_MS),
+      })
+    } catch (error) {
+      warn(ctx, `the DeepSeek speech input request failed: ${error?.message ?? error}`)
+      reply(502, {
+        ok: false,
+        error: `the DeepSeek speech input could not be reached: ${error?.message ?? error}`,
+      })
+      return
+    }
+    if (!upstream.ok) {
+      // 官方那句原文带得出去 (它不含令牌), 但先把令牌抹一遍: 上游若把请求头回显进错误里也只是空白
+      const detail = await upstream.text().catch(() => '')
+      const safe = detail.split(token).join('***').slice(0, 400)
+      reply(502, {
+        ok: false,
+        status: upstream.status,
+        error: `the DeepSeek speech input answered ${upstream.status}${safe === '' ? '' : `: ${safe}`}`,
+      })
+      return
+    }
+    let said = null
+    try {
+      said = await upstream.json()
+    } catch (error) {
+      reply(502, { ok: false, error: `the DeepSeek speech input answer could not be read: ${error?.message ?? error}` })
+      return
+    }
+    const text = typeof said?.text === 'string' ? said.text.trim() : ''
+    if (text === '') {
+      reply(502, { ok: false, error: 'the DeepSeek speech input heard nothing in that recording' })
+      return
+    }
+    reply(200, {
+      ok: true,
+      text,
+      requestId: typeof said?.request_id === 'string' ? said.request_id : '',
+      durationMs: Number(said?.duration_ms ?? 0),
+      source: from,
+    })
   }
 }
 
@@ -14197,10 +14468,13 @@ function voiceSourceChoice() {
 function registerVoiceInput(ctx) {
   const speech = ctx.speechToText
   if (!speech || typeof speech.register !== 'function') return
+  // 名字跟着"这台机器选了哪一条"走 (2026-11-15, 2.8.1 #6): 选了账号那条的机器, 这颗麦克风底下跑的是
+  // 官方接口, 标签还写 "On-device" 就是在骗人 —— 换选择要重启宿主才会改这一行, 而那一行只是显示
+  const accountVoice = voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
   speech.register({
     info: {
       id: SPEECH_PROVIDER_ID,
-      name: 'On-device SenseVoice',
+      name: accountVoice ? 'DeepSeek official voice input' : 'On-device SenseVoice',
       location: 'host-local',
       languages: SPEECH_LANGUAGES,
       downloadSources: SPEECH_SOURCES,
@@ -14213,7 +14487,15 @@ function registerVoiceInput(ctx) {
       },
     },
     preparation: {
-      snapshot: () => ({ ...speechState }),
+      // 选了账号那条的机器没有可下的东西 (2026-11-15, 2.8.1 #6): 这一栏说 "ready", 而不是让"没下
+      // 240 MB"看起来像还没准备好 —— 那颗按钮真的按得动, 它走的是官方接口
+      snapshot: () => (voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
+        ? {
+            ...speechState,
+            phase: 'ready',
+            message: 'the DeepSeek voice input is in use: nothing to download on this phone',
+          }
+        : { ...speechState }),
       /**
        * 起一次准备
        *
@@ -14241,16 +14523,16 @@ function registerVoiceInput(ctx) {
     async transcribe({ audio, language }) {
       const info = await speechInspect()
       // 这条按钮与球走同一套 (2026-10-09): 盘上那一个模型就是它, 不再按"GLM 在不在"分岔 ——
-      // 分岔的代价是别人为了按一次按钮要多下 1.6 GB, 而 GLM 的准是**点名要它**时才值得的
-      const engine = SPEECH_ENGINE_SHERPA
-      if (!info.present) {
-        // 选了账号那条的机器不再被催那 240 MB (见 [voiceSourceChoice]): 这一句要说的是"这台机器
-        // 是哪种配法", 而不是一句永远一样的 `run lw_speech op=prepare`
+      // 分岔的代价是别人为了按一次按钮要多下 1.6 GB, 而 GLM 的准是**点名要它**时才值得的。
+      // **引导里选了账号那条的机器改走 deepseek** (2026-11-15, 2.8.1 #6): 那一档没有本地模型,
+      // 于是"没下 240 MB"不再是错误, 这一段录音由宿主带令牌送去官方接口
+      const engine = voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
+        ? SPEECH_ENGINE_DEEPSEEK
+        : SPEECH_ENGINE_SHERPA
+      if (engine === SPEECH_ENGINE_SHERPA && !info.present) {
         throw new Error(
-          voiceSourceChoice() === 'deepseek'
-            ? 'this install uses DeepSeek voice input for speech and the local SenseVoice model is'
-              + ' not downloaded: run lw_speech op=prepare to add the local model as well'
-            : 'the SenseVoice model is not downloaded yet: run lw_speech op=prepare once',
+          'the SenseVoice model is not downloaded yet: run lw_speech op=prepare once'
+            + ' (or pick the DeepSeek voice input in getting started, which needs no model)',
         )
       }
       const directory = info.directory
