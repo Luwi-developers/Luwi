@@ -1786,6 +1786,85 @@ if (splitSource === '' || itemSource === '') {
   expect('client.js', client, 'var parts = outItemsOf(line)')
 }
 
+// ── 十九、探索面板真的显示盘上那几份 (2.8.1 #12) ───────────────────────────────
+//
+// 主人: "修复前台更多中探索面板的显示bug，没有同步显示，且点击开始这一趟和刷新没有反馈，
+// 需要加上toast反馈". 两半各钉各的
+//
+// 1. **宿主的读数**: 那三行原来读的是 `explore.json` 里从来没有的键 (`nextTask` / `lastSummaryAt` /
+//    `schedule.time`) —— 任务卡在 `lw/explore-card.md`、摘要在 `lw/explore/*.md`、排期在
+//    `explore-schedule.json`, 于是面板永远「还没有排 / — / —」。现在一处读真的, 顺手把
+//    `enabled` / `running` 也报上来, 页面才说得清"关着"与"正在跑"
+// 2. **页面那一层**: 三行由 `workReading` 拼 (这里真跑真值表, 不复制第二份措辞), 抽屉开着时每一拍比
+//    `workKey`, 盘上变了才重画
+// 3. **两颗按钮各留一句 toast**: 抽屉盖着时输入卡那行 `#lwp-note` 在后面, 写了也看不见
+// 4. **「开始这一趟」投的是那张卡**, 不是 `explore.json` 的 `nextTask` (宿主从来不写它)
+
+expect('PortalBridge.kt 探索卡读 ExploreTask', portalBridge, 'ExploreTask.read(context)')
+expect('PortalBridge.kt 排期读 ExploreSchedule.plan', portalBridge, 'ExploreSchedule.plan(context)')
+expect('PortalBridge.kt 探索读数带 enabled', portalBridge, 'put("enabled", plan.enabled)')
+expect('PortalBridge.kt 探索读数带 running', portalBridge, 'put("running", ExploreTask.running(context) != null)')
+expect('PortalBridge.kt 摘要取目录里最新那份', portalBridge, 'lwFile("explore").listFiles()')
+expect('PortalBridge.kt 开始这一趟投那张卡', portalBridge, 'val task = card.ifEmpty { DEFAULT_EXPLORE_TEXT }')
+expect('PortalBridge.kt 已经在跑就不投', portalBridge, 'if (ExploreTask.running(context) != null) {')
+if (portalBridge.includes('explore.optString("nextTask")')) {
+  failures.push('PortalBridge.kt: 还在读 explore.json 的 nextTask (宿主从不写那个键, 面板因此永远空)')
+} else {
+  notes.push('ok   PortalBridge 不再读 explore.json 的 nextTask')
+}
+
+expect('client.js 提示那颗挂在 root 上', client, "els.toast.id = 'lwp-toast'")
+expect('client.js 提示的样式', client, '#lwp-toast{position:absolute')
+expect('client.js 探索读数带这一趟', workDrawerSource, "kv('这一趟',")
+expect('client.js 开始这一趟的回执', workDrawerSource, "toast('已投出去 (第 '")
+expect('client.js 已经在跑的回执', workDrawerSource, "toast('已经有一场在跑, 这一下不另开'")
+expect('client.js 没投出去的回执', workDrawerSource, "toast('这一下没投出去 (收件箱写不进去)', true)")
+expect('client.js 刷新的回执', workDrawerSource, "toast('已刷新 '")
+expect('client.js 刷新带时刻', workDrawerSource, 'clock(fresh.now)')
+expect('client.js 面板开着跟每一拍', ledgerBody, "drawer === 'work' && workKey(status && status.explore) !== workShown")
+
+const toastSource = takeFunction('toast')
+if (toastSource === '' || !toastSource.includes('els.toast.textContent =')
+  || !toastSource.includes('}, 2400)')) {
+  failures.push('client.js: toast 没有写到那颗元素上 / 或不会自己收 (2.4 s)')
+} else {
+  notes.push('ok   toast: 写到 #lwp-toast 上, 2.4 s 自己收')
+}
+
+// 探索那三行的真值: 有卡 / 空卡 / 关着 / 正在跑 四种读数都由同一个 `workReading` 拼
+const readingSource = takeFunction('workReading')
+const workKeySource = takeFunction('workKey')
+if (readingSource === '' || workKeySource === '') {
+  failures.push('client.js: 抽不出 workReading / workKey (探索面板那几行)')
+} else {
+  const workReading = new Function('stamp', `${readingSource}\nreturn workReading`)(
+    (ms) => `T${String(ms)}`,
+  )
+  const workKey = new Function('workReading', `${workKeySource}\nreturn workKey`)(workReading)
+  const card = {
+    nextTask: '看看相册', cardChars: 812, lastSummaryAt: 1_731_700_000_000, schedule: '03:00', enabled: true, running: true,
+  }
+  const empty = workReading({})
+  const off = workReading({ ...card, cardChars: 0, running: false, enabled: false })
+  const cases = [
+    ['有卡那一份', workReading(card).next === '看看相册 (812 字)'
+      && workReading(card).last === 'T1731700000000'
+      && workReading(card).when === '03:00 (每天)'
+      && workReading(card).running === '正在跑'],
+    ['空的一份', empty.next === '还没有排 (到点自由探索)' && empty.last === '—'
+      && empty.when === '—' && empty.running === '没在跑'],
+    ['关着那一份', off.when === '03:00 (关着)' && off.next === '看看相册'],
+    ['盘上没变就同一把键', workKey(card) === workKey({ ...card })],
+    ['跑没跑变了就换键', workKey(card) !== workKey({ ...card, running: false })],
+  ]
+  const broken = cases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (broken.length === 0) {
+    notes.push('ok   workReading: 卡 / 摘要 / 时刻 / 这一趟 四行都照盘上那份写 (空与关着各有各的说法)')
+  } else {
+    failures.push(`workReading 判错了: ${broken.join(' / ')}`)
+  }
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

@@ -1009,6 +1009,18 @@ window.__ModuleLoader__.load({
       'background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
       '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur)}',
       '#lwp-drawer .lwp-actions button{min-height:36px;padding:6px 14px;font-size:13px}',
+
+      // 顶上那颗提示 (2.8.1 #12): 抽屉盖着的时候输入卡里那行 `#lwp-note` 在它后面, 写了也看不见 ——
+      // 「开始这一趟」「刷新」按下去于是与"没接上"同形。这一颗挂在 root 上 (不在抽屉里), 重画抽屉不会
+      // 把它一起清掉; 位置放顶上是因为抽屉自己能占到屏幕高度的七成
+      '#lwp-toast{position:absolute;left:50%;transform:translateX(-50%);top:64px;z-index:6;',
+      'max-width:78%;padding:8px 14px;border-radius:999px;font-size:12px;line-height:18px;text-align:center;',
+      'color:var(--dsw-alias-label-primary,#18181b);background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
+      '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur);',
+      'border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
+      'box-shadow:0 8px 28px rgba(15,23,42,.18);pointer-events:none}',
+      '#lwp-toast[hidden]{display:none}',
+      '#lwp-toast[data-error="on"]{color:var(--dsw-alias-state-error-primary,#b91c1c)}',
     ].join('')
 
     // ── 门户本体 ──────────────────────────────────────────────────────────────
@@ -1059,6 +1071,20 @@ window.__ModuleLoader__.load({
       var historyUnsub = null
       var historyQuery = ''
       var noteTimer = null
+      /**
+       * 屏幕上那一颗提示 (2.8.1 #12)
+       *
+       * `showNote` 写的是输入卡里那行小字, 抽屉一盖就看不见 —— 所以面板里那些"按下去了没有"的回执
+       * 另走这一颗: 挂在 root 上, 抽屉与预览窗都盖不住, 2.4 s 自己收
+       */
+      var toastTimer = null
+      /**
+       * 探索面板现在写着哪一份读数 (`workKey`)
+       *
+       * 抽屉开着时每 3 s 那一拍 (`pollLedger`) 拿新的一份与它比: 盘上真的变了才重画, 于是「开始这一趟」
+       * 投出去之后那一行 `这一趟` 会自己变成「正在跑」, 不必再按一次刷新
+       */
+      var workShown = ''
       /** 正在开新对话: 连点只认第一次 */
       var navigating = false
       /** 新建之后这一小段时间不跟账本 —— 桥写不进去时也不至于被拽回旧场 */
@@ -3856,6 +3882,33 @@ window.__ModuleLoader__.load({
         }, 2600)
       }
 
+      /**
+       * 顶上那颗提示 (2.8.1 #12 主人: "点击开始这一趟和刷新没有反馈, 需要加上toast反馈")
+       *
+       * 与 `showNote` 的差别只有落点: 那一行在输入卡里, 抽屉开着时被压在下面; 这一颗是 root 的子元素,
+       * 抽屉与预览窗都是它的兄弟 —— 所以面板里的动作一律用它回执。2.4 s 后自己收, 连点只留最后一句
+       *
+       * @param text 要说的那一句
+       * @param isError true 时按错误色写 (没投出去 / 桥不在)
+       */
+      function toast(text, isError) {
+        if (!els.toast) return
+        els.toast.textContent = text === undefined || text === null ? '' : String(text)
+        els.toast.setAttribute('data-error', isError === true ? 'on' : 'off')
+        els.toast.hidden = els.toast.textContent === ''
+        if (toastTimer !== null) clearTimeout(toastTimer)
+        toastTimer = null
+        if (els.toast.hidden) return
+        toastTimer = setTimeout(function () {
+          toastTimer = null
+          if (els.toast) {
+            els.toast.textContent = ''
+            els.toast.hidden = true
+            els.toast.setAttribute('data-error', 'off')
+          }
+        }, 2400)
+      }
+
       // ── 这一层的脸 (背景 + 浓淡 + 头像 + 昵称, 设置 → 外观) ──────────────────
 
       /**
@@ -4170,6 +4223,8 @@ window.__ModuleLoader__.load({
 
       function openDrawer(which) {
         drawer = drawer === which ? '' : which
+        // 开一层时先取一份最新的读数 (2.8.1 #12): 面板上那几行不该停在上一次打开时的那一份
+        if (drawer !== '') status = call('portalStatus')
         renderDrawer()
       }
 
@@ -4421,33 +4476,89 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(actions)
       }
 
+      /**
+       * 探索面板那几行读数 (纯函数, 2.8.1 #12)
+       *
+       * 之前这三行读的是 `explore.json` 里**从来没有**的键 (`nextTask` / `lastSummaryAt` / `schedule.time`),
+       * 于是面板永远写着「还没有排 / — / —」, 宿主写得再勤也不动。宿主现在报的是真的那三份: 任务卡
+       * (`lw/explore-card.md`) / 摘要目录里最新那份 / `explore-schedule.json`。行文只在这里拼一处,
+       * 判据脚本真跑这张真值表 (`tools/check-luwi-portal.mjs` 第十九节)
+       */
+      function workReading(explore) {
+        var data = explore || {}
+        var task = typeof data.nextTask === 'string' ? data.nextTask.trim() : ''
+        var chars = Number(data.cardChars)
+        var next = task === '' ? '还没有排 (到点自由探索)' : task
+        if (task !== '' && isFinite(chars) && chars > 0) next += ' (' + String(chars) + ' 字)'
+        // 摘要那一行用 `stamp` 而不是 `clock`: 上一次可能是前天的, 只写 HH:MM 会被读成今天
+        var last = Number(data.lastSummaryAt) > 0 ? stamp(data.lastSummaryAt) : '—'
+        var at = typeof data.schedule === 'string' ? data.schedule.trim() : ''
+        var when = at === '' ? '—' : at + (data.enabled === false ? ' (关着)' : ' (每天)')
+        return {
+          next: next,
+          last: last,
+          when: when,
+          running: data.running === true ? '正在跑' : '没在跑',
+        }
+      }
+
+      /** 那几行拼成一把键: 抽屉开着时只有盘上真的变了才重画 (见 `pollLedger`) */
+      function workKey(explore) {
+        var reading = workReading(explore)
+        return [reading.next, reading.last, reading.when, reading.running].join('\u0001')
+      }
+
       function renderWorkDrawer() {
-        var data = status || {}
-        var explore = data.explore || {}
+        var explore = (status && status.explore) || {}
+        var reading = workReading(explore)
+        workShown = workKey(explore)
         els.drawer.appendChild(h('h3', null, '探索'))
-        els.drawer.appendChild(kv('下一趟', explore.nextTask || '还没有排'))
-        els.drawer.appendChild(kv('上次摘要', explore.lastSummaryAt ? clock(explore.lastSummaryAt) : '—'))
-        els.drawer.appendChild(kv('探索时刻', explore.schedule || '—'))
+        els.drawer.appendChild(kv('下一趟', reading.next))
+        els.drawer.appendChild(kv('上次摘要', reading.last))
+        els.drawer.appendChild(kv('探索时刻', reading.when))
+        els.drawer.appendChild(kv('这一趟', reading.running))
         var actions = h('div', 'lwp-actions')
         var start = h('button', null, '开始这一趟')
         start.onclick = function () {
-          call('portalExplore')
-          setTimeout(refresh, 600)
+          // 回执先落屏 (2.8.1 #12 主人: "点击开始这一趟和刷新没有反馈"): 投递与开那一场都在宿主
+          // 那一侧, 这一拍屏上什么都不变的话, 按下去与"没接上"分不开
+          var result = call('portalExplore')
+          if (result === null) {
+            toast('这一版宿主还不支持', true)
+            return
+          }
+          if (result.running === true) {
+            toast('已经有一场在跑, 这一下不另开', false)
+          } else if (result.queued === false) {
+            toast('这一下没投出去 (收件箱写不进去)', true)
+          } else {
+            toast('已投出去 (第 ' + String(result.seq || 0) + ' 行), 她这就开始')
+          }
+          setTimeout(refresh, 700)
         }
         actions.appendChild(start)
         var again = h('button', null, '刷新')
-        again.onclick = refresh
+        again.onclick = function () {
+          var fresh = refresh()
+          if (fresh === null) {
+            toast('这一版宿主还不支持', true)
+            return
+          }
+          toast('已刷新 ' + clock(fresh.now))
+        }
         actions.appendChild(again)
         // 第三颗挂在「开始这一趟 / 刷新」右边, 落探索那一组
         actions.appendChild(settingsButton('explore'))
         els.drawer.appendChild(actions)
       }
 
+      /** 重取一份判断层 / 探索读数并就地重画 (回执里那几句要用新的一份, 所以把 `status` 交回去) */
       function refresh() {
         status = call('portalStatus')
         renderDrawer()
         renderMeta()
         if (mounted) renderFlow()
+        return status
       }
 
       /* ── 上传文件 (主人 2026-11-08: `+` 就是上传文件的按钮, 图片与 docs 一样走这条) ──
@@ -4979,6 +5090,9 @@ window.__ModuleLoader__.load({
         // 这一拍顺便兜一件事: FileObserver 漏了事件时把她说的话补读回来
         var wasThinking = phaseThinking()
         status = call('portalStatus')
+        // 探索面板开着时跟着盘上那几份文件走 (2.8.1 #12): 这一拍读到的那一份与屏上写着的不同就重画 ——
+        // 于是「开始这一趟」投出去之后 `这一趟` 会自己变成「正在跑」, 宿主改写了任务卡也会当场看见
+        if (drawer === 'work' && workKey(status && status.explore) !== workShown) renderDrawer()
         loadOut(false)
         if (phaseThinking() !== wasThinking) renderFlow()
         var ledger = call('portalSession')
@@ -5299,6 +5413,14 @@ window.__ModuleLoader__.load({
         els.drawer.id = 'lwp-drawer'
         els.drawer.hidden = true
         root.appendChild(els.drawer)
+
+        // 顶上那颗提示 (2.8.1 #12): 抽屉里「开始这一趟 / 刷新」的回执写这里 —— 输入卡那行 `#lwp-note`
+        // 在抽屉后面, 写了也看不见。挂在 root 上而不是抽屉里: 重画抽屉 (每 3 s 比一次读数) 不会连带清掉
+        els.toast = h('div')
+        els.toast.id = 'lwp-toast'
+        els.toast.setAttribute('role', 'status')
+        els.toast.hidden = true
+        root.appendChild(els.toast)
 
         /* ── 预览窗 (2026-11-09 主人: "点击文件名后弹出预览窗口, 和权限选择窗口一样大小") ───
          *
