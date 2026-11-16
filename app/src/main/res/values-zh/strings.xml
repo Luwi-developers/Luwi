@@ -1225,6 +1225,20 @@
     <string name="doctor_group_copy">复制群号 %1$s</string>
     <string name="doctor_group_copied">群号已复制</string>
     <string name="boot_failed_report">把这个错误报上去</string>
+
+    <!-- 2.8.1 #16: 开发板块, 两件伴侣软件由用户自己下载 -->
+    <string name="settings_section_dev">开发</string>
+    <string name="settings_section_dev_summary">给开发用的伴侣软件, 自己点下载</string>
+    <string name="settings_dev_note">Luwi 只把包装下来交给系统安装器, 装不装由你在那一页点的那一下定</string>
+    <string name="settings_dev_android">安卓开发工具</string>
+    <string name="settings_dev_android_summary">手机内的编译与签名工具链</string>
+    <string name="settings_dev_console">Luwi 开发台</string>
+    <string name="settings_dev_console_summary">会话 / 插件 / 日志同屏</string>
+    <string name="settings_dev_absent">没装 · 点一下下载</string>
+    <string name="settings_dev_busy">正在下载…</string>
+    <string name="settings_dev_installed">已装 %1$s</string>
+    <string name="settings_dev_page">打开下载页</string>
+    <string name="settings_dev_page_summary">直链下不动时, 去那里自己挑一份</string>
 </resources>
 
 

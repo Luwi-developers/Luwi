@@ -186,6 +186,10 @@
   那一段, 高亮跟着纵向滚动走; 段下标 = `SettingsListLeadingItems` + `SettingsSectionKeys` 的顺序 +
   `SettingsGroupTitleBefore` 那两处组标题 (页面上只有「常用」「能力」两处), **新加一段必须同时进
   `SettingsSectionKeys` 与 `SettingsSectionTitleRes`** (判据 `check-settings-sections.mjs` 第三节)
+- **「开发」那一段是两件伴侣软件的下载入口** (2.8.1 #16): 「安卓开发工具」/「Luwi 开发台」两行, 点一下经
+  `PluginCompanion.ensure` 下 APK 再交系统安装器 —— **"自行下载" = 不代装**, 装不装由人在安装器那一页点的那一下定;
+  装没装读 `CompanionApk.installed` (不记自己的账)。地址只有一条表: `tool/DevTools.kt` (`luwi-plugins` 的 `packages/`
+  经 jsDelivr, 主址 + 镜像), 发布侧换地方只改那里; 判据 `DevToolsTest`
 - **跨门户记录那一段按时间合并** (2026-11-14): `mergeTimeline(carried, orderTimeline(…))` —— 记录那一段**不再**
   盲接在头上 (盲拼接会把"冷启 / 换场那一拍只有她的行"的半截线冻进记录, 之后她的话整组压在自己的消息上面);
   同一身份留 live 那份、按 `time` 稳定排、缺时间沉底、尾部 240 截; `carryRecord()` 在 `lastUsers === 0`
