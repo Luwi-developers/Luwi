@@ -207,9 +207,24 @@ internal class PortalBridge(private val context: Context) {
             // `portalOut` 取那一场的 jsonl, 当成时间线上的几行插进来 (不换场)。只读, 一个字节不写;
             // `startedAt` 是"这一场是不是新的"的唯一判据
             put("proactive", JSONObject().apply {
-                val run = readJson(lwFile("proactive.json"))?.optJSONObject("run")
+                val state = readJson(lwFile("proactive.json"))
+                val run = state?.optJSONObject("run")
                 put("session", run?.optString("session").orEmpty())
                 put("startedAt", run?.optLong("startedAt", 0L) ?: 0L)
+                // 最近那几场 (2.8.1 #8): 连点「唤醒一下」时, 中间那一场会被下一场从 `run` 覆盖掉 ——
+                // 页面照这一串把还没收过的逐场补进来, 于是"连点三次三条都在" (宿主最多记 8 条)
+                val recent = state?.optJSONArray("recent") ?: JSONArray()
+                put("recent", JSONArray().apply {
+                    for (index in 0 until recent.length()) {
+                        val one = recent.optJSONObject(index) ?: continue
+                        val id = one.optString("session").orEmpty()
+                        if (id.isEmpty()) continue
+                        put(JSONObject().apply {
+                            put("session", id)
+                            put("startedAt", one.optLong("startedAt", 0L))
+                        })
+                    }
+                })
             })
         }
         return body.toString()
@@ -434,12 +449,17 @@ internal class PortalBridge(private val context: Context) {
     }
 
     /**
-     * 唤醒一下: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧
+     * 唤醒一下: 投一行 `source:"wake"`, 开口全在宿主那一侧 (2.8.1 #8)
+     *
+     * **为什么不再投 `router`** (2026-11-15 主人: "点击唤醒一下时, 必须主动说话"): 那个来源是闹钟
+     * 那一拍用的, 进了宿主的 `judgeRouter` 就要过静默时段 / 冷却 / 沉睡前等待, 再落到"没什么值得
+     * 说的" —— 人当面戳了一下, 屏上却一个字都没有, 正是这次要修的那件事。换成 `wake` 之后宿主
+     * 一道闸都不看 (见 `routerWakeNow`), 并且先落一句应声, 于是点完 3 s 内必有一颗气泡
      *
      * **回执要够用** (2026-11-15 主人: 「唤醒一下」点不动): 投出去只是第一步, 宿主在不在跑决定了
      * 这一句什么时候被看见 —— 所以回 `host`:
      *
-     * - `running`: 她这一拍就在判, 几秒内可能开口
+     * - `running`: 她这一拍就开一场, 应声马上落进 `lw/out`
      * - `starting`: 宿主还没起来, 这一行已经在收件箱里, 起好了就会被消费 (异步拉起, 不等)
      *
      * **不在这里同步等宿主**: `ExploreSchedule.wakeHost` 会睡到就绪 (最长几十秒), 而这座桥跑在
@@ -447,16 +467,16 @@ internal class PortalBridge(private val context: Context) {
      */
     @JavascriptInterface
     fun portalTick(): String {
-        val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_ROUTER) }.getOrNull()
+        val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_WAKE) }.getOrNull()
         runCatching { RouterTick.ensure(context) }
         val running = DshHost.status is HostStatus.Running
         if (!running) {
             // 后台拉起来: 那一行留在收件箱里, 宿主一起来就消费 (与 RouterTick.fire 同一条路)
             runCatching {
-                Thread({ runCatching { ExploreSchedule.wakeHost(context) } }, "lw-portal-tick").start()
+                Thread({ runCatching { ExploreSchedule.wakeHost(context) } }, "lw-portal-wake").start()
             }
         }
-        Log.i(LOOK_TAG, "portal tick: queued #${seq ?: 0L} host=${if (running) "running" else "starting"}")
+        Log.i(LOOK_TAG, "portal wake: queued #${seq ?: 0L} host=${if (running) "running" else "starting"}")
         return JSONObject().apply {
             put("queued", seq != null)
             put("seq", seq ?: 0L)

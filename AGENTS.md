@@ -206,6 +206,10 @@
 - **没写过 `lw_say` 的轮次, 宿主在 turn end 补一行进同一份 jsonl** (有行就不再推 `op=reply`), 球与门户逐字同源;
   球换场先 `clearReplies`; **`BoxView.replies` 的 `inputType=TYPE_NULL` 会把换行压成空格, 必须 `setSingleLine(false)`**;
   回复之间**单换行**合并 (`kept.joinToString("\n")`)
+- **判断层的「唤醒一下」一点就说话** (2026-11-16, 2.8.1 #8): 那颗按钮投 `source:"wake"` (与闹钟那一拍 `router` 分开),
+  宿主那一支**一道判断闸都不看** (`routerWakeNow`); 先按 `ROUTER_WAKE_LINES` 轮转落一句应声进那一场的 `lw/out`
+  (3 s 内必见气泡, 连点不是同一句), 再开一场主动对话; 门户点完自己补 8 拍, 并照 `proactive.json` 的 `recent`
+  把连点之间被 `run` 覆盖掉的那一场也补进来 (换场不清屏上已有的气泡); 判据 `check-luwi-portal` 第十七节
 - **时间线按轮排**: `orderTimeline` 把 user → 她的话 (按 seq) → error → 兜底 放同轮, 行按 `at` 归轮 (同毫秒算上一轮),
   缺时间的 user 沉底; 补句的 `at` 取 `event.time` (`lwOutAppend` 的 `atHint`); 判据 `tools/check-portal-order.mjs`
 - **余额两条触发**: ① 每轮结束覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷); ② 点「看余额」: 上次那份

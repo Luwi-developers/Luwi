@@ -1136,6 +1136,13 @@ window.__ModuleLoader__.load({
       var echoSession = ''
       /** 那一场已经收到哪个 `seq` (两段水位, 与 [loadOut] 同一条规矩) */
       var echoNext = 0
+      /**
+       * 「唤醒一下」点完之后那几拍补问的定时器 (2.8.1 #8)
+       *
+       * 收纳那一拍是 3 秒一次的 `pollLedger`, 而那颗按钮要的是"按下去就有回音" —— 点完这里自己
+       * 多问几拍 (见 [watchWake]), 3 秒一到就交回定时器, 不留常驻轮询
+       */
+      var wakeTimer = null
       /** 已经取进 `outLines` 的那些 `seq` (取水位推进了也去重一次: 见 [loadOut] 里那段注释) */
       var seenSeq = {}
       var outQueue = []
@@ -1526,7 +1533,9 @@ window.__ModuleLoader__.load({
       function isProactiveStart(node) {
         if (!node || typeof node !== 'object') return false
         var source = node.source
-        if (source && typeof source.via === 'string' && source.via === 'proactive') return true
+        // `wake` 是 2.8.1 #8 那一档: 点「唤醒一下」开的那一场, 开场同样是给模型的启动说明
+        if (source && typeof source.via === 'string'
+          && (source.via === 'proactive' || source.via === 'wake')) return true
         var text = textOf(node.content)
         return text.replace(/^\s+/u, '').indexOf(PROACTIVE_START_MARK) === 0
       }
@@ -1680,6 +1689,75 @@ window.__ModuleLoader__.load({
         if (added === 0) return
         flowForceBottom = true
         renderFlow()
+      }
+
+      /**
+       * 收一场新的主动对话: 只换取数目标, **不清掉屏上已有的那几条** (2026-11-16, 2.8.1 #8)
+       *
+       * 连点三次「唤醒一下」会连着开三场: 以前换一场就 `echoes = []`, 于是第二下之后上一条气泡凭空
+       * 消失, 看上去像"只有最后一次说了话"。`echoItemOf` 的身份带会话 id, 攒着不会撞; 只把
+       * `echoNext` 归零 (水位是每一场自己的)
+       */
+      function adoptEchoRun(run) {
+        if (!run || typeof run.session !== 'string' || run.session === '') return false
+        if (run.session === echoSession) return false
+        echoSession = run.session
+        echoNext = 0
+        loadEcho(false)
+        return true
+      }
+
+      /**
+       * 把宿主记着的那几场主动对话里还没收过的收进来 (2.8.1 #8)
+       *
+       * `proactive.json` 的 `run` 只有**最新一场**: 连点三次「唤醒一下」时, 两场之间那一场会被下一次
+       * 覆盖掉, 光看 `run` 就只收得到最后那一句。宿主另记了一小串 `recent` (`portalStatus` 原样带
+       * 过来), 这里按 `startedAt` 升序逐场补, 每场取一次它自己的 `lw/out`
+       *
+       * @returns {number} 这一拍补进来几场
+       */
+      function adoptProactiveRuns(proactive) {
+        var runs = proactive && Array.isArray(proactive.recent) ? proactive.recent.slice() : []
+        var newest = proactive && typeof proactive.session === 'string' ? proactive.session : ''
+        if (newest !== '') {
+          var known = false
+          for (var k = 0; k < runs.length; k += 1) {
+            if (runs[k] && runs[k].session === newest) known = true
+          }
+          if (!known) runs.push({ session: newest, startedAt: Number(proactive.startedAt) || 0 })
+        }
+        runs.sort(function (a, b) {
+          return (Number(a && a.startedAt) || 0) - (Number(b && b.startedAt) || 0)
+        })
+        var adopted = 0
+        for (var i = 0; i < runs.length; i += 1) {
+          if (!proactiveNew(runs[i], proactiveSeen)) continue
+          proactiveSeen = Number(runs[i].startedAt) || proactiveSeen
+          if (adoptEchoRun(runs[i])) adopted += 1
+        }
+        return adopted
+      }
+
+      /**
+       * 点完「唤醒一下」盯着看几拍 (2026-11-16, 2.8.1 #8)
+       *
+       * 主人要的是"按下去就有回音", 而收纳那一拍定时器是 3 秒一次 —— 这里自己连问 8 拍 (400 ms
+       * 一发, 约 3 秒): 宿主一开新的一场就换成它, 再照那一场的 `lw/out` 把应声取回来。到点就交回
+       * 定时器, 不留常驻轮询
+       */
+      function watchWake() {
+        var left = 8
+        function beat() {
+          if (!mounted) return
+          status = call('portalStatus')
+          var run = status && status.proactive ? status.proactive : null
+          if (adoptProactiveRuns(run) === 0) loadEcho(false)
+          left -= 1
+          if (left > 0) wakeTimer = setTimeout(beat, 400)
+        }
+        if (wakeTimer !== null) clearTimeout(wakeTimer)
+        wakeTimer = null
+        beat()
       }
 
       /**
@@ -4255,6 +4333,10 @@ window.__ModuleLoader__.load({
         tick.onclick = function () {
           // 回执先落屏 (2026-11-15 主人: 「唤醒一下」点不动): 判断在宿主那一侧异步跑, 这一拍
           // 屏上什么都不变的话, 按下去与"没接上"是同一个样子
+          //
+          // 2026-11-16 (#8, 主人: "点击唤醒一下时, 必须主动说话"): 这一下投的是 `source:"wake"`,
+          // 宿主不再过判断层那几道闸, 先应一声再开一场 —— 所以回执写"她这就说", 并且点完自己
+          // 盯几拍 ([watchWake]), 3 s 内必有一颗气泡 (不等 3 s 那一拍定时器)
           var result = call('portalTick')
           if (result === null) {
             tickNote = ''
@@ -4265,11 +4347,12 @@ window.__ModuleLoader__.load({
             tickNote = '这一下没投出去 (收件箱写不进去)'
             showNote('这一下没投出去', true)
           } else if (result.host === 'starting') {
-            tickNote = '宿主在起, 起好她就会看一眼'
+            tickNote = '宿主在起, 起好她就会应一声'
           } else {
-            tickNote = '已投出去 (第 ' + String(result.seq || 0) + ' 行), 她这一拍在判'
+            tickNote = '已投出去 (第 ' + String(result.seq || 0) + ' 行), 她这就说'
           }
           renderDrawer()
+          watchWake()
           // 6 s 后收掉那一行: 回执是"这一下有没有出去", 不是常驻读数
           setTimeout(function () {
             if (drawer !== 'router' || tickNote === '') return
@@ -4897,14 +4980,10 @@ window.__ModuleLoader__.load({
         // 只落在那一场独立会话的历史里" —— 所以**不换场**, 只把那一场的 `lw/out` 当成本场时间线上的
         // 几行插进来 (见 [echoes] / [echoItemOf]); 条数 = 触发前 + 1, 上面那段历史一条不动.
         // 换了一场主动对话才重取 (同一个 `startedAt` 只投一次), 之后每拍补尾巴
+        // 2026-11-16 (#8): 换场**不清**屏上已有的那几条 —— 连点三次「唤醒一下」三条都要留着;
+        // 而且照宿主的 `recent` 把两拍之间被覆盖掉的那一场也补进来 (见 [adoptProactiveRuns])
         var run = status && status.proactive ? status.proactive : null
-        if (proactiveNew(run, proactiveSeen)) {
-          proactiveSeen = Number(run.startedAt) || proactiveSeen
-          echoSession = run.session
-          loadEcho(true)
-        } else {
-          loadEcho(false)
-        }
+        if (adoptProactiveRuns(run) === 0) loadEcho(false)
         renderMeta()
       }
 
@@ -5455,6 +5534,8 @@ window.__ModuleLoader__.load({
         renderTimer = null
         if (pollTimer !== null) clearInterval(pollTimer)
         pollTimer = null
+        if (wakeTimer !== null) clearTimeout(wakeTimer)
+        wakeTimer = null
         if (noteTimer !== null) clearTimeout(noteTimer)
         noteTimer = null
         if (undoTimer !== null) clearTimeout(undoTimer)
@@ -5573,10 +5654,11 @@ window.__ModuleLoader__.load({
           status = call('portalStatus')
           // 挂载这一刻文件里记着的主动场: **十分钟内的算"最新的消息"**, 第一拍就接进当前对话 —— 这样
           // "打开应用看到最新那句"与"页面被系统重建过"两条都不靠运气; 更早的就是上一次开机的事, 不接
-          // (`startedAt` 变大才算新, 见 [proactiveNew])
+          // (`startedAt` 变大才算新, 见 [proactiveNew]; 减一 = 只补最新那一场, 不把 `recent` 里更早的
+          // 全翻上来 —— 2.8.1 #8 加了 `recent` 之后这一格必须这么写)
           var openedRun = status && status.proactive ? status.proactive : null
           var openedAt = openedRun ? Number(openedRun.startedAt) || 0 : 0
-          proactiveSeen = openedAt > 0 && Date.now() - openedAt <= RECENT_PROACTIVE_MS ? 0 : openedAt
+          proactiveSeen = openedAt > 0 && Date.now() - openedAt <= RECENT_PROACTIVE_MS ? openedAt - 1 : openedAt
           renderDrawer()
           refresh()
           // 模型是异步的: 先把界面立起来, 数据到了再补 (拿不到就不画)
