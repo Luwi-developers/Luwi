@@ -5083,10 +5083,13 @@ const TOOLS = [
       + 'Use text for one line (that is the whole call most of the time), lines for two to six when she '
       + 'really has that much to say: they are spoken one after another, at the pace set in this '
       + "phone's own settings (设置 → 活动 → 更多设置). "
+      + 'One bubble holds one thing (2026-11-16): a line, a picture, a document or a sticker. Passing '
+      + 'text together with a picture is fine - the host writes the sentence first and the picture '
+      + 'after it, each on its own bubble, never both inside one. '
       + 'image puts one picture into the same stream: give the absolute path of a png / jpg / jpeg / '
       + 'webp / gif on this phone (at most 20 MB). It is copied into her own folder, so tidying the '
-      + 'album later does not take it away. One picture per call, sentence plus picture, and never a '
-      + 'picture where a sentence would do. '
+      + 'album later does not take it away. One picture per call, and never a picture where a sentence '
+      + 'would do. '
       + 'sticker puts one of her own little pictures instead: either a file name inside '
       + '$DSH_HOME/lw/stickers, or just a mood or scene word (开心 / 无语 / 晚安) - the host picks a file '
       + 'whose tags or name match, at random when several do, and says what it picked. Text and a sticker '
@@ -5095,7 +5098,7 @@ const TOOLS = [
       + 'file hands over one document instead: give the absolute path of a pdf / txt / md / json / csv / '
       + 'log / doc(x) / xls(x) / ppt(x) / zip on this phone (at most 20 MB). It is copied into her own '
       + 'folder and drawn as a blue file name the user can tap to preview - so do not paste the contents '
-      + 'into the reply, the name is the whole message. '
+      + 'into the reply, the name is the whole message. It goes out on its own bubble too. '
       + 'speak: true also reads that line out loud, when read-aloud is switched on in the app. '
       + 'The reply body - the text written beside a tool call - is NOT a way to speak in this preset: '
       + 'the portal does not draw it, the ball does not show it and it is not read aloud. Keep it to '
@@ -5116,20 +5119,22 @@ const TOOLS = [
         type: 'string',
         description: 'For a picture: the absolute path of a png / jpg / jpeg / webp / gif file on this '
           + 'phone. It is COPIED into her own folder - the album copy can change or go away and this '
-          + 'picture still stays in the conversation',
+          + 'picture still stays in the conversation. A sentence passed with it lands first as its own '
+          + 'bubble: the picture is never drawn inside the same bubble as text',
       },
       sticker: {
         type: 'string',
         description: 'For a sticker: a mood or scene word (开心 / 无语 / 晚安) or the exact file name '
           + 'inside $DSH_HOME/lw/stickers - a word is matched against each sticker\'s tags and name, and '
           + 'one of the matches is picked at random. It is only REFERENCED, not copied - swapping that '
-          + 'file swaps the sticker. It goes out as its own bubble, so text + sticker in one call is the '
-          + 'normal way to say something and then put a face on it',
+          + 'file swaps the sticker. It always goes out as its own bubble (text + sticker in one call = '
+          + 'a line bubble, then the sticker bubble)',
       },
       file: {
         type: 'string',
         description: 'For a document: the absolute path of a pdf / txt / md / json / csv / log / doc(x) / '
-          + 'xls(x) / ppt(x) / zip file on this phone (at most 20 MB)',
+          + 'xls(x) / ppt(x) / zip file on this phone (at most 20 MB). It goes out as its own bubble - a '
+          + 'sentence passed with it lands first as its own bubble',
       },
       speak: {
         type: 'boolean',
@@ -5176,60 +5181,49 @@ const TOOLS = [
       if (image !== '' && file !== '') {
         throw new Error('one call carries either an image or a file, not both')
       }
-      // 图片落成 `image` 行: 有字就是"一句话带一张图", 没字就是纯图 (两种都只占一行一个泡)
+      // **一条气泡只装一样东西** (2026-11-16, 落实表 #9): 话与媒体各落各的行 —— 门户每一行画一个
+      // 气泡, 球每一行落一样东西。原来图 / 文件是被揉进最后一句那一行的 (prepare 把 `kind:"image"`
+      // 与 `kind:"text"` 并进同一个对象), 门户只好把一句话和图挤进一条气泡 —— 主人 2026-11-15 那一句
+      // 是"表情或图片和文字同时进一条气泡时表情会被吞, 要求表情图片等文件必须单独发一条气泡"。
+      // 表情那一行以前还带一个 `[…]` 占位正文, 同样算"话与表情同进一条气泡", 一并去掉
       const images = image === '' ? [] : [image].slice(0, LW_IMAGE_MAX_PER_CALL)
       const files = file === '' ? [] : [file]
       const written = []
       const problems = []
+      // ① 话: 一句一行, 这一行只有 kind 与 text
       for (let index = 0; index < texts.length; index += 1) {
-        const text = texts[index]
-        const fields = { kind: 'text', text }
-        const last = index === texts.length - 1
-        const withImage = images.length > 0 && last
-        const withFile = files.length > 0 && last
         try {
-          const row = await lwOutAppend(session, fields, withImage
-            ? async (seq) => {
-              const art = await lwOutImage(session, seq, images[0])
-              return art === null ? {} : { kind: 'image', ...art }
-            }
-            : withFile
-              ? async (seq) => {
-                const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
-                return art === null ? {} : { kind: 'file', ...art }
-              }
-              : undefined)
-          written.push(row)
+          written.push(await lwOutAppend(session, { kind: 'text', text: texts[index] }))
         } catch (error) {
           problems.push(`line ${index + 1}: ${error?.message ?? error}`)
           break
         }
       }
-      // 表情单独一个泡 (2026-11-15): "说一句 + 补一张"是真人常见的写法, 原来**只有**没给文字的那一趟
-      // 才贴, 于是说了话又想补个表情时这一张被静默丢掉 —— 她以为贴了, 屏上没有
-      if (sticker !== '' && problems.length === 0) {
-        try {
-          written.push(await lwOutAppend(session, { kind: 'sticker', sticker, text: '[…]' }))
-          const home = process.env.DSH_HOME
-          if (home) void markStickerUsed(join(home, 'lw', 'stickers'), sticker).catch(() => {})
-        } catch (error) {
-          problems.push(error?.message ?? String(error))
-        }
-      }
-      // 只有图 / 只有文件: 文字那一圈是空的, 就落一行媒体
-      if (written.length === 0 && problems.length === 0) {
+      // ② 图或文件: 自己那一行 (没有正文, 不与谁合并) —— 一次只递一样, 见上面那道闸
+      if (problems.length === 0 && (images.length > 0 || files.length > 0)) {
         try {
           if (images.length > 0) {
             written.push(await lwOutAppend(session, { kind: 'image' }, async (seq) => {
               const art = await lwOutImage(session, seq, images[0])
               return art === null ? {} : art
             }))
-          } else if (files.length > 0) {
+          } else {
             written.push(await lwOutAppend(session, { kind: 'file' }, async (seq) => {
               const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
               return art === null ? {} : art
             }))
           }
+        } catch (error) {
+          problems.push(error?.message ?? String(error))
+        }
+      }
+      // ③ 表情: 自己那一行 —— "说一句 + 补一张"是真人常见的写法 (2026-11-15), 但它不跟那句话挤在
+      // 一条气泡里, 所以这一行只有 kind 与 sticker
+      if (sticker !== '' && problems.length === 0) {
+        try {
+          written.push(await lwOutAppend(session, { kind: 'sticker', sticker }))
+          const home = process.env.DSH_HOME
+          if (home) void markStickerUsed(join(home, 'lw', 'stickers'), sticker).catch(() => {})
         } catch (error) {
           problems.push(error?.message ?? String(error))
         }

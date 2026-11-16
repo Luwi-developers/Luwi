@@ -307,9 +307,9 @@ check('挑不到就把库里的候选带回去 (把静默失败换成教学反�
   /she has no stickers yet/.test(host),
 ], [true, true])
 
-check('说一句再补一张: 文字行写完照样追加一条表情行 (原来只有没给文字时才贴)', [
+check('说一句再补一张: 文字行写完照样追加一条表情行, 表情自己一个气泡 (不带占位正文)', [
   /if \(sticker !== '' && problems\.length === 0\) \{/.test(said),
-  /kind: 'sticker', sticker, text: '\[…\]'/.test(said),
+  /\{ kind: 'sticker', sticker \}\)/.test(said) && !/text: '\[…\]'/.test(said),
   /including the sticker \$\{sticker\}/.test(said),
   /void markStickerUsed\(/.test(said),
 ], [true, true, true, true])

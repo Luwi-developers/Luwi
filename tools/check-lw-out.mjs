@@ -342,9 +342,9 @@ check('一次说几句时朗读等它们上完屏再开口 (耳朵不比眼睛�
     && /const spokenWait = written\.reduce/.test(host))
 // 朗读与显示分离 (2026-11-10, 方案 docs/Luwi-朗读与显示分离-方案-2026-11-09.md §4.2):
 // **jsonl 一个字节都不动**, `voice` 只走朗读流, 绝不进显示字段
-check('jsonl 的显示字段没被朗读稿改动 (数组那三样还是 kind/text/sticker)',
-  /const fields = \{ kind: 'text', text \}/.test(host)
-    && !/const fields = \{[^}]*voice/.test(host)
+check('jsonl 的显示字段没被朗读稿改动 (话那一行只有 kind/text, 数组那三样还是 kind/text/sticker)',
+  /\{ kind: 'text', text: texts\[index\] \}/.test(host)
+    && !/\{ kind: 'text'[^}]*voice/.test(host)
     && !/lwOutAppend\([^)]*voice/.test(host))
 check('`voice` 是念法不是说法: 只交给 readAloudScript, 差异落一行日志',
   /readAloudScript\(shownText, voice\)/.test(host)
@@ -523,6 +523,31 @@ for (const key of [
   check(`两份 strings 都有 ${key}`,
     stringsEn.includes(`name="${key}"`) && stringsZh.includes(`name="${key}"`))
 }
+
+/* ── 十六、一条气泡只装一样东西 (2.8.1 #9: 图 / 文件 / 表情各占自己那一行) ──────── */
+//
+// 主人 (2026-11-15): "表情或图片和文字同时进一条气泡时表情会被吞, 要求表情图片等文件必须单独发一条气泡"
+// 写侧以前有两条路把两样东西塞进同一个对象: 图 / 文件挂在最后一句的 prepare 上 (一个行里同时有
+// `kind:"text"` 与 `kind:"image"`), 表情那一行带一个 `[…]` 占位正文。两条路都断掉之后, 一行就是
+// 一个气泡; 老行由门户拆开 (真值在 `check-luwi-portal` 第十八节真跑)
+
+const sayAt = host.indexOf("name: 'lw_say'")
+const personaAt = host.indexOf("name: 'lw_persona'", sayAt)
+const sayBlock = sayAt >= 0 && personaAt > sayAt ? host.slice(sayAt, personaAt) : ''
+check('lw_say 那一段抠得到 (一条气泡只装一样东西的判据都在里头)', sayBlock !== '',
+  `sayAt=${sayAt} personaAt=${personaAt}`)
+check('话那一行不再并媒体 (没有 withImage / withFile 那种 prepare)',
+  !sayBlock.includes('const withImage') && !sayBlock.includes('const withFile'), sayBlock.slice(0, 160))
+check('话那一行只有 kind 与 text (第二个参数就是那两个字段, 没有 prepare)',
+  /\{ kind: 'text', text: texts\[index\] \}\)\)/.test(sayBlock))
+check('图与文件各落自己那一行 (fields 里只有 kind)',
+  /\{ kind: 'image' \}, async \(seq\) => \{/.test(sayBlock)
+    && /\{ kind: 'file' \}, async \(seq\) => \{/.test(sayBlock))
+check('表情那一行只有 kind 与 sticker, 不再带 `[…]` 占位正文',
+  /\{ kind: 'sticker', sticker \}\)/.test(sayBlock) && !sayBlock.includes("text: '[…]'"))
+check('工具描述写明"一条气泡只装一样东西" (模型读得到的那一句)', /One bubble holds one thing/.test(sayBlock))
+check('门户把老行拆成两项 (outItemsOf 存在, nodesOf 走它)',
+  /function outItemsOf\(line\) \{/.test(client) && /var parts = outItemsOf\(line\)/.test(client))
 
 if (failures > 0) {
   console.error(`check-lw-out: FAIL (${failures}/${count})`)
