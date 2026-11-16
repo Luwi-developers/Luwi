@@ -25,6 +25,24 @@ class SpeechTailTest {
         assertEquals(25_000L, SpeechTail.budgetMs("一".repeat(100)))
     }
 
+    /** 垫话 (2.8.1 #14): 首片在阈值之内到就一声都不多出, 迟到才响 */
+    @Test
+    fun `垫话只在首包迟到的时候响`() {
+        assertFalse(SpeechTail.fillerDue(120L, firstClipReady = false))
+        assertTrue(SpeechTail.fillerDue(SpeechTail.FILLER_AFTER_MS, firstClipReady = false))
+        // 首片已经起播: 到点也不响 (垫话补的是空白, 不是加一句话)
+        assertFalse(SpeechTail.fillerDue(SpeechTail.FILLER_AFTER_MS * 4, firstClipReady = true))
+        // 响的是 `assets/clips/` 里最短的那一段
+        assertEquals("huh", SpeechTail.FILLER_CLIP)
+    }
+
+    /** 垫话那一句**不进** tail 预算: 预算只按正文的字数算 */
+    @Test
+    fun `垫话不计入 tail 预算`() {
+        // 30 个字 = 350 * 30 + 4000; 等首包那一声 (预录的一段) 一个字符都不加
+        assertEquals(14_500L, SpeechTail.budgetMs("一".repeat(30)))
+    }
+
     @Test
     fun `自带与在线那两条, 只看进程内的播放标记`() {
         val now = 1_000_000L

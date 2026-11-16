@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.Json
 
 /**
@@ -32,12 +33,14 @@ import kotlinx.serialization.json.Json
  * 没登录时宿主回一句"还没登录", 设置页那句提示与它逐字对得上
  *
  * 一次一片 (片长见 [LwDeepseekSpeech.CHUNK_CHARS]), 一片在放的时候下一片已经在取了 —— 与 [LwApiTts]
- * 同一套调度, 只是换了个对端
+ * 同一套调度, 只是换了个对端. 两条的"等首包"与"换音色不叠音"也走同一份算术 (2026-11-16, 2.8.1 #14):
+ * 起播先排一声垫话 (`LwSpeak.fillerFor`, 阈值 `SpeechTail.FILLER_AFTER_MS`), 第一片回来就叫 ready 掐掉它,
+ * 而每一趟一个号 —— 上一趟晚回来的那一片不许再放
  */
 internal object LwDeepseekTts {
 
     /** 现在有没有在放: 播放器是 [LwVoiceClip] 那一份, 这一条只多问一句"是不是我这一趟" */
-    val speaking: Boolean get() = active && LwVoiceClip.speaking
+    val speaking: Boolean get() = activeRun != 0 && LwVoiceClip.speaking
 
     /**
      * 念一段: 成功回 `"said …"` (与其它引擎同形, 调用方据此判成败), 失败回一句人话
@@ -51,26 +54,36 @@ internal object LwDeepseekTts {
         val pieces = LwDeepseekSpeech.pieces(text)
         if (pieces.isEmpty()) return "there is nothing to say"
         val started = System.currentTimeMillis()
-        stopped = false
-        active = true
+        // 每一趟一个号 (2.8.1 #14): 换音色 / 再念一句时上一趟的号就过期 —— 它晚一步等回来的那一片
+        // **不许再放**, 否则旧音色与新音色会叠在一起
+        val mine = runs.incrementAndGet()
+        activeRun = mine
         val pool: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "lw-deepseek-tts-fetch").apply { isDaemon = true }
         }
+        var filler: LwSpeak.Filler? = null
         return try {
             fun queued(piece: String): Future<Clip> = pool.submit(
                 Callable {
-                    if (stopped) throw IllegalStateException("the reading was stopped")
-                    fetch(piece, wanted)
+                    if (mine != runs.get()) throw IllegalStateException("the reading was stopped")
+                    fetch(piece, wanted, mine)
                 },
             )
             var pending = queued(pieces.first())
+            // 等首包那一段先出一声垫话 (2.8.1 #14): 首片一到就叫 ready, 掐掉它再放真正的
+            val waitForFirst = LwSpeak.fillerFor(context)
+            filler = waitForFirst
             pieces.forEachIndexed { index, piece ->
-                if (stopped) return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
+                if (mine != runs.get()) {
+                    return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
+                }
                 val clip = await(pending)
+                // 第一片回来了: 这一声垫话到此为止 (两段声音不许叠)
+                if (index == 0) waitForFirst.ready()
                 // 放这一片的时候, 下一片已经在取了
                 val next = pieces.getOrNull(index + 1)?.let { queued(it) }
                 if (!LwVoiceClip.play(context, clip.bytes, clip.extension)) {
-                    return if (stopped) {
+                    return if (mine != runs.get()) {
                         "stopped on request while saying \"${piece.take(SCRIBBLE)}\""
                     } else {
                         "the audio did not finish playing"
@@ -84,15 +97,20 @@ internal object LwDeepseekTts {
             Log.w(TAG, "the DeepSeek TTS call failed", error)
             "the DeepSeek TTS call failed: ${error.message ?: error}"
         } finally {
-            active = false
+            // 首片之后 cancel 是空的 (ready 已经撤过这一趟); 失败 / 被叫停那几档靠它把垫话撤掉
+            filler?.cancel()
+            // 只清自己那一趟: 后面可能已经起了新的一趟 (它的 activeRun 不许被这一趟抹掉)
+            if (activeRun == mine) activeRun = 0
             pool.shutdownNow()
         }
     }
 
     /** 掐断: 这一趟不在念时回 null (与其它引擎同形, 调用方靠它分辨"谁停的") */
     fun stop(): String? {
-        if (!active) return null
-        stopped = true
+        // **先作废这一趟**: 还在等网络的那一趟也要停 —— 否则它晚一步回来就与新的一句叠在一起 (换音色)
+        runs.incrementAndGet()
+        activeRun = 0
+        if (!LwVoiceClip.speaking) return null
         return LwVoiceClip.stop()
     }
 
@@ -103,7 +121,7 @@ internal object LwDeepseekTts {
     private class RouteError(message: String) : IllegalStateException(message)
 
     /** 取一片: 网络抖动时重试一次 (两次都空手就把宿主那句原话报出去) */
-    private fun fetch(text: String, voice: String): Clip {
+    private fun fetch(text: String, voice: String, mine: Int): Clip {
         var attempt = 0
         while (true) {
             attempt += 1
@@ -111,7 +129,7 @@ internal object LwDeepseekTts {
                 return fetchOnce(text, voice)
             } catch (error: Throwable) {
                 // 宿主自己给的原因 (没登录 / 官方 4xx) 不重试: 同一条稿子再发一遍只多花一次钱
-                if (error is RouteError || attempt >= MAX_ATTEMPTS || stopped) throw error
+                if (error is RouteError || attempt >= MAX_ATTEMPTS || mine != runs.get()) throw error
                 Log.i(TAG, "attempt $attempt failed (${error.message}), retrying once")
                 try {
                     Thread.sleep(RETRY_DELAY_MS)
@@ -119,7 +137,7 @@ internal object LwDeepseekTts {
                     Thread.currentThread().interrupt()
                     throw error
                 }
-                if (stopped) throw error
+                if (mine != runs.get()) throw error
             }
         }
     }
@@ -210,11 +228,15 @@ internal object LwDeepseekTts {
     private const val MAX_ATTEMPTS = 2
     private const val RETRY_DELAY_MS = 400L
 
-    /** 这一趟是不是我 (掐断与"正在说"都要分得开) */
+    /** 正在念的那一趟的号 (0 = 没有); "正在说"与掐断都要分得开 */
     @Volatile
-    private var active = false
+    private var activeRun = 0
 
-    /** 这一次念有没有被叫停 */
-    @Volatile
-    private var stopped = false
+    /**
+     * 每一趟一个号 (2.8.1 #14): 换音色 / 再念一句 / 被掐断时加一, 上一趟的号就过期
+     *
+     * 原来是 `stopped` 那一个布尔: 新的一趟把它写回 false, 上一趟醒来看到 false 就接着放 —— 两条
+     * `MediaPlayer` 各放各的, 就是"切换音色时叠音"
+     */
+    private val runs = AtomicInteger(0)
 }
