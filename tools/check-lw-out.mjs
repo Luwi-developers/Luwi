@@ -483,6 +483,47 @@ check('门户不再给每一张图垫 72px 幻影最小高', !/\.lwp-image\{max-
 check('`lw-in` 的规矩只剩一处实现 (门户桥改调 LwIn)',
   /LwIn\.put\(/.test(bridge) && !/STASH_EXTS/.test(bridge) && /BallAttach/.test(lwIn))
 
+/* ── 十五、她的话也弹到通知栏 (2.8.1 #7: 不打开应用也知道她说了一句) ────────── */
+
+const outNotify = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/OutNotify.kt')
+const lwNotify = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwNotify.kt')
+const hostService = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
+const stringsEn = await read('app/src/main/res/values/strings.xml')
+const stringsZh = await read('app/src/main/res/values-zh/strings.xml')
+const drainBody = bodyOf(outNotify, 'private fun drain(')
+
+// 通知是同一份 jsonl 的**第三个听众**: 解析仍然只有 OutFile 一处, 它不自己 split 也不自己解 JSON
+check('她的话弹通知走同一个 observer + 同一个解析器 (第三个听众)',
+  /OutWatch\.watch\(app\)/.test(outNotify) && /OutFile\.page\(context, id, mark\)/.test(outNotify)
+    && !/split\('\\n'\)/.test(outNotify) && !/JSONObject\(/.test(outNotify))
+check('宿主服务起来那一下把它挂上 (冷启动也在这一条上)',
+  /OutNotify\.ensure\(this\)/.test(hostService))
+check('首拍只记水位, 历史一条不补',
+  /for \(id in OutFile\.sessions\(app\)\) marks\[id\] = OutFile\.maxSeq\(app, id\)/.test(outNotify))
+check('前台那一档不弹 (`importance > IMPORTANCE_FOREGROUND` 才是后台)',
+  /fun wants\(importance: Int\): Boolean =\s*\n\s*importance > ActivityManager\.RunningAppProcessInfo\.IMPORTANCE_FOREGROUND/.test(outNotify))
+check('先推进水位再判要不要弹 (前台画过的那几句不许切出去补弹)',
+  drainBody.includes('marks[id] = page.max')
+    && drainBody.indexOf('marks[id] = page.max') < drainBody.indexOf('wants(importance)'), drainBody.slice(0, 200))
+check('一句一条: id 由会话与 seq 合成, 落在 0x4C57 那一段 (不撞常驻 1 / 工具 2)',
+  /fun sayId\(session: String, seq: Int\): Int =/.test(lwNotify) && /0x4C570000/.test(lwNotify))
+check('点通知落到那一场 (EXTRA_OPEN_SESSION, 不带给"此刻那一场"让路的 LIVE 记号)',
+  /putExtra\(OverlayService\.EXTRA_OPEN_SESSION, session\)/.test(lwNotify)
+    && !/putExtra\(OverlayService\.EXTRA_OPEN_LIVE/.test(lwNotify))
+check('她的话与工具通知两条渠道分开 (一个开关不该连带另一个)',
+  /const val SPEECH_CHANNEL_ID = "lw-say"/.test(lwNotify)
+    && /NotificationChannel\(\s*\n\s*SPEECH_CHANNEL_ID/.test(lwNotify))
+check('表情那行不把占位符写进通知 (取表情名)', /notification_speech_sticker/.test(outNotify))
+// 两份 strings 都得有这六条 (中文界面上冒英文是最容易漏的那一档, 见 check-strings-keys)
+for (const key of [
+  'notification_channel_speech', 'notification_channel_speech_description',
+  'notification_speech_sticker', 'notification_speech_image',
+  'notification_speech_file', 'notification_speech_file_named',
+]) {
+  check(`两份 strings 都有 ${key}`,
+    stringsEn.includes(`name="${key}"`) && stringsZh.includes(`name="${key}"`))
+}
+
 if (failures > 0) {
   console.error(`check-lw-out: FAIL (${failures}/${count})`)
   process.exit(1)

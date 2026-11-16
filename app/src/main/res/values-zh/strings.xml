@@ -1193,6 +1193,12 @@
 
     <string name="notification_channel_tools">工具通知</string>
     <string name="notification_channel_tools_description">模型用 lw_notify 发出来的通知</string>
+    <string name="notification_channel_speech">她的话</string>
+    <string name="notification_channel_speech_description">她在门户里说了一句、而应用不在前台时弹的那一条</string>
+    <string name="notification_speech_sticker">发了一个表情: %1$s</string>
+    <string name="notification_speech_image">发了一张图</string>
+    <string name="notification_speech_file">发了一个文件</string>
+    <string name="notification_speech_file_named">发了一个文件: %1$s</string>
 
     <string name="preview_open_refused">这个文件不在工作区里</string>
     <string name="preview_open_missing">这台设备上没有能打开它的应用</string>

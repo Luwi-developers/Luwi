@@ -196,9 +196,13 @@
 - **她说的话也由文件说了算** (方案 `docs/Luwi-对话层-最终方案-2026-11-08.md`): `lw_say` 唯一发言工具, 只写
   `$DSH_HOME/lw/out/<sessionId>.jsonl` (宿主单写者: `seq` 起时 tail 取 max / `at` 单调 / `gapMs` 按 `sim.json` 的
   `send` 段抽); 门户走 `PortalBridge.portalOut(id, next)` 两段水位, 浮球走 `tool/OutFile.kt` 读同一份 ——
-  **解析器只一处**, `OutWatch` 一个 `FileObserver` 两个听众; 节奏 (含 `dueAt`)、条数、`seq` 两边必须一致; `luwi`
+  **解析器只一处**, `OutWatch` 一个 `FileObserver` 三个听众 (门户 / 浮球 / 通知); 节奏 (含 `dueAt`)、条数、`seq` 两边必须一致; `luwi`
   档在 `BALL_SILENT_PRESETS` 里 (正文不进框不念), 图走只读 `/lw-out` (`kind:'prefix'` + effect + **只认回环两头**);
-  判据 `tools/check-lw-out.mjs` (146 条) + `OutFileTest` / `BallOutboxTest`
+  判据 `tools/check-lw-out.mjs` (162 条) + `OutFileTest` / `BallOutboxTest`
+- **她的话还要在手机上弹一条通知** (2.8.1 #7): 第三个听众 `tool/OutNotify.kt`, 挂在 `DshHostService.onCreate`;
+  **应用不在前台才弹** (`getMyMemoryState` 的 importance `> IMPORTANCE_FOREGROUND`), 一句一条 (`lw-say` 渠道 /
+  id = 会话与 `seq` 合成 / 点它经 `EXTRA_OPEN_SESSION` 回到那一场), **冷启动只记水位不补历史**, 表情取名字不写占位符
+  `[…]`; 通知许可没给时只留一行 `LwNotify` 日志; 判据 `check-lw-out` 第十五节 + `OutNotifyTest`
 - **没写过 `lw_say` 的轮次, 宿主在 turn end 补一行进同一份 jsonl** (有行就不再推 `op=reply`), 球与门户逐字同源;
   球换场先 `clearReplies`; **`BoxView.replies` 的 `inputType=TYPE_NULL` 会把换行压成空格, 必须 `setSingleLine(false)`**;
   回复之间**单换行**合并 (`kept.joinToString("\n")`)
