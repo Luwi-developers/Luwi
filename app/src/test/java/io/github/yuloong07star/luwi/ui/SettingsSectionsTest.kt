@@ -19,10 +19,12 @@ class SettingsSectionsTest {
     /** D1 拍板的那六段: 省电那一段 + 「常用」一级分组下那五段 (导航那一段 2026-10-17 撤了) */
     private val common = listOf("power", "appearance", "channel", "ball", "wake", "speak")
 
-    /** 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成) */
+    /** 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成,
+     *  开发 2026-11-16 加在接口后面) */
     private val abilities = listOf(
         "notifications", "screenshot", "look", "lock",
         "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+        "dev",
     )
 
     @Test
@@ -89,9 +91,10 @@ class SettingsSectionsTest {
     @Test
     fun sectionKeysAreUnique() {
         assertEquals("段名不能重复", SettingsSectionKeys.size, SettingsSectionKeys.toSet().size)
-        // 2026-11-07: 「探索」与「定时对话」合成「活动」那一段之后是 20 段 (原来写死 21, 这条一直红着)
-        assertEquals("现在页面上是 20 段", 20, SettingsSectionKeys.size)
-        assertEquals("常用六段 + 能力十四段", SettingsSectionKeys.size, common.size + abilities.size)
+        // 2026-11-07: 「探索」与「定时对话」合成「活动」那一段之后是 20 段 (原来写死 21, 那条一直红着);
+        // 2026-11-16: 开发那一段加在接口后面, 于是 21 段
+        assertEquals("现在页面上是 21 段", 21, SettingsSectionKeys.size)
+        assertEquals("常用六段 + 能力十五段", SettingsSectionKeys.size, common.size + abilities.size)
     }
 
     /* ── 顶部索引条那张下标表 (2026-11-14) ───────────────────────────────── */
@@ -100,7 +103,7 @@ class SettingsSectionsTest {
      * 每一段都有一个下标, 且严格递增
      *
      * 公式错一格的样子很安静: 点「接口」跳到「权限」, 界面上一点异常都没有 —— 所以这里连末项的
-     * 绝对值也钉住 (页面上 23 项: 1 条提示 + 20 段 + 2 处组标题)
+     * 绝对值也钉住 (页面上 24 项: 1 条提示 + 21 段 + 2 处组标题)
      */
     @Test
     fun everySectionHasADistinctRow() {

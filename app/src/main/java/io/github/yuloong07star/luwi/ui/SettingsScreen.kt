@@ -271,12 +271,13 @@ internal val SettingsSectionsAlwaysOpenKeys = listOf(
 internal val SettingsSectionsAlwaysOpen: Set<String> = SettingsSectionsAlwaysOpenKeys.toSet()
 
 /**
- * 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern;
- * 活动那一段 2026-11-07 由「探索」与「定时对话」合成 —— 她的日程、她开口的时机都在同一个入口里)
+ * 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern;
+ * 活动那一段 2026-11-07 由「探索」与「定时对话」合成 —— 她的日程、她开口的时机都在同一个入口里;
+ * 开发那一段 2026-11-16 加在接口后面 —— 两件伴侣软件由用户自己下)
  */
 private val AbilitySectionKeys = listOf(
     "notifications", "screenshot", "look", "lock",
-    "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+    "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api", "dev",
 )
 
 /**
@@ -320,6 +321,7 @@ internal val SettingsSectionTitleRes: Map<String, Int> = linkedMapOf(
     "tavern" to R.string.settings_tavern_title,
     "permissions" to R.string.settings_section_permissions,
     "api" to R.string.settings_section_api,
+    "dev" to R.string.settings_section_dev,
 )
 
 /**
@@ -966,6 +968,19 @@ fun SettingsScreen() {
                 onToggle = toggleSection,
             ) {
                 ApiItems()
+            }
+
+            // 开发那一段 (2.8.1 #16, 主人 2026-11-16: "在 luwi 设置里加个开发板块, 上面加上可以让
+            // 用户自行下载'安卓开发工具'和'luwi 开发台'伴侣软件"): 两行下载入口, **不代装** —— 包下
+            // 下来交给系统安装器, 装不装由人在那一页点的那一下定 (见 [DevItems] 与 [DevTools])
+            settingsSection(
+                key = "dev",
+                title = R.string.settings_section_dev,
+                summary = R.string.settings_section_dev_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                DevItems()
             }
         }
 

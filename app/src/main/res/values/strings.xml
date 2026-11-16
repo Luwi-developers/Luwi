@@ -1226,6 +1226,20 @@
     <string name="doctor_group_copy">Copy group number %1$s</string>
     <string name="doctor_group_copied">Group number copied</string>
     <string name="boot_failed_report">Report this error</string>
+
+    <!-- 2.8.1 #16: 开发板块, 两件伴侣软件由用户自己下载 -->
+    <string name="settings_section_dev">Development</string>
+    <string name="settings_section_dev_summary">Companion apps for development, you download them</string>
+    <string name="settings_dev_note">Luwi only fetches the package and hands it to the system installer: whether it gets installed is the tap you make on that page</string>
+    <string name="settings_dev_android">Android dev tools</string>
+    <string name="settings_dev_android_summary">aapt2 / d8 / apksigner on the phone</string>
+    <string name="settings_dev_console">Luwi dev console</string>
+    <string name="settings_dev_console_summary">Sessions, plugins and logs on one screen</string>
+    <string name="settings_dev_absent">not installed - tap to download</string>
+    <string name="settings_dev_busy">downloading…</string>
+    <string name="settings_dev_installed">installed %1$s</string>
+    <string name="settings_dev_page">Open the download page</string>
+    <string name="settings_dev_page_summary">Pick a copy there if a direct link will not come down</string>
 </resources>
 
 
