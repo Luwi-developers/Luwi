@@ -646,6 +646,8 @@
     <string name="settings_sim_sticker_max_summary">单张最多 %1$d MB</string>
     <string name="settings_sim_sticker_count">最多攒几张</string>
     <string name="settings_sim_sticker_count_summary">目录里最多 %1$d 张</string>
+    <string name="settings_sim_sticker_every">多久贴一张</string>
+    <string name="settings_sim_sticker_every_summary">大约每 %1$d 条话贴一张 (0 = 不贴)</string>
     <string name="settings_sim_sticker_note">她自己攒的表情 (lw_sticker op=fetch) 与你在门户里加的都按这两条; 超过的单张, 或者多出来的那一张, 都会被拒</string>
     <string name="settings_explore_off">还没开</string>
     <string name="settings_explore_next">下一次 %1$s</string>

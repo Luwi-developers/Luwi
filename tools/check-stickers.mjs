@@ -29,6 +29,10 @@ const ball = await read('app/src/main/java/io/github/yuloong07star/luwi/overlay/
 const portal = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalBridge.kt')
 const page = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/SimSettingsScreen.kt')
 const persona = await read('presets/luwi/cordis.patch.yml')
+const proactive = await read('presets/proactive/cordis.patch.yml')
+const said = host.slice(host.indexOf("name: 'lw_say'"), host.indexOf("name: 'lw_persona'"))
+const stringsZh = await read('app/src/main/res/values-zh/strings.xml')
+const stringsEn = await read('app/src/main/res/values/strings.xml')
 
 let failures = 0
 let checks = 0
@@ -55,7 +59,11 @@ const section = host.slice(start, end)
 const api = new Function(
   `${section}\nreturn { stickerExtOf, stickerNameOf, STICKER_MAX_BYTES, STICKER_MAX_COUNT,`
     + ' STICKER_DIR_MAX_BYTES, STICKER_FETCH_TIMEOUT_MS, STICKER_FILE_OK, STICKER_NAME_OK,'
-    + ' STICKER_MB_RANGE, STICKER_COUNT_RANGE }',
+    + ' STICKER_MB_RANGE, STICKER_COUNT_RANGE,'
+    + ' stickerStemOf, stickerWordHit, stickerTagsOf, pickSticker, stickerTagMapOf,'
+    + ' stickerMoodLine, stickerCatalogText, STICKER_TAG_OK, STICKER_TAG_MAX,'
+    + ' stickerUntaggedOf, stickerUntaggedText,'
+    + ' STICKER_EVERY_N, STICKER_EVERY_RANGE, STICKER_PROMPT_LIMIT }',
 )()
 
 /** `lw_sticker` 那一条工具定义 (描述 + 参数表 + execute): 那几道闸都在这里面 */
@@ -198,21 +206,29 @@ check('回执说清"存下了, 但没贴出去"', [
 
 /* ── 五、工具面与那张闸表 ───────────────────────────────────────────────── */
 
-check('参数表有 url 与 name, op 三档', [
+check('参数表有 url / name / query / tags, op 五档', [
   /url: \{/.test(tool),
   /name: \{/.test(tool),
-  /enum: \['list', 'fetch', 'say'\]/.test(tool),
-], [true, true, true])
+  /query: \{/.test(tool),
+  /tags: \{/.test(tool),
+  /enum: \['list', 'pick', 'tag', 'fetch', 'say'\]/.test(tool),
+], [true, true, true, true, true])
 
-check('三张表里那只 B 表认识它 (list / say 是只读那一面, fetch 要 act 以上)', [
-  /'lw_sticker', new Set\(\['list', 'say'\]\)/.test(host),
-], [true])
+check('三张表里那只 B 表认识它 (list / say / pick 是只读那一面, fetch 与 tag 要 act 以上)', [
+  /'lw_sticker', new Set\(\['list', 'say', 'pick'\]\)/.test(host),
+  !/'lw_sticker', new Set\(\[[^\]]*'tag'/.test(host),
+], [true, true])
 
-check('persona 教的是"攒下来仍然用 lw_say 贴"', [
+check('persona 教的是"攒下来仍然用 lw_say 贴", 而且不必先列目录', [
   /lw_sticker op=fetch/.test(persona),
   /lw_say\(\{ sticker/.test(persona),
   /op=list/.test(persona),
-], [true, true, true])
+  /不必先列/.test(persona),
+  /lw_sticker op=tag/.test(persona),
+  /多久贴一张/.test(persona),
+  /\{\{lw_stickers\}\}/.test(persona),
+  /\{\{lw_stickers\}\}/.test(proactive),
+], [true, true, true, true, true, true, true, true])
 
 check('应用侧那张白名单与本条同一个集合 (png / gif / webp / jpg)', [
   api.STICKER_FILE_OK.source,
@@ -220,6 +236,157 @@ check('应用侧那张白名单与本条同一个集合 (png / gif / webp / jpg)
   api.STICKER_FILE_OK.test('a.JPEG'),
   api.STICKER_FILE_OK.test('a.txt'),
 ], ['\\.(png|gif|webp|jpg|jpeg)$', true, true, false])
+
+/* ── 六、按情绪词挑一张 (2026-11-15 主人: "当前发送表情包的概率太小") ────── */
+
+// 那一批补的是"她会贴"而不是"她能贴": 库有了、通道有了、渲染有了, 只差三样 —— 不必先列目录就知道
+// 有什么 (提示词变量), 说一句情绪词就能挑到一张 (pickSticker), 挑不到时当场回候选。这三样都不会崩,
+// 崩起来都是"静默不贴", 所以逐样钉
+
+const lib = [
+  { name: '开心.png', tags: ['开心', '赞'] },
+  { name: '无语.gif', tags: ['无语', '难绷'] },
+  { name: '晚安.webp', tags: ['晚安', '困'] },
+  { name: 'a.png', tags: [] },
+]
+
+check('挑一张: 准确文件名与去掉扩展名的名字都逐字命中', [
+  api.pickSticker(lib, '开心.png', () => 0)?.name,
+  api.pickSticker(lib, '开心', () => 0)?.name,
+  api.pickSticker(lib, '晚安.webp', () => 0)?.name,
+], ['开心.png', '开心.png', '晚安.webp'])
+
+check('挑一张: 标签命中, 名字里带着这个词也命中', [
+  api.pickSticker(lib, '赞', () => 0)?.name,
+  api.pickSticker(lib, '难绷', () => 0)?.name,
+  api.pickSticker(lib, '无', () => 0)?.name,
+], ['开心.png', '无语.gif', '无语.gif'])
+
+check('挑一张: 多张命中随机取一张 (rand 头取第一, 尾取最后)', [
+  api.pickSticker([{ name: 'a1.png', tags: ['开心'] }, { name: 'a2.png', tags: ['开心'] }], '开心', () => 0)?.name,
+  api.pickSticker([{ name: 'a1.png', tags: ['开心'] }, { name: 'a2.png', tags: ['开心'] }], '开心', () => 0.99)?.name,
+], ['a1.png', 'a2.png'])
+
+check('挑一张: 单字的拉丁名不许乱命中 (a 不命中 happy), 对不上就回 null', [
+  api.pickSticker(lib, 'happy', () => 0),
+  api.pickSticker(lib, '完全没有这个词', () => 0),
+  api.pickSticker([], '开心', () => 0),
+  api.pickSticker(lib, '  ', () => 0),
+], [null, null, null, null])
+
+check('挑一张: 叫"开心"的那张也找得到"不开心"这种反话', api.pickSticker(lib, '不开心', () => 0)?.name,
+  '开心.png')
+
+check('标签只收干净的那几条 (去重 / 切空白与标点 / 限 6 条)', [
+  api.stickerTagsOf(['开心', '开心', '赞']),
+  api.stickerTagsOf('开心 赞、无语'),
+  api.stickerTagsOf(['坏/的', 'has space', '', 'ok_1']),
+  api.stickerTagsOf(Array.from({ length: 9 }, (_, i) => `t${i}`)).length,
+], [['开心', '赞'], ['开心', '赞', '无语'], ['ok_1'], api.STICKER_TAG_MAX])
+
+check('标签账读坏了不废整本 (坏值当没有, 好名字留着)', [
+  api.stickerTagMapOf({ '开心.png': { tags: ['开心', '赞'], used: 2, lastUsedAt: 5 }, 'x.png': 'nope' }),
+  api.stickerTagMapOf(null),
+], [{ '开心.png': { tags: ['开心', '赞'], used: 2, lastUsedAt: 5 } }, {}])
+
+check('目录摘要给的是名字 + 标签 + 用过几次, 库再大也只列 30 张', [
+  api.stickerCatalogText([{ name: '开心.png', tags: ['开心'], used: 3 }, { name: '无语.gif', tags: [], used: 0 }]),
+  api.STICKER_PROMPT_LIMIT,
+  api.stickerCatalogText(Array.from({ length: 40 }, (_, i) => ({ name: `s${i}.png`, tags: [] })))
+    .split(' / ').length,
+], ['开心（开心·用过3次） / 无语', 30, 30])
+
+check('lw_say 收的是"文件名或词", 一律先过一遍库', [
+  /const stickerRaw = String\(args\?\.sticker \?\? ''\)\.trim\(\)/.test(said),
+  /await resolveStickerForSay\(stickerRaw\)/.test(said),
+  /const hit = pickSticker\(entries, query\)/.test(host),
+], [true, true, true])
+
+check('挑不到就把库里的候选带回去 (把静默失败换成教学反馈)', [
+  /nothing matched "\$\{query\}": the folder has/.test(host),
+  /she has no stickers yet/.test(host),
+], [true, true])
+
+check('说一句再补一张: 文字行写完照样追加一条表情行 (原来只有没给文字时才贴)', [
+  /if \(sticker !== '' && problems\.length === 0\) \{/.test(said),
+  /kind: 'sticker', sticker, text: '\[…\]'/.test(said),
+  /including the sticker \$\{sticker\}/.test(said),
+  /void markStickerUsed\(/.test(said),
+], [true, true, true, true])
+
+check('贴出去记一次账, 标签账落在同目录的 tags.json (它不占张数也不当图)', [
+  /async function markStickerUsed\(folder, name\)/.test(host),
+  /async function readStickerTags\(folder\)/.test(host),
+  /async function writeStickerTags\(folder, map\)/.test(host),
+  /const STICKER_TAG_FILE = 'tags\.json'/.test(host),
+  api.STICKER_FILE_OK.test('tags.json'),
+], [true, true, true, true, false])
+
+check('提示词变量 lw_stickers 注册在 lw_persona 旁边, 只喂会说话的那两档', [
+  /scope\.systemPrompt\.variable\('lw_stickers', stickersFor\)/.test(host),
+  /function stickersFor\(context\)/.test(host),
+  /preset !== 'luwi' && preset !== 'proactive'/.test(host),
+  /\{\{lw_stickers\}\}/.test(persona),
+  /\{\{lw_stickers\}\}/.test(proactive),
+], [true, true, true, true, true])
+
+check('密度那一格: 0 = 不贴, 缺省每 4 条一张, 范围 0..20, 设置页与 sim.json 都认', [
+  /不要贴表情/.test(api.stickerMoodLine(0)),
+  api.stickerMoodLine(4).includes('每 4 条'),
+  api.stickerMoodLine(9).includes('每 9 条'),
+  api.STICKER_EVERY_N,
+  api.STICKER_EVERY_RANGE,
+  /val STICKER_EVERY_RANGE = 0\.\.20/.test(simSetting),
+  /const val STICKER_EVERY_N = 4/.test(simSetting),
+  /everyN = sticker\.int\("everyN", Default\.STICKER_EVERY_N, STICKER_EVERY_RANGE\)/.test(simSetting),
+  /put\("everyN", plan\.sticker\.everyN\)/.test(simSetting),
+], [true, true, true, 4, [0, 20], true, true, true, true])
+
+check('设置页多一行「多久贴一张」, 两种语言的键都在', [
+  /settings_sim_sticker_every\b/.test(page),
+  /settings_sim_sticker_every_summary,/.test(page),
+  /range = SimSetting\.STICKER_EVERY_RANGE/.test(page),
+  /plan\.sticker\.copy\(everyN = it\)/.test(page),
+  /settings_sim_sticker_every_summary/.test(stringsZh),
+  /settings_sim_sticker_every_summary/.test(stringsEn),
+], [true, true, true, true, true, true])
+
+/* ── 七、没标签的图 (2026-11-16 主人: "使用表情包时列出没有标签的图, 有就顺便标上") ────────── */
+
+// 一张没有标签的图对"情绪词检索"等于不存在 (只认文件名, 而她的名字常常是流水号), 所以
+// 三处都要点名: 提示词摘要 / op=list / 贴出去的回执 —— 最后那条是最便宜的"顺手标"落点
+
+check('未标名单: 只挑 tags 空的, 压成一行, 超过 6 张就 +N, 全标了回空串', [
+  api.stickerUntaggedText([{ name: 'a.jpg', tags: [] }, { name: 'b.png', tags: ['开心'] }]),
+  api.stickerUntaggedText([{ name: 'a.jpg', tags: ['开心'] }, { name: 'b.png', tags: ['赞'] }]),
+  api.stickerUntaggedText([]),
+  api.stickerUntaggedText(Array.from({ length: 9 }, (_, i) => ({ name: `s${i}.png`, tags: [] }))),
+  api.stickerUntaggedOf([{ name: 'a.jpg', tags: [] }, { name: 'b.png', tags: ['开心'] }]).length,
+  api.stickerUntaggedText([{ name: '1.jpg', tags: [] }], 12),
+], ['a.jpg', '', '', 's0.png / s1.png / s2.png / s3.png / s4.png / s5.png 等 9 张', 1, '1.jpg'])
+
+check('三处都点名"还没标签": 提示词摘要 / op=list / 贴出去的回执', [
+  /【还没标签】/.test(host),
+  /only their file names find them/.test(tool),
+  /no tags on it yet: 1-3 words with lw_sticker op=tag/.test(said),
+], [true, true, true])
+
+check('回执里那句只在"这一张没标签"时出现 (标过的不再唠叨)', [
+  /\(stickerHit\.tags \?\? \[\]\)\.length === 0/.test(said),
+  /stickerNote/.test(said),
+], [true, true])
+
+check('persona 教了"顺手标一张" (luwi 与 proactive 都要)', [
+  /顺手 `lw_sticker op=tag`/.test(persona),
+  /还没.?有标签/.test(persona),
+  /lw_sticker op=tag/.test(proactive),
+  /还没.?有标签/.test(proactive),
+], [true, true, true, true])
+
+check('op=tag 的说明写清"没标签只认文件名" (工具描述里)', [
+  /a sticker with no tags can only be found by its/.test(tool),
+  /exact file name\*\*/.test(tool),
+], [true, true])
 
 console.log(`\n${checks - failures} / ${checks} 条通过`)
 if (failures > 0) process.exit(1)

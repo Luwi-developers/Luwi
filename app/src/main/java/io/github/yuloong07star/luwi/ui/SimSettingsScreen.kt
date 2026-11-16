@@ -552,6 +552,20 @@ fun SimSettingsDialog(
                             onChange = { plan = plan.copy(sticker = plan.sticker.copy(maxCount = it)) },
                             onCommit = { commit() },
                         )
+                        // 多久贴一张 (2026-11-15 主人: "当前发送表情包的概率太小"): 0 = 不贴;
+                        // 宿主每一步把它换成提示词里的一句密度, 所以这一格拨完下一句就生效
+                        NumberRow(
+                            title = stringResource(R.string.settings_sim_sticker_every),
+                            summary = stringResource(
+                                R.string.settings_sim_sticker_every_summary,
+                                plan.sticker.everyN,
+                            ),
+                            value = plan.sticker.everyN,
+                            range = SimSetting.STICKER_EVERY_RANGE,
+                            unit = stringResource(R.string.settings_sim_unit_messages),
+                            onChange = { plan = plan.copy(sticker = plan.sticker.copy(everyN = it)) },
+                            onCommit = { commit() },
+                        )
                         Note(stringResource(R.string.settings_sim_sticker_note))
                     }
                 }

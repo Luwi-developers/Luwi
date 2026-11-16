@@ -63,6 +63,25 @@ class SimSettingTest {
         assertEquals(20..500, SimSetting.STICKER_COUNT_RANGE)
     }
 
+    /** 2026-11-15 (主人: "当前发送表情包的概率太小"): 多久贴一张, 0 = 不贴 */
+    @Test
+    fun `多久贴一张缺省 4, 范围 0到20, 越界与坏值都夹回`() {
+        assertEquals(0..20, SimSetting.STICKER_EVERY_RANGE)
+        assertEquals(4, SimSetting.planFrom(root("""{"v":1}""")).sticker.everyN)
+        assertEquals(0, SimSetting.planFrom(root("""{"sticker":{"everyN":0}}""")).sticker.everyN)
+        assertEquals(20, SimSetting.planFrom(root("""{"sticker":{"everyN":99}}""")).sticker.everyN)
+        assertEquals(0, SimSetting.planFrom(root("""{"sticker":{"everyN":-3}}""")).sticker.everyN)
+        assertEquals(4, SimSetting.planFrom(root("""{"sticker":{"everyN":"很多"}}""")).sticker.everyN)
+    }
+
+    @Test
+    fun `多久贴一张会落盘 (toJson 里有 everyN 这一格)`() {
+        val plan = SimSetting.Plan(sticker = SimSetting.Sticker(everyN = 7))
+        val sticker = SimSetting.toJson(plan)["sticker"] as JsonObject
+        assertEquals("7", sticker["everyN"].toString())
+        assertEquals("2", sticker["maxMb"].toString())
+    }
+
     @Test
     fun `带全 14 个群味老键的 sim 文件也读得回来 (不认识的就当没有)`() {
         val plan = SimSetting.planFrom(

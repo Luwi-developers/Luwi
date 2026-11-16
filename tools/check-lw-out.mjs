@@ -471,8 +471,12 @@ check('发出去那一句带附件段 (与门户逐字相同), 桌面对话那�
 check('摘掉/清空附件在框那一侧有实现', /fun addAttachment\(pick: LwIn\.Pick\)/.test(boxView)
   && /fun clearAttachments\(\)/.test(boxView) && /fun removeAttachment\(pick: LwIn\.Pick\)/.test(boxView))
 check('门户那张图也有长宽上限, 点一下开预览窗 (2026-11-10 各收一半: 43% / 30vh)',
+  // 2026-11-15: 这一拍之前长久是红的 —— 长按菜单进来之后 onclick 多了一句 `consumeHeld` 守卫,
+  // 而那一条钉的是旧的逐字形状。行为没变 (点一下仍然 openPreview, 长按走 openFileMenu),
+  // 所以这里改成钉"守卫之后仍然 openPreview"
   /\.lwp-image\{max-width:43%/.test(client) && /max-height:30vh/.test(client)
-    && /wrap\.onclick = function \(\) \{ openPreview/.test(client))
+    && /wrap\.onclick = function \(\) \{\s*if \(consumeHeld\(wrap\)\) return\s*openPreview/.test(client)
+    && /attachLongPress\(wrap, function \(at\) \{\s*openFileMenu/.test(client))
 check('球那侧长宽各一半 (宽 50% 内容宽 / 高 18% 屏高)', /const val MAX_WIDTH_PERCENT = 50/.test(media)
   && /const val MAX_HEIGHT_PERCENT = 18/.test(media))
 check('门户不再给每一张图垫 72px 幻影最小高', !/\.lwp-image\{max-width:86%;min-height:72px/.test(client))

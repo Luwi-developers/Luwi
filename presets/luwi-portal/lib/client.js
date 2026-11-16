@@ -801,7 +801,11 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary,#6b7280)}',
       // 表情: 门户也画那张小图 (走 /lw-out/stickers), 取不到就一行灰字
       // **120 的方框写死**: 图在解码前后占的是同一块地, 下面那条不会被顶上来 (2026-11-09 的抖动)
-      '.lwp-sticker{max-width:86%;padding:6px 10px;border-radius:var(--dsw-radius-lg,16px);',
+      // **气泡跟着图收** (2026-11-16): 只写 max-width 时它是一块 block, 在那一列里被 stretch 到 86%,
+      // 右边一大片空灰 —— 真机截图量到气泡 911px / 图 323px。三个值里任一生效就够: inline-flex 管
+      // "父不是 flex", align-self 管"父是 flex", width:fit-content 兜底 (与 `.lwp-file` 同一个写法)
+      '.lwp-sticker{display:inline-flex;align-self:flex-start;width:fit-content;max-width:86%;',
+      'padding:6px 10px;border-radius:var(--dsw-radius-lg,16px);',
       'contain:layout paint;',
       'font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary,#6b7280);background:rgba(15,23,42,.045)}',
       '.lwp-sticker img{display:block;width:120px;height:120px;object-fit:contain;border-radius:10px}',

@@ -321,15 +321,18 @@ check('B 表的只读那一面三档都放 (lw_files read / lw_system get / lw_c
 ]), [['allow', 'allow', 'allow'], ['allow', 'allow', 'allow'], ['allow', 'allow', 'allow']])
 
 // 2026-11-10 (方案 F): `lw_sticker` 原来不在表里 (= 三档都放), 而它的 `op=fetch` 会外发请求并落盘 ——
-// 列素材与贴一张都不动设备, 那一面算写动
-check('B 表里 lw_sticker: list / say 三档都放, fetch 只在 act / full', await acrossTiers([
+// 列素材 / 贴一张 / 按词挑一张都不动设备, 那一面算写动; 2026-11-15 加了 pick (只查) 与 tag (写
+// `lw/stickers/tags.json`) —— 后者是写动, 与 fetch 同一档
+check('B 表里 lw_sticker: list / say / pick 三档都放, fetch 与 tag 只在 act / full', await acrossTiers([
   ['lw_sticker', { op: 'list' }],
   ['lw_sticker', { op: 'say', id: '开心.png' }],
+  ['lw_sticker', { op: 'pick', query: '开心' }],
   ['lw_sticker', { op: 'fetch', url: 'https://example.com/a.png' }],
+  ['lw_sticker', { op: 'tag', id: '开心.png', tags: ['开心'] }],
 ]), [
-  ['allow', 'allow', 'deny'],
-  ['allow', 'allow', 'allow'],
-  ['allow', 'allow', 'allow'],
+  ['allow', 'allow', 'allow', 'deny', 'deny'],
+  ['allow', 'allow', 'allow', 'allow', 'allow'],
+  ['allow', 'allow', 'allow', 'allow', 'allow'],
 ])
 
 // 2026-11-10 (人格卡运行时读): 读三档都放; 写是改她自己的设定, 归写动 (remind 拒)
