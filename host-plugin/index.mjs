@@ -17,7 +17,7 @@
 
 import { connect } from 'node:net'
 
-import { existsSync, mkdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -192,6 +192,17 @@ export function apply(ctx) {
     })
   } catch (error) {
     warn(ctx, `the persona card variable was not registered: ${error?.message ?? error}`)
+  }
+
+  // 她的表情目录 (2026-11-15): 预设 prefix 里引用 `{{lw_stickers}}` —— 名字 + 标签 + 用过几次, 外加
+  // 设置页那一格给的密度。为什么要进提示词: 她原来得先调 `lw_sticker op=list` 才知道自己有什么,
+  // 于是"贴表情"的第一步就卡住了 (主人 2026-11-15: 概率太小)
+  try {
+    ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.variable('lw_stickers', stickersFor)
+    })
+  } catch (error) {
+    warn(ctx, `the sticker list variable was not registered: ${error?.message ?? error}`)
   }
 
   // 「看余额」那一档 (2026-10-16): 账号缝里那个数只有宿主拿得到, 落成文件应用才看得见 ——
@@ -1037,6 +1048,61 @@ function personaFor(context) {
   } catch (error) {
     console.warn(`luwi-channel: the persona card could not be read: ${error?.message ?? error}`)
     return PERSONA_FALLBACK
+  }
+}
+
+/**
+ * 她库里有什么 (提示词变量 `{{lw_stickers}}`, 2026-11-15)
+ *
+ * 与 [personaFor] 同一个机制: 每一步组提示词都求值一次, 于是主人往目录里丢一张、她自己 `op=fetch`
+ * 攒一张, 下一次请求就看得见 —— 原来她得先调一次 `lw_sticker op=list` 才知道自己有什么, 这一步的
+ * 摩擦比任何一句"多贴点表情"都更劝退
+ *
+ * 只给会说话的那两档 (luwi / proactive): 探索 / 酒馆里这一句只是噪声
+ *
+ * 3 s 缓存管目录那一半 ("有几张"), 密度那一句每次现算 —— 主人拨完设置就该在下一次请求里生效
+ */
+function stickersFor(context) {
+  try {
+    const session = context?.agent?.session
+    const preset = session?.meta?.agentPreset ?? session?.agentPreset
+    if (typeof preset === 'string' && preset !== '' && preset !== 'luwi' && preset !== 'proactive') return ''
+    const home = process.env.DSH_HOME
+    if (!home) return ''
+    const folder = join(home, 'lw', 'stickers')
+    const now = Date.now()
+    if (stickerPromptCache.key !== folder || now - stickerPromptCache.at >= 3000) {
+      const names = (() => {
+        try {
+          return readdirSync(folder)
+        } catch {
+          return []
+        }
+      })().filter((one) => STICKER_FILE_OK.test(one))
+      const tags = readStickerTagsSync(folder)
+      const entries = names.map((name) => ({
+        name,
+        tags: tags[name]?.tags ?? [],
+        used: tags[name]?.used ?? 0,
+      }))
+      stickerPromptCache.key = folder
+      stickerPromptCache.at = now
+      const untagged = stickerUntaggedText(entries)
+      stickerPromptCache.text = entries.length === 0
+        ? '【她的表情】文件夹 lw/stickers 还是空的: 贴不了。想贴就用 lw_sticker op=fetch 给一个 https'
+          + ' 图链接攒一张, 之后 lw_say {sticker:"名字"} 贴出去'
+        : `【她的表情】${entries.length} 张: ${stickerCatalogText(entries)}。贴的时候不用先列清单, 直接`
+          + ' lw_say {sticker:"开心"} 给一句情绪或场景词, 宿主按标签和名字挑一张 (同一个词对得上好几张'
+          + '就随机一张), 也可以给准确文件名'
+          + (untagged === '' ? '' : `\n【还没标签】${stickerUntaggedOf(entries).length} 张: ${untagged} ——`
+            + ' 只认得它们的文件名。贴中了一张没标签的, 说完那句之后顺手发一次'
+            + ' lw_sticker op=tag (id + 1~3 个词, 按你当时那句话的口气), 一次一张就够; 标过之后'
+            + ' 「无语」「赞」这类词才找得到它')
+    }
+    return `${stickerPromptCache.text}\n【这一场的表情密度】${stickerMoodLine(readLwStickerEveryNSync(home))}`
+  } catch (error) {
+    console.warn(`luwi-channel: the sticker list could not be read: ${error?.message ?? error}`)
+    return ''
   }
 }
 
@@ -4817,8 +4883,16 @@ const TOOLS = [
     name: 'lw_sticker',
     description:
       'The stickers she has (her own little pictures): op=list shows the files in $DSH_HOME/lw/stickers '
-      + '(png / gif / webp, each one under the size limit set in 设置 → 活动 → 更多设置 → 表情) - use it '
-      + 'to find a file name. op=fetch saves ONE picture from the web into that same folder, which is '
+      + '(png / gif / webp, each one under the size limit set in 设置 → 活动 → 更多设置 → 表情), with the '
+      + 'tags she gave them and how many times each one went out. **Listing first is not required**: lw_say '
+      + 'takes a mood or scene word (开心 / 无语 / 晚安) and the host picks a file whose tags or name match '
+      + 'it - at random when several match, so the same word does not always put up the same picture. '
+      + 'op=pick is that same lookup without saying anything (use it to check what a word would hit). '
+      + 'op=tag records 1-6 short words on one sticker, so later moods find it - do it when she first '
+      + 'notices what a picture means, not in bulk; **a sticker with no tags can only be found by its '
+      + 'exact file name**, so when one that just went out had no tags, give it 1-3 words right after '
+      + 'saying that line (op=list also lists the ones still untagged). op=fetch saves ONE picture from '
+      + 'the web into that same folder, which is '
       + 'how she builds up her own set: give url (https only, at most that same size limit) and '
       + 'optionally name (letters, digits, _ or Chinese characters, at most 24, no dots or slashes); '
       + 'the type follows the bytes, not the link, and the name is overwritten if it is already there. '
@@ -4831,13 +4905,23 @@ const TOOLS = [
       op: {
         type: 'string',
         required: true,
-        description: 'list, fetch (save one picture from the web) or say for the host\'s low-level'
-          + ' ball channel',
-        enum: ['list', 'fetch', 'say'],
+        description: 'list, pick (what a mood word would hit), tag (record moods on one file),'
+          + ' fetch (save one picture from the web) or say for the host\'s low-level ball channel',
+        enum: ['list', 'pick', 'tag', 'fetch', 'say'],
       },
       id: {
         type: 'string',
-        description: 'For op=say: the sticker file name, exactly as op=list printed it',
+        description: 'For op=say and op=tag: the sticker file name, exactly as op=list printed it',
+      },
+      query: {
+        type: 'string',
+        description: 'For op=pick: a mood or scene word (开心 / 无语 / 晚安), or an exact file name',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For op=tag: 1-6 short words that should find this picture later (开心 / 赞 / 无语);'
+          + ' they replace whatever was there before',
       },
       url: {
         type: 'string',
@@ -4860,12 +4944,55 @@ const TOOLS = [
       if (!home) throw new Error('this profile has no DSH_HOME, so there are no stickers to read')
       const folder = join(home, 'lw', 'stickers')
       if (op === 'list') {
-        const names = await readdir(folder).then(
-          (list) => list.filter((one) => STICKER_FILE_OK.test(one)).sort(),
-          () => [],
-        )
-        if (names.length === 0) return `no stickers yet: put png / gif / webp files into ${folder}`
-        return `${names.length} sticker(s) in ${folder}:\n${names.map((one) => `- ${one}`).join('\n')}`
+        const entries = await stickerEntriesOf(folder)
+        if (entries.length === 0) {
+          return `no stickers yet: put png / gif / webp files into ${folder},`
+            + ' or use op=fetch with an https link to save one'
+        }
+        const lines = entries.map((one) => {
+          const bits = []
+          if (one.tags.length > 0) bits.push(`tags: ${one.tags.join('/')}`)
+          if (one.used > 0) bits.push(`went out ${one.used}x`)
+          return `- ${one.name}${bits.length > 0 ? ` (${bits.join('; ')})` : ''}`
+        })
+        const untagged = stickerUntaggedText(entries, 12)
+        return `${entries.length} sticker(s) in ${folder}:\n${lines.join('\n')}\n`
+          + 'put one up with lw_say - either the file name, or just a mood word'
+          + (untagged === ''
+            ? ''
+            : `\nno tags yet (only their file names find them): ${untagged}`
+              + ' - give one 1-3 words with op=tag')
+      }
+      if (op === 'pick') {
+        const query = String(args?.query ?? args?.id ?? '').trim()
+        if (query === '') throw new Error('op=pick needs query: a mood or scene word, e.g. 开心')
+        const entries = await stickerEntriesOf(folder)
+        if (entries.length === 0) throw new Error(`no stickers yet: ${folder} is empty`)
+        const hit = pickSticker(entries, query)
+        if (hit === null) {
+          return `nothing matches "${query}"; the folder has: ${stickerCatalogText(entries)}`
+        }
+        return `"${query}" would put up ${hit.name}`
+          + `${hit.tags.length > 0 ? ` (tags: ${hit.tags.join('/')})` : ''}`
+      }
+      if (op === 'tag') {
+        const id = String(args?.id ?? '').trim()
+        if (id === '') throw new Error('op=tag needs id: the sticker file name')
+        const entries = await stickerEntriesOf(folder)
+        const target = entries.find((one) => one.name.toLowerCase() === id.toLowerCase()
+          || stickerStemOf(one.name) === stickerStemOf(id))
+        if (!target) throw new Error(`no sticker called ${id}; op=list shows the names`)
+        const tags = stickerTagsOf(args?.tags ?? args?.query ?? '')
+        if (tags.length === 0) {
+          throw new Error('op=tag needs tags: 1-6 short words, e.g. ["开心","赞"]')
+        }
+        const map = await readStickerTags(folder)
+        const before = map[target.name] ?? { used: 0, lastUsedAt: 0 }
+        map[target.name] = { tags, used: before.used, lastUsedAt: before.lastUsedAt }
+        if (!(await writeStickerTags(folder, map))) {
+          throw new Error(`the tag file did not land in ${folder} (the write was not read back)`)
+        }
+        return `tagged ${target.name}: ${tags.join('/')} - lw_say {sticker:"${tags[0]}"} finds it from now on`
       }
       if (op === 'fetch') {
         const url = String(args?.url ?? '').trim()
@@ -4943,7 +5070,7 @@ const TOOLS = [
         reportSticker(id)
         return `the sticker ${id} is on its way to the ball (it shows above the reply, one at a time)`
       }
-      throw new Error(`op has to be list, fetch or say, not "${op}"`)
+      throw new Error(`op has to be list, pick, tag, fetch or say, not "${op}"`)
     },
   }),
   defineTool({
@@ -4960,8 +5087,11 @@ const TOOLS = [
       + 'webp / gif on this phone (at most 20 MB). It is copied into her own folder, so tidying the '
       + 'album later does not take it away. One picture per call, sentence plus picture, and never a '
       + 'picture where a sentence would do. '
-      + 'sticker puts one of her own little pictures instead (a file name inside '
-      + '$DSH_HOME/lw/stickers, list them with lw_sticker op=list); do not then explain the picture. '
+      + 'sticker puts one of her own little pictures instead: either a file name inside '
+      + '$DSH_HOME/lw/stickers, or just a mood or scene word (开心 / 无语 / 晚安) - the host picks a file '
+      + 'whose tags or name match, at random when several do, and says what it picked. Text and a sticker '
+      + 'in the same call is normal (a line, then the picture on its own bubble); do not then explain the '
+      + 'picture either. Nothing matched the word means the call fails and lists what she has. '
       + 'file hands over one document instead: give the absolute path of a pdf / txt / md / json / csv / '
       + 'log / doc(x) / xls(x) / ppt(x) / zip on this phone (at most 20 MB). It is copied into her own '
       + 'folder and drawn as a blue file name the user can tap to preview - so do not paste the contents '
@@ -4990,9 +5120,11 @@ const TOOLS = [
       },
       sticker: {
         type: 'string',
-        description: 'For a sticker: the file name inside $DSH_HOME/lw/stickers, exactly as '
-          + 'lw_sticker op=list printed it (no path, no ..). It is only REFERENCED, not copied - '
-          + 'swapping that file swaps the sticker',
+        description: 'For a sticker: a mood or scene word (开心 / 无语 / 晚安) or the exact file name '
+          + 'inside $DSH_HOME/lw/stickers - a word is matched against each sticker\'s tags and name, and '
+          + 'one of the matches is picked at random. It is only REFERENCED, not copied - swapping that '
+          + 'file swaps the sticker. It goes out as its own bubble, so text + sticker in one call is the '
+          + 'normal way to say something and then put a face on it',
       },
       file: {
         type: 'string',
@@ -5027,10 +5159,14 @@ const TOOLS = [
       // 那会让球 1 条、门户 N 条, 同一条话两种形状)
       if (send.burstEnabled !== true && texts.length > 1) texts = [texts.join('\n')]
       if (texts.length > 6) texts = texts.slice(0, 6)
-      const sticker = String(args?.sticker ?? '').trim()
-      if (sticker !== '' && (sticker.includes('/') || sticker.includes('\\') || sticker.includes('..'))) {
-        throw new Error(`that is not a sticker file name: ${sticker}`)
+      // 表情收两种说法 (2026-11-15): 准确文件名, 或者一句情绪 / 场景词; 都对不上就当场退回候选
+      const stickerRaw = String(args?.sticker ?? '').trim()
+      if (stickerRaw !== ''
+        && (stickerRaw.includes('/') || stickerRaw.includes('\\') || stickerRaw.includes('..'))) {
+        throw new Error(`that is not a sticker name or mood word: ${stickerRaw}`)
       }
+      const stickerHit = stickerRaw === '' ? null : await resolveStickerForSay(stickerRaw)
+      const sticker = stickerHit === null ? '' : stickerHit.name
       const image = String(args?.image ?? '').trim()
       const file = String(args?.file ?? '').trim()
       if (texts.length === 0 && sticker === '' && image === '' && file === '') {
@@ -5069,7 +5205,18 @@ const TOOLS = [
           break
         }
       }
-      // 只有图 / 只有文件 / 只有表情: 文字那一圈是空的, 就落一行媒体
+      // 表情单独一个泡 (2026-11-15): "说一句 + 补一张"是真人常见的写法, 原来**只有**没给文字的那一趟
+      // 才贴, 于是说了话又想补个表情时这一张被静默丢掉 —— 她以为贴了, 屏上没有
+      if (sticker !== '' && problems.length === 0) {
+        try {
+          written.push(await lwOutAppend(session, { kind: 'sticker', sticker, text: '[…]' }))
+          const home = process.env.DSH_HOME
+          if (home) void markStickerUsed(join(home, 'lw', 'stickers'), sticker).catch(() => {})
+        } catch (error) {
+          problems.push(error?.message ?? String(error))
+        }
+      }
+      // 只有图 / 只有文件: 文字那一圈是空的, 就落一行媒体
       if (written.length === 0 && problems.length === 0) {
         try {
           if (images.length > 0) {
@@ -5082,8 +5229,6 @@ const TOOLS = [
               const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
               return art === null ? {} : art
             }))
-          } else {
-            written.push(await lwOutAppend(session, { kind: 'sticker', sticker, text: '[…]' }))
           }
         } catch (error) {
           problems.push(error?.message ?? String(error))
@@ -5112,7 +5257,17 @@ const TOOLS = [
         ? `#${written[0].seq}`
         : `#${written[0].seq}-#${written[written.length - 1].seq}`
       const gaps = written.map((row) => `${row.gapMs}ms`).join(' / ')
+      // 回执里点名"这一张还没标签" (2026-11-16 主人: 没标签的顺手标上): 她此刻正好知道这张是怎么用的,
+      // 也正好在说话 — 这一句是"标一下"最便宜的落点, 不必另开一次检查
+      const stickerNote = sticker === ''
+        ? ''
+        : `, including the sticker ${sticker}`
+          + ((stickerHit.tags ?? []).length === 0
+            ? ` (no tags on it yet: 1-3 words with lw_sticker op=tag id "${sticker}" would let`
+              + ' 「无语」「赞」这类词 find it next time)'
+            : '')
       const head = `said ${written.length} line(s) ${range} into the conversation (gapMs ${gaps})`
+        + stickerNote
         + `${spoken === '' ? '' : `, ${spoken}`}`
       return problems.length === 0 ? head : `${head}\nproblem: ${problems.join('; ')}`
     },
@@ -7665,6 +7820,22 @@ async function readLwStickerLimits() {
   return {
     maxBytes: mb * 1024 * 1024,
     maxCount: clamp(raw?.maxCount, STICKER_COUNT_RANGE, STICKER_MAX_COUNT),
+    // 多久贴一张 (2026-11-15): 0 = 不贴; 提示词那一侧按它换一句密度的话
+    everyN: clamp(raw?.everyN, STICKER_EVERY_RANGE, STICKER_EVERY_N),
+  }
+}
+
+/** 同上一格, 只给同步的提示词变量用 (读坏了按缺省: 贴表情的密度不值得为它掉一行提示词) */
+function readLwStickerEveryNSync(home) {
+  try {
+    const text = readFileSync(join(home, 'lw', 'sim.json'), 'utf8')
+    const root = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+    const raw = root?.sticker !== null && typeof root?.sticker === 'object' ? root.sticker : {}
+    const number = Number(raw?.everyN)
+    if (!Number.isFinite(number)) return STICKER_EVERY_N
+    return Math.min(STICKER_EVERY_RANGE[1], Math.max(STICKER_EVERY_RANGE[0], Math.round(number)))
+  } catch {
+    return STICKER_EVERY_N
   }
 }
 
@@ -8947,6 +9118,31 @@ const STICKER_FILE_OK = /\.(png|gif|webp|jpg|jpeg)$/i
 const STICKER_NAME_OK = /^[\w\u4e00-\u9fa5-]{1,24}$/u
 
 /**
+ * 表情的标签与使用账落这一个文件 (2026-11-15)
+ *
+ * 它躺在同一个目录里, 但 `STICKER_FILE_OK` 只认图, 所以既不会被当成一张表情, 也不占张数
+ */
+const STICKER_TAG_FILE = 'tags.json'
+
+/** 一张表情最多记几条标签 (再多就没人读了) */
+const STICKER_TAG_MAX = 6
+
+/** 标签本身认的字符: 比名字宽一点 (允许更短), 但同样不许空白与斜杠 */
+const STICKER_TAG_OK = /^[\w\u4e00-\u9fa5-]{1,12}$/u
+
+/** 提示词摘要里最多列几张 (库再大也不能把每一步的提示词撑爆) */
+const STICKER_PROMPT_LIMIT = 30
+
+/** `lw_stickers` 那个提示词变量的缓存 (组提示词每一步都求值, 而目录不是每步都变) */
+const stickerPromptCache = { at: 0, key: '', text: '' }
+
+/** 贴表情的密度缺省: 大约每 4 条话一张 (与 `SimSetting.Default.STICKER_EVERY_N` 同一个数) */
+const STICKER_EVERY_N = 4
+
+/** 那一格的范围: 0 = 不贴 (与 `SimSetting.STICKER_EVERY_RANGE` 逐字相同) */
+const STICKER_EVERY_RANGE = [0, 20]
+
+/**
  * 一张图的真身是什么 (按**魔数**判, 不信 URL 后缀)
  *
  * 后缀是调用方随手写的, 而解码器只认字节 —— 一张 `.png` 名义的 jpeg 落进目录之后, `BallStickers`
@@ -8989,6 +9185,212 @@ function stickerNameOf(rawName, url) {
   const dot = raw.lastIndexOf('.')
   const stem = (dot > 0 ? raw.slice(0, dot) : raw).trim()
   return STICKER_NAME_OK.test(stem) ? stem : ''
+}
+
+/** 文件名去掉扩展名、压小写 —— 检索与打标签都按它比 */
+function stickerStemOf(name) {
+  const raw = String(name ?? '').trim()
+  const dot = raw.lastIndexOf('.')
+  return (dot > 0 ? raw.slice(0, dot) : raw).toLowerCase()
+}
+
+/**
+ * 双向包含: 短的这一头至少两个字 (2026-11-15)
+ *
+ * 不加这条, 名字叫 `a` 的那张就会命中任何带 a 的词 ("happy"), 而一张叫 `开心` 的图反而找不到
+ * `不开心` —— 两个方向都是错的, 只是错法不同
+ */
+function stickerWordHit(hay, needle) {
+  const a = String(hay ?? '').trim().toLowerCase()
+  const b = String(needle ?? '').trim().toLowerCase()
+  if (a === '' || b === '') return false
+  if (a.includes(b)) return true
+  return b.includes(a) && a.length >= 2
+}
+
+/**
+ * 调用方给的标签 (数组或一句串) → 干净的几条 (纯函数)
+ *
+ * 切分按空格 / 逗号 / 顿号 / 竖线: 她写 `tags: ["开心","赞"]` 与写 `"开心 赞"` 都收
+ */
+function stickerTagsOf(raw) {
+  const list = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,,;;、，；|/]+/u)
+  const out = []
+  for (const one of list) {
+    const tag = String(one ?? '').trim()
+    if (tag === '' || !STICKER_TAG_OK.test(tag)) continue
+    if (!out.includes(tag)) out.push(tag)
+    if (out.length >= STICKER_TAG_MAX) break
+  }
+  return out
+}
+
+/**
+ * 从一库里挑一张 (纯函数): 名字逐字相同 → 标签命中 → 名字里带着这个词
+ *
+ * 多张命中**随机一张**: 同一句情绪词对得上好几张是常态, 每次都取第一张等于库里只有一张 ——
+ * 而她老贴同一张比不贴更像假人 (这是 sticker-mcp 的 send_sticker 那条路教的)
+ *
+ * @param entries `[{ name, tags }]`
+ * @param query 情绪 / 场景词, 或者准确文件名
+ * @param rand 注入随机源, 判据里给固定值
+ * @returns 命中的那一条; 一张都对不上回 null
+ */
+function pickSticker(entries, query, rand = Math.random) {
+  const q = String(query ?? '').trim().toLowerCase()
+  if (q === '') return null
+  const list = (Array.isArray(entries) ? entries : []).filter((one) => one && one.name)
+  if (list.length === 0) return null
+  const choose = (hits) => hits[Math.min(hits.length - 1, Math.floor(Math.max(0, rand()) * hits.length))]
+  const exact = list.filter((one) => String(one.name).toLowerCase() === q || stickerStemOf(one.name) === q)
+  if (exact.length > 0) return choose(exact)
+  const byTag = list.filter((one) => (Array.isArray(one.tags) ? one.tags : [])
+    .some((tag) => stickerWordHit(tag, q)))
+  if (byTag.length > 0) return choose(byTag)
+  const byName = list.filter((one) => stickerWordHit(stickerStemOf(one.name), q))
+  return byName.length > 0 ? choose(byName) : null
+}
+
+/** 落盘那一份的归一化 (纯函数): 坏值当没有, 但名字那一层保留 —— 读坏了不该把整本账作废 */
+function stickerTagMapOf(parsed) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out = {}
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof name !== 'string' || name === '') continue
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+    out[name] = {
+      tags: stickerTagsOf(value.tags),
+      used: Math.max(0, Math.round(Number(value.used) || 0)),
+      lastUsedAt: Math.max(0, Number(value.lastUsedAt) || 0),
+    }
+  }
+  return out
+}
+
+/** 标签与使用账 (异步): 没有这一份 / 读坏了都当"还没有标签", 不阻断贴表情 */
+async function readStickerTags(folder) {
+  try {
+    const text = await readFile(join(folder, STICKER_TAG_FILE), 'utf8')
+    return stickerTagMapOf(JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text))
+  } catch {
+    return {}
+  }
+}
+
+/** 提示词变量那一侧只能同步读 (每一步组提示词都求值) */
+function readStickerTagsSync(folder) {
+  try {
+    const text = readFileSync(join(folder, STICKER_TAG_FILE), 'utf8')
+    return stickerTagMapOf(JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text))
+  } catch {
+    return {}
+  }
+}
+
+/** 写回标签账 (原子写): 失败只回 false —— 记不上账不该让这一张贴不出去 */
+async function writeStickerTags(folder, map) {
+  try {
+    await mkdir(folder, { recursive: true })
+    const temporary = temporaryName(join(folder, STICKER_TAG_FILE))
+    await writeFile(temporary, `${JSON.stringify(map, null, 2)}\n`, 'utf8')
+    await rename(temporary, join(folder, STICKER_TAG_FILE))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 目录里的表情 + 标签 + 次数 (list / 检索 / 提示词摘要共用这一处读) */
+async function stickerEntriesOf(folder) {
+  const names = await readdir(folder).then(
+    (list) => list.filter((one) => STICKER_FILE_OK.test(one)).sort((a, b) => a.localeCompare(b, 'zh')),
+    () => [],
+  )
+  const tags = await readStickerTags(folder)
+  return names.map((name) => ({
+    name,
+    tags: tags[name]?.tags ?? [],
+    used: tags[name]?.used ?? 0,
+    lastUsedAt: tags[name]?.lastUsedAt ?? 0,
+  }))
+}
+
+/** 记一次"贴出去了": 次数 +1 (账写不进去也不影响这一句已经发出去了) */
+async function markStickerUsed(folder, name) {
+  const map = await readStickerTags(folder)
+  const before = map[name] ?? { tags: [], used: 0, lastUsedAt: 0 }
+  map[name] = { tags: before.tags, used: before.used + 1, lastUsedAt: Date.now() }
+  await writeStickerTags(folder, map)
+}
+
+/**
+ * 贴表情的密度那一句 (设置 → 活动 → 更多设置 → 表情 → 多久贴一张)
+ *
+ * 光有"怎么贴"没有"多久贴一张", 模型就只会把它当装饰 (2026-11-15 主人: 概率太小)
+ */
+function stickerMoodLine(everyN) {
+  const n = Math.max(0, Math.min(200, Math.round(Number(everyN) || 0)))
+  if (n === 0) return '这一场主人把表情关掉了: 不要贴表情'
+  if (n <= 2) return `主人把密度调高了: 大约每 ${n} 条话就可以贴一张, 接梗 / 应和 / 吐槽都能来一张`
+  if (n <= 4) return `大约每 ${n} 条话贴一张就够; 对方先发表情、或者正玩得热闹时可以连贴两张`
+  return `大约每 ${n} 条话才贴一张: 宁可不贴, 也不要每条都配一张图`
+}
+
+/**
+ * 还没标签的那几张 (2026-11-16 主人: "使用表情包时列出没有标签的图, 有就顺便标上")
+ *
+ * 为什么它值得单独一处: 一张叫 `1000026655.jpg` 的图没有标签时, 对"情绪词检索"等于不存在 ——
+ * 只有准确文件名找得到它, 而她下一轮多半已经忘了那个流水号
+ */
+function stickerUntaggedOf(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((one) => (Array.isArray(one.tags) ? one.tags : []).length === 0)
+}
+
+/** 未标名单压成一行 (`a.jpg / b.png`, 超过 limit 张就 `+N`); 都标了回空串 */
+function stickerUntaggedText(entries, limit = 6) {
+  const list = stickerUntaggedOf(entries)
+  if (list.length === 0) return ''
+  const names = list.slice(0, Math.max(1, limit)).map((one) => one.name).join(' / ')
+  return list.length > limit ? `${names} 等 ${list.length} 张` : names
+}
+
+/** 目录里那几张压成一行 (提示词摘要与回执共用): `开心（开心/赞·用过3次） / 无语 / 晚安` */
+function stickerCatalogText(entries, limit = STICKER_PROMPT_LIMIT) {
+  const list = (Array.isArray(entries) ? entries : []).slice(0, Math.max(1, limit))
+  return list.map((one) => {
+    const bits = []
+    if (Array.isArray(one.tags) && one.tags.length > 0) bits.push(one.tags.join('/'))
+    if (Number(one.used) > 0) bits.push(`用过${one.used}次`)
+    const stem = stickerStemOf(one.name)
+    return bits.length > 0 ? `${stem}（${bits.join('·')}）` : stem
+  }).join(' / ')
+}
+
+/**
+ * 把 `lw_say` 收到的 sticker 参数变成一个真文件名 (2026-11-15)
+ *
+ * 原来只认 `lw_sticker op=list` 印出来的那一串名字: 她要先列一次目录, 再逐字抄一个; 抄错一个字宿主
+ * 也不报错 (那道闸只拦路径), 落下一行谁都画不出来的 sticker —— 门户退成灰字, 她那边毫无反馈, 于是
+ * 下一次干脆不贴了
+ *
+ * @param query 准确文件名 / 去掉扩展名的名字 / 一句情绪或场景词
+ * @returns 目录里命中那一条 (`{ name, tags, used }` —— 回执要按 `tags` 判断"要不要顺手标一下")
+ * @throws 库里是空的, 或者一张都对不上 (报错里带上库里有什么)
+ */
+async function resolveStickerForSay(query) {
+  const home = process.env.DSH_HOME
+  if (!home) throw new Error('this profile has no DSH_HOME, so there are no stickers to put up')
+  const folder = join(home, 'lw', 'stickers')
+  const entries = await stickerEntriesOf(folder)
+  if (entries.length === 0) {
+    throw new Error(`she has no stickers yet: ${folder} is empty - lw_sticker op=fetch saves one from`
+      + ' an https link')
+  }
+  const hit = pickSticker(entries, query)
+  if (hit !== null) return hit
+  throw new Error(`nothing matched "${query}": the folder has ${stickerCatalogText(entries)}`
+    + ' - give one of those, a shorter mood word, or lw_sticker op=fetch a new picture')
 }
 
 /**
@@ -12077,8 +12479,9 @@ const PROACTIVE_ACT_TABLE = new Map([
   ['lw_plugin', new Set(['list', 'read', 'audit'])],
   ['lw_skill', new Set(['scan'])],
   ['lw_sync', new Set(['status'])],
-  // 她的表情 (2026-11-10): 列素材与贴一张都不动设备, `fetch` 会外发请求并落盘 —— 那一面算写动
-  ['lw_sticker', new Set(['list', 'say'])],
+  // 她的表情 (2026-11-10): 列素材 / 贴一张 / 按情绪词挑一张都不动设备; `fetch` 会外发请求并落盘,
+  // 而 `tag` 写的是 `lw/stickers/tags.json` —— 那两面算写动 (2026-11-15 加的 pick / tag)
+  ['lw_sticker', new Set(['list', 'say', 'pick'])],
   // 没有只读那一面: 一调就是动手
   ['lw_app_control', new Set()],
   ['lw_launch', new Set()],

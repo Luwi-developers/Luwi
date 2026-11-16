@@ -647,6 +647,8 @@
     <string name="settings_sim_sticker_max_summary">at most %1$d MB each</string>
     <string name="settings_sim_sticker_count">How many stickers at most</string>
     <string name="settings_sim_sticker_count_summary">up to %1$d in the folder</string>
+    <string name="settings_sim_sticker_every">How often a sticker</string>
+    <string name="settings_sim_sticker_every_summary">about one every %1$d lines (0 = never)</string>
     <string name="settings_sim_sticker_note">Both what she saves herself (lw_sticker op=fetch) and the ones you add here follow these two limits; anything bigger, or one sticker too many, is refused</string>
     <string name="settings_explore_off">Not scheduled yet</string>
     <string name="settings_explore_next">next %1$s</string>

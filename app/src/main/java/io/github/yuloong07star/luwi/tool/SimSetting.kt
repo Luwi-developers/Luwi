@@ -72,6 +72,15 @@ internal object SimSetting {
     val STICKER_MB_RANGE = 1..20
     val STICKER_COUNT_RANGE = 20..500
 
+    /**
+     * 多久贴一张表情 (2026-11-15, 主人: "当前发送表情包的概率太小")
+     *
+     * 这一格不是物理上限, 是一条**行为**的刻度 —— 宿主把它换成提示词里的一句密度
+     * (`host-plugin` 的 `stickerMoodLine`), 于是"她贴得太少"这件事在设置页就能拨,
+     * 不用改预设、也不用重打宿主。0 = 不贴
+     */
+    val STICKER_EVERY_RANGE = 0..20
+
     /** 每一档的缺省值 (与 `qq-bridge/config.json` 的 `socialV2` 对齐, 见 `tools/check-sim.mjs`) */
     object Default {
         const val WAKE_MODE = MODE_DIVING
@@ -97,6 +106,7 @@ internal object SimSetting {
         const val ACTING = ACTING_REMIND
         const val STICKER_MAX_MB = 2
         const val STICKER_MAX_COUNT = 200
+        const val STICKER_EVERY_N = 4
     }
 
     /**
@@ -164,6 +174,7 @@ internal object SimSetting {
     data class Sticker(
         val maxMb: Int = Default.STICKER_MAX_MB,
         val maxCount: Int = Default.STICKER_MAX_COUNT,
+        val everyN: Int = Default.STICKER_EVERY_N,
     ) {
         val maxBytes: Long get() = maxMb.toLong() * 1024L * 1024L
     }
@@ -243,6 +254,7 @@ internal object SimSetting {
             sticker = Sticker(
                 maxMb = sticker.int("maxMb", Default.STICKER_MAX_MB, STICKER_MB_RANGE),
                 maxCount = sticker.int("maxCount", Default.STICKER_MAX_COUNT, STICKER_COUNT_RANGE),
+                everyN = sticker.int("everyN", Default.STICKER_EVERY_N, STICKER_EVERY_RANGE),
             ),
         )
     }
@@ -295,6 +307,7 @@ internal object SimSetting {
         put("sticker", buildJsonObject {
             put("maxMb", plan.sticker.maxMb)
             put("maxCount", plan.sticker.maxCount)
+            put("everyN", plan.sticker.everyN)
         })
     }
 

@@ -271,17 +271,21 @@ check('这一页的文案里没有 Diving and waking 那种群味长句', [
   en.includes('<string name="settings_activity_more_summary">Diving, pacing, decision layer, stickers</string>'),
 ], [true, true, true, true, true])
 
-// 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount`, 读的时候夹进各自范围
-check('表情那两格写进 sim.json 的 sticker.maxMb / maxCount, 读回时夹进范围', [
+// 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount` / `everyN`,
+// 读的时候夹进各自范围。`everyN` 是 2026-11-15 加的"多久贴一张" (主人: 发得太少)
+check('表情那三格写进 sim.json 的 sticker.maxMb / maxCount / everyN, 读回时夹进范围', [
   /val STICKER_MB_RANGE = 1\.\.20/.test(sim),
   /val STICKER_COUNT_RANGE = 20\.\.500/.test(sim),
-  /data class Sticker\(\s*val maxMb: Int = Default\.STICKER_MAX_MB,\s*val maxCount: Int = Default\.STICKER_MAX_COUNT,\s*\)/.test(sim),
+  /val STICKER_EVERY_RANGE = 0\.\.20/.test(sim),
+  /data class Sticker\(\s*val maxMb: Int = Default\.STICKER_MAX_MB,\s*val maxCount: Int = Default\.STICKER_MAX_COUNT,\s*val everyN: Int = Default\.STICKER_EVERY_N,\s*\)/.test(sim),
   /maxMb = sticker\.int\("maxMb", Default\.STICKER_MAX_MB, STICKER_MB_RANGE\)/.test(sim),
   /maxCount = sticker\.int\("maxCount", Default\.STICKER_MAX_COUNT, STICKER_COUNT_RANGE\)/.test(sim),
+  /everyN = sticker\.int\("everyN", Default\.STICKER_EVERY_N, STICKER_EVERY_RANGE\)/.test(sim),
   /put\("sticker", buildJsonObject \{/.test(sim),
   /put\("maxMb", plan\.sticker\.maxMb\)/.test(sim),
   /put\("maxCount", plan\.sticker\.maxCount\)/.test(sim),
-], [true, true, true, true, true, true, true, true])
+  /put\("everyN", plan\.sticker\.everyN\)/.test(sim),
+], [true, true, true, true, true, true, true, true, true, true, true])
 
 check('那条弹窗的形状与插件能力那张一样 (OverlayDialog + 可滚动的一坨 + 底部按钮)', [
   /fun SimSettingsDialog\(/.test(page),
@@ -328,6 +332,9 @@ const keys = [
   'settings_sim_sticker_max_summary',
   'settings_sim_sticker_count',
   'settings_sim_sticker_count_summary',
+  // 2026-11-15: 多久贴一张 (同一个 sticker 段, 写在 note 前面 —— 顺序对不上会红)
+  'settings_sim_sticker_every',
+  'settings_sim_sticker_every_summary',
   'settings_sim_sticker_note',
 ]
 

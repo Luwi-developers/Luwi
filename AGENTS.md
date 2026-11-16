@@ -371,6 +371,18 @@
   判据 `tools/check-sim.mjs` / `check-router.mjs`
 - **表情单张上限同在那页**: `sim.json` 的 `sticker.maxMb` (1~20, 缺省 2), 三处同读 —— 宿主 `lw_sticker op=fetch`、
   `BallStickers.capBytes`、`PortalBridge`; 只改一处就"存得下但画不出"
+- **表情"贴得勤不勤"也是设置里的一格** (2026-11-15, 主人: "当前发送表情包的概率太小"): `sim.json` 的
+  `sticker.everyN` (0~20, 缺省 4, 0 = 不贴) —— 宿主把它换成提示词里的一句密度 (`stickerMoodLine`), 所以
+  这是**行为**刻度不是物理上限。配套三件: ① `{{lw_stickers}}` 提示词变量 (`stickersFor`, 与 `lw_persona`
+  同一个注入点) 把"库里有哪几张 + 标签 + 用过几次"直接喂进 prompt, 她不必先 `lw_sticker op=list`;
+  ② `lw_say` 的 `sticker` 收**情绪/场景词** (`pickSticker` 按标签与名字挑, 多命中随机), 挑不到当场回候选
+  —— 以前抄错名字是静默落一行画不出来的表情; ③ 说了话再补一张也认 (表情单独一个气泡, 以前只有没给文字
+  才贴)。标签账落 `lw/stickers/tags.json` (`op=tag`, 不进张数也不当图)。**预设与宿主同一次装机才有
+  `{{lw_stickers}}`**: 旧宿主 + 新预设会 fail loud (`unknown prompt variable`)。
+  ④ **没标签的图会被点名三处** (2026-11-16 主人: "使用表情包时列出没有标签的图, 有就顺便标上"):
+  提示词摘要的【还没标签】段 / `op=list` 尾行 / `lw_say` 贴出去的回执 —— 没标签的图只认准确文件名
+  (`1000026655.jpg` 这种流水号等于检索不到), 所以贴中一张没标签的, 她说完那句话就顺手 `op=tag` 记
+  1~3 个词 (一轮最多一张, 不为打标签另起一句话)
 - **判断层那两把尺子归她**: 「游戏多久算久」「提前几天提」不在设置也不在 `sim.json`, 由探索 `rules` 或
   `lw_router op=rules` 写 `router.json.rules` (5~1440 分钟 / 1~365 天, 缺省 100/60); **`simRouterRules` 不许再读这两键**
 - 探索解锁: `explore-schedule.json` 的 `unlock` (缺省关), 与「唤醒时自动解锁」两个开关
