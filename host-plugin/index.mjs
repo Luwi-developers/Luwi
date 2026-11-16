@@ -11203,6 +11203,11 @@ async function voiceDeliver(ctx, line) {
   if (line.source === 'router') {
     return routerTick(ctx)
   }
+  // 判断层那颗「唤醒一下」(2.8.1 #8): 主人亲手点的, 不走上面那道判断 —— 他等了, 就得有回音
+  // (见 [routerWakeNow]: 先应一声落进 `lw/out`, 再开一场主动对话)
+  if (line.source === 'wake') {
+    return routerWakeNow(ctx)
+  }
   // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
   // 不查浮标那本 10 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
   if (line.source === 'proactive') {
@@ -12208,6 +12213,125 @@ async function routerTick(ctx) {
   return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
 }
 
+/* ── 点「唤醒一下」那一下 (2.8.1 #8) ─────────────────────────────────────────
+ *
+ * 主人 2026-11-15: "点击唤醒一下时, 必须主动说话". 那一颗按钮在判断层 (门户 `⋯ → 判断`), 投的是
+ * `source:"wake"`, 与闹钟那一拍 `router` 分开 —— 见 [routerWakeNow] 与应用的 `VoiceInbox.SOURCE_WAKE`
+ */
+
+/**
+ * 主人亲手点「唤醒一下」时, 宿主先替她应哪一句 (轮转池)
+ *
+ * 为什么由宿主先应一声: 那一颗按钮要的是"按下去就有回音", 而模型那一轮从开会话到 `lw_say` 落盘
+ * 最快也要一两秒, 赶上慢的那几拍就是"点了没反应" (2026-11-15 主人报的原话)。这一句**先**落进
+ * `lw/out`, 门户照那份文件画, 于是 3 s 里必有一颗气泡; 她要接着说, 那一场里照常投 (一是应声,
+ * 一是正话, 两句话不冲突)
+ *
+ * 池子写在这里而不是 `router.json`: 判断层那几把"她自己的尺子"是行为刻度 (`lw_router op=rules`
+ * 写的), 而这一句只是"被叫了一声"的语气 —— 多一个键就多一处要同步的地方, 也没有要改它的入口
+ */
+const ROUTER_WAKE_LINES = Object.freeze([
+  '我在, 怎么啦?',
+  '嗯? 叫我?',
+  '在呢.',
+  '怎么了?',
+  '我听着呢.',
+  '嗯嗯, 在的.',
+])
+
+/** 池子是空的那一句 (池子不该是空的, 但"点了没回音"这条不许再回来) */
+const ROUTER_WAKE_FALLBACK = '在呢.'
+
+/**
+ * 下一次点「唤醒一下」先应哪一句 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * **轮转不随机**: 随机连着抽中同一句是常有的事, 而主人连点三下看见两个"嗯?"会以为又卡住了。
+ * 游标落在 `router.json` 的 `wake.cursor`, 于是宿主重启之后也记得上一句是谁
+ *
+ * @param {string[]} lines 池子
+ * @param {number} cursor 上一次用到哪一格 (负数 / 坏值都夹回来)
+ * @returns {{text: string, cursor: number}} 这一句与下一次的游标
+ */
+function wakeLineFor(lines, cursor) {
+  const pool = (Array.isArray(lines) ? lines : [])
+    .filter((one) => typeof one === 'string')
+    .map((one) => one.trim())
+    .filter((one) => one !== '')
+  if (pool.length === 0) return { text: ROUTER_WAKE_FALLBACK, cursor: 0 }
+  const raw = Number(cursor)
+  const wanted = Number.isFinite(raw) ? Math.floor(raw) : 0
+  const at = ((wanted % pool.length) + pool.length) % pool.length
+  return { text: pool[at], cursor: (at + 1) % pool.length }
+}
+
+/** `router.json` 里这一笔的游标 (`wake.cursor`): 读不到就从第一句起 */
+async function readWakeCursor() {
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  const cursor = Number(state?.wake?.cursor ?? 0)
+  return Number.isFinite(cursor) ? cursor : 0
+}
+
+/**
+ * 点「唤醒一下」那一场的开场正文 (纯函数)
+ *
+ * 与 `proactiveStartLine` 分开: 那一份允许"没有值得说的就保持沉默", 而这一颗是主人亲手点的 ——
+ * 应声已经由宿主先落了, 这里只交代两件事: 那一句已经说出去 (别重复), 想补就补一句。
+ * **不说来路**: 按钮 / 面板 / 判断层 / 指令这些字一个都不进她的嘴 (与 #43 同一条口径)
+ *
+ * @param {string} alreadySaid 宿主先应出去的那一句
+ */
+function wakeStartLine(alreadySaid) {
+  const said = String(alreadySaid ?? '').trim()
+  return [
+    '主人刚在手机上戳了你一下, 想听你说句话.',
+    said === '' ? '' : `你先应了一声「${said}」, 那一句已经发出去了, 不要重复它.`,
+    '还有顺带想说的就再补一句 (lw_say), 没有就保持沉默, 一条都不写.',
+    '别说按钮 / 面板 / 判断层 / 指令 / 系统这类来路, 就像平时随口接一句.',
+  ].filter((one) => one !== '').join('\n')
+}
+
+/**
+ * 判断层那颗「唤醒一下」: 人亲手点的, 不是闹钟 (2.8.1 #8)
+ *
+ * 与 [routerTick] 分两支是刻意的: 那一支是她自己在挑时机, 静默时段 / 冷却 / 沉睡前等待 /
+ * "没什么值得说的"每一道都能让它不出声; 而这一颗是人当面戳她 —— 他等了, 就得有回音。所以这里
+ * **一道闸都不看**: 直接开一场主动对话 (那一场照旧归 `proactive` 预设与三张表), 并把应声先落进
+ * 它的 `lw/out`
+ */
+async function routerWakeNow(ctx) {
+  const cursor = await readWakeCursor()
+  const chosen = wakeLineFor(ROUTER_WAKE_LINES, cursor)
+  const started = await startProactive(ctx, {
+    text: wakeStartLine(chosen.text),
+    via: 'wake',
+    openLine: chosen.text,
+  })
+  const now = Date.now()
+  // 这一笔只记"开口了"与游标: `awaiting` 不写 (点了按钮不等于要主人再回一句), 冷却那一格照旧归
+  // 自动那一支; `lastSpokenAt` 要写 —— 面板上「上一次开口」读的就是它, 刚说完却显示「—」也是错的
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  await writeRouterJson(routerStatePath(), {
+    ...state,
+    v: 1,
+    at: now,
+    lastSpokenAt: now,
+    last: { say: true, kind: 'wake', brief: '主人在判断层点了「唤醒一下」', why: '点了一下' },
+    wake: { at: now, cursor: chosen.cursor, text: chosen.text, session: started?.session ?? null },
+  })
+  console.log(
+    `luwi-channel: the wake button: conversation ${String(started?.session ?? '').slice(0, 8)} pulled up,`
+      + ` first line #${Number(started?.open ?? 0) || 0} ("${chosen.text}")`,
+  )
+  return {
+    said: true,
+    kind: 'wake',
+    brief: 'the wake button',
+    session: started?.session ?? null,
+    line: chosen.text,
+    via: 'wake',
+  }
+}
+
 /**
  * 一张全黑的图是不是"这块屏上什么都没有"
  *
@@ -12403,6 +12527,18 @@ const proactiveRun = {
 
 /** 这次进程里开过几场 (读数) */
 let proactiveStarts = 0
+
+/**
+ * 最近开过的那几场 (`{session, startedAt, via}`), 给门户补漏用 (2.8.1 #8)
+ *
+ * `run` 只有**最新一场**: 连点三次「唤醒一下」时, 两场之间那一场会被下一次覆盖掉, 门户光看 `run`
+ * 就只收得到最后那一句。这一串跟着 `proactive.json` 一起落盘 (最多 [PROACTIVE_RECENT_MAX] 条),
+ * 门户按 `startedAt` 把还没收过的逐场补进来 —— 于是"连点三次"三条都在
+ */
+const proactiveRecent = []
+
+/** 那一串留几条: 一次连点最多几下的量级, 再多也没有读的人 */
+const PROACTIVE_RECENT_MAX = 8
 
 /* ── 主动场的三张表 + 三档 (2026-11-10) ─────────────────────────────────────
  *
@@ -12775,6 +12911,8 @@ async function proactiveStateWriteNow() {
     updatedAt: Date.now(),
     starts: proactiveStarts,
     run: proactiveRun.session === null ? null : { ...proactiveRun },
+    // 最近那几场 (2.8.1 #8): 门户按它把连点漏掉的那一场也收进来 (见 [adoptProactiveRuns])
+    recent: proactiveRecent.slice(-PROACTIVE_RECENT_MAX),
   }
   try {
     await mkdir(dirname(path), { recursive: true })
@@ -12804,6 +12942,17 @@ async function proactiveStateRestore() {
   const run = record?.run
   if (run === null || typeof run !== 'object') return false
   if (typeof run.session !== 'string' || run.session === '') return false
+  // 那一串也接回来: 宿主刚起时门户照它补漏 (2.8.1 #8), 缺 / 坏就当没有, 不拦住下面那一场
+  const recent = Array.isArray(record?.recent) ? record.recent : []
+  for (const one of recent) {
+    if (one === null || typeof one !== 'object') continue
+    if (typeof one.session !== 'string' || one.session === '') continue
+    proactiveRecent.push({
+      session: one.session,
+      startedAt: Number(one.startedAt) || 0,
+      via: typeof one.via === 'string' ? one.via : '',
+    })
+  }
   proactiveRun.session = run.session
   proactiveRun.workspace = typeof run.workspace === 'string' ? run.workspace : ''
   proactiveRun.startedAt = Number(run.startedAt) || 0
@@ -12849,6 +12998,9 @@ async function chooseProactivePreset(ctx) {
  * **能做什么按档位** (13-4, 2026-11-10 扩成三档): 这里没有一条建屏 / 选屏的路; 会话起来之后那一场
  * 三张表的工具由 [proactiveGate] 按 `sim.json` 的 `proactive.acting` 判 —— `remind` / `act` 两档
  * 从头到尾碰不到虚拟屏, `full` 档才放开 (主人 2026-11-10 的决定)
+ *
+ * **`openLine`** (2.8.1 #8): 给了就先把它当第一句落进这一场的 `lw/out`, 再开轮 —— 只有人亲手点的
+ * 「唤醒一下」用它 (见 [routerWakeNow]), 到点那一档不传
  */
 async function startProactive(ctx, options = {}) {
   const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'inbox'
@@ -12887,7 +13039,22 @@ async function startProactive(ctx, options = {}) {
   proactiveRun.presetWhy = presetWhy
   proactiveRun.acting = acting
   proactiveStarts += 1
+  // 这一场也记进"最近几场" (2.8.1 #8): `run` 会被下一场覆盖, 连点那几下里中间那一场就靠这一串
+  proactiveRecent.push({ session: sessionId, startedAt, via })
+  while (proactiveRecent.length > PROACTIVE_RECENT_MAX) proactiveRecent.shift()
   await proactiveStateWrite()
+  // 「唤醒一下」那一路: **先把应声落进这一场的 jsonl, 再开轮** (2.8.1 #8)
+  // 门户画的是 `lw/out` 那份文件, 于是这一行落完就有一颗气泡, 不必等模型那一轮跑完; 写不进去只
+  // 记一行 —— 那一场照旧开, 不许因为这一句把整场拖死
+  let openRow = null
+  const openLine = String(options?.openLine ?? '').trim()
+  if (openLine !== '') {
+    try {
+      openRow = await lwOutAppend(sessionId, { kind: 'text', text: openLine })
+    } catch (error) {
+      console.warn(`luwi-channel: the wake line was not written: ${error?.message ?? error}`)
+    }
+  }
   try {
     await deliverToBall(
       ctx,
@@ -12917,6 +13084,8 @@ async function startProactive(ctx, options = {}) {
     acting,
     // 这一档有没有屏: 只有 `full` 才有 (`remind` / `act` 都碰不到)
     screen: acting === PROACTIVE_ACTING_FULL,
+    // 先落进去的那一句 (`openLine` 那一路才有): 宿主日志与「唤醒一下」的回执读它
+    open: openRow === null ? null : openRow.seq,
   }
 }
 

@@ -1597,7 +1597,7 @@ expect('PortalBridge.kt', portalBridge, 'SimSetting.setWakeMode(')
 expect('PortalBridge.kt', portalBridge, 'SimSetting.MODE_DIVING')
 expect('PortalBridge.kt', portalBridge, 'put("host"')
 expect('PortalBridge.kt', portalBridge, 'ExploreSchedule.wakeHost(')
-expect('PortalBridge.kt', portalBridge, 'Log.i(LOOK_TAG, "portal tick: queued')
+expect('PortalBridge.kt', portalBridge, 'Log.i(LOOK_TAG, "portal wake: queued')
 expect('PortalBridge.kt', portalBridge, '"portal tick switch -> ')
 expect('SimSetting.kt', simSetting, 'fun setWakeMode(context: Context, mode: String): Boolean')
 // 关掉唤醒那一趟必须落成潜水 (否则 `RouterTick.enabled` 的合成值仍是开)
@@ -1609,6 +1609,135 @@ expect('client.js', client, 'position:sticky')
 // 开关态与"哪一侧来的"两句话都得在, 否则 `bySim` 白给
 expect('client.js', client, "'开着 (更多设置里选的活跃)'")
 expect('client.js', client, "'开着 (25-55 分一次)'")
+
+// ── 十七、判断层「唤醒一下」必须主动说话 (2.8.1 #8) ─────────────────────────────
+//
+// 主人 2026-11-15: "点击唤醒一下时, 必须主动说话" (21:13 补充: 指判断层那颗), 验收是"连点 3 次,
+// 每次 3 s 内都出现一条非空 lw_say 文本气泡, 不是固定同一句". 四段链路少一段就回到"点了没反应":
+// ① 应用投 `source:"wake"` (与闹钟 `router` 分开) ② 宿主那一支不过 `judgeRouter` 那几道闸
+// ③ 应声**先**落进 `lw/out` 再开轮 (3 s 那一颗气泡不靠模型) ④ 门户点完自己补几拍, 换场不清屏
+
+expect('VoiceInbox.kt', voiceInbox, 'const val SOURCE_WAKE = "wake"')
+expect('PortalBridge.kt', portalBridge, 'VoiceInbox.SOURCE_WAKE')
+expect('host-plugin', hostPlugin, "line.source === 'wake'")
+expect('host-plugin', hostPlugin, 'return routerWakeNow(ctx)')
+
+// 人点的那一下**不许**再过判断层那几道闸: 静默时段 / 冷却 / 沉睡前等待一个字都不该出现 ——
+// 出现了就说明又接回 `judgeRouter`, "点了不出声"会原样回来
+const wakeAt = hostPlugin.indexOf('async function routerWakeNow(ctx) {')
+const wakeEnd = wakeAt < 0 ? -1 : hostPlugin.indexOf('\n}\n', wakeAt)
+const wakeSource = wakeAt < 0 || wakeEnd < 0 ? '' : hostPlugin.slice(wakeAt, wakeEnd + 3)
+if (wakeSource === '') {
+  failures.push('host-plugin: 抽不出 routerWakeNow (名字或缩进改过?)')
+} else {
+  const gates = ['judgeRouter', 'quiet', 'cooldown', 'preSleep']
+  const present = gates.filter((one) => wakeSource.includes(one))
+  if (present.length > 0) failures.push(`routerWakeNow 里又接上了判断闸: ${present.join(' / ')}`)
+  else notes.push('ok   routerWakeNow 一道判断闸都不看 (人点了就必须出声)')
+}
+expect('host-plugin', hostPlugin, 'text: wakeStartLine(chosen.text)')
+expect('host-plugin', hostPlugin, 'openLine: chosen.text')
+expect('host-plugin', hostPlugin, "via: 'wake'")
+// 那一声已经说出去了: 开场要交代"别重复它", 否则模型把同一句再发一遍就是两条一样的气泡
+expect('host-plugin', hostPlugin, '不要重复它')
+
+// 应声要**排在投第一句之前**: 气泡先到, 模型那一轮后到 —— 反过来就又要等模型
+const startAt = hostPlugin.indexOf('async function startProactive(ctx, options = {}) {')
+const startEnd = startAt < 0 ? -1 : hostPlugin.indexOf('\n}\n', startAt)
+const startBody = startAt < 0 || startEnd < 0 ? '' : hostPlugin.slice(startAt, startEnd + 3)
+const openAt = startBody.indexOf('openRow = await lwOutAppend(sessionId')
+const deliverAt = startBody.indexOf('await deliverToBall(')
+if (startBody === '' || openAt < 0 || deliverAt < 0 || openAt > deliverAt) {
+  failures.push('startProactive: 应声没有先落盘 (openLine 那一句要排在 deliverToBall 之前)')
+} else {
+  notes.push('ok   应声先落进 lw/out 再开轮 (3 s 内那颗气泡不靠模型)')
+}
+
+// 连点三次不许是同一句: 池子轮转 (抽那一段纯函数真跑, 不复制第二份)
+const lineAt = hostPlugin.indexOf('function wakeLineFor(lines, cursor) {')
+const lineEnd = lineAt < 0 ? -1 : hostPlugin.indexOf('\n}\n', lineAt)
+const lineSource = lineAt < 0 || lineEnd < 0 ? '' : hostPlugin.slice(lineAt, lineEnd + 3)
+if (lineSource === '') {
+  failures.push('host-plugin: 抽不出 wakeLineFor (名字或缩进改过?)')
+} else {
+  const fallback = grab(hostPlugin, /const ROUTER_WAKE_FALLBACK = '([^']+)'/) ?? ''
+  const wakeLineFor = new Function('ROUTER_WAKE_FALLBACK', `${lineSource}\nreturn wakeLineFor`)(fallback)
+  const pool = ['一', '二', '三']
+  const picks = []
+  let cursor = 0
+  for (let i = 0; i < 4; i += 1) {
+    const one = wakeLineFor(pool, cursor)
+    picks.push(one.text)
+    cursor = one.cursor
+  }
+  const rows = [
+    picks.join(''), // 连点四次的四句 (转一圈回到第一句)
+    wakeLineFor(pool, 7).text, // 游标越界夹回来 (7 % 3 = 1)
+    wakeLineFor(pool, -1).text, // 负数也夹回最后一句
+    wakeLineFor([], 0), // 空池子兜底
+  ]
+  const want = ['一二三一', '二', '三', { text: fallback, cursor: 0 }]
+  if (JSON.stringify(rows) === JSON.stringify(want)) {
+    notes.push('ok   wakeLineFor: 连着点不是同一句 (四拍一圈 / 越界夹回 / 空池兜底)')
+  } else {
+    failures.push(`wakeLineFor 轮转不对: got ${JSON.stringify(rows)} want ${JSON.stringify(want)}`)
+  }
+}
+
+// 池子本身至少三句且不重复 (只有一句 = 连点三次同一句, 正是验收里不许的那一条)
+const poolAt = hostPlugin.indexOf('const ROUTER_WAKE_LINES = Object.freeze([')
+const poolEnd = poolAt < 0 ? -1 : hostPlugin.indexOf('])', poolAt)
+const poolSource = poolAt < 0 || poolEnd < 0 ? '' : hostPlugin.slice(poolAt, poolEnd)
+const wakeLines = [...poolSource.matchAll(/'([^']+)'/gu)].map((one) => one[1])
+if (wakeLines.length >= 3 && new Set(wakeLines).size === wakeLines.length) {
+  notes.push(`ok   应声池子 ${wakeLines.length} 句且不重复`)
+} else {
+  failures.push(`应声池子不足三句或有重复: ${JSON.stringify(wakeLines)}`)
+}
+
+// 门户那一侧: 点完自己补几拍, 换场不清屏上已有的气泡, 连点之间被覆盖的那一场也补得上
+expect('client.js', client, 'function watchWake')
+expect('client.js', client, 'function adoptEchoRun')
+expect('client.js', client, 'function adoptProactiveRuns')
+expect('client.js', client, 'watchWake()')
+expect('client.js', client, '她这就说')
+// `run` 只有最新一场: 连点三次时中间那一场靠宿主记的 `recent` 补 (2.8.1 #8)
+expect('host-plugin', hostPlugin, 'recent: proactiveRecent.slice(-PROACTIVE_RECENT_MAX)')
+expect('host-plugin', hostPlugin, 'proactiveRecent.push({ session: sessionId, startedAt, via })')
+expect('host-plugin', hostPlugin, 'Array.isArray(record?.recent) ? record.recent : []')
+expect('PortalBridge.kt', portalBridge, 'optJSONArray("recent")')
+expect('client.js', client, 'adoptProactiveRuns(run) === 0')
+expect('client.js', client, 'openedAt - 1')
+const adoptSource = takeFunction('adoptEchoRun')
+if (adoptSource === '') {
+  failures.push('client.js: 抽不出 adoptEchoRun (名字或缩进改过?)')
+} else if (adoptSource.includes('echoes = []')) {
+  failures.push('adoptEchoRun: 换场把屏上已有的气泡清了 (连点三次只剩最后一条)')
+} else {
+  notes.push('ok   adoptEchoRun 换场不清屏上已有的气泡')
+}
+const runsSource = takeFunction('adoptProactiveRuns')
+if (runsSource === '' || !runsSource.includes('proactiveNew(runs[i], proactiveSeen)')
+  || !runsSource.includes('adoptEchoRun(runs[i])') || !runsSource.includes('startedAt')) {
+  failures.push('client.js: adoptProactiveRuns 没有按 startedAt 逐场走 proactiveNew + adoptEchoRun')
+} else {
+  notes.push('ok   adoptProactiveRuns 按 startedAt 升序逐场补 (中间那场也在)')
+}
+const ledgerBody = takeFunction('pollLedger')
+if (ledgerBody === '') {
+  failures.push('client.js: 抽不出 pollLedger')
+} else if (!ledgerBody.includes('adoptProactiveRuns(run)') || /echoes = \[\]/u.test(ledgerBody)) {
+  failures.push('pollLedger: 新一场那一支没走 adoptProactiveRuns')
+} else {
+  notes.push('ok   pollLedger 新一场那一支走 adoptProactiveRuns (与点完那几拍同一条)')
+}
+const wakePage = takeFunction('watchWake')
+if (wakePage.includes('var left = 8') && wakePage.includes('setTimeout(beat, 400)')
+  && wakePage.includes('adoptProactiveRuns(run)')) {
+  notes.push('ok   watchWake: 8 拍 x 400 ms, 每拍按 recent 补场, 到点交回 3 s 定时器')
+} else {
+  failures.push('client.js: watchWake 的拍数 / 间隔 / 补场有一条不对')
+}
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
