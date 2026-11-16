@@ -54,14 +54,14 @@ nextTask + router 的 checks) 摆在同一屏上
 
 | 方法 | 做什么 |
 | :-- | :-- |
-| `portalStatus()` | 读 `lw/router.json` + `lw/sim.json` + `lw/explore.json`, 原样回给页面 (不做判断) |
+| `portalStatus()` | 读 `lw/router.json` + `lw/sim.json` + `lw/explore.json`, 原样回给页面 (不做判断); 探索那几行读的是**真的落点**: 任务卡 `lw/explore-card.md` (`ExploreTask`)、摘要目录 `lw/explore/*.md` 最新那份、排期 `explore-schedule.json` (`ExploreSchedule.plan`), 外加 `enabled` / `nextAt` / `running` |
 | `portalSession()` | 读 `voice/session.json`, 回 `{id, at, usable, remainMs, workspacePath}` |
 | `portalLook(wantWall)` | 读 `lw/face.json` + `lw/face/<图>` (设置 → 外观), 回 `{alpha, wall, ver}`; `wantWall=true` 才把图编成 data URL (几万字), 平时只问 `alpha`/`ver`; `ver` 是文件名, 页面拿它当缓存键 |
 | `portalBind(id)` | 把这一场写进账本 (`origin:"ball"`, `cwd` = `dsh-ball`), 球接下来 10 分钟接的就是它 |
 | `portalTick()` | 往收件箱投一行 `source:"router"` + `RouterTick.ensure` (与定时唤醒同一个入口) |
 | `portalTickEnabled(on)` | `RouterTick.setEnabled` |
 | `portalCheckDone(id)` | `RouterChecks.drop` |
-| `portalExplore()` | 往收件箱投一行 `source:"explore"` (正文是 `explore.json` 的 nextTask) |
+| `portalExplore()` | 往收件箱投一行 `source:"explore"`, 正文是那张任务卡 (`lw/explore-card.md`); 已经有一场在跑时回 `running:true` 且不投 |
 
 ## 那张脸 (输入卡 / 权限 / 模型 / 命令 / 背景 / 玻璃)
 
@@ -97,6 +97,12 @@ nextTask + router 的 checks) 摆在同一屏上
 
 **判断只在宿主那一处**: 门户显示的是 `router.json` 的 `last` (宿主 `judgeRouter` 判完写的), 它自己
 不重算, 所以抽屉里那句 `why` 与宿主真的判过的那一次逐字一致
+
+**探索面板 (`⋯ → 探索`) 的四行照盘上那份写** (2.8.1 #12): 下一趟 = 任务卡摘要 + 字数, 上次摘要 =
+`lw/explore/` 最新那份的修改时刻, 探索时刻 = `explore-schedule.json` 的 `at` (关着就写明), 这一趟 =
+`ExploreTask.running` 的判据。抽屉开着时每一拍 (`pollLedger`, 3 s) 比一次 `workKey`, 盘上变了才重画;
+**「开始这一趟」「刷新」各留一句 toast** (`#lwp-toast`, 2.4 s 自己收) —— 抽屉盖着时输入卡那行
+`#lwp-note` 在后面, 写了也看不见, 按下去于是与"没接上"同形
 
 ## 首启自动落进 `<工作区根>/Luwi` (2026-11-13 改口径, 原「选工作区」作废)
 

@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.tool.ExploreSchedule
+import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.OutFile
 import io.github.yuloong07star.luwi.tool.OutPaths
@@ -132,7 +133,6 @@ internal class PortalBridge(private val context: Context) {
         val router = readJson(lwFile("router.json")) ?: JSONObject()
         val sim = readJson(lwFile("sim.json")) ?: JSONObject()
         val explore = readJson(lwFile("explore.json")) ?: JSONObject()
-        val schedule = readJson(lwFile("explore-schedule.json")) ?: JSONObject()
 
         val rules = JSONObject()
         val hostRules = router.optJSONObject("rules")
@@ -188,10 +188,30 @@ internal class PortalBridge(private val context: Context) {
                     put("bySim", SimSetting.plan(context).wake.active)
                 })
             })
+            // 探索那几行读数 (2.8.1 #12): 以前读的是 `explore.json` 里**从来没有**的三个键
+            // (`nextTask` / `lastSummaryAt` / `schedule.time`), 于是面板永远写着「还没有排 / — / —」,
+            // 换一场 / 换一版都不动 —— 那三样各有各的落点: 任务卡 `lw/explore-card.md`、摘要
+            // `lw/explore/<yyyyMMdd-HHmm>.md`、排期 `explore-schedule.json` (读法只有
+            // [ExploreSchedule.plan] 一份, 别在这里再解一遍 JSON)
+            val plan = ExploreSchedule.plan(context)
+            val card = ExploreTask.read(context)
+            val lastFinish = explore.optJSONObject("lastFinish")
             put("explore", JSONObject().apply {
-                put("nextTask", explore.optString("nextTask").orEmpty())
-                put("lastSummaryAt", explore.optLong("lastSummaryAt", 0L))
-                put("schedule", schedule.optString("time").orEmpty())
+                put("nextTask", if (card.isEmpty()) "" else ExploreTask.summary(context))
+                put("cardChars", card.length)
+                put("lastSummaryAt", lastSummaryAt(lastFinish?.optLong("at", 0L) ?: 0L))
+                put("schedule", plan.at)
+                put("enabled", plan.enabled)
+                put(
+                    "nextAt",
+                    if (plan.enabled) {
+                        ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) ?: 0L
+                    } else {
+                        0L
+                    },
+                )
+                // 现在这一场在不在跑 (面板那一行, 与 `portalExplore` 的 `running` 同一个判据)
+                put("running", ExploreTask.running(context) != null)
             })
             // 「正在做」那一行: 与球上那三个字**同一份** `lw/ball-phase.json` (方案 §3.4 末段: 复用,
             // 不要另造)。门户只在流末尾画一句"正在做…", 长 turn 才不像卡死
@@ -549,14 +569,32 @@ internal class PortalBridge(private val context: Context) {
     @JavascriptInterface
     fun portalMenuPick(id: String): String = PortalMenu.pick(context, id.trim())
 
-    /** 开始这一趟探索: 投一行 `source:"explore"`, 正文就是 `explore.json` 排好的那个 nextTask */
+    /**
+     * 开始这一趟探索: 投一行 `source:"explore"`, 正文就是那张任务卡 (`lw/explore-card.md`)
+     *
+     * 2.8.1 #12: 这一行原来读 `explore.json` 的 `nextTask` —— 宿主从来不写那个键, 于是点「开始这一趟」
+     * 投的永远是兜底那句 `接着上一趟看看`, 与面板上写着的那张卡不是同一件事。卡只有一张, 排期到点那一趟
+     * 读的也是它 (宿主 `startExplore` 的同一个正文), 这里改读同一份
+     *
+     * 已经在跑的那一场不再投 (宿主 `startExplore` 里那道 "已经有活着的就拒" 的同一个判据): 投进去只会被
+     * 它拒掉, 而页面上那句 toast 要说的正是"已经有一场在跑", 所以这里先把 `running` 报回去
+     */
     @JavascriptInterface
     fun portalExplore(): String {
-        val explore = readJson(lwFile("explore.json")) ?: JSONObject()
-        val task = explore.optString("nextTask").orEmpty().trim().ifEmpty { DEFAULT_EXPLORE_TEXT }
+        val card = ExploreTask.read(context)
+        val task = card.ifEmpty { DEFAULT_EXPLORE_TEXT }
+        if (ExploreTask.running(context) != null) {
+            return JSONObject().apply {
+                put("queued", false)
+                put("running", true)
+                put("seq", 0L)
+                put("task", "")
+            }.toString()
+        }
         val seq = runCatching { VoiceInbox.append(context, task, source = VoiceInbox.SOURCE_EXPLORE) }.getOrNull()
         return JSONObject().apply {
             put("queued", seq != null)
+            put("running", false)
             put("seq", seq ?: 0L)
             put("task", task)
         }.toString()
@@ -786,6 +824,22 @@ internal class PortalBridge(private val context: Context) {
         if (!file.isFile) null else JSONObject(file.readText())
     }.getOrNull()
 
+    /**
+     * 上一次留下摘要是哪一刻 (2.8.1 #12)
+     *
+     * 摘要在 `$DSH_HOME/lw/explore/<yyyyMMdd-HHmm>.md` (宿主 `exploreSummaryName`, 按那一场开始那一刻
+     * 起名), 文件名里那个时刻是**开始**时间而不是落盘时间 —— 面板那一行问的是"上次摘要是什么时候",
+     * 所以认目录里最新那份的 mtime; 一份都没有时退宿主记在 `explore.json` 的 `lastFinish.at`
+     */
+    private fun lastSummaryAt(fallback: Long): Long {
+        val newest = runCatching {
+            lwFile("explore").listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".md") }
+                ?.maxOfOrNull { it.lastModified() } ?: 0L
+        }.getOrDefault(0L)
+        return if (newest > 0L) newest else fallback
+    }
+
     private companion object {
         /** 工作区名: 宿主那一侧是 `BALL_WORKSPACE_NAME`, 判据脚本会比对这两个量 */
         const val BALL_WORKSPACE = "dsh-ball"
@@ -802,7 +856,7 @@ internal class PortalBridge(private val context: Context) {
         /** 唤醒那一行的正文: 宿主只看 source, 正文只是给人看的读数 */
         const val TICK_TEXT = "tick"
 
-        /** 探索那一行没有 nextTask 时的兜底正文 (空正文会被收件箱拒掉) */
+        /** 任务卡是空的时候「开始这一趟」投的兜底正文 (空正文会被收件箱拒掉) */
         const val DEFAULT_EXPLORE_TEXT = "接着上一趟看看"
 
         /** 那一张脸的日志 tag (与 HostScreen 的 WEB_TAG 同一族) */
