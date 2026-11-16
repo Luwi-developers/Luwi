@@ -309,9 +309,9 @@ check('nextTask 的参数表与说明都在 (下一场任务卡)', [
   /nextTask:/u.test(toolFace),
   toolFace.includes('NEXT exploration'),
 ], [true, true])
-check('finish 还收两把尺子 (2026-11-10: 游戏线 / 提前天数由探索自己定)', [
+check('finish 还收两把尺子 (2026-11-10: 应用线 / 提前天数由探索自己定; 2.8.1 #10 起叫 appMinutes)', [
   /rules: \{/u.test(toolFace),
-  toolFace.includes('gameMinutes'),
+  toolFace.includes('appMinutes'),
   /async function exploreRulesWrite\(rules\)/u.test(section),
   /exploreRulesWrite\(args\?\.rules\)/u.test(section),
   !/settings_sim_router_game/u.test(host),
