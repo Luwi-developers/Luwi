@@ -5425,6 +5425,9 @@ const TOOLS = [
           lastSpokenAt: Number(state.lastSpokenAt ?? 0) || 0,
           last: state.last ?? null,
           rules: inputs?.rules ?? state.rules ?? {},
+          // 2.8.1 #11: "错过几次"与"下一拍随口一句的概率" —— 递增那一条只看这一段就够
+          chatMisses: Math.max(0, Number(inputs?.chatMisses ?? 0) || 0),
+          chatChance: routerChatChance(inputs?.rules ?? state.rules ?? {}, inputs?.chatMisses ?? 0),
           // 探索交来的检测项 (2026-11-07 晚): 看一眼"现在盯着什么"就是这一段
           checks: inputs?.checks ?? [],
           checksSaid: inputs?.checksSaid ?? {},
@@ -9579,6 +9582,17 @@ const ROUTER_DEFAULTS = Object.freeze({
   wishDays: 60,
   cooldownMs: 30 * 60 * 1000,
   chatChance: 0.35,
+  /**
+   * 每错过一拍涨多少 (2.8.1 #11, 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%, 任意一次开口
+   * 即清零")
+   *
+   * 以前那是**一条常数**概率: 到了"太久没说话"那条线之后, 每一拍都拿 0.35 再抽一次, 抽不中就再等
+   * 25~55 分钟. 主人要的是**越来越想说** —— 连着几拍都没说出口, 下一拍就多 20%, 顶到 1.0 为止;
+   * 任意一次开口 (提醒 / 未了的事 / 检测项 / 随口一句 / 点「唤醒一下」) 都把这笔账清零
+   *
+   * 写 0 = 不递增, 与 2.8.0 那条常数概率逐字一致 (老 `sim.json` 里没有这一格, 缺省就是 0.2)
+   */
+  chatChanceStep: 0.2,
   chatAfterMs: 4 * 60 * 60 * 1000,
   /**
    * 沉睡前观察 (2026-11-07 晚): 主人刚说完话的这几分钟里, 她这一拍不唤醒
@@ -9871,6 +9885,47 @@ function routerCheckHit(check, input, now) {
   return null
 }
 
+/** 随口一句那一档的概率上限 (2.8.1 #11): 涨到 1 就不再涨 */
+const ROUTER_CHAT_CHANCE_MAX = 1
+
+/** `chatMisses` 最多记到几 (0.35 + 4 × 0.2 就已经顶到 1.0, 再往上只是把文件写长) */
+const ROUTER_CHAT_MISSES_MAX = 20
+
+/**
+ * 这一拍"随口问一句"的概率 (2.8.1 #11, 纯函数)
+ *
+ * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口即清零"
+ * —— 于是这条概率不是常数, 而是"她等了多久"的函数: 连着几拍都没说出口, 下一拍就更想说
+ *
+ * `chatChanceStep` 写 0 时结果恒等于 `chatChance`, 与改动前逐字一致 (老 `sim.json` 没有这一格,
+ * 缺省 0.2; 只有写 0 才回到"不递增")
+ *
+ * 少了 `chatMisses` 这一格 (老 `router.json`) 按 0 算: 于是升级上来第一拍仍是 0.35
+ */
+function routerChatChance(rules, misses) {
+  const base = Number(rules?.chatChance ?? ROUTER_DEFAULTS.chatChance)
+  const step = Number(rules?.chatChanceStep ?? ROUTER_DEFAULTS.chatChanceStep)
+  const count = Math.max(0, Number(misses ?? 0) || 0)
+  const floor = Number.isFinite(base) ? Math.max(0, base) : ROUTER_DEFAULTS.chatChance
+  if (!Number.isFinite(step) || step <= 0) return Math.min(ROUTER_CHAT_CHANCE_MAX, floor)
+  // 浮点尾数收干净: 0.35 + 3 × 0.2 在 JS 里是 0.9500000000000001, 而人要看的是 0.95
+  return Math.min(ROUTER_CHAT_CHANCE_MAX, Math.round((floor + count * step) * 1e4) / 1e4)
+}
+
+/**
+ * 这一拍过完之后 `chatMisses` 该是多少 (2.8.1 #11, 纯函数)
+ *
+ * 只有"到点了该找句话, 这一拍却没说出口"才 +1 (`decision.chatMissed`) —— 静默时段 / 冷却 /
+ * 他还在说话 / 退让期 (`ignored >= 2`) 那些拍本来就不该开口, 拿它们去催她说话是另一回事
+ *
+ * **开口即清零**不在这一支: 说出来之后由 [routerMarkSaid] 直接写 0
+ */
+function nextChatMisses(state, decision) {
+  const before = Math.max(0, Number(state?.chatMisses ?? 0) || 0)
+  const bump = decision?.chatMissed === true ? 1 : 0
+  return Math.min(ROUTER_CHAT_MISSES_MAX, before + bump)
+}
+
 /**
  * 这一次要不要开口 (纯函数, 无 fs 无时钟无随机源)
  *
@@ -9975,11 +10030,15 @@ function judgeRouter(input) {
       brief: `${what} · ${hit.fact}`,
     })
   }
+  // 这一拍算不算"到点了该找句话": 退让期里**不主动找话题** —— 这两次他都没接, 再"随口问一句"
+  // 就是骚扰; 太短没说话也不算. 两件事都要在抽签之外单独知道, 因为"该说却没说出来"那一拍
+  // 要记账 (2.8.1 #11): 下一拍的概率 +20% (见 [routerChatChance] / [nextChatMisses])
+  let chatDue = false
   if (candidates.length === 0) {
     const idleFor = lastSpokenAt > 0 ? now - lastSpokenAt : Number.POSITIVE_INFINITY
     const roll = typeof input?.random === 'function' ? Number(input.random()) : Math.random()
-    // 退让期里**不主动找话题**: 这两次他都没接, 再"随口问一句"就是骚扰
-    if (ignored < 2 && idleFor > Number(rules.chatAfterMs) && roll < Number(rules.chatChance)) {
+    chatDue = ignored < 2 && idleFor > Number(rules.chatAfterMs)
+    if (chatDue && roll < routerChatChance(rules, input?.chatMisses)) {
       candidates.push({
         kind: 'chat',
         score: 2,
@@ -9990,7 +10049,12 @@ function judgeRouter(input) {
       })
     }
   }
-  if (candidates.length === 0) return { say: false, why: 'nothing worth saying' }
+  if (candidates.length === 0) {
+    // `chatMissed` 只给"该说却没说出来"那一拍: [routerTick] 据此把 `chatMisses` +1
+    return chatDue
+      ? { say: false, why: 'nothing worth saying', chatMissed: true }
+      : { say: false, why: 'nothing worth saying' }
+  }
   candidates.sort((a, b) => b.score - a.score)
   const best = candidates[0]
   // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到。
@@ -11918,6 +11982,8 @@ function simRouterRules(sim) {
   }
   put('cooldownMs', sim?.router?.cooldownMs)
   put('chatChance', sim?.router?.chatChance)
+  // 每错过一拍涨多少 (2.8.1 #11): 0 = 不递增, 与改动前逐字一致
+  put('chatChanceStep', sim?.router?.chatChanceStep)
   put('chatAfterMs', sim?.router?.chatAfterMs)
   put('ignoredCooldownMs', sim?.router?.ignoredCooldownMs)
   put('preSleepWaitMs', sim?.wake?.preSleepWaitMs)
@@ -12140,6 +12206,8 @@ async function readRouterInputs() {
     .filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
     .reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
   const ignored = await refreshIgnored(lastUserAt)
+  // 这几拍她"该找句话却没说出口"累计了几次 (2.8.1 #11): 随口一句那条概率按它往上抬
+  const chatMisses = Math.max(0, Number(state?.chatMisses ?? 0) || 0)
   // 静默窗口: 「更多设置」里那一份在就按它 (`sim.json` 一写就是全键), 否则回落到自动指令那一份
   const window = String(settings?.quiet?.window ?? '')
   const [from, to] = window.split(/[-~]/).map((one) => one.trim())
@@ -12157,6 +12225,8 @@ async function readRouterInputs() {
     quiet,
     lastSpokenAt,
     ignored,
+    // 2.8.1 #11: 随口一句那条概率的"欠账" —— 每错过一拍 +1, 开口就清零
+    chatMisses,
     lastUserAt,
     usage,
     wishes: Array.isArray(wishes) ? wishes : [],
@@ -12301,6 +12371,9 @@ async function routerMarkSaid(decision, quota = { checkMessages: 1 }) {
     // 这一笔是"退让"那条的起点: 下一次判断时看它之后他有没有说话 (见 [refreshIgnored])
     awaiting: { at: now, kind: String(decision?.kind ?? '') },
     last: decision,
+    // **开口即清零** (2.8.1 #11): 这一支本来就只在真的说出来之后调, 所以那一笔"错过几次"的
+    // 欠账直接写 0 —— +1 只在 [routerTick] 的未开口分支里 (见 [nextChatMisses])
+    chatMisses: 0,
     ...(Object.keys(checksSaid).length > 0 ? { checksSaid } : {}),
   })
   if (decision?.kind !== 'wish' || !decision?.id) return
@@ -12406,7 +12479,15 @@ async function routerTick(ctx) {
   const decision = judgeRouter(inputs)
   if (decision.say !== true) {
     const state = (await readRouterJson(routerStatePath())) ?? {}
-    await writeRouterJson(routerStatePath(), { ...state, v: 1, at: inputs.now, last: decision })
+    await writeRouterJson(routerStatePath(), {
+      ...state,
+      v: 1,
+      at: inputs.now,
+      last: decision,
+      // 这一拍"该找句话却没说出口"就记一笔 (2.8.1 #11): 下一拍随口一句的概率高 20%,
+      // 静默 / 冷却 / 退让期那些拍不算 (见 [nextChatMisses])
+      chatMisses: nextChatMisses(state, decision),
+    })
     return { said: false, why: decision.why }
   }
   // 这一场能发几条 / 检测项占几条: 由 `send` 段算 (2026-11-14), 开场与记账用的是同一个数
@@ -12532,6 +12613,8 @@ async function routerWakeNow(ctx) {
     at: now,
     lastSpokenAt: now,
     last: { say: true, kind: 'wake', brief: '主人在判断层点了「唤醒一下」', why: '点了一下' },
+    // 人亲手戳了一下也是"开口" (2.8.1 #11): 错过那笔账一样清零
+    chatMisses: 0,
     wake: { at: now, cursor: chosen.cursor, text: chosen.text, session: started?.session ?? null },
   })
   console.log(

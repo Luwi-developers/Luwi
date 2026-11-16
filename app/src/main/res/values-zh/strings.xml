@@ -622,6 +622,8 @@
     <string name="settings_sim_router_cooldown_summary">至少 %1$d 分钟</string>
     <string name="settings_sim_router_chance">随口问一句的概率</string>
     <string name="settings_sim_router_chance_summary">每次判断 %1$d%%</string>
+    <string name="settings_sim_router_chance_step">每错过一次加多少</string>
+    <string name="settings_sim_router_chance_step_summary">%1$d%% (涨到 100%% 为止)</string>
     <string name="settings_sim_router_chat_after">多久算太久没说话</string>
     <string name="settings_sim_router_chat_after_summary">%1$d 小时</string>
     <string name="settings_sim_router_ignored">没人理之后退让多久</string>
