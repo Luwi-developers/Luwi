@@ -13,6 +13,9 @@
  *      取, 少一个就是 `Resources$NotFoundException`, 而它在 LazyColumn 预取时才炸)
  *   6. **冷却那个数是主人自己定的** (2026-10-09): 新建时它随提示词交给模型, 管理里还有一条**不经过
  *      模型**的直改 —— 两侧任何一侧掉了, 主人按的那个数就不算数
+ *   7. **录一遍就有一条规则** (2.8.1 #15): 录了几步就该有几个子条件而且顺序不动, 轨迹不能落进规则目录
+ *      (那里的 `*.json` 都会被当成规则读), 叶子只能是录制给得出的那两片, 折出来的东西还要过 `write`
+ *      那道校验 —— 这四件坏了都不会当场报错, 只会变成"它怎么没响"或者"设置页多了一条 BROKEN"
  *
  * 跑法: node tools/check-automations.mjs   (不需要设备, 也不需要 host)
  */
@@ -90,7 +93,7 @@ function pluginBody(toolName) {
 /* ── 一、op 名单 ────────────────────────────────────────────────────────── */
 
 check(
-  'lw_automation 的 op: 插件只给模型那五条 (delete 只在桥上有)',
+  'lw_automation 的 op: 插件只给模型那几条 (delete 只在桥上有)',
   pluginEnum('lw_automation'),
   kotlinList(tool, 'MODEL_OPERATIONS'),
 )
@@ -546,6 +549,133 @@ check('status 那一行如实说 task 自己会动手', /allowed: a task rule ac
 check('旧文件里的 allowActing 只是被忽略 (那张单测在)', (await read(
   'app/src/test/java/io/github/yuloong07star/luwi/automation/AutomationStoreTest.kt',
 )).includes('旧文件里的 allowActing 读进来不影响任何事'), true)
+
+/* ── 十一、录制即得技能 (2.8.1 #15) ─────────────────────────────────────── */
+
+/*
+ * 2026-11-16 落实表 #15: 录一遍真人操作, 折成一条规则 (依据 Work2Skill 那一类"从演示里抽技能")。
+ *
+ * 这一节钉的是那条**一一对应**: 录了几步就该有几个子条件, 顺序不动 —— 主人拿 op=list 读回来时要能指着
+ * 规则里的每一片叶子说"这一步是我点的"。其次是三处会静默坏掉的地方:
+ *
+ *   1. 录制轨迹落错目录 (`*.json` 在规则目录里会被当成规则读, 设置页上就多一条 BROKEN)
+ *   2. 叶子不是那两片 (一次 GUI 录制给不出别的, 写错了就是一条永远不成立的规则)
+ *   3. 折出来的东西没过 `write` 那道校验 (落盘的规则"从来没响过", 没人查得出来)
+ */
+
+const recorded = await read(
+  'app/src/test/java/io/github/yuloong07star/luwi/tool/LwAutomationRecordTest.kt',
+)
+
+check('record 是给模型的一条 op, delete 仍然只在桥上', [
+  kotlinList(tool, 'MODEL_OPERATIONS').includes('record'),
+  kotlinList(tool, 'OPERATIONS').includes('record'),
+  pluginEnum('lw_automation').includes('record'),
+  pluginEnum('lw_automation').includes('delete'),
+], [true, true, true, false])
+
+check('三个动作都在桥上 (start / stop / cancel), 不给 action 就是 stop', [
+  /"start" -> startRecording\(context\)/.test(tool),
+  /"cancel" -> cancelRecording\(context\)/.test(tool),
+  /"stop", "save", "finish" -> finishRecording\(context, request\)/.test(tool),
+  /request\.string\("action", "stop"\)/.test(tool),
+], [true, true, true, true])
+
+check('轨迹取自无障碍那条窗口队列, 不是第二个录制器', [
+  /LwAccessibility\.heard\(session\.cursor, kinds = WINDOW_KINDS\)/.test(tool),
+  /private val WINDOW_KINDS = setOf\("window"\)/.test(tool),
+  /put\("cursor", LwAccessibility\.latest\)/.test(tool),
+  /if \(!LwAccessibility\.running\)/.test(tool),
+], [true, true, true, true])
+
+check('录制那一串不进规则目录 (它旁边那份 steps.json 也不是规则)', [
+  /const val RECORDED_DIRECTORY = "recorded"/.test(tool),
+  /File\(recordedDirectory\(context\), RECORDED_SESSION\)/.test(tool),
+  /File\(recordedDirectory\(context\), "\$name\.steps\.json"\)/.test(tool),
+  /put\("steps", buildJsonArray \{/.test(tool),
+], [true, true, true, true])
+
+check('一步换一个子条件: mapIndexed 不合并, 上限取组合那条 5', [
+  /fun recordedLeaves\(steps: List<RecordedStep>\): List<JsonObject>/.test(tool),
+  /steps\.mapIndexed \{ index, step ->/.test(tool),
+  /steps\[index - 1\]\.packageName == step\.packageName/.test(tool),
+  /steps\.take\(AutomationRule\.COMBO_MAX_CONDS\)/.test(tool),
+], [true, true, true, true])
+
+check('两片叶子就是录制给得出的那两片 (foreground / activity)', [
+  /val leaf = if \(index > 0 && steps\[index - 1\]\.packageName == step\.packageName\)/.test(tool),
+  /put\("kind", leaf\)/.test(tool),
+  /put\("package", step\.packageName\)/.test(tool),
+  /put\("withinMinutes", RECORDED_ACTIVITY_MINUTES\)/.test(tool),
+  ['foreground', 'activity'].every((kind) => leaf.includes(kind)),
+], [true, true, true, true, true])
+
+check('只有一步时不套组合 (when 就是那一片叶子)', [
+  /val when_ = if \(conds\.size == 1\) \{/.test(tool),
+  /conds\.single\(\)/.test(tool),
+  /put\("kind", "all"\)/.test(tool),
+  /buildJsonArray \{ conds\.forEach \{ add\(it\) \} \}/.test(tool),
+], [true, true, true, true])
+
+check('去重按 包 + Activity + 标题 三样, 同一个窗口刷两次不算两步', [
+  /fun mergeRecordedSteps\(steps: List<RecordedStep>\): List<RecordedStep>/.test(tool),
+  /last\.screen == step\.screen/.test(tool),
+  /last\.title == step\.title/.test(tool),
+], [true, true, true])
+
+check('折出来的那一份过 write 同一道校验, 写完让引擎重读', [
+  /recordedRule\(rule, thenKind, thenLine, steps\)/.test(tool),
+  /AutomationStore\.write\(context, rule, json\)/.test(tool),
+  tool.includes('this recording was not accepted'),
+  /AutomationEngine\.invalidate\(\)/.test(tool),
+], [true, true, true, true])
+
+check('录的那一串跟着 then.text 走 (规则响的时候还认得那几步)', [
+  /put\("text", thenLine\.trim\(\) \+ "\\n" \+ recordedStepsLine\(kept\)\)/.test(tool),
+  /"录的那一串: "/.test(tool),
+  /fun stepTitle\(step: RecordedStep\): String/.test(tool),
+], [true, true, true])
+
+check('空手也说话: 没录到东西时讲清下一步, 并且不写规则', [
+  /if \(steps\.isEmpty\(\)\) \{/.test(tool),
+  tool.includes('nothing was recorded: no window came to the front'),
+  tool.includes('the session stays open'),
+], [true, true, true])
+
+check('无障碍关着时 start 与 stop 都明说, 不假装录上了', [
+  tool.includes('nothing can be recorded yet'),
+  tool.includes('设置 -> 无障碍 -> Luwi'),
+  tool.includes('so there is nothing to read back'),
+], [true, true, true])
+
+check('说明里念清三件事: 一条 op / 一步一个子条件 / 两片叶子与轨迹去处', [
+  automation.includes('op=record'),
+  automation.includes('every step becomes exactly one condition'),
+  automation.includes('each later screen of the same app becomes activity'),
+  automation.includes('recorded as <name>.steps.json'),
+], [true, true, true, true])
+
+/** 主动场那张 `lw_automation` 行放行了哪几个 op */
+const actRow = ((plugin.match(/\['lw_automation', new Set\(\[([^\]]*)\]\)\]/) ?? [])[1] ?? 'record, write')
+
+check('主动场没把 record 放行 (那张表只放只读那几条)', [
+  actRow.includes('record'),
+  actRow.includes('"write"'),
+], [false, false])
+
+check('单测钉着 3/3 那条对应 (三步 -> 三片叶子, 顺序不动)', [
+  /class LwAutomationRecordTest/.test(recorded),
+  recorded.includes('三步录成三个子条件, 顺序与叶子逐条对上'),
+  /assertEquals\(3, conds\.size\)/.test(recorded),
+  recorded.includes('assertEquals(listOf("foreground", "activity", "activity")'),
+  /LwAutomation\.RecordedStep\(/.test(recorded),
+], [true, true, true, true, true])
+
+check('status 多一行「在录吗」, list 的空态给出录制那条路', [
+  /rows \+= "recording" to \(recording\(context\)\?\.let/.test(tool),
+  /nothing being recorded \(op=record action=start begins one\)/.test(tool),
+  tool.includes('or record one with op=record'),
+], [true, true, true])
 
 console.log(`\n${checks - failures} / ${checks} 条通过`)
 if (failures > 0) process.exit(1)
