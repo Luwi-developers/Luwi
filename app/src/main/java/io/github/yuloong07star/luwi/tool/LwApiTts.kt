@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 「API TTS」那条引擎: 把文本 POST 给一个 **OpenAI 兼容的 `/v1/audio/speech`**, 拿回音频字节, 交给
@@ -26,6 +27,9 @@ import java.util.concurrent.Future
  *
  * 两处优化 (2026-10-25): 一片在放的时候下一片已经在取了 (句子之间的空白从"一次请求"缩到"一次播放"),
  * 网络异常 / 429 / 5xx 自动重试一次 —— 4xx 的其余各档不重试, 免得重复计费
+ *
+ * **等首包那一段先出一声** (2.8.1 #14): 第一片要等一趟网络, 那一段里喇叭是静的 —— 由
+ * `LwSpeak.fillerFor` 排一声预录填音补上, 首片一到就掐掉再放真正的 (阈值见 `SpeechTail.FILLER_AFTER_MS`)
  *
  * 音量: 拿回来的是编码过的音频, 应用这一侧不解码就没有增益可加 —— 响度由服务与手机媒体音量决定,
  * 所以设置页对这条引擎显示的是"它自己决定"而不是那条滑块
@@ -53,26 +57,36 @@ internal object LwApiTts {
         // 逐音色模型: 设计出来的那条可能挂在另一个模型上, 没写就用设置页那个
         val model = LwApiVoices.modelFor(context, wanted) ?: api.model
         val started = System.currentTimeMillis()
-        stopped = false
+        // 每一趟一个号 (2.8.1 #14): 换音色 / 再念一句时上一趟的号就过期 —— 它晚一步等回来的那一片
+        // **不许再放**, 否则旧音色与新音色会叠在一起
+        val mine = runs.incrementAndGet()
         val pool: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "lw-api-tts-fetch").apply { isDaemon = true }
         }
+        var filler: LwSpeak.Filler? = null
         return try {
             // 取一片: 叫停之后不再发新请求 (已经发出去的那一趟让它在 finally 里被丢弃)
             fun queued(piece: String): Future<Clip> = pool.submit(
                 Callable {
-                    if (stopped) throw IllegalStateException("the reading was stopped")
-                    fetch(endpoint, api.key, model, wanted, speed, piece)
+                    if (mine != runs.get()) throw IllegalStateException("the reading was stopped")
+                    fetch(endpoint, api.key, model, wanted, speed, piece, mine)
                 },
             )
             var pending = queued(pieces.first())
+            // 等首包那一段先出一声垫话 (2.8.1 #14): 首片一到就叫 ready, 掐掉它再放真正的
+            val waitForFirst = LwSpeak.fillerFor(context)
+            filler = waitForFirst
             pieces.forEachIndexed { index, piece ->
-                if (stopped) return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
+                if (mine != runs.get()) {
+                    return "stopped on request before saying \"${piece.take(SCRIBBLE)}\""
+                }
                 val clip = await(pending)
+                // 第一片回来了: 这一声垫话到此为止 (两段声音不许叠)
+                if (index == 0) waitForFirst.ready()
                 // 放这一片的时候, 下一片已经在取了 —— 它要是在这一片放完之前回来, 两片之间就没有空白
                 val next = pieces.getOrNull(index + 1)?.let { queued(it) }
                 if (!LwVoiceClip.play(context, clip.bytes, clip.extension)) {
-                    return if (stopped) {
+                    return if (mine != runs.get()) {
                         "stopped on request while saying \"${piece.take(SCRIBBLE)}\""
                     } else {
                         "the audio did not finish playing"
@@ -86,14 +100,17 @@ internal object LwApiTts {
             Log.w(TAG, "the API TTS call failed", error)
             "the API TTS call failed: ${error.message ?: error}"
         } finally {
+            // 首片之后 cancel 是空的 (ready 已经撤过这一趟); 失败 / 被叫停那几档靠它把垫话撤掉
+            filler?.cancel()
             pool.shutdownNow()
         }
     }
 
     /** 掐断: 没在放时回 null (与自带那条同形) */
     fun stop(): String? {
+        // **先作废这一趟**: 还在等网络的那一趟也要停 —— 否则它晚一步回来就与新的一句叠在一起 (换音色)
+        runs.incrementAndGet()
         if (!LwVoiceClip.speaking) return null
-        stopped = true
         return LwVoiceClip.stop()
     }
 
@@ -113,6 +130,7 @@ internal object LwApiTts {
         voice: String,
         speed: Float,
         input: String,
+        mine: Int,
     ): Clip {
         var attempt = 0
         while (true) {
@@ -121,7 +139,7 @@ internal object LwApiTts {
                 return fetchOnce(endpoint, key, model, voice, speed, input)
             } catch (error: Throwable) {
                 val retryable = error is IOException || (error is EndpointError && error.retryable)
-                if (!retryable || attempt >= MAX_ATTEMPTS || stopped) throw error
+                if (!retryable || attempt >= MAX_ATTEMPTS || mine != runs.get()) throw error
                 Log.i(TAG, "attempt $attempt failed (${error.message}), retrying once")
                 try {
                     Thread.sleep(RETRY_DELAY_MS)
@@ -130,7 +148,7 @@ internal object LwApiTts {
                     throw error
                 }
                 // 等待那 400 ms 里被叫停: 不再发第二趟
-                if (stopped) throw error
+                if (mine != runs.get()) throw error
             }
         }
     }
@@ -209,7 +227,11 @@ internal object LwApiTts {
     /** 重试之前等多久: 429 / 5xx 常常是瞬时的, 半秒就够 */
     private const val RETRY_DELAY_MS = 400L
 
-    /** 这一次念有没有被叫停 */
-    @Volatile
-    private var stopped = false
+    /**
+     * 每一趟一个号 (2.8.1 #14): 换音色 / 再念一句 / 被掐断时加一, 上一趟的号就过期
+     *
+     * 原来是 `stopped` 那一个布尔: 新的一趟把它写回 false, 上一趟醒来看到 false 就接着放 —— 两条
+     * `MediaPlayer` 各放各的, 就是"切换音色时叠音"
+     */
+    private val runs = AtomicInteger(0)
 }
