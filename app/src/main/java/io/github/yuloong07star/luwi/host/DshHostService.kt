@@ -25,6 +25,7 @@ import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
+import io.github.yuloong07star.luwi.tool.OutNotify
 import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.UsageLedger
@@ -70,6 +71,10 @@ class DshHostService : Service() {
         // 判断层的唤醒 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
         // 才按 25~55 分钟不定时唤醒一次 "该看一眼了"
         RouterTick.ensure(this)
+        // 她说的话弹到通知栏 (2.8.1 #7): 与门户、浮球同一个 observer 的第三个听众 —— 应用不在前台时
+        // 每句可读的话弹一条, 于是主人不打开应用也知道她说了一句。水位从这一刻起算, 历史一条不补
+        runCatching { OutNotify.ensure(this) }
+            .onFailure { Log.w(TAG, "the watch on her words did not start: ${it.message}") }
         // 「今天用了多久」先算一次 (2026-11-07): 判断层的唤醒随时可能来, 而第一拍心跳还要等 60 秒
         runCatching { UsageLedger.maybeRefresh(this, System.currentTimeMillis()) }
         // **唤醒词自愈** (2026-10-10 主人: "让它自愈"): 那个开关开着、又不在省电模式, 就把监听拉起来

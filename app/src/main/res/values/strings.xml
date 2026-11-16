@@ -1194,6 +1194,12 @@
 
     <string name="notification_channel_tools">Tool notifications</string>
     <string name="notification_channel_tools_description">Notifications the model posts with lw_notify</string>
+    <string name="notification_channel_speech">Her words</string>
+    <string name="notification_channel_speech_description">One line per thing she says to the portal while the app is in the background</string>
+    <string name="notification_speech_sticker">Sent a sticker: %1$s</string>
+    <string name="notification_speech_image">Sent a picture</string>
+    <string name="notification_speech_file">Sent a file</string>
+    <string name="notification_speech_file_named">Sent a file: %1$s</string>
 
     <string name="preview_open_refused">That file is outside the workspace</string>
     <string name="preview_open_missing">No app on this device can open that file</string>
