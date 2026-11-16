@@ -198,7 +198,7 @@
   `send` 段抽); 门户走 `PortalBridge.portalOut(id, next)` 两段水位, 浮球走 `tool/OutFile.kt` 读同一份 ——
   **解析器只一处**, `OutWatch` 一个 `FileObserver` 三个听众 (门户 / 浮球 / 通知); 节奏 (含 `dueAt`)、条数、`seq` 两边必须一致; `luwi`
   档在 `BALL_SILENT_PRESETS` 里 (正文不进框不念), 图走只读 `/lw-out` (`kind:'prefix'` + effect + **只认回环两头**);
-  判据 `tools/check-lw-out.mjs` (162 条) + `OutFileTest` / `BallOutboxTest`
+  判据 `tools/check-lw-out.mjs` (169 条) + `OutFileTest` / `BallOutboxTest`
 - **她的话还要在手机上弹一条通知** (2.8.1 #7): 第三个听众 `tool/OutNotify.kt`, 挂在 `DshHostService.onCreate`;
   **应用不在前台才弹** (`getMyMemoryState` 的 importance `> IMPORTANCE_FOREGROUND`), 一句一条 (`lw-say` 渠道 /
   id = 会话与 `seq` 合成 / 点它经 `EXTRA_OPEN_SESSION` 回到那一场), **冷启动只记水位不补历史**, 表情取名字不写占位符
@@ -391,6 +391,11 @@
   提示词摘要的【还没标签】段 / `op=list` 尾行 / `lw_say` 贴出去的回执 —— 没标签的图只认准确文件名
   (`1000026655.jpg` 这种流水号等于检索不到), 所以贴中一张没标签的, 她说完那句话就顺手 `op=tag` 记
   1~3 个词 (一轮最多一张, 不为打标签另起一句话)
+- **一条气泡只装一样东西** (2026-11-16, 2.8.1 #9, 主人: "表情或图片和文字同时进一条气泡时表情会被吞,
+  要求表情图片等文件必须单独发一条气泡"): `lw_say` 的话 / 图 / 文件 / 表情**各落各的 jsonl 行** ——
+  图与文件不再挂在最后一句的 prepare 上 (原来是同一个对象里两种 `kind`), 表情行也不再带 `[…]` 占位正文;
+  一行 = 门户一个气泡 = 球一样东西。老行 (话与图并在一行) 由门户 `outItemsOf` 拆成两项; 判据
+  `check-lw-out` 第十六节 + `check-luwi-portal` 第十八节 (真跑拆行真值表)
 - **判断层那两把尺子归她**: 「游戏多久算久」「提前几天提」不在设置也不在 `sim.json`, 由探索 `rules` 或
   `lw_router op=rules` 写 `router.json.rules` (5~1440 分钟 / 1~365 天, 缺省 100/60); **`simRouterRules` 不许再读这两键**
 - 探索解锁: `explore-schedule.json` 的 `unlock` (缺省关), 与「唤醒时自动解锁」两个开关

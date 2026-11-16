@@ -1739,6 +1739,53 @@ if (wakePage.includes('var left = 8') && wakePage.includes('setTimeout(beat, 400
   failures.push('client.js: watchWake 的拍数 / 间隔 / 补场有一条不对')
 }
 
+// ── 十八、一条气泡只装一样东西 (2.8.1 #9, 主人 2026-11-15) ──────────────────────
+//
+// "表情或图片和文字同时进一条气泡时表情会被吞, 要求表情图片等文件必须单独发一条气泡"
+// 门户这一侧管的是**升级前写下的行**: 那时宿主把图 / 文件并进最后一句那一行 (`kind:"image"` 与那句
+// `text` 在同一个对象里), 门户只好把一句话和图挤进一条气泡。`outItemsOf` 把那种行拆成两项, 于是老
+// 对话里也是"话一条气泡, 图一条气泡"; 新宿主写的行本来就一行一样东西, 拆不动也不该动。五条真值:
+// 1) 只有话 → 一项 2) 图 + 话 → 两项 (话在前, 图在后, 两个 id 不同) 3) 文件 + 话 → 两项
+// 4) 只有图 → 一项 5) 老表情行 (`text` 是占位符 `[…]`) → 一项, 正文空串 (表情自己一条气泡)
+
+const splitSource = takeFunction('outItemsOf')
+if (splitSource === '' || itemSource === '') {
+  failures.push('client.js: 抽不出 outItemOf / outItemsOf (一条气泡只装一样东西那一层)')
+} else {
+  const outItemOf2 = new Function(`${itemSource}\nreturn outItemOf`)()
+  const outItemsOf = new Function('outItemOf', `${splitSource}\nreturn outItemsOf`)(outItemOf2)
+  const onlyText = outItemsOf({ seq: 1, at: 10, kind: 'text', text: '早' })
+  const withImage = outItemsOf({
+    seq: 2, at: 20, kind: 'image', text: '看这个', rel: 'assets/s/2-a.png', w: 10, h: 20,
+  })
+  const withFile = outItemsOf({
+    seq: 3, at: 30, kind: 'file', text: '这份', rel: 'assets/s/3-a.pdf', name: 'a.pdf', bytes: 9,
+  })
+  const onlyImage = outItemsOf({ seq: 4, at: 40, kind: 'image', rel: 'assets/s/4-b.png' })
+  const legacySticker = outItemsOf({ seq: 5, at: 50, kind: 'sticker', sticker: '开心', text: '[…]' })
+  const cases = [
+    ['只有话', onlyText.length === 1 && onlyText[0].text === '早'],
+    ['只有图', onlyImage.length === 1 && onlyImage[0].image === 'assets/s/4-b.png'],
+    ['表情那一行不带正文', legacySticker.length === 1
+      && legacySticker[0].sticker === '开心' && legacySticker[0].text === ''],
+    ['图 + 话拆两项', withImage.length === 2
+      && withImage[0].text === '看这个' && !withImage[0].image
+      && withImage[1].image === 'assets/s/2-a.png' && withImage[1].text === ''
+      && withImage[0].id !== withImage[1].id],
+    ['文件 + 话拆两项', withFile.length === 2
+      && withFile[0].text === '这份' && !withFile[0].file
+      && withFile[1].file && withFile[1].file.name === 'a.pdf' && withFile[1].text === ''
+      && withFile[0].id !== withFile[1].id],
+  ]
+  const broken = cases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (broken.length === 0) {
+    notes.push('ok   outItemsOf: 一条气泡只装一样东西 (图 / 文件与话拆成两项, 老表情行不带正文)')
+  } else {
+    failures.push(`outItemsOf 拆错了: ${broken.join(' / ')}`)
+  }
+  expect('client.js', client, 'var parts = outItemsOf(line)')
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

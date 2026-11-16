@@ -1994,6 +1994,39 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * jsonl 的**一行** → 流里的项 (**一条气泡只装一样东西**, 2.8.1 #9)
+       *
+       * 宿主的 `lw_say` 现在把话 / 图 / 文件 / 表情各写各的行, 所以这一层通常一行一项; 但升级前写下的
+       * 行还在文件里 (`kind:"image"` 与那句 `text` 在同一个对象里, 门户只好把一句话和图挤进一条气泡),
+       * 那种行在这里**拆成两项**: 话一条气泡, 图或文件一条气泡。两项的 `id` 不同 (`…\u0001media`),
+       * 增量渲染那一套身份与门户记录的去重都认得出它们是两条
+       * @param {object} line jsonl 的一行
+       * @returns {object[]} 一项或两项 (顺序: 话在前, 东西在后)
+       */
+      function outItemsOf(line) {
+        var item = outItemOf(line)
+        var text = typeof item.text === 'string' ? item.text.trim() : ''
+        // 表情那一种已经由 [outItemOf] 把正文清掉了 (老行里的 `[…]` 占位符不上屏), 这里只管图与文件
+        if ((item.kind !== 'image' && item.kind !== 'file') || text === '') return [item]
+        var side = {}
+        for (var key in item) {
+          if (Object.prototype.hasOwnProperty.call(item, key)) side[key] = item[key]
+        }
+        side.id = String(item.id) + '\u0001media'
+        side.text = ''
+        // 话那一项只留身份与正文: 图 / 文件那几格 (`image` / `file` / `w` / `h`) 归 `side`
+        var words = {
+          who: item.who,
+          id: item.id,
+          seq: item.seq,
+          time: item.time,
+          kind: 'text',
+          text: text,
+        }
+        return [words, side]
+      }
+
+      /**
        * 取一次
        *
        * `reset` = 重新拿全量 (打开 / 换会话, **一次画完不排队**); 否则只取 `seq > outNext` 的尾巴,
@@ -2249,10 +2282,12 @@ window.__ModuleLoader__.load({
         }
         userKey = userKeyNow
         // 她说的话: 只画"已放出"的行 (水位内的那些), 不再在渲染里自己排队
+        // 一行里既有话又有图 / 文件时拆成两项 (2.8.1 #9), 于是老对话也是"话一条气泡, 图一条气泡"
         for (var k = 0; k < outLines.length; k++) {
           var line = outLines[k]
           if (releasedIds[line.seq] !== true) continue
-          rows.push(outItemOf(line))
+          var parts = outItemsOf(line)
+          for (var p = 0; p < parts.length; p += 1) rows.push(parts[p])
         }
         // 主动场那几句 (2026-11-12 #38): 与本场她的话走同一份 `rows` —— 交给 [orderTimeline] 按 `at`
         // 归轮、按抬高的 `seq` 排在后面, 于是"她刚说的那句"就落在本场时间线的末尾 (条数 +1)。
