@@ -99,6 +99,13 @@ internal object SimSetting {
         const val MAX_SEND_PER_HOUR = 60
         const val COOLDOWN_MS = 1_800_000L
         const val CHAT_CHANCE = 0.35f
+        /**
+         * 每错过一次唤醒, 随口问一句的概率涨多少 (2.8.1 #11)
+         *
+         * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口
+         * 即清零". 0 = 不递增 (回到 2.8.0 那条常数概率), 1 = 一拍就顶到必说
+         */
+        const val CHAT_CHANCE_STEP = 0.2f
         const val CHAT_AFTER_MS = 14_400_000L
         const val IGNORED_COOLDOWN_MS = 86_400_000L
         const val QUIET_FROM = "23:00"
@@ -149,6 +156,7 @@ internal object SimSetting {
     data class Router(
         val cooldownMs: Long = Default.COOLDOWN_MS,
         val chatChance: Float = Default.CHAT_CHANCE,
+        val chatChanceStep: Float = Default.CHAT_CHANCE_STEP,
         val chatAfterMs: Long = Default.CHAT_AFTER_MS,
         val ignoredCooldownMs: Long = Default.IGNORED_COOLDOWN_MS,
     )
@@ -235,6 +243,7 @@ internal object SimSetting {
             router = Router(
                 cooldownMs = router.long("cooldownMs", Default.COOLDOWN_MS, 60_000L..86_400_000L),
                 chatChance = router.float("chatChance", Default.CHAT_CHANCE, 0f..1f),
+                chatChanceStep = router.float("chatChanceStep", Default.CHAT_CHANCE_STEP, 0f..1f),
                 chatAfterMs = router.long("chatAfterMs", Default.CHAT_AFTER_MS, 60_000L..172_800_000L),
                 ignoredCooldownMs = router.long(
                     "ignoredCooldownMs",
@@ -298,6 +307,7 @@ internal object SimSetting {
         put("router", buildJsonObject {
             put("cooldownMs", plan.router.cooldownMs)
             put("chatChance", plan.router.chatChance)
+            put("chatChanceStep", plan.router.chatChanceStep)
             put("chatAfterMs", plan.router.chatAfterMs)
             put("ignoredCooldownMs", plan.router.ignoredCooldownMs)
         })

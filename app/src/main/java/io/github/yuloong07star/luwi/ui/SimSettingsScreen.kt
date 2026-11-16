@@ -430,6 +430,21 @@ fun SimSettingsDialog(
                             onChange = { plan = plan.copy(router = plan.router.copy(chatChance = it / 100f)) },
                             onCommit = { commit() },
                         )
+                        // 每一拍没说出来就往上加一档 (2.8.1 #11, 主人: "每错过一次唤醒 chatChance 加 20%")
+                        NumberRow(
+                            title = stringResource(R.string.settings_sim_router_chance_step),
+                            summary = stringResource(
+                                R.string.settings_sim_router_chance_step_summary,
+                                (plan.router.chatChanceStep * 100).roundToInt(),
+                            ),
+                            value = (plan.router.chatChanceStep * 100).roundToInt(),
+                            range = 0..100,
+                            unit = "%",
+                            onChange = {
+                                plan = plan.copy(router = plan.router.copy(chatChanceStep = it / 100f))
+                            },
+                            onCommit = { commit() },
+                        )
                         NumberRow(
                             title = stringResource(R.string.settings_sim_router_chat_after),
                             summary = stringResource(

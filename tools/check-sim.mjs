@@ -71,6 +71,7 @@ const expected = {
   MAX_SEND_PER_HOUR: 60, // send.maxPerHour
   COOLDOWN_MS: 1_800_000, // ROUTER_DEFAULTS.cooldownMs
   CHAT_CHANCE: 0.35, // ROUTER_DEFAULTS.chatChance
+  CHAT_CHANCE_STEP: 0.2, // ROUTER_DEFAULTS.chatChanceStep (2.8.1 #11)
   CHAT_AFTER_MS: 14_400_000, // ROUTER_DEFAULTS.chatAfterMs
   IGNORED_COOLDOWN_MS: 86_400_000, // ROUTER_DEFAULTS.ignoredCooldownMs
 }
@@ -88,10 +89,52 @@ check('潜水/活跃两个档名就是 diving 与 active, 缺省是潜水', [
 check('宿主的 ROUTER_DEFAULTS 与这一页同一套数', [
   /cooldownMs: 30 \* 60 \* 1000,/.test(host),
   /chatChance: 0\.35,/.test(host),
+  /chatChanceStep: 0\.2,/.test(host),
   /chatAfterMs: 4 \* 60 \* 60 \* 1000,/.test(host),
   /ignoredCooldownMs: 24 \* 60 \* 60 \* 1000,/.test(host),
   /preSleepWaitMs: 5 \* 60 \* 1000,/.test(host),
-], [true, true, true, true, true])
+], [true, true, true, true, true, true])
+
+/* ── 一之二、每错过一次加 20% 那一格 (2.8.1 #11) ────────────────────────── */
+
+/*
+ * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口即清零".
+ * 这一节钉三件: ① 这一页的缺省与范围 (0..1) ② 落盘与读回走同一个键 ③ 写 0 时概率恒等于 chatChance,
+ * 也就是"与改动前逐字一致" —— 最后一条是真跑宿主那段纯函数, 不是查字符串
+ */
+
+check('chatChanceStep 缺省 0.2, 范围 0..1, 落盘与读回走同一个键', [
+  kotlinConst(sim, 'CHAT_CHANCE_STEP'),
+  /val chatChanceStep: Float = Default\.CHAT_CHANCE_STEP,/.test(sim),
+  /chatChanceStep = router\.float\("chatChanceStep", Default\.CHAT_CHANCE_STEP, 0f\.\.1f\)/.test(sim),
+  /put\("chatChanceStep", plan\.router\.chatChanceStep\)/.test(sim),
+  // 宿主从 sim.json 的 router 段读它 (缺键 / 坏值都不放进规则表, 由 ROUTER_DEFAULTS 兜底)
+  /put\('chatChanceStep', sim\?\.router\?\.chatChanceStep\)/.test(host),
+  // 这一页有一行能改它
+  /R\.string\.settings_sim_router_chance_step\b/.test(page)
+    && /settings_sim_router_chance_step_summary/.test(page),
+], [0.2, true, true, true, true, true])
+
+/** 抽宿主那段纯函数出来真跑 (`routerChatChance` 与 `ROUTER_DEFAULTS` 在同一段里) */
+const chatAt = host.indexOf('const ROUTER_DEFAULTS')
+const chatEnd = host.indexOf('function ballReplyPolicy', chatAt)
+if (chatAt < 0 || chatEnd < 0) {
+  console.error('FAIL the router block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const { routerChatChance, ROUTER_DEFAULTS: HOST_ROUTER } = new Function(
+  `${host.slice(chatAt, chatEnd)}\nreturn { routerChatChance, ROUTER_DEFAULTS }`,
+)()
+
+check('宿主那侧缺省就是 0.35 起 / 每次 0.2 / 夹 1.0', [
+  HOST_ROUTER.chatChance,
+  HOST_ROUTER.chatChanceStep,
+  [0, 1, 2, 3, 4, 5].map((n) => routerChatChance({}, n)),
+], [0.35, 0.2, [0.35, 0.55, 0.75, 0.95, 1, 1]])
+
+check('写 0 时行为与改动前逐字一致 (概率恒等于 chatChance)', [0, 1, 2, 3, 9].map(
+  (n) => routerChatChance({ chatChanceStep: 0 }, n),
+), [0.35, 0.35, 0.35, 0.35, 0.35])
 
 // 2026-11-10 主人: "那两个设置应该由探索或主动对话时自己决定" —— 游戏线 / 提前天数从这一页搬走,
 // 改由 `router.json.rules` 写; 这两条负断言钉住"界面与数据层都不再回潮", 并确认老 sim.json 不再盖住它
@@ -321,6 +364,9 @@ const keys = [
   'settings_activity_more_summary',
   'settings_sim_title',
   'settings_sim_note',
+  // 2026-11-16: 每错过一次加多少 (2.8.1 #11, 紧跟在"随口问一句的概率"那两行后面)
+  'settings_sim_router_chance_step',
+  'settings_sim_router_chance_step_summary',
   'settings_sim_checks_note',
   'settings_sim_checks_empty',
   'settings_sim_checks_how',

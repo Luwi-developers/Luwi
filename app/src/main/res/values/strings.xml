@@ -623,6 +623,8 @@
     <string name="settings_sim_router_cooldown_summary">at least %1$d minutes</string>
     <string name="settings_sim_router_chance">Chance of an idle remark</string>
     <string name="settings_sim_router_chance_summary">%1$d%% per judgement</string>
+    <string name="settings_sim_router_chance_step">How much each missed turn adds</string>
+    <string name="settings_sim_router_chance_step_summary">%1$d%% (up to 100%%)</string>
     <string name="settings_sim_router_chat_after">What counts as too long without a word</string>
     <string name="settings_sim_router_chat_after_summary">%1$d hours</string>
     <string name="settings_sim_router_ignored">How long she steps back for</string>

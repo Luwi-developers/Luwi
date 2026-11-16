@@ -37,10 +37,12 @@ if (at < 0 || end < 0) {
 const {
   judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS,
   heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES, ROUTER_SOCIAL_PACKAGES,
+  routerChatChance, nextChatMisses, ROUTER_CHAT_CHANCE_MAX, ROUTER_CHAT_MISSES_MAX,
 } = new Function(
   `${host.slice(at, end)}\nreturn { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey,`
     + ' ROUTER_DEFAULTS, heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES,'
-    + ' ROUTER_SOCIAL_PACKAGES }',
+    + ' ROUTER_SOCIAL_PACKAGES, routerChatChance, nextChatMisses, ROUTER_CHAT_CHANCE_MAX,'
+    + ' ROUTER_CHAT_MISSES_MAX }',
 )()
 
 /* ── 两把"她自己定"的尺子 (2026-11-10) ─────────────────────────────────── */
@@ -713,6 +715,99 @@ check('认不出来的档落回"其余"那一句', routerRestLine('别的'), ROU
 check('主人自己在 router.json 写的 lines 仍然优先 (三档都用那一句)', routerLine({
   kind: 'rest', tier: 'other', lines: { rest: '该歇了' },
 }), '该歇了')
+
+/* ── 十、随口一句的概率递增 (2.8.1 #11) ────────────────────────────────────── */
+
+/*
+ * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口即清零;
+ * ignored>=2 的退让期仍然禁 chat". 这一节按真值表钉住四件事: ① 概率随 chatMisses 递增并夹在 1.0
+ * ② 步长写 0 时与改动前逐字一致 ③ 只有"该说没说"那一拍记账 ④ 退让期概率 1.0 也不出 chat
+ */
+
+check('缺省基准 0.35 / 每错过一次 0.2 / 上限 1.0', [
+  ROUTER_DEFAULTS.chatChance,
+  ROUTER_DEFAULTS.chatChanceStep,
+  ROUTER_CHAT_CHANCE_MAX,
+], [0.35, 0.2, 1])
+
+check('概率真值表: chatMisses 0/1/2/3/4 -> 0.35/0.55/0.75/0.95/1.0, >=5 夹 1.0', [0, 1, 2, 3, 4, 5, 9].map(
+  (n) => routerChatChance({}, n),
+), [0.35, 0.55, 0.75, 0.95, 1, 1, 1])
+
+check('基准自己已经到 1.0 时不再往上涨', routerChatChance({ chatChance: 1 }, 3), 1)
+
+check('步长写 0 时与改动前逐字一致 (概率恒等于 chatChance)', [0, 1, 2, 3, 9].map(
+  (n) => routerChatChance({ chatChanceStep: 0 }, n),
+), [0.35, 0.35, 0.35, 0.35, 0.35])
+
+check('步长是坏值时按不递增 (与写 0 同一条), 负数也一样', [
+  routerChatChance({ chatChanceStep: '很多' }, 2),
+  routerChatChance({ chatChanceStep: -0.5 }, 2),
+], [0.35, 0.35])
+
+check('缺 chatMisses 时按 0 算 (老 router.json 没有这一格)', [
+  routerChatChance({}, undefined),
+  routerChatChance({}, null),
+], [0.35, 0.35])
+
+/** 到了"太久没说话"那条线之后的底座 (缺省 chatAfterMs 4 小时) */
+const chatBase = (over = {}) => base({ lastSpokenAt: NOW - 5 * HOUR, ...over })
+
+check('同一拍 roll=0.45: 0 次错过的 0.35 抽不中, 1 次错过的 0.55 抽中了', [
+  judgeRouter(chatBase({ chatMisses: 0, random: () => 0.45 })).say,
+  judgeRouter(chatBase({ chatMisses: 1, random: () => 0.45 })).kind,
+], [false, 'chat'])
+
+check('同一拍 roll=0.7: 1 次错过 (0.55) 抽不中, 2 次 (0.75) 抽中了', [
+  judgeRouter(chatBase({ chatMisses: 1, random: () => 0.7 })).say,
+  judgeRouter(chatBase({ chatMisses: 2, random: () => 0.7 })).kind,
+], [false, 'chat'])
+
+check('退让期里概率 1.0 也不出 chat (冷却已过, 只差 ignored 那一闸)', (() => {
+  const one = judgeRouter(base({
+    lastSpokenAt: NOW - 30 * HOUR,
+    ignored: 2,
+    chatMisses: 9,
+    random: () => 0.0,
+  }))
+  return [one.say, one.why, one.chatMissed]
+})(), [false, 'nothing worth saying', undefined])
+
+check('该说却没说出来那一拍带 chatMissed (routerTick 据此 +1)', judgeRouter(chatBase({
+  random: () => 0.9,
+})).chatMissed, true)
+
+check('静默 / 冷却 / 他还在说话那些拍不带 chatMissed (本来就不该开口)', [
+  judgeRouter(chatBase({ now: new Date(2026, 10, 7, 23, 30, 0).getTime(), random: () => 0.9 })).chatMissed,
+  judgeRouter(chatBase({ lastUserAt: NOW - 60 * 1000, random: () => 0.9 })).chatMissed,
+  judgeRouter(chatBase({ lastSpokenAt: NOW - 12 * 60 * 1000, random: () => 0.9 })).chatMissed,
+], [undefined, undefined, undefined])
+
+check('还没到 chatAfterMs 那条线时也不带 chatMissed', judgeRouter(chatBase({
+  lastSpokenAt: NOW - 1 * HOUR,
+  random: () => 0.9,
+})).chatMissed, undefined)
+
+check('这一拍本来就有别的话要说 (rest 胜出) 就不算错过', judgeRouter(chatBase({
+  random: () => 0.9,
+  usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] },
+})).chatMissed, undefined)
+
+check('下一笔 chatMisses: 该说没说 +1, 其余照旧, 封顶 20', [
+  nextChatMisses({ chatMisses: 2 }, { say: false, chatMissed: true }),
+  nextChatMisses({ chatMisses: 2 }, { say: false }),
+  nextChatMisses({}, { say: false, chatMissed: true }),
+  nextChatMisses({ chatMisses: 19 }, { say: false, chatMissed: true }),
+  nextChatMisses({ chatMisses: 99 }, { say: false, chatMissed: true }),
+  ROUTER_CHAT_MISSES_MAX,
+], [3, 2, 1, 20, 20, 20])
+
+check('开口那一笔写 0 (routerMarkSaid 与「唤醒一下」各一处)', [
+  (host.match(/chatMisses: 0,/gu) ?? []).length,
+  /chatMisses: nextChatMisses\(state, decision\)/u.test(host),
+  /const chatMisses = Math\.max\(0, Number\(state\?\.chatMisses \?\? 0\) \|\| 0\)/u.test(host),
+  /put\('chatChanceStep', sim\?\.router\?\.chatChanceStep\)/u.test(host),
+], [2, true, true, true])
 
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)
