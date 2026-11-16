@@ -34,8 +34,13 @@ if (at < 0 || end < 0) {
   console.error('FAIL the router block is not in host-plugin/index.mjs any more')
   process.exit(1)
 }
-const { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS } = new Function(
-  `${host.slice(at, end)}\nreturn { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS }`,
+const {
+  judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS,
+  heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES, ROUTER_SOCIAL_PACKAGES,
+} = new Function(
+  `${host.slice(at, end)}\nreturn { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey,`
+    + ' ROUTER_DEFAULTS, heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES,'
+    + ' ROUTER_SOCIAL_PACKAGES }',
 )()
 
 /* ── 两把"她自己定"的尺子 (2026-11-10) ─────────────────────────────────── */
@@ -46,24 +51,60 @@ if (rulesAt < 0 || rulesEnd < 0) {
   console.error('FAIL the router rules block is not in host-plugin/index.mjs any more')
   process.exit(1)
 }
-const { normalizeRouterRules } = new Function(
-  `${host.slice(rulesAt, rulesEnd)}\nreturn { normalizeRouterRules }`,
-)()
+const { normalizeRouterRules, migrateRouterRules, hasLegacyRouterRules } = new Function(
+  // 迁移那一支要读新缺省 (旧键认到就落回它), 而 `ROUTER_DEFAULTS` 在更上面那一段里
+  'ROUTER_DEFAULTS',
+  `${host.slice(rulesAt, rulesEnd)}\nreturn { normalizeRouterRules, migrateRouterRules, hasLegacyRouterRules }`,
+)(ROUTER_DEFAULTS)
 
-check('两把尺子原样收下', normalizeRouterRules({ gameMinutes: 120, wishDays: 30 }), {
-  gameMinutes: 120,
+check('两把尺子原样收下', normalizeRouterRules({ appMinutes: 120, wishDays: 30 }), {
+  appMinutes: 120,
   wishDays: 30,
 })
-check('越界夹回范围 (游戏 5..1440 / 提前 1..365)', normalizeRouterRules({ gameMinutes: 0, wishDays: 9999 }), {
-  gameMinutes: 5,
+check('越界夹回范围 (应用 5..1440 / 提前 1..365)', normalizeRouterRules({ appMinutes: 0, wishDays: 9999 }), {
+  appMinutes: 5,
   wishDays: 365,
 })
-check('坏值丢掉, 不认识的不收', normalizeRouterRules({ gameMinutes: '很久', wishDays: null, cooldownMs: 1 }), {})
-check('只给一个键时另一个不出现 (另一把尺子保持原样)', normalizeRouterRules({ gameMinutes: 80 }), {
-  gameMinutes: 80,
+check('坏值丢掉, 不认识的不收', normalizeRouterRules({ appMinutes: '很久', wishDays: null, cooldownMs: 1 }), {})
+check('只给一个键时另一个不出现 (另一把尺子保持原样)', normalizeRouterRules({ appMinutes: 80 }), {
+  appMinutes: 80,
 })
 check('不是对象时回空', normalizeRouterRules(null), {})
-check('缺省仍是 100 分钟 / 60 天', [ROUTER_DEFAULTS.gameMinutes, ROUTER_DEFAULTS.wishDays], [100, 60])
+check('缺省仍是 120 分钟 / 60 天', [ROUTER_DEFAULTS.appMinutes, ROUTER_DEFAULTS.wishDays], [120, 60])
+
+/* 旧键 `gameMinutes` 的只读迁移 (2.8.1 #10): 认到就落回新的缺省, 旧键一定不带出去 */
+check('旧文件的 gameMinutes:100 迁移成 appMinutes:120 (不搬旧数字)', normalizeRouterRules({ gameMinutes: 100 }), {
+  appMinutes: 120,
+})
+check('迁移后旧键不在结果里', Object.keys(migrateRouterRules({ gameMinutes: 100 })), ['appMinutes'])
+check('旧键与 wishDays 一起时两把尺子都在, 旧键删掉', migrateRouterRules({ gameMinutes: 100, wishDays: 30 }), {
+  appMinutes: 120,
+  wishDays: 30,
+})
+check('新键已经在时按新键算 (旧键只是被删掉)', migrateRouterRules({ gameMinutes: 100, appMinutes: 90 }), {
+  appMinutes: 90,
+})
+check('旧键是坏值时当没有 (不因为见过一个坏值就写上 120)', migrateRouterRules({ gameMinutes: '很久' }), {})
+check('认不认得出旧键 (只据此补写一次)', [
+  hasLegacyRouterRules({ gameMinutes: 100 }),
+  hasLegacyRouterRules({ appMinutes: 120 }),
+  hasLegacyRouterRules(null),
+], [true, false, false])
+check('旧文件里 gameMinutes:1000 不再压住新口径 (线上的数落回 120)', normalizeRouterRules({ gameMinutes: 1000 }), {
+  appMinutes: 120,
+})
+
+/* ── rest 那三档台词 (2.8.1 #10) ───────────────────────────────────────── */
+
+const linesAt = host.indexOf('const ROUTER_LINES')
+const linesEnd = host.indexOf('function routerStatePath', linesAt)
+if (linesAt < 0 || linesEnd < 0) {
+  console.error('FAIL the router lines block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const { routerLine, routerRestLine, ROUTER_LINES, ROUTER_REST_LINES } = new Function(
+  `${host.slice(linesAt, linesEnd)}\nreturn { routerLine, routerRestLine, ROUTER_LINES, ROUTER_REST_LINES }`,
+)()
 
 /* ── 一个固定的"现在": 2026-11-07 21:40 ─────────────────────────────────── */
 
@@ -129,22 +170,23 @@ check(
       { at: NOW - 20 * 60 * 1000, kind: 'call', state: 'start' },
       { at: NOW - 60 * 1000, kind: 'call', state: 'end' },
     ],
-    usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 118 * 60 * 1000 }] },
+    usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] },
   })).kind,
   'rest',
 )
 
-/* ── 二、游戏时长 ───────────────────────────────────────────────────────── */
+/* ── 二、今天用得最久的那个应用 (2.8.1 #10: 任意应用, 不只是游戏) ───────── */
 
 check(
-  '游戏 118 分钟 -> 提醒歇一会儿',
-  judgeRouter(base({ usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 118 * 60 * 1000 }] } })),
+  '游戏 130 分钟 -> 提醒歇一会儿',
+  judgeRouter(base({ usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] } })),
   {
     say: true,
     kind: 'rest',
     to: 'ball',
-    brief: '王者荣耀 今天 118 分钟, 现在 21:40',
-    why: '王者荣耀 今天 118 分钟, 现在 21:40',
+    tier: 'game',
+    brief: '王者荣耀 今天 130 分钟, 现在 21:40',
+    why: '王者荣耀 今天 130 分钟, 现在 21:40',
   },
 )
 
@@ -155,16 +197,23 @@ check(
 )
 
 check(
-  '不是游戏的应用再久也不按"歇一会儿"说',
-  judgeRouter(base({ usage: { today: [{ pkg: 'com.tencent.mm', label: '微信', ms: 300 * 60 * 1000 }] } })).say,
-  false,
+  '不是游戏的应用用得久也一样提醒 (微信 300 分钟)',
+  judgeRouter(base({ usage: { today: [{ pkg: 'com.tencent.mm', label: '微信', ms: 300 * 60 * 1000 }] } })),
+  {
+    say: true,
+    kind: 'rest',
+    to: 'ball',
+    tier: 'social',
+    brief: '微信 今天 300 分钟, 现在 21:40',
+    why: '微信 今天 300 分钟, 现在 21:40',
+  },
 )
 
 check(
-  '规则里的线抬到 200 分钟后 118 分钟就不说了',
+  '规则里的线抬到 200 分钟后 130 分钟就不说了',
   judgeRouter(base({
-    usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 118 * 60 * 1000 }] },
-    rules: { gameMinutes: 200 },
+    usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] },
+    rules: { appMinutes: 200 },
   })).say,
   false,
 )
@@ -321,7 +370,7 @@ check(
     usage: usageGame,
     lastSpokenAt: NOW - 5 * HOUR,
     checks: [checkUsage],
-    rules: { gameMinutes: 1000 },
+    rules: { appMinutes: 1000 },
   })).kind,
   'check',
 )
@@ -581,6 +630,89 @@ const emptyOpening = routerStartLine(
   { maxMessages: 6, checkMessages: 3 },
 )
 check('没有检测项时不硬凑配额', emptyOpening.includes('没有检测项可提'), true)
+
+/* ── 九、rest 口径: 今天任意一个应用 + 三档台词 (2.8.1 #10) ────────────────── */
+
+/*
+ * 主人那一句: "rest 判定从「今天某个游戏满 gameMinutes」改成「今天任意一个应用使用满 appMinutes」,
+ * 排除 Luwi 自己 / 桌面 / 输入法三类, 旧键 gameMinutes 只读迁移一次, 台词按应用分档". 这一节按真值表
+ * 逐条钉住: 线上下 / 三类排除 / 挑最久那一个 / 三档台词各一句
+ */
+
+const CHROME = 'com.android.chrome'
+const READER = 'com.example.reader'
+const usageOf = (...rows) => ({ today: rows })
+
+check('非游戏应用 130 分钟 -> 出 rest 候选', (() => {
+  const one = judgeRouter(base({ usage: usageOf({ pkg: CHROME, label: 'Chrome', ms: 130 * 60 * 1000 }) }))
+  return [one.say, one.kind, one.tier, one.brief]
+})(), [true, 'rest', 'other', 'Chrome 今天 130 分钟, 现在 21:40'])
+
+check('非游戏应用 119 分钟 -> 还没到线 (缺省 120)', judgeRouter(base({
+  usage: usageOf({ pkg: CHROME, label: 'Chrome', ms: 119 * 60 * 1000 }),
+})).say, false)
+
+check('桌面 / 输入法 / Luwi 自己各 200 分钟都不算', judgeRouter(base({
+  usage: usageOf(
+    { pkg: 'com.miui.home', label: '桌面', ms: 200 * 60 * 1000 },
+    { pkg: 'com.sohu.inputmethod.sogou', label: '搜狗输入法', ms: 200 * 60 * 1000 },
+    { pkg: 'io.github.yuloong07star.luwi', label: 'Luwi', ms: 200 * 60 * 1000 },
+  ),
+})).say, false)
+
+check('应用自己写的 home / ime 标记也认 (包名表认不出的情况下)', [
+  judgeRouter(base({ usage: usageOf({ pkg: 'com.vendor.shell', label: '桌面', home: true, ms: 300 * 60 * 1000 }) })).say,
+  judgeRouter(base({ usage: usageOf({ pkg: 'com.vendor.keys', label: '输入法', ime: true, ms: 300 * 60 * 1000 }) })).say,
+], [false, false])
+
+check('包名里带 launcher / inputmethod 的兜底也排掉 (旧版应用不写标记)', [
+  routerExcludedApp({ pkg: 'com.vivo.launcher' }),
+  routerExcludedApp({ pkg: 'com.iflytek.inputmethod.miui' }),
+  routerExcludedApp({ pkg: CHROME }),
+], [true, true, false])
+
+check('王者 130 + Chrome 200 都超线时 brief 说 Chrome 200 分钟 (按分钟降序取最大)', (() => {
+  const one = judgeRouter(base({
+    usage: usageOf(
+      { pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 },
+      { pkg: CHROME, label: 'Chrome', ms: 200 * 60 * 1000 },
+    ),
+  }))
+  return [one.tier, one.brief]
+})(), ['other', 'Chrome 今天 200 分钟, 现在 21:40'])
+
+check('最大的那个在文件里排第二也挑得出来', heaviestUsageApp([
+  { pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 },
+  { pkg: CHROME, label: 'Chrome', ms: 200 * 60 * 1000 },
+  { pkg: READER, label: '阅读', ms: 130 * 60 * 1000 },
+], 120)?.label, 'Chrome')
+
+check('一个都没到线时 heaviestUsageApp 回 null', heaviestUsageApp([
+  { pkg: CHROME, label: 'Chrome', ms: 60 * 60 * 1000 },
+], 120), null)
+
+check('档位: 游戏 / 视频社交 / 其余', [
+  routerRestTier({ game: true, social: false }),
+  routerRestTier({ game: false, social: true }),
+  routerRestTier({ game: false, social: false }),
+], ['game', 'social', 'other'])
+
+check('三档台词各命中一次 (decision -> 那一句话)', [
+  routerLine(judgeRouter(base({ usage: usageOf({ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }) }))),
+  routerLine(judgeRouter(base({ usage: usageOf({ pkg: 'com.ss.android.ugc.aweme', label: '抖音', ms: 200 * 60 * 1000 }) }))),
+  routerLine(judgeRouter(base({ usage: usageOf({ pkg: READER, label: '阅读', ms: 200 * 60 * 1000 }) }))),
+], ['都这么久了, 起来走两步吧', '刷了有一会儿了, 眼睛歇一下吧', '这个看了挺久, 歇一会儿吧'])
+
+check('游戏以外两档开口都不是"起来走两步"那句', [
+  routerRestLine('social').includes('起来走两步'),
+  routerRestLine('other').includes('起来走两步'),
+  new Set([routerRestLine('game'), routerRestLine('social'), routerRestLine('other')]).size,
+], [false, false, 3])
+
+check('认不出来的档落回"其余"那一句', routerRestLine('别的'), ROUTER_REST_LINES.other)
+check('主人自己在 router.json 写的 lines 仍然优先 (三档都用那一句)', routerLine({
+  kind: 'rest', tier: 'other', lines: { rest: '该歇了' },
+}), '该歇了')
 
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)

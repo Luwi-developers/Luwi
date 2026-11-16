@@ -107,13 +107,15 @@ check('两把尺子不再在 SimSetting 与这一页里', [
 
 check('宿主不再从 sim.json 读这两把尺子, 而给她留了两个写入口', [
   !/put\('gameMinutes', sim\?\.router\?\.gameMinutes\)/u.test(host),
+  !/put\('appMinutes', sim\?\.router\?\.appMinutes\)/u.test(host),
   !/put\('wishDays', sim\?\.router\?\.wishDays\)/u.test(host),
   /const ROUTER_RULE_RANGES = Object\.freeze\(\{/u.test(host),
   /function normalizeRouterRules\(input\)/u.test(host),
   /async function writeRouterRules\(rules\)/u.test(host),
-  /gameMinutes: args\?\.gameMinutes, wishDays: args\?\.wishDays/u.test(host),
+  // 2.8.1 #10: 尺子改名 appMinutes (旧名 gameMinutes 只作只读迁移的入口)
+  /appMinutes: args\?\.appMinutes,\s*gameMinutes: args\?\.gameMinutes,\s*wishDays: args\?\.wishDays/u.test(host),
   /exploreRulesWrite\(args\?\.rules\)/u.test(host),
-], [true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true])
 
 /* ── 二、读盘逐键兜底 ───────────────────────────────────────────────────── */
 

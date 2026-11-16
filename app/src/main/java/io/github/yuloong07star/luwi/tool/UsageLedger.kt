@@ -4,9 +4,11 @@ import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.PowerManager
 import android.util.Log
+import android.view.inputmethod.InputMethodManager
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.host.DshHost
 import kotlinx.serialization.json.Json
@@ -19,8 +21,8 @@ import java.io.File
  * 「今天这台手机被怎么用了」那一份读数 (2026-11-07, 球是门户)
  *
  * 判断层 (`host-plugin` 的 `judgeRouter`) 要回答"她该不该开口", 而它需要两个数: **今天哪个应用用了
- * 多久**(游戏那一档就是"打太久了"), 以及**刚才发生了什么**(前台换了 / 解锁了)。这一份就是那两样,
- * 落 `$DSH_HOME/lw/`:
+ * 多久**(用得久就该歇一会儿 —— 2.8.1 #10 起是"任意一个应用", 不再只数游戏), 以及**刚才发生了什么**
+ * (前台换了 / 解锁了)。这一份就是那两样, 落 `$DSH_HOME/lw/`:
  *
  * - `usage.json` —— 应用**单写者**, 宿主只读 (`judgeRouter` 读它)
  * - `signals.jsonl` —— 一行一件事, 有界 200 行
@@ -101,6 +103,9 @@ internal object UsageLedger {
                         put("label", app.label)
                         put("ms", app.ms)
                         put("game", app.game)
+                        // 2.8.1 #10: 桌面与输入法不参与"用了多久"那一笔账, 判断层照这两个标记排除
+                        put("home", app.home)
+                        put("ime", app.ime)
                     })
                 }
             })
@@ -150,8 +155,11 @@ internal object UsageLedger {
             }
         }
         val foreground = running.maxByOrNull { it.value }?.key
+        // 桌面与输入法 (2.8.1 #10): 包名猜不出来, 问系统 —— 见 [homePackages] / [inputMethodPackages]
+        val homes = homePackages(context)
+        val imes = inputMethodPackages(context)
         val apps = totals
-            .map { (pkg, ms) -> app(context, pkg, ms) }
+            .map { (pkg, ms) -> app(context, pkg, ms, pkg in homes, pkg in imes) }
             .sortedByDescending { it.ms }
         return Snapshot(
             access = access,
@@ -206,14 +214,48 @@ internal object UsageLedger {
         target.writeText(kept.joinToString("\n", postfix = if (kept.isEmpty()) "" else "\n"))
     }
 
-    /** 一个包 -> 那一行读数 (名字取不到就用包名, 类型取不到就不是游戏) */
-    private fun app(context: Context, pkg: String, ms: Long): App {
+    /**
+     * 一个包 -> 那一行读数 (名字取不到就用包名, 类型取不到就不是游戏)
+     *
+     * `home` / `ime` 是给判断层用的**排除标记** (2.8.1 #10): 桌面只要解锁就在, 输入法跟着每一句话涨,
+     * 拿它们去判"该歇一会儿"就是噪音。判断层认这两个标记 (外加她自己那一个包名)
+     */
+    private fun app(context: Context, pkg: String, ms: Long, home: Boolean, ime: Boolean): App {
         val manager = context.packageManager
         val info = runCatching { manager.getApplicationInfo(pkg, 0) }.getOrNull()
         val label = info?.let { runCatching { manager.getApplicationLabel(it).toString() }.getOrNull() }
         val game = info?.category == ApplicationInfo.CATEGORY_GAME
-        return App(pkg = pkg, label = label?.takeIf { it.isNotBlank() } ?: pkg, ms = ms, game = game)
+        return App(
+            pkg = pkg,
+            label = label?.takeIf { it.isNotBlank() } ?: pkg,
+            ms = ms,
+            game = game,
+            home = home,
+            ime = ime,
+        )
     }
+
+    /**
+     * 系统里报了「桌面」的那几个包 (`CATEGORY_HOME`)
+     *
+     * 不按包名猜: MIUI 那个叫 `com.miui.home`, vivo 叫 `com.bbk.launcher2`, 换一层皮就全错 ——
+     * `PackageManager` 自己知道谁是桌面
+     */
+    private fun homePackages(context: Context): Set<String> = runCatching {
+        context.packageManager
+            .queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
+            .mapNotNull { it.activityInfo?.packageName }
+            .toSet()
+    }.getOrDefault(emptySet())
+
+    /** 已启用的输入法 (装了几个就有几个; 没开的一律不算) */
+    private fun inputMethodPackages(context: Context): Set<String> = runCatching {
+        context.getSystemService(InputMethodManager::class.java)
+            ?.enabledInputMethodList
+            ?.map { it.packageName }
+            ?.toSet()
+            ?: emptySet()
+    }.getOrDefault(emptySet())
 
     /** 「使用情况访问」给没给 (appops, 与 `PermissionCatalog` 那一条是同一个判据) */
     private fun usageAccess(context: Context): Boolean {
@@ -250,8 +292,15 @@ internal object UsageLedger {
         }
     }
 
-    /** 今天这一天的一份快照 */
-    data class App(val pkg: String, val label: String, val ms: Long, val game: Boolean)
+    /** 今天这一天的一份快照 (`home` / `ime` = 桌面 / 输入法, 判断层据此不把它们算进"用了多久") */
+    data class App(
+        val pkg: String,
+        val label: String,
+        val ms: Long,
+        val game: Boolean,
+        val home: Boolean = false,
+        val ime: Boolean = false,
+    )
 
     data class Snapshot(
         val access: Boolean,

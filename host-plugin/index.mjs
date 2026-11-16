@@ -4261,8 +4261,9 @@ const TOOLS = [
       + ' computable shape, and only what you have evidence for - the settings page lists them and the'
       + ' owner may switch one off. When this run really turned up nothing worth watching, say that in'
       + ' the summary\'s 仍不确定的点 section instead of handing in an invented one. `rules` is for the'
-      + ' two scales the owner no longer sets in the app: {"gameMinutes":120,"wishDays":30} - how long a'
-      + ' game counts as long and how many days ahead a remembered date is brought up. Send it only'
+      + ' two scales the owner no longer sets in the app: {"appMinutes":120,"wishDays":30} - how long one'
+      + ' app has to run today before it counts as long (any app, not just games) and how many days ahead a'
+      + ' remembered date is brought up. Send it only'
       + ' when this run gives you a reason to move one; leave it out and the current values stay.',
     parameters: {
       op: {
@@ -4306,8 +4307,9 @@ const TOOLS = [
         type: 'object',
         additionalProperties: true,
         description: 'finish only, optional: the two judgement scales the owner no longer sets in the'
-          + ' app - {"gameMinutes":120,"wishDays":30}. gameMinutes is how long a game counts as long'
-          + ' (5..1440), wishDays is how many days ahead a remembered date is brought up (1..365).'
+          + ' app - {"appMinutes":120,"wishDays":30}. appMinutes is how long one app has to run today'
+          + ' before it counts as long (any app: games, video, anything; 5..1440), wishDays is how many'
+          + ' days ahead a remembered date is brought up (1..365).'
           + ' Send only the key you want to move; the other one keeps its value',
       },
     },
@@ -5356,11 +5358,13 @@ const TOOLS = [
     name: 'lw_router',
     description:
       'The decision layer: whether she should speak up right now, and about what. op=judge runs the '
-      + 'judgement over the phone\'s own numbers (how long a game has been running today, the things '
-      + 'she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts one '
-      + 'sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
-      + 'op=rules sets how long a game counts as long (gameMinutes) and how many days ahead a promise '
-      + 'is brought up (wishDays) - the owner no longer has those two rows in settings (2026-11-10), '
+      + 'judgement over the phone\'s own numbers (how long the heaviest app has been running today, the '
+      + 'things she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts '
+      + 'one sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
+      + 'op=rules sets how long one app has to run today before it counts as long (appMinutes - any app, '
+      + 'not just games; the home screen, the keyboard and Luwi herself never count) and how many days '
+      + 'ahead a promise is brought up (wishDays) - '
+      + 'the owner no longer has those two rows in settings (2026-11-10), '
       + 'so use this op when your own judgement says the scale should change. '
       + 'It never opens a conversation by itself - op=judge only answers.',
     parameters: {
@@ -5373,9 +5377,15 @@ const TOOLS = [
         type: 'string',
         description: 'For op=say: the sentence to put on the ball',
       },
+      appMinutes: {
+        type: 'number',
+        description: 'For op=rules: how long one app has to run today before it counts as long, in'
+          + ' minutes (5..1440)',
+      },
       gameMinutes: {
         type: 'number',
-        description: 'For op=rules: how long a game counts as long, in minutes (5..1440)',
+        description: 'For op=rules: the old name of appMinutes (before 2.8.1 it only counted games).'
+          + ' Still accepted, but it lands on the default appMinutes - send appMinutes instead',
       },
       wishDays: {
         type: 'number',
@@ -5400,7 +5410,11 @@ const TOOLS = [
         return `said it on the ball: ${text}`
       }
       if (op === 'rules') {
-        const written = await writeRouterRules({ gameMinutes: args?.gameMinutes, wishDays: args?.wishDays })
+        const written = await writeRouterRules({
+          appMinutes: args?.appMinutes,
+          gameMinutes: args?.gameMinutes,
+          wishDays: args?.wishDays,
+        })
         if (written.error) throw new Error(written.error)
         return JSON.stringify(written.rules)
       }
@@ -9554,7 +9568,14 @@ function noteTurnOut(sessionId, lines) {
  * `lw/router.json` 里哪一项没写就用这里的 —— 于是"文件坏了"与"还没写过"都还能跑, 只是按缺省
  */
 const ROUTER_DEFAULTS = Object.freeze({
-  gameMinutes: 100,
+  /**
+   * 今天**任意一个应用**用满多久就该歇一会儿 (2.8.1 #10, 主人: "不光是游戏")
+   *
+   * 以前这一格叫 `gameMinutes` (缺省 100), 只数游戏 —— 可是刷两小时短视频、看一上午文档, 一样是
+   * "用得久了"。改口径时线也跟着抬到 120: 100 分钟那条线是给游戏定的, 铺到所有应用上就变成了打扰
+   * (旧键的迁移见 [ROUTER_LEGACY_RULES] 与 [migrateRouterRules])
+   */
+  appMinutes: 120,
   wishDays: 60,
   cooldownMs: 30 * 60 * 1000,
   chatChance: 0.35,
@@ -9590,6 +9611,116 @@ const ROUTER_GAME_PACKAGES = new Set([
   'com.netease.pes',
   'com.hypergryph.arknights',
 ])
+
+/**
+ * 视频 / 社交那一档 (2.8.1 #10)
+ *
+ * 它只决定"这句话怎么说", 与"算不算久"无关 —— 刷视频跟打游戏都用得久, 但劝人的话不一样。
+ * 与游戏那一张表同一个处境: 应用那一侧会写 `social` 标记, 这张表是旧版应用的兜底
+ */
+const ROUTER_SOCIAL_PACKAGES = new Set([
+  'com.tencent.mm',
+  'com.tencent.mobileqq',
+  'com.ss.android.ugc.aweme',
+  'com.ss.android.ugc.aweme.lite',
+  'com.smile.gifmaker',
+  'tv.danmaku.bili',
+  'com.xingin.xhs',
+  'com.sina.weibo',
+  'com.zhihu.android',
+  'com.ss.android.article.news',
+  'com.tencent.qqlive',
+  'com.qiyi.video',
+  'com.google.android.youtube',
+  'com.instagram.android',
+  'org.telegram.messenger',
+  'com.whatsapp',
+])
+
+/**
+ * 三类**不参与计数**的应用 (2.8.1 #10): Luwi 自己 / 桌面 / 输入法
+ *
+ * 为什么要专门排除: 桌面只要解锁就在, 输入法跟着每一句话涨, 它们当然排得进"今天用了多久"的头几名 ——
+ * 拿它们去判"该歇一会儿", 主人收到的是"桌面 今天 210 分钟", 那不是提醒, 是噪音。
+ *
+ * 应用那一侧 (`UsageLedger`) 会写 `home` / `ime` 两个标记, 那是最准的判据 (`PackageManager` 的
+ * `CATEGORY_HOME` 与已启用输入法名单); 这里几张表是**旧版应用**的兜底, 再退一步按包名认
+ */
+const ROUTER_SELF_PACKAGES = new Set([
+  'io.github.yuloong07star.luwi',
+])
+
+const ROUTER_HOME_PACKAGES = new Set([
+  'com.miui.home',
+  'com.android.launcher',
+  'com.android.launcher3',
+  'com.google.android.apps.nexuslauncher',
+  'com.huawei.android.launcher',
+  'com.oppo.launcher',
+  'com.bbk.launcher2',
+  'com.sec.android.app.launcher',
+  'com.teslacoilsw.launcher',
+])
+
+const ROUTER_IME_PACKAGES = new Set([
+  'com.sohu.inputmethod.sogou',
+  'com.iflytek.inputmethod',
+  'com.baidu.input',
+  'com.google.android.inputmethod.latin',
+  'com.huawei.ohos.inputmethod',
+  'com.miui.inputmethod',
+])
+
+/**
+ * 这一行读数要不要跳过 (纯函数): 她自己 / 桌面 / 输入法都不算"用了一个应用"
+ *
+ * 先认应用写的三个标记 (`self` / `home` / `ime`), 再认那几张表, 最后才是包名里的字眼 ——
+ * 旧版应用不写标记时, `com.vivo.launcher` 这种仍然得排掉
+ */
+function routerExcludedApp(one) {
+  const pkg = String(one?.pkg ?? '')
+  if (pkg === '') return true
+  if (one?.self === true || one?.home === true || one?.ime === true) return true
+  if (ROUTER_SELF_PACKAGES.has(pkg)) return true
+  if (ROUTER_HOME_PACKAGES.has(pkg) || ROUTER_IME_PACKAGES.has(pkg)) return true
+  return /launcher|inputmethod|input_method/iu.test(pkg)
+}
+
+/**
+ * 今天用得最久的那一个应用 (纯函数)
+ *
+ * 只看线以上的那些: 按时长降序取第一个 —— 两条都超线时说的是最久的那一个 (王者 130 与 Chrome 200
+ * 同时成立, 提的是 Chrome), 而不是碰巧排在 `usage.json` 前面那一个
+ *
+ * @returns `{ pkg, label, minutes, game, social }`, 一个都没到线就回 null
+ */
+function heaviestUsageApp(today, appMinutes) {
+  const line = Math.round(Number(appMinutes))
+  if (!Number.isFinite(line) || line <= 0) return null
+  const rows = (Array.isArray(today) ? today : [])
+    .filter((one) => one && !routerExcludedApp(one))
+    .map((one) => {
+      const pkg = String(one?.pkg ?? '')
+      return {
+        pkg,
+        label: String(one?.label ?? '').trim() || pkg,
+        minutes: Math.floor((Number(one?.ms ?? 0) || 0) / 60000),
+        game: one?.game === true || ROUTER_GAME_PACKAGES.has(pkg),
+        social: one?.social === true || ROUTER_SOCIAL_PACKAGES.has(pkg),
+      }
+    })
+    .filter((one) => one.minutes >= line)
+  if (rows.length === 0) return null
+  rows.sort((a, b) => b.minutes - a.minutes)
+  return rows[0]
+}
+
+/** 这个应用该用哪一档台词 (纯函数): 游戏原句 / 视频社交一句 / 其余中性一句 (2.8.1 #10) */
+function routerRestTier(one) {
+  if (one?.game === true) return 'game'
+  if (one?.social === true) return 'social'
+  return 'other'
+}
 
 /** 那一天是哪一天 (本地时区, `2026-11-07`) */
 function routerDayKey(now) {
@@ -9787,17 +9918,17 @@ function judgeRouter(input) {
   const candidates = []
   const minuteMs = 60 * 1000
   const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
-  for (const one of today) {
-    const pkg = String(one?.pkg ?? '')
-    const isGame = one?.game === true || ROUTER_GAME_PACKAGES.has(pkg)
-    if (!isGame) continue
-    const minutes = Math.floor(Number(one?.ms ?? 0) / minuteMs)
-    if (minutes < Number(rules.gameMinutes)) continue
+  // **rest 那一档按"今天任意一个应用"算** (2.8.1 #10): 以前只数游戏 (`gameMinutes`), 现在凡是用得
+  // 久的应用都要看见 —— 桌面 / 输入法 / 她自己不算 (见 [routerExcludedApp]), 台词按应用分档
+  // (见 [routerRestTier])
+  const heaviest = heaviestUsageApp(today, rules.appMinutes)
+  if (heaviest) {
     candidates.push({
       kind: 'rest',
       score: 5,
       to: 'ball',
-      brief: `${one?.label || pkg} 今天 ${minutes} 分钟, 现在 ${routerClockText(now)}`,
+      tier: routerRestTier(heaviest),
+      brief: `${heaviest.label} 今天 ${heaviest.minutes} 分钟, 现在 ${routerClockText(now)}`,
     })
   }
   const todayKey = routerDayKey(now)
@@ -9868,6 +9999,8 @@ function judgeRouter(input) {
     say: true,
     kind: best.kind,
     to: best.to,
+    // rest 那一档带"按哪个应用分档" (2.8.1 #10): [routerLine] 据此挑那句话
+    ...(best.tier ? { tier: best.tier } : {}),
     ...(best.id ? { id: best.id } : {}),
     ...(best.key ? { key: best.key } : {}),
     brief: best.brief,
@@ -11683,12 +11816,43 @@ function reportSticker(id) {
  *
  * 直推给球时用它 —— **不把数字念给主人听**: "王者荣耀今天 118 分钟"是判断的依据, 不是该说出口的
  * 那句话。想让她的语气不一样, 改 `lw/router.json` 的 `lines` 就行
+ *
+ * `rest` 不在这张表里: 它按应用分三档 (见 [ROUTER_REST_LINES]), 一句"起来走两步"对刷视频的人说不通
  */
 const ROUTER_LINES = Object.freeze({
-  rest: '都这么久了, 起来走两步吧',
   wish: '今天还没动那件事, 要不要现在看一眼',
   chat: '在干嘛呢',
 })
+
+/**
+ * `rest` 那一档的三句 (2.8.1 #10, 主人: "台词按应用分档")
+ *
+ * 游戏那句是原来的原句, 一个字都没改; 视频社交说的是"眼睛歇一下"; 其余应用一句中性的 ——
+ * 拿"起来走两步"去劝一个在看文档的人, 读起来就像她没看懂他在干什么
+ */
+const ROUTER_REST_LINES = Object.freeze({
+  game: '都这么久了, 起来走两步吧',
+  social: '刷了有一会儿了, 眼睛歇一下吧',
+  other: '这个看了挺久, 歇一会儿吧',
+})
+
+/** 某一档 rest 缺省说什么 (纯函数, 认不出来的档按"其余"那一句) */
+function routerRestLine(tier) {
+  return ROUTER_REST_LINES[String(tier ?? '')] ?? ROUTER_REST_LINES.other
+}
+
+/**
+ * 直推给球的那一句 (说人话, 不带数字)
+ *
+ * `decision.lines[kind]` 是主人自己改过的那一句 (`router.json` 的 `lines` 段): 她写了就一律按她的,
+ * 三档都算 —— 那是"她想怎么说", 不该被分档盖住
+ */
+function routerLine(decision) {
+  const custom = decision?.lines?.[decision.kind]
+  if (typeof custom === 'string' && custom.trim()) return custom.trim()
+  if (decision?.kind === 'rest') return routerRestLine(decision?.tier)
+  return ROUTER_LINES[decision.kind] ?? ''
+}
 
 /** 那份文件: `$DSH_HOME/lw/router.json` (规则 + 上一次判断 + 上次开口的时刻) */
 function routerStatePath() {
@@ -11765,45 +11929,101 @@ function simRouterRules(sim) {
  *
  * 以前它们写在「更多设置」页、落 `sim.json`; 现在那一页没有了, 只剩 `router.json.rules` 这一处写点:
  * 探索收尾的 `rules` 或对话里的 `lw_router op=rules`。**范围写死在这里**: 模型给 0 或 99999 都夹回来,
- * 缺省仍由 [ROUTER_DEFAULTS] 给 (100 分钟 / 60 天)
+ * 缺省仍由 [ROUTER_DEFAULTS] 给 (120 分钟 / 60 天)
  */
 const ROUTER_RULE_RANGES = Object.freeze({
-  gameMinutes: { min: 5, max: 1_440 },
+  appMinutes: { min: 5, max: 1_440 },
   wishDays: { min: 1, max: 365 },
 })
 
 /**
- * 把一份 `{gameMinutes, wishDays}` 收干净 (纯函数)
+ * 上一版的名字 (2.8.1 #10): 旧键 `gameMinutes` → 新键 `appMinutes`
+ *
+ * **只读迁移**: 文件里认得到旧键就按它算一次新口径, 写的时候一定把旧键删掉 (见 [writeRouterRules]
+ * 与 [migrateRouterRules])
+ */
+const ROUTER_LEGACY_RULES = Object.freeze({
+  gameMinutes: 'appMinutes',
+})
+
+/**
+ * 把一份 `{appMinutes, wishDays}` 收干净 (纯函数)
  *
  * 不认识的键丢掉, 坏值丢掉, 越界夹进范围; 一个能用的都没有时回 `{}` —— 调用方据此决定"什么都不写"
  * (写一个空对象会把已有的两把尺子清掉, 那不是"没交")
+ *
+ * 旧键那一支是**迁移**, 不是读取: `gameMinutes` 说的是"游戏满多久", 现在这条说的是"任意一个应用满
+ * 多久", 同一根线换个口径会把 100 分钟铺到所有应用上 (比新缺省还松, 一天能响好几回) —— 所以认到旧键
+ * 就把新键落回缺省, 而不是把旧数字搬过来
  */
 function normalizeRouterRules(input) {
   const out = {}
   if (!input || typeof input !== 'object') return out
-  for (const [key, range] of Object.entries(ROUTER_RULE_RANGES)) {
-    const raw = input[key]
-    if (raw === undefined || raw === null || raw === '') continue
+  /** 一个键收成范围内的整数, 缺键 / 坏值一律回 null (交给下一支去判) */
+  const cleanNumber = (source, key, range) => {
+    const raw = source?.[key]
+    if (raw === undefined || raw === null || raw === '') return null
     const number = Math.round(Number(raw))
-    if (!Number.isFinite(number)) continue
-    out[key] = Math.min(range.max, Math.max(range.min, number))
+    if (!Number.isFinite(number)) return null
+    return Math.min(range.max, Math.max(range.min, number))
+  }
+  for (const [key, range] of Object.entries(ROUTER_RULE_RANGES)) {
+    const direct = cleanNumber(input, key, range)
+    if (direct !== null) {
+      out[key] = direct
+      continue
+    }
+    // 新键没给 (或给的是坏值) 时看旧键: 认到就把新缺省写上, 顺序也跟着范围表走
+    const legacy = Object.keys(ROUTER_LEGACY_RULES).find((one) => ROUTER_LEGACY_RULES[one] === key)
+    if (!legacy) continue
+    const raw = input[legacy]
+    if (raw === undefined || raw === null || raw === '') continue
+    // 坏值不算"认到了旧键": 那一份文件本来就该当没有
+    if (!Number.isFinite(Number(raw))) continue
+    out[key] = ROUTER_DEFAULTS[key]
   }
   return out
+}
+
+/**
+ * 读进来的那一份 `rules` 收成新口径 (纯函数, 只读迁移)
+ *
+ * 旧文件里可能还留着 `gameMinutes`: 这里把它换成 `appMinutes` 的缺省, **并把旧键丢掉** —— 于是
+ * `lw_router op=status` 报的是新口径, 而下一次谁写 `router.json` 时那份文件就干净了
+ */
+function migrateRouterRules(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {}
+  // 两把尺子排在前面 (按范围表的顺序), 别的键原样跟在后面, 旧键一个都不带出去 —— 于是同一份文件
+  // 迁移过后写出来的形状是定死的, 不会因为键的先后顺序每次都换一个样子
+  const out = { ...normalizeRouterRules(input) }
+  for (const [key, value] of Object.entries(input)) {
+    if (key in ROUTER_LEGACY_RULES) continue
+    if (key in out) continue
+    out[key] = value
+  }
+  return out
+}
+
+/** 这一份 rules 里还有没有旧键 (整个 `readRouterInputs` 只据此补写一次) */
+function hasLegacyRouterRules(input) {
+  if (!input || typeof input !== 'object') return false
+  return Object.keys(ROUTER_LEGACY_RULES).some((key) => key in input)
 }
 
 /**
  * 把两把尺子写进 `router.json.rules` (读-改-写, 保留那份文件里别的键)
  *
  * 与 `exploreChecksWrite` 同一个形状: 先读整份再写回, 于是探索的 `checks`、判断层的 `last` 不会被这一下
- * 抹掉。一次只写交上来的那几个键 —— 只给 `gameMinutes` 时 `wishDays` 保持原样
+ * 抹掉。一次只写交上来的那几个键 —— 只给 `appMinutes` 时 `wishDays` 保持原样; 旧键 `gameMinutes`
+ * 在写回时一定被删掉 (迁移只做一次, 之后那份文件里就没有它了)
  */
 async function writeRouterRules(rules) {
   const clean = normalizeRouterRules(rules)
-  if (Object.keys(clean).length === 0) return { rules: {}, written: 0, error: 'no gameMinutes / wishDays to write' }
+  if (Object.keys(clean).length === 0) return { rules: {}, written: 0, error: 'no appMinutes / wishDays to write' }
   const path = routerStatePath()
   if (!path) return { rules: {}, written: 0, error: 'this profile has no DSH_HOME' }
   const state = (await readRouterJson(path)) ?? {}
-  const existing = state?.rules && typeof state.rules === 'object' ? state.rules : {}
+  const existing = migrateRouterRules(state?.rules && typeof state.rules === 'object' ? state.rules : {})
   const merged = { ...existing, ...clean }
   await writeRouterJson(path, { ...state, v: 1, rules: merged })
   return { rules: merged, written: Object.keys(clean).length }
@@ -11901,8 +12121,15 @@ async function readRouterInputs() {
   if (!home) return null
   const lw = join(home, 'lw')
   const state = (await readRouterJson(routerStatePath())) ?? {}
-  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
+  // **旧键只读迁移一次** (2.8.1 #10): 那份文件里还留着 `gameMinutes` 就就地换成 `appMinutes` 的缺省
+  // 并把旧键删掉 —— 只动 `rules` 这一格, `last` / `checks` / `checksSaid` 那些账原样带回去;
+  // 迁移之后这一行不再触发 (旧键已经没了)
+  if (hasLegacyRouterRules(state?.rules)) {
+    state.rules = migrateRouterRules(state.rules)
+    await writeRouterJson(routerStatePath(), { ...state, v: 1 })
+  }
   const wishes = ((await readRouterJson(join(lw, 'wishes.json')))?.items) ?? []
+  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
   const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
   const gate = (await readRouterJson(join(lw, 'proactive-gate.json'))) ?? {}
   const settings = (await readRouterJson(join(home, 'automations', 'settings.json'))) ?? {}
@@ -11934,7 +12161,8 @@ async function readRouterInputs() {
     usage,
     wishes: Array.isArray(wishes) ? wishes : [],
     signals,
-    rules: { ...(state?.rules ?? {}), ...simRouterRules(sim) },
+    // 规则表按新口径收一遍 (2.8.1 #10): 旧文件里的 `gameMinutes` 在这里换成 `appMinutes` 的缺省
+    rules: migrateRouterRules({ ...(state?.rules ?? {}), ...simRouterRules(sim) }),
     checks: Array.isArray(state?.checks) ? state.checks : [],
     checksSaid: state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {},
     // 一场主动对话最多发几条 (`send` 段): 2026-11-14 主人 —— 检测项在那一场里占几条, 由这个上限决定
@@ -11970,12 +12198,6 @@ async function refreshIgnored(lastUserAt) {
   const ignored = Math.min(5, (Number(state?.ignored ?? 0) || 0) + 1)
   await writeRouterJson(path, { ...state, v: 1, ignored, countedFor: awaitingAt })
   return ignored
-}
-
-/** 直推给球的那一句 (说人话, 不带数字) */
-function routerLine(decision) {
-  const custom = decision?.lines?.[decision.kind]
-  return typeof custom === 'string' && custom.trim() ? custom.trim() : ROUTER_LINES[decision.kind] ?? ''
 }
 
 /**
