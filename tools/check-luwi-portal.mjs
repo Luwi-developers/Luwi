@@ -817,27 +817,40 @@ if (failTableSource === '' || imageFailSource === '') {
   expect('HostScreen.kt', screen, 'private const val PICK_NONE = "none"')
   expect('HostScreen.kt', screen, 'view.pickState(PICK_SHOWN)')
   expect('HostScreen.kt', screen, 'view.pickState(PICK_NONE)')
-  expect('HostScreen.kt', screen, 'view.pickState(PICK_EMPTY)')
-  expect('HostScreen.kt', screen, 'view.pickState(PICK_PICKED)')
+  // 选择器的回调那一支里 `page` 可能已经不在了 (renderer 换过一块), 所以是安全调用
+  expect('HostScreen.kt', screen, 'view?.pickState(PICK_EMPTY)')
+  expect('HostScreen.kt', screen, 'view?.pickState(PICK_PICKED)')
   expect('PortalBridge.kt', portalBridge, 'fun portalImageFail(payload: String): String')
   expect('PortalBridge.kt', portalBridge, 'Log.w(LOOK_TAG, "image send failed: $text")')
   expect('PortalBridge.kt', portalBridge, '"机型: ${Build.MANUFACTURER} ${Build.MODEL}"')
   expect('PortalBridge.kt', portalBridge, '"WebView: $label (major ${info?.major ?: 0})"')
 
-  // 宿主回话那一支: `shown` / `picked` / `empty` 只撤计时器, 只有 `none` 要报 ——
+  // 宿主回话那一支: `shown` 只把计时器停住 (还欠文件), `picked` / `empty` 结清且不报, 只有 `none` 要报 ——
   // 2026-11-15 主人: "点击附件进入选择界面时没有选择直接退出会出现图片发送失败: webview 未回调,
   // 要求这种情况下不要显示这个报错" (取消是主人自己的动作, 不是一次失败)
   if (pickStateSource === '') {
     failures.push('client.js: 抽不出 pickState (宿主那句回话没人接)')
   } else {
     const reasons = []
-    let disarms = 0
-    const pickState = new Function('disarmPickWatch', 'imageFail', 'IMAGE_FAIL',
-      `${pickStateSource}\nreturn pickState`)(() => { disarms += 1 }, (reason) => reasons.push(reason), table)
+    let settled = 0
+    let owed = 0
+    const pickState = new Function('disarmPickWatch', 'pickOwed', 'pickSettled', 'imageFail', 'IMAGE_FAIL',
+      `${pickStateSource}\nreturn pickState`)(
+      () => {},
+      () => { owed += 1 },
+      () => { settled += 1 },
+      (reason) => reasons.push(reason),
+      table,
+    )
     pickState('shown')
+    if (reasons.length === 0 && owed === 1 && settled === 0) {
+      notes.push('ok   pickState: shown 只是"还欠着文件", 不报失败 (选择器刚起来)')
+    } else {
+      failures.push(`client.js: pickState 对 shown 的处置不对 (报 ${reasons.length} 次, 欠 ${String(owed)}, 清 ${String(settled)})`)
+    }
     pickState('picked')
-    if (reasons.length === 0) notes.push('ok   pickState: shown / picked 只撤计时器, 不报失败')
-    else failures.push(`client.js: pickState 对 shown/picked 也报了失败 (${reasons.join(',')})`)
+    if (reasons.length === 0) notes.push('ok   pickState: picked 结清, 不报失败')
+    else failures.push(`client.js: pickState 对 picked 也报了失败 (${reasons.join(',')})`)
     // `empty` = 人选了又退出来: 屏上不该留一句失败
     pickState('empty')
     if (reasons.length === 0) notes.push('ok   pickState: empty (人自己取消) 静默, 不报失败')
@@ -848,8 +861,8 @@ if (failTableSource === '' || imageFailSource === '') {
     } else {
       failures.push(`client.js: pickState 对 none 没报「webview 未回调」(实际 ${reasons.join(',')})`)
     }
-    if (disarms === 4) notes.push('ok   pickState: 四种回话都先撤计时器 (不会二次报)')
-    else failures.push(`client.js: pickState 撤计时器的次数不是 4 (实际 ${String(disarms)})`)
+    if (settled === 3) notes.push('ok   pickState: 三个终态 (picked / empty / none) 都结清, 只有 shown 留债')
+    else failures.push(`client.js: pickState 结清回话的次数不是 3 (实际 ${String(settled)})`)
   }
 }
 
@@ -966,6 +979,267 @@ if (copyDiagSource === '' || diagFailSource === '') {
     failures.push(`client.js: 复制成功没有回执 (${JSON.stringify(copyNotes)})`)
   }
 }
+
+// ── 十二·三、选好的那几份由宿主读、宿主落, 页面只管画 (2.8.1 #13) ──────────────
+//
+// 根因两半:
+// ① 页面把"选择器起来没有 / 选中的是什么"押在渲染器上, 而选择器盖着时渲染器整个停着 —— 那个 2.5 s
+//    看门狗被盖住时跑不动, 回到页面第一瞬间先跑, 宿主那两句回话还排在它后面, 于是每次选图都多一条
+//    假的「webview 未回调」(2026-11-12 真机 logcat: `file chooser` 之后 5.2 s 冒出来, 而人当场就选了)
+// ② 字节靠 WebView 自己读 `content://` 再 base64 过桥, 相册那种 Uri 在渲染器里有的机器上读出来是空的
+//    (`FileReader` 的 onerror / 空 buffer) —— 页面上就"点了确定什么都没有" (issue #53)
+//
+// 改法: 宿主读 + `LwIn.put` 落盘 + 把成品交回页面 (`stashPicked` -> `picked`); 看门狗只在页面看得见的
+// 时候挂, 回到页面先给一段宽限 (`pickWatchVisibility` / `PICK_GRACE_MS`). 这一节钉两条用例:
+// ① 选好交回页面: 一份 3 MB JPEG 交回来 -> 待发栏恰好一行 ready, 缩略图走 `/lw-out/in/`, 一条失败都没有
+// ② 回调为空但不误报: 空手而归 / 选择器盖着 / 宽限到点前宿主回话, 屏上一条失败都不许有
+
+const pickedSource = takeFunction('picked')
+const pickTable = failTableSource === '' ? {} : new Function(`${failTableSource}\nreturn IMAGE_FAIL`)()
+const watchSources = {
+  disarm: takeFunction('disarmPickWatch'),
+  armVisible: takeFunction('armPickWatchWhileVisible'),
+  due: takeFunction('pickWatchDue'),
+  visibility: takeFunction('pickWatchVisibility'),
+  arm: takeFunction('armPickWatch'),
+  owed: takeFunction('pickOwed'),
+  settled: takeFunction('pickSettled'),
+}
+const attachSrcSource = takeFunction('attachSrc')
+
+if (pickedSource === ''
+  || pickTable.noCallback === undefined
+  || Object.keys(watchSources).some((key) => watchSources[key] === '')) {
+  failures.push('client.js: 抽不出 picked / 选图看门狗那几个函数 —— 2.8.1 #13 那条路不在')
+} else {
+  // 源码: 字节只在宿主那一处读、那一处落, 页面不再自己存一遍 (同一次发送只落 1 个文件靠它)
+  expect('PortalBridge.kt: 宿主读选择器的结果', portalBridge, 'fun stashPicked(uris: List<Uri>): String')
+  expect('PortalBridge.kt: 用 contentResolver 自己读', portalBridge, 'context.contentResolver.openInputStream(uri)?.use { it.readBytes() }')
+  expect('PortalBridge.kt: 落盘仍走 LwIn', portalBridge, 'val result = LwIn.put(root, name, bytes)')
+  expect('PortalBridge.kt: 名字没有扩展名时按 MIME 补', portalBridge, 'MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)')
+  expect('HostScreen.kt: 选择器回来先让宿主落盘', screen, 'portal.stashPicked(picked.toList())')
+  expect('HostScreen.kt: 落好的那几份交回页面', screen, 'view?.pickedFiles(landed ?: nothingLanded(picked.size))')
+  expect('HostScreen.kt: 交回页面那句 JS', screen, "window.__LUWI_PORTAL__.picked(")
+  expect('HostScreen.kt: 答给 WebView 的是"没选" (页面不再读一遍)', screen, 'answer.onReceiveValue(null)')
+  expect('HostScreen.kt: 读 + 落盘下 IO 那一趟', screen, 'withContext(Dispatchers.IO)')
+  expect('HostScreen.kt: 一份没落成也要说一句', screen, 'private fun nothingLanded(count: Int): JSONObject')
+  expect('client.js: 页面那侧接住', client, 'picked: function (payload) { portal.picked(payload) }')
+  expect('client.js: 门户对象上也有一份', client, 'picked: picked,')
+  // 两处 `<input type=file>` 各报一次: `+` 那条由宿主读, 表情包那格仍走页面 (老路不动)
+  expect('client.js: 普通附件点之前先报 file', client, "call('portalPickMode', 'file')")
+  expect('client.js: 表情那格点之前先报 sticker', client, "call('portalPickMode', 'sticker')")
+  expect('PortalBridge.kt: 这一次是给谁挑的', portalBridge, 'fun portalPickMode(mode: String): String')
+  expect('PortalBridge.kt: 只认一次, 取走就复位', portalBridge, 'fun takePickMode(): String')
+  expect('HostScreen.kt: 选择器起来那一刻取走', screen, 'pendingSticker = portal.takePickMode() == PICK_MODE_STICKER')
+  expect('HostScreen.kt: 表情那格把 Uri 交回页面 (老路)', screen, 'answer.onReceiveValue(picked)')
+  expect('client.js: 看门狗按可见性停/续', client, "document.addEventListener('visibilitychange', function () { pickWatchVisibility() })")
+  expect('client.js: 宽限那个数', client, 'var PICK_GRACE_MS = 1500')
+  const landings = portalBridge.split('LwIn.put(').length - 1
+  if (landings === 2) {
+    notes.push('ok   落盘只有两处 (门户那段 base64 + 选择器那条), 都在 LwIn.put 这一处')
+  } else {
+    failures.push(`PortalBridge.kt: LwIn.put 被调了 ${String(landings)} 处 (应 2 处: base64 那条与选择器那条)`)
+  }
+  const pushes = pickedSource.split('attach.push(').length - 1
+  if (pushes === 1) notes.push('ok   picked 只在一处 push (一份交回来 = 待发栏一行, 不重复)')
+  else failures.push(`client.js: picked 里 attach.push 有 ${String(pushes)} 处 (应 1 处)`)
+  if (/portalStash|readImage|stashOne|FileReader/.test(pickedSource)) {
+    failures.push('client.js: picked 里还在自己读字节 / 自己存 —— 那就是第二份 (同一次发送只许落 1 个)')
+  } else {
+    notes.push('ok   picked 不再自己读字节、不再自己存 (字节已经在盘上了)')
+  }
+
+  /**
+   * 按 client.js 那几段原文拼一个能真跑的"选图"小模块
+   *
+   * 计时器换成手摇的 (`fire()`), 页面可见性换成假的 (`hidden(true/false)`), 其余全是原文 —— 于是
+   * "盖着的时候不许挂着 / 回来先给宽限 / 宿主的回话先到就不许再报"这几条真值都能断言
+   * @param options - `{attach, onFail, onNote, sessionId, hidden}`
+   */
+  function pickModule(options) {
+    const timers = new Map()
+    let next = 1
+    const doc = { hidden: options.hidden === true }
+    const module = new Function(
+      'setTimeout', 'clearTimeout', 'document', 'imageFail', 'IMAGE_FAIL',
+      'attach', 'MAX_ATTACH', 'sessionId', 'renderAttach', 'showNote', 'baseNameOf', 'mimeOfName',
+      'PICK_WAIT_MS', 'PICK_GRACE_MS',
+      [
+        'var pickWatch = null',
+        'var pickPending = false',
+        'var pickHeld = false',
+        watchSources.disarm,
+        watchSources.armVisible,
+        watchSources.due,
+        watchSources.visibility,
+        watchSources.arm,
+        watchSources.owed,
+        watchSources.settled,
+        pickStateSource,
+        pickedSource,
+        'return {',
+        '  armPickWatch: armPickWatch,',
+        '  pickWatchVisibility: pickWatchVisibility,',
+        '  pickState: pickState,',
+        '  picked: picked,',
+        '  watch: function () { return pickWatch },',
+        '  pending: function () { return pickPending },',
+        '  held: function () { return pickHeld },',
+        '}',
+      ].join('\n'),
+    )(
+      (fn, delay) => {
+        const id = next
+        next += 1
+        timers.set(id, { fn, delay })
+        return id
+      },
+      (id) => { timers.delete(id) },
+      doc,
+      options.onFail,
+      pickTable,
+      options.attach,
+      6,
+      options.sessionId === undefined ? 'session-1' : options.sessionId,
+      () => {},
+      options.onNote,
+      () => { throw new Error('picked 不该自己去认 basename (名字是宿主给的)') },
+      () => 'image/png',
+      2500,
+      1500,
+    )
+    return {
+      module,
+      /** 页面看得见 / 看不见 (选择器盖着) */
+      hidden: (value) => { doc.hidden = value === true },
+      /** 还挂着几个计时器 */
+      armed: () => timers.size,
+      /** 把挂着的计时器全摇一遍 (到点就跑, 跑过的先摘掉) */
+      fire: () => {
+        const due = [...timers.values()]
+        timers.clear()
+        for (const one of due) one.fn()
+      },
+    }
+  }
+
+  // ① 选好交回页面: 宿主落好一份 3 MB JPEG, 交回来的就是这一段
+  const pickedAttach = []
+  const pickedFails = []
+  const pickedNotes = []
+  const pickOne = pickModule({ attach: pickedAttach, onFail: (reason) => pickedFails.push(reason), onNote: (text) => pickedNotes.push(text) })
+  pickOne.module.armPickWatch()
+  pickOne.module.pickState('shown')
+  pickOne.hidden(true) // 人进了相册
+  pickOne.module.pickWatchVisibility()
+  if (pickOne.armed() === 0) notes.push('ok   选择器盖着时看门狗停着 (不会在回来那一瞬间误报)')
+  else failures.push('client.js: 选择器盖着时计时器还挂着 —— 回来第一瞬间就会误报「webview 未回调」')
+  const jpeg = {
+    name: 'IMG_20261116_201903.jpg',
+    path: '/storage/emulated/0/DSH/Luwi/lw-in/IMG_20261116_201903.jpg',
+    bytes: 3 * 1024 * 1024,
+    image: true,
+    mediaType: 'image/jpeg',
+  }
+  const added = (() => {
+    pickOne.hidden(false) // 回到页面
+    pickOne.module.pickWatchVisibility()
+    pickOne.module.pickState('picked') // 宿主那一句先到 (选择器回来了, 选到了东西)
+    const one = pickOne.module.picked({ files: [jpeg], rejected: [] })
+    pickOne.fire()
+    return one
+  })()
+  if (added === 1 && pickedAttach.length === 1) {
+    notes.push('ok   picked: 一份交回来 = 待发栏一行 (不多一行)')
+  } else {
+    failures.push(`client.js: picked 加进来的行数不对 (返回 ${String(added)}, 实际 ${String(pickedAttach.length)} 行)`)
+  }
+  const row = pickedAttach[0] || {}
+  if (row.status === 'ready' && row.kind === 'image' && row.path === jpeg.path && row.name === jpeg.name
+    && row.bytes === jpeg.bytes && row.mediaType === 'image/jpeg') {
+    notes.push('ok   picked: 那一行是 ready 的图 (名字 / 路径 / 字节数 / MIME 都是宿主给的那份)')
+  } else {
+    failures.push(`client.js: picked 记下的那一行不对 (${JSON.stringify(row)})`)
+  }
+  if (pickedFails.length === 0 && pickedNotes.length === 0) {
+    notes.push('ok   选好交回页面: 一条失败都不报 (也没多一句提示)')
+  } else {
+    failures.push(`client.js: 选好交回页面时还报了东西 (失败 ${JSON.stringify(pickedFails)}, 提示 ${JSON.stringify(pickedNotes)})`)
+  }
+  if (pickOne.module.pending() === false && pickOne.module.held() === false && pickOne.armed() === 0) {
+    notes.push('ok   picked 结清这一趟 (不欠回话, 计时器也不留)')
+  } else {
+    failures.push('client.js: picked 之后还欠着回话 / 还挂着计时器')
+  }
+  if (attachSrcSource !== '') {
+    const thumb = new Function('baseNameOf', `${attachSrcSource}\nreturn attachSrc`)((name) => String(name || '').split('/').pop())(
+      pickedAttach[0],
+    )
+    if (thumb === '/lw-out/in/' + encodeURIComponent(jpeg.name)) {
+      notes.push('ok   那一行的缩略图走 /lw-out/in/ (宿主刚落好的那一份)')
+    } else {
+      failures.push(`client.js: 交回来那一行的缩略图 src 是 ${JSON.stringify(thumb)}, 应为 /lw-out/in/<名字>`)
+    }
+  }
+
+  // ② 回调为空但不误报: 空手而归 / 盖着 / 宽限到点前宿主回话, 屏上都不许有一条失败
+  const quietAttach = []
+  const quietFails = []
+  const quietNotes = []
+  const pickQuiet = pickModule({ attach: quietAttach, onFail: (reason) => quietFails.push(reason), onNote: (text) => quietNotes.push(text) })
+  // 空手而归: 起来 -> 空 -> 回页面
+  pickQuiet.module.armPickWatch()
+  pickQuiet.module.pickState('shown')
+  pickQuiet.hidden(true)
+  pickQuiet.module.pickWatchVisibility()
+  pickQuiet.module.pickState('empty')
+  pickQuiet.hidden(false)
+  pickQuiet.module.pickWatchVisibility()
+  pickQuiet.fire()
+  if (quietFails.length === 0 && quietNotes.length === 0 && quietAttach.length === 0) {
+    notes.push('ok   回调为空 (人自己退出): 不误报, 待发栏也不多一行')
+  } else {
+    failures.push(`client.js: 回调为空时还报了东西 (失败 ${JSON.stringify(quietFails)}, 提示 ${JSON.stringify(quietNotes)}, 行 ${String(quietAttach.length)})`)
+  }
+  // 回来之后宿主那一句先到: 宽限到点也不许报
+  pickQuiet.module.armPickWatch()
+  pickQuiet.hidden(true)
+  pickQuiet.module.pickWatchVisibility()
+  pickQuiet.hidden(false)
+  pickQuiet.module.pickWatchVisibility()
+  if (pickQuiet.armed() === 1) {
+    notes.push('ok   回到页面先挂一段宽限 (宿主那两句还有机会落地)')
+  } else {
+    failures.push('client.js: 回到页面之后没有重新挂宽限计时器 (那句 picked 就永远等不到了)')
+  }
+  pickQuiet.module.picked({ files: [], rejected: [] })
+  pickQuiet.fire()
+  if (quietFails.length === 0) notes.push('ok   宽限期间宿主回话 -> 到点也不报 (空的 picked 同样结清)')
+  else failures.push(`client.js: 宽限期间已经回话了还是报了失败 (${quietFails.join(',')})`)
+  // 真的一个字都没回来: 宽限到点报一次, 再摇不报第二次
+  pickQuiet.module.armPickWatch()
+  pickQuiet.hidden(true)
+  pickQuiet.module.pickWatchVisibility()
+  pickQuiet.hidden(false)
+  pickQuiet.module.pickWatchVisibility()
+  pickQuiet.fire()
+  pickQuiet.fire()
+  if (quietFails.length === 1 && quietFails[0] === pickTable.noCallback) {
+    notes.push('ok   真的没回话才报一次「webview 未回调」(摇两遍也只有一条)')
+  } else {
+    failures.push(`client.js: 没回话那一档的报法不对 (${JSON.stringify(quietFails)})`)
+  }
+  // 被拒的那几份要有一句人话 (读不动 / 太大 / 不收这种文件)
+  const rejectNotes = []
+  const pickReject = pickModule({ attach: [], onFail: () => {}, onNote: (text) => rejectNotes.push(text) })
+  pickReject.module.picked({ files: [], rejected: [{ name: 'HEIC_0001.heic', reason: '不收这种文件: HEIC_0001.heic' }] })
+  if (rejectNotes.length === 1 && rejectNotes[0].indexOf('不收这种文件') > 0) {
+    notes.push('ok   被拒的那几份有一句人话 (不静默)')
+  } else {
+    failures.push(`client.js: 被拒的文件没有提示 (${JSON.stringify(rejectNotes)})`)
+  }
+}
+
 
 // ── 十三、首启自动落进默认工作区, 界面上没有「选工作区」入口 (2026-11-13) ────────
 //

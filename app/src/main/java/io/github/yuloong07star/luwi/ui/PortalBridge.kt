@@ -3,11 +3,14 @@ package io.github.yuloong07star.luwi.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -28,6 +31,20 @@ import io.github.yuloong07star.luwi.workspace.Workspace
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+
+/**
+ * 选择器交回来的那一份读不动时的说法 (2.8.1 #13)
+ *
+ * 两处用同一句: [PortalBridge.stashPicked] 被拒的那一条, 与 `HostScreen` 里整趟读挂了时兜底的那一条 ——
+ * 屏上要说的永远是同一句人话
+ */
+internal const val PICKED_UNREADABLE = "这一份读不动"
+
+/** 这一次选择器是给门户那个 `+` 挑的 (普通附件: 宿主读、宿主落进 `lw-in`) */
+internal const val PICK_MODE_FILE = "file"
+
+/** 这一次选择器是给表情包面板那格「加一张」挑的 (还是老路: WebView 把 Uri 交给页面 `change`) */
+internal const val PICK_MODE_STICKER = "sticker"
 
 /**
  * 门户开着没有, 以及"让页面收起 / 打开"的那条 JS 入口
@@ -637,6 +654,119 @@ internal class PortalBridge(private val context: Context) {
             put("bytes", pick.bytes)
             put("name", pick.name)
         }.toString()
+    }
+
+    /**
+     * 这一次选择器是给谁挑的 (`file` / `sticker`), 页面点之前先报一次 (见 [portalPickMode])
+     *
+     * 只认一次: [takePickMode] 取走就复位, 于是"页面忘了报"与"不是页面发起的那一档"都按普通附件走
+     */
+    @Volatile
+    private var pickMode: String = PICK_MODE_FILE
+
+    /**
+     * 这一次选择器是给谁挑的 (2.8.1 #13)
+     *
+     * 门户有两处 `<input type=file>`: `+` (普通附件) 与表情包面板那格「加一张」。前者 2.8.1 #13 起由
+     * 宿主读、宿主落 (`<工作区>/lw-in/`, 见 [stashPicked]); 后者仍走老路 —— 页面拿 Uri 读成 base64 交
+     * [portalStickerAdd], 落的是 `lw/stickers`。两条路的区别只有页面知道, 所以点之前先报一次
+     *
+     * @param mode `file` / `sticker`; 别的说法一律按 `file`
+     * @return `{ok:true, mode:"…"}`
+     */
+    @JavascriptInterface
+    fun portalPickMode(mode: String): String {
+        pickMode = if (mode.trim() == PICK_MODE_STICKER) PICK_MODE_STICKER else PICK_MODE_FILE
+        return JSONObject().put("ok", true).put("mode", pickMode).toString()
+    }
+
+    /** 取走这一次的模式 (只认一次; 取完复位成 `file`) */
+    fun takePickMode(): String {
+        val was = pickMode
+        pickMode = PICK_MODE_FILE
+        return was
+    }
+
+    /**
+     * 选择器交回来的那几份由**宿主自己读、自己落** (2.8.1 #13)
+     *
+     * 为什么不交给页面读: `<input type=file>` 给页面的是一串 `content://` Uri, 而 WebView 的渲染器
+     * 不是每一次都读得动它们 —— 相册那种 Uri 到手就是空的 (`FileReader` 的 `onerror` / 空 buffer),
+     * 页面上于是"点了确定什么都没有" (issue #53), 宿主本来就拿着这几个 Uri (选择器的结果先到
+     * [HostScreen] 那个回调), `contentResolver` 又是 app 自己的授权, 所以这一趟改成**宿主读、宿主落**,
+     * 页面只管把那几行画出来 (见页面侧 `picked`)
+     *
+     * 落盘仍是 [LwIn.put] 那一份实现 (basename / 白名单 / 12 MB / 同名顺延 / 写完读回): 一次选几份就落
+     * 几份, **同一份不会落两遍** —— 交回页面之后页面不再自己存一次, 这条由 `HostScreen` 那个回调保证
+     * (它答给 WebView 的是"没选", 所以 `change` 不会再来一次)
+     *
+     * @param uris 选择器交回来的那几个
+     * @return `{ok, files:[{name, path, bytes, image, mediaType}], rejected:[{name, reason}]}`;
+     *   `ok` 只表示"至少落成一份", 被拒的每一份都带一句人话
+     */
+    fun stashPicked(uris: List<Uri>): String {
+        val root = Workspace.resolve(context).directory
+        val files = JSONArray()
+        val rejected = JSONArray()
+        for (uri in uris) {
+            val name = displayNameOf(uri)
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) {
+                rejected.put(JSONObject().put("name", name).put("reason", PICKED_UNREADABLE))
+                Log.w(LOOK_TAG, "picked $name: $PICKED_UNREADABLE")
+                continue
+            }
+            val result = LwIn.put(root, name, bytes)
+            val pick = result.pick
+            if (pick == null) {
+                rejected.put(JSONObject().put("name", name).put("reason", result.error))
+                Log.w(LOOK_TAG, "picked $name rejected: ${result.error}")
+                continue
+            }
+            files.put(JSONObject().apply {
+                put("name", pick.name)
+                put("path", pick.path)
+                put("bytes", pick.bytes)
+                put("image", pick.image)
+                put("mediaType", runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty())
+            })
+            // 一行读数: 真机上"选中的那份到底落没落、落在哪"就认这一行 (与页面那行 attach 对得上)
+            Log.i(LOOK_TAG, "picked ${pick.name} ${pick.bytes}B -> ${pick.path}")
+        }
+        return JSONObject().apply {
+            put("ok", files.length() > 0)
+            put("files", files)
+            put("rejected", rejected)
+        }.toString()
+    }
+
+    /**
+     * 选择器给的名字 (`DISPLAY_NAME`); 拿不到就拿 uri 最后那一段
+     *
+     * **没有扩展名的要按 MIME 补一个** (2.8.1 #13): 有的机器给的是流水号 (`1000026655`), 而 [LwIn.put]
+     * 的白名单按扩展名认 —— 不补就是"选得中、存不进", 页面上只留一行看不懂的红字
+     */
+    private fun displayNameOf(uri: Uri): String {
+        val shown = runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        }.getOrNull()?.use { cursor ->
+            if (!cursor.moveToFirst()) {
+                null
+            } else {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            }
+        }
+        val name = shown?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "file" }
+        // 有扩展名就原样交出去 (认不认由 LwIn 说, 它会回一句"不收这种文件: <名字>")
+        if (LwIn.extensionOf(name).isNotEmpty()) return name
+        val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
+        val ext = runCatching { MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) }
+            .getOrNull().orEmpty()
+        return if (ext.isEmpty()) name else "$name.$ext"
     }
 
     /**

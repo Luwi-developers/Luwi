@@ -1256,6 +1256,18 @@ window.__ModuleLoader__.load({
       }
       /** 点 `+` 到宿主回报 "选择器起来了" 之间最多等多久: 要压在判据那个 5 s 里面 */
       var PICK_WAIT_MS = 2500
+      /**
+       * 回到页面之后先让出多久再判"没回调" (2.8.1 #13)
+       *
+       * 宿主那几句回话 (`pickState` / `picked`) 走 `evaluateJavascript`, 而选择器在前台时渲染器整个
+       * 停着 —— 它们要等页面回到前台才落地, 落地的顺序还排在计时器后面 (2026-11-12 真机 logcat:
+       * `file chooser` 之后 5.2 s 冒出一条假的「webview 未回调」, 而人当场就选了图) —— 所以回来之后先
+       * 让出这一小段: 宿主的回话一两帧就到, 到了就把计时器撤掉; 真没回话, 宽限过了再报
+       *
+       * **四行诊断里认的就是这一档**: 那条失败气泡的第四行写着「图片: 未选择」—— 报的时候手里一张图都
+       * 没有, 说明它来自这个看门狗, 而不是读字节 / 落盘那两条路 (那两条会带上这一份多大)
+       */
+      var PICK_GRACE_MS = 1500
       /** 选完之后读字节 + 落盘最多等多久 (12 MB 在这台机器上不到 1 s, 留足余量) */
       var UPLOAD_WAIT_MS = 10000
       /**
@@ -1265,6 +1277,10 @@ window.__ModuleLoader__.load({
       var imageFails = []
       /** 点 `+` 那一下的计时器 (宿主一回调就撤) */
       var pickWatch = null
+      /** 这一趟选图还欠宿主一个回话 (`picked` / `empty` / `none` 里任意一个到了才算还清) */
+      var pickPending = false
+      /** 计时器这会儿是"停着等人"而不是"没挂": 页面看得见之后再按宽限挂上 (见 [pickWatchVisibility]) */
+      var pickHeld = false
       /** 表情那个方框的边长 (px): 与 CSS `.lwp-sticker img` 里的 120 是同一个数, 改一处就得改另一处 */
       var STICKER_BOX = 120
       /**
@@ -3454,6 +3470,9 @@ window.__ModuleLoader__.load({
       /** 选一张本地图加进 `lw/stickers` (与 she 用的同一个目录, 加完她就能贴) */
       function pickSticker() {
         if (!els.stickerFile) return
+        // 这一趟是给表情包挑的 (2.8.1 #13): 宿主照这个说法把 Uri 原样交回 `change`, 一个字节都不读 ——
+        // 加表情走的是 `lw/stickers` 那份 base64, 不是 `+` 那条 `lw-in/`
+        call('portalPickMode', 'sticker')
         els.stickerFile.value = ''
         els.stickerFile.click()
       }
@@ -4615,20 +4634,81 @@ window.__ModuleLoader__.load({
         pickWatch = null
       }
 
+      /**
+       * 挂上"WebView 没回调"的计时器 —— **页面看得见才挂** (2.8.1 #13)
+       *
+       * 选择器一盖上来, 这块 WebView 就不可见了, 渲染器那边 JS 计时器整个停着; 等页面回到前台, 那个
+       * 早就到点的计时器**第一个跑**, 而宿主那两句回话还排在它后面 —— 于是每次选图都多一条假的
+       * 「webview 未回调」, 这一条就是那个根: 盖着的时候不挂 (`pickHeld`), 回来看见宿主没说话再挂
+       * @param {number} delay 挂多久之后才算"没回调"
+       */
+      function armPickWatchWhileVisible(delay) {
+        disarmPickWatch()
+        pickHeld = false
+        if (typeof document !== 'undefined' && document.hidden === true) {
+          // 已经看不见了 (选择器盖着): 挂着也只会误报, 记一笔"人在里面挑", 回来再挂
+          pickHeld = true
+          return
+        }
+        pickWatch = setTimeout(pickWatchDue, delay)
+      }
+
+      /** 计时器到点: 还欠着回话才报, 而且只在页面看得见的时候报 */
+      function pickWatchDue() {
+        pickWatch = null
+        if (pickPending !== true) return
+        if (typeof document !== 'undefined' && document.hidden === true) {
+          pickHeld = true
+          return
+        }
+        pickPending = false
+        imageFail(IMAGE_FAIL.noCallback)
+      }
+
+      /**
+       * 选择器盖上来 / 回到页面 (2.8.1 #13)
+       *
+       * 两件事: 盖着就把计时器停了 (那段时间它跑不动, 硬留着只会在回来那一瞬间误报); 回来时还欠着回话
+       * 就按 [PICK_GRACE_MS] 再挂一次 —— 宿主那两句先落地的话, 这一步到点前就已经被撤掉了
+       */
+      function pickWatchVisibility() {
+        if (pickPending !== true) return
+        if (typeof document !== 'undefined' && document.hidden === true) {
+          disarmPickWatch()
+          pickHeld = true
+          return
+        }
+        if (pickHeld !== true) return
+        armPickWatchWhileVisible(PICK_GRACE_MS)
+      }
+
       /** 点 `+` 之后先假定"WebView 没回调": 宿主那侧一行 `pickState` 回来就撤掉它 */
       function armPickWatch() {
+        pickPending = true
+        armPickWatchWhileVisible(PICK_WAIT_MS)
+      }
+
+      /** 选择器起来了 (宿主 `shown`): 还欠一个终态, 但页面这会儿盖着, 计时器先停着 */
+      function pickOwed() {
+        pickPending = true
+        pickHeld = true
+        // 那句 `shown` 有可能是排队到现在的 (人已经回来了): 那就按宽限再挂一次, 不能停在"什么都不等"
+        armPickWatchWhileVisible(PICK_GRACE_MS)
+      }
+
+      /** 这一趟选图有结论了 (`picked` / `empty` / `none`): 不欠了, 计时器也撤掉 */
+      function pickSettled() {
+        pickPending = false
+        pickHeld = false
         disarmPickWatch()
-        pickWatch = setTimeout(function () {
-          pickWatch = null
-          imageFail(IMAGE_FAIL.noCallback)
-        }, PICK_WAIT_MS)
       }
 
       /**
        * 宿主那侧对这次选择的回话 (见 `HostScreen.onShowFileChooser` 与那个选择器的回调)
        *
-       * - `shown`: `onShowFileChooser` 真的进来了 —— 选择器起来了, 撤掉计时器
-       * - `picked`: 选好的文件已经交回页面 (随后就到了 change)
+       * - `shown`: `onShowFileChooser` 真的进来了 —— 选择器起来了. **这一档不算结清**: 文件还没回来,
+       *   只是把计时器停住 (见 [pickOwed])
+       * - `picked`: 选择器回来了而且选到了东西 —— 落好的那几份随后由 [picked] 交回页面 (2.8.1 #13)
        * - `empty`: 选择器回来了但是空的 —— **人自己退出来的** (2026-11-15 主人: "没有选择直接
        *   退出...要求这种情况下不要显示这个报错")。这一档只撤计时器, 屏上不留一个字: 取消是
        *   主人自己的动作, 不是一次失败
@@ -4637,9 +4717,71 @@ window.__ModuleLoader__.load({
        */
       function pickState(state) {
         var what = String(state === undefined || state === null ? '' : state)
-        disarmPickWatch()
-        if (what === 'shown' || what === 'picked' || what === 'empty') return
+        if (what === 'shown') {
+          pickOwed()
+          return
+        }
+        pickSettled()
+        if (what === 'picked' || what === 'empty') return
         imageFail(IMAGE_FAIL.noCallback)
+      }
+
+      /**
+       * 宿主把选好的那几份交回来了 (2.8.1 #13)
+       *
+       * **字节是宿主读的、宿主落的** (见 `PortalBridge.stashPicked`): 页面不再拿 `content://` 去
+       * FileReader, 也不再 base64 过桥 —— 那两条路在有的机器上就是"点确定什么都没有" (issue #53)
+       * 这里拿到的每一份都已经在 `<工作区>/lw-in/` 里了 (`path` 是盘上的绝对路径), 所以直接记成
+       * `ready`: 缩略图走 `/lw-out/in/<名字>`, 发送时路径进正文, 她拿 `read_image` 打开的就是这一份
+       *
+       * **一次选几份就有几份, 只此一处 push** —— 同一次发送只落 1 个文件靠的就是宿主那边只读一遍
+       * @param {object} payload `{files:[{name, path, bytes, image, mediaType}], rejected:[{name, reason}]}`
+       * @returns {number} 真的加进待发栏几份 (判据拿它读)
+       */
+      function picked(payload) {
+        pickSettled()
+        if (typeof sessionId !== 'string' || sessionId === '') {
+          // 选择器是开了会话才弹的; 走到这儿说明这一场刚被换掉 —— 文件已经在盘上, 说一句就走
+          showNote('先开一场对话', true)
+          return 0
+        }
+        var body = payload !== null && typeof payload === 'object' ? payload : {}
+        var files = body.files !== null && typeof body.files === 'object' && body.files.length ? body.files : []
+        var added = 0
+        for (var i = 0; i < files.length && attach.length < MAX_ATTACH; i += 1) {
+          var one = files[i]
+          if (one === null || typeof one !== 'object') continue
+          var path = typeof one.path === 'string' ? one.path : ''
+          if (path === '') continue
+          var name = typeof one.name === 'string' && one.name !== '' ? one.name : baseNameOf(path)
+          var mediaType = typeof one.mediaType === 'string' ? one.mediaType : ''
+          attach.push({
+            kind: one.image === true ? 'image' : 'stashed',
+            name: name,
+            bytes: Number(one.bytes) || 0,
+            mediaType: mediaType !== '' ? mediaType : mimeOfName(name),
+            data: '',
+            status: 'ready',
+            error: '',
+            path: path,
+            lastLogged: '',
+          })
+          added += 1
+        }
+        var rejected = body.rejected !== null && typeof body.rejected === 'object' && body.rejected.length
+          ? body.rejected
+          : []
+        if (rejected.length > 0) {
+          // 被拒的那几份宿主给了人话 (读不动 / 太大 / 不收这种文件): 原样说一句, 不静默
+          var said = []
+          for (var r = 0; r < rejected.length; r += 1) {
+            var bad = rejected[r] !== null && typeof rejected[r] === 'object' ? rejected[r] : {}
+            said.push(String(bad.name || '这一份') + (bad.reason ? ': ' + String(bad.reason) : ''))
+          }
+          showNote('这些没进来: ' + said.join('; '), true)
+        }
+        renderAttach()
+        return added
       }
 
       /**
@@ -4697,6 +4839,8 @@ window.__ModuleLoader__.load({
           showNote('先开一场对话', true)
           return
         }
+        // 这一趟是普通附件 (2.8.1 #13): 宿主读、宿主落进 `lw-in/`, 落好的那几份再经 [picked] 交回来
+        call('portalPickMode', 'file')
         // 这一下以前是静默的: WebView 不回调就没有任何反应 (落实表 #35)
         armPickWatch()
         els.file.click()
@@ -5344,6 +5488,9 @@ window.__ModuleLoader__.load({
           if (els.file) els.file.value = ''
         })
         tools.appendChild(els.file)
+        // 选择器盖上来 / 回到页面 (2.8.1 #13): 那段时间计时器停着, 回来先给宿主一句回话的机会 ——
+        // 没有这一句, 每次选图都会多一条假的「webview 未回调」(见 [pickWatchVisibility])
+        document.addEventListener('visibilitychange', function () { pickWatchVisibility() })
 
         els.note = h('span', null, '')
         els.note.id = 'lwp-note'
@@ -5864,6 +6011,13 @@ window.__ModuleLoader__.load({
          */
         pickState: pickState,
         /**
+         * 宿主把选好的那几份交回来 (2.8.1 #13)
+         *
+         * `{files:[{name, path, bytes, image, mediaType}], rejected:[…]}` —— 字节已经在
+         * `<工作区>/lw-in/` 里了 (宿主读的、宿主落的), 这里只管记成 ready 并重画待发栏
+         */
+        picked: picked,
+        /**
          * 注入一次「图片发送失败」(2.8.1 #1): 与计时器到点那条路同一个函数 —— 判据靠它制造一次失败,
          * 然后点气泡右侧那颗「复制诊断」
          */
@@ -5951,6 +6105,13 @@ window.__ModuleLoader__.load({
          * 没有这一句, 页面上就分不清"还在等选择器"与"选了但 WebView 没回调" —— 后者正是 issue #53
          */
         pickState: function (state) { portal.pickState(state) },
+        /**
+         * 宿主把选好的那几份交回来 (2.8.1 #13): `{files, rejected}`
+         *
+         * 交回来的是**落好盘的那几份** (宿主读的、宿主落的) —— 页面上于是"缩略图直接出现", 而不是
+         * 自己去读一串 `content://` 再 base64 过桥; 后者在有的机器上就是"点了确定什么都没有"
+         */
+        picked: function (payload) { portal.picked(payload) },
         /**
          * 注入一次「图片发送失败」(2.8.1 #1)
          *

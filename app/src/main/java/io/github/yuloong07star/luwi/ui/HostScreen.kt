@@ -122,6 +122,7 @@ import io.github.yuloong07star.luwi.wake.WakeWordDownload
 import io.github.yuloong07star.luwi.voice.VoiceState
 import io.github.yuloong07star.luwi.wake.WakeWordService
 import io.github.yuloong07star.luwi.wake.WakeWordState
+import org.json.JSONArray
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.DropdownEntry
@@ -135,10 +136,12 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Remove
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -998,6 +1001,12 @@ private fun HostWebView(
     // A file input can only be answered by an activity, so the page's request parks here until
     // the picker it launched comes back
     var pending by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    // 门户那座桥 (2.8.1 #13): 选图那条路也要用它 —— 选中的那几份由宿主自己读下来落进 `lw-in`,
+    // 页面不再经 `content://` 去读 (渲染器读相册 Uri 有的机器上就是空的, 于是"点了确定没反应")
+    val portal = remember(context) { PortalBridge(context.applicationContext) }
+    // 这一次选择器是给谁挑的: `false` = 门户那个 `+` (宿主读、宿主落), `true` = 表情包那格「加一张」
+    // (还是老路, Uri 交回页面)。页面在点 `<input>` 之前报一次, 这里在选择器起来那一刻取走
+    var pendingSticker by remember { mutableStateOf(false) }
     // 老 WebView 那一摊 (2.7.10, 见 [WebCompat]): 那段 polyfill 是"文档开始"注入的, 垫的是
     // `Promise.withResolvers` 这类 Chrome 119 才有的 API; 页面还会把"还缺什么"报回来
     val compat = remember(context) { WebCompat.script(context) }
@@ -1006,18 +1015,49 @@ private fun HostWebView(
     // `root` 有子节点就算起来了 —— 那是"界面真的画出来"的判据 (与 SHELL_PROBE 那个日志同一件事)
     var readyAt by remember { mutableIntStateOf(0) }
     var stuck by remember { mutableStateOf(false) }
+    // 这一屏的协程作用域: 选图那条路要把几 MB 的字节读下来落盘 (下 IO 那一趟), 返回键问页面那一句
+    // 也走它 —— 同一个作用域, 离开这一屏就一起停
+    val scope = rememberCoroutineScope()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val answer = pending ?: return@rememberLauncherForActivityResult
         pending = null
         // The platform helper reads either form of result the picker can return, a single data
         // URI or the clip data of a multiple selection
         val picked = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
-        answer.onReceiveValue(picked)
-        // 回来是空的 (`确定` 了却没有 data / 被取消): 页面上**什么都没发生** —— 那正是 issue #53 报的
-        // 那一下, 所以要说出来 (落实表 #35); 有文件就只是把计时器撤掉
         val view = page
-        if (view != null) {
-            if (picked.isNullOrEmpty()) view.pickState(PICK_EMPTY) else view.pickState(PICK_PICKED)
+        val sticker = pendingSticker
+        if (picked.isNullOrEmpty()) {
+            // 回来是空的 = **人自己退出来的**: 这一档屏上不留一个字 (2026-11-15 主人: "没有选择直接
+            // 退出...要求这种情况下不要显示这个报错"), 只把页面那侧"WebView 没回调"的计时器撤掉
+            Log.i(WEB_TAG, "picker came back empty, sticker=$sticker")
+            answer.onReceiveValue(null)
+            view?.pickState(PICK_EMPTY)
+            return@rememberLauncherForActivityResult
+        }
+        if (sticker) {
+            // 表情包那格「加一张」: 老路不动 —— Uri 交回页面, 它读成 base64 交 `portalStickerAdd`,
+            // 落的是 `lw/stickers` (不是 `lw-in/`), 所以这里一个字节都不读
+            Log.i(WEB_TAG, "picker handed ${picked.size} uri(s) to the sticker panel")
+            answer.onReceiveValue(picked)
+            view?.pickState(PICK_PICKED)
+            return@rememberLauncherForActivityResult
+        }
+        // **字节由宿主读、宿主落** (2.8.1 #13): 相册那种 `content://` Uri 交给渲染器去读, 有的机器上
+        // 读到的是空的 (FileReader 的 onerror / 空 buffer) —— 页面上就是"点了确定什么都没有"
+        // 宿主本来就拿着这几个 Uri, 这里读下来落进 `<工作区>/lw-in/` (与球那条 `+` 同一份 `LwIn.put`),
+        // 再把落好的几份**交回页面**, 页面只管画
+        //
+        // 答给 WebView 的是"没选": 页面那一侧不能再读一遍 —— 读一遍就会落第二份 (同一次发送只落 1 个)
+        // 读 + 落盘放在 IO 上 (一份 3 MB 的图从相册读出来再写进 /sdcard 是几百毫秒, 压在主线程上界面会
+        // 顿住), 所以先把 `picked` 这个状态推出去 —— 页面的看门狗到这里就撤了, 落好的那几份随后就到
+        answer.onReceiveValue(null)
+        view?.pickState(PICK_PICKED)
+        scope.launch {
+            val landed = withContext(Dispatchers.IO) {
+                runCatching { JSONObject(portal.stashPicked(picked.toList())) }.getOrNull()
+            }
+            // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
+            view?.pickedFiles(landed ?: nothingLanded(picked.size))
         }
     }
     // **已经交给 WebView 的那一条地址** (不是 `view.url`): host 打印的 token URL 会 302 到根路径,
@@ -1077,7 +1117,7 @@ private fun HostWebView(
                     addJavascriptInterface(WakeBridge(viewContext.applicationContext), WAKE_BRIDGE)
                     // 门户那一层 (2026-11-07): 判断层与工作结构在 `$DSH_HOME/lw` 里, 球那场的账在
                     // `$DSH_HOME/voice/session.json` 里 —— 页面读不到 app 沙盒, 所以从这座桥走
-                    addJavascriptInterface(PortalBridge(viewContext.applicationContext), PORTAL_BRIDGE)
+                    addJavascriptInterface(portal, PORTAL_BRIDGE)
                     // 老 WebView 那一档: 先把桥挂上 (页面把"还缺什么"报回来), 再让 polyfill 在文档
                     // **开始**时跑 —— 顺序不能反, 反了那段报告就没人接
                     addJavascriptInterface(
@@ -1241,7 +1281,10 @@ private fun HostWebView(
                             params: FileChooserParams,
                         ): Boolean {
                             Log.i(WEB_TAG, "file chooser ${params.acceptTypes.joinToString()}")
-                            // 选择器真的起来了: 页面那侧"WebView 没回调"的计时器到此为止 (落实表 #35)
+                            // 这一次是给谁挑的 (2.8.1 #13): 页面点之前报过一次, 这里取走 (只认一次)
+                            pendingSticker = portal.takePickMode() == PICK_MODE_STICKER
+                            // 选择器真的起来了: 页面那侧"WebView 没回调"的计时器到此为止 (落实表 #35) ——
+                            // 这一句落地的时机是"页面回到前台", 所以页面那边按可见性停/续 (2.8.1 #13)
                             view.pickState(PICK_SHOWN)
                             // A second request supersedes the first, and every callback has to be
                             // answered exactly once
@@ -1413,7 +1456,7 @@ private fun HostWebView(
 
     // 返回键先问页面一句 (见 [PageBack]): 网页里那一层 (右栏的浏览器格, 手机上它是全屏的) 收得掉就
     // 收掉, 收不掉把这一下还回去。超时按 [PAGE_BACK_MS] 而不是 `ask` 那个 5 s —— 返回键不能挂着等
-    val scope = rememberCoroutineScope()
+    // (用上面那个 `scope`: 同一屏一个作用域, 离开这一屏一起停)
     DisposableEffect(page) {
         val view = page
         PageBack.handle = view?.let { target ->
@@ -1764,12 +1807,19 @@ private const val RETURN_TRIES = 2
 private const val PAGE_BACK_MS = 500L
 
 /**
- * 选图那一路的四个词 (落实表 #35, 2026-11-12): 页面 `__LUWI_PORTAL__.pickState(state)` 认的就是这一套
+ * 选图那一路的四个词 (落实表 #35, 2026-11-12; 2.8.1 #13 收紧): 页面 `__LUWI_PORTAL__.pickState(state)`
+ * 认的就是这一套
  *
- * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选好的文件交回页面 /
+ * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选择器回来了而且选到了东西 (随后
+ * 宿主把落好盘的那几份交回页面, 见 [pickedFiles]) /
  * `empty` = 回来是空的 (**人自己退出来的**, 页面上一个字都不写 —— 2026-11-15 主人: "没有选择直接
  * 退出...要求这种情况下不要显示这个报错") / `none` = 选择器起不来 (这一档才是真的"点了没反应",
  * 页面说一句「图片发送失败：webview 未回调」)
+ *
+ * **每一次请求都只答一个终态** (`picked` / `empty` / `none`): 页面的看门狗只认这个, 而选择器盖着时
+ * 渲染器是停着的 —— 那几句 `evaluateJavascript` 要等页面回到前台才落地 (2026-11-12 的 logcat:
+ * `file chooser` 之后 5.2 s 才出一条假的「webview 未回调」) —— 所以页面那边**在选择器盖着时把计时器
+ * 停住, 回来之后再给一段宽限**, 见 client.js 的 `pickWatchVisibility`
  */
 private const val PICK_SHOWN = "shown"
 private const val PICK_PICKED = "picked"
@@ -1784,6 +1834,37 @@ private const val PICK_NONE = "none"
  */
 private fun WebView.pickState(state: String) {
     evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.pickState('$state')", null)
+}
+
+/**
+ * 把宿主落好的那几份交给门户 (2.8.1 #13)
+ *
+ * 交回去的是 [PortalBridge.stashPicked] 那一份 JSON (名字 / 路径 / 字节数 / 是不是图 / MIME), 页面照它
+ * 直接把待发栏里那几行画成 ready —— **不再过 WebView 的 `content://` 读法**, 也不再走 base64 那座桥
+ * (一份 3 MB 的图要过两次桥, 而落盘本来就是宿主的事)
+ *
+ * 行分隔符要转义: `JSONObject` 不转 `\u2028` / `\u2029`, 而它们在 JS 里是换行 —— 文件名里带上就会把
+ * 这一句拆成语法错误
+ * @param payload [PortalBridge.stashPicked] 回来的那段 JSON
+ */
+private fun WebView.pickedFiles(payload: JSONObject) {
+    val literal = payload.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.picked($literal)", null)
+}
+
+/**
+ * 读那一趟整个挂了的时候交回页面的说法 (2.8.1 #13)
+ *
+ * 一份都没落成时页面不能停在"什么都没发生": 这条走 `rejected` 那一支, 门户会照原样说一句
+ * @param count 这一次选了几份
+ */
+private fun nothingLanded(count: Int): JSONObject = JSONObject().apply {
+    put("ok", false)
+    put("files", JSONArray())
+    put("rejected", JSONArray().put(JSONObject().apply {
+        put("name", "选中的 $count 份")
+        put("reason", PICKED_UNREADABLE)
+    }))
 }
 
 /**
