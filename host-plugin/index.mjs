@@ -4196,7 +4196,20 @@ const TOOLS = [
     + ' watches can run right now, what is holding a rule back (no notification access,'
     + ' accessibility off, no exact alarms, power save, quiet hours) and, for every combination,'
     + ' the last time each sub-condition held (that line is how you answer "why did it not fire"), op=history says what was'
-    + ' decided recently and why it did not fire. Deleting is not available here: that is a button on'
+    + ' decided recently and why it did not fire, and op=record turns one real run through the phone'
+    + ' into a rule: call it with action="start", ask the user to do the thing on the phone (for example'
+    + ' 打开设置 -> 点 WLAN), then call it again with action="stop" plus name and then, and the rule is'
+    + ' written for you - no JSON to compose. **The steps come from the accessibility window trace, so'
+    + ' every step becomes exactly one condition, in order**: the first window of an app becomes'
+    + ' foreground {package}, and each later screen of the same app becomes activity {withinMinutes:1}'
+    + ' (a tap inside an app can only be seen as "the phone was just touched"); the screen titles are'
+    + ' kept in then.text after the line "录的那一串", so a fired rule still knows which sequence it was.'
+    + ' A recording longer than five steps keeps the first five, action="cancel" drops one, and the raw'
+    + ' trace of the last one is left in DSH_HOME/automations/recorded as <name>.steps.json (not the'
+    + ' rules directory, so nothing in it is ever loaded as a rule). What is recorded is that bounded'
+    + ' 200-event ring, so keep one recording to the flow itself - a minute or two, not a whole session.'
+    + ' Prefer it over op=write when the user would rather show you than describe it.'
+    + ' Deleting is not available here: that is a button on'
     + ' the settings page. A rule that cannot be read is copied to DSH_HOME/automations/rejected as'
     + ' <name>.json plus <name>.error.txt, and the settings page can delete both at once.',
     'automation',
@@ -4204,17 +4217,29 @@ const TOOLS = [
       op: {
         type: 'string',
         required: true,
-        description: 'list the rules, read one, write one (create or overwrite), the watches\' state,'
-          + ' or the recent decisions',
-        enum: ['list', 'read', 'write', 'status', 'history'],
+        description: 'list the rules, read one, write one (create or overwrite), record one from a real'
+          + ' run through the phone, the watches\' state, or the recent decisions',
+        enum: ['list', 'read', 'write', 'record', 'status', 'history'],
       },
       name: {
         type: 'string',
-        description: 'Which rule, without the .json. Required by read and write',
+        description: 'Which rule, without the .json. Required by read and write, and by record when it'
+          + ' stops',
       },
       json: {
         type: 'string',
         description: 'The whole rule as one JSON object, required by write',
+      },
+      then: {
+        type: 'string',
+        description: 'For op=record action="stop": what the rule should do when the recorded flow comes'
+          + ' round again, as one line (the steps that were recorded are appended to it)',
+      },
+      action: {
+        type: 'string',
+        description: 'For op=record: "start" begins a recording, "stop" folds it into a rule (the'
+          + ' default), "cancel" drops it',
+        enum: ['start', 'stop', 'cancel'],
       },
       limit: {
         type: 'integer',
