@@ -22,9 +22,67 @@
  * 退出码: 0 = 每一条都成立; 1 = 有失败项 (逐条印出哪一条与它的判据)
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { register } from 'node:module'
+import { createServer } from 'node:net'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+/**
+ * 让 `@deepseek-ai/dsh-tools` 解得开 —— 插件模块一被 import 就要它
+ *
+ * 第六节要真跑 `lw_tap` 的执行体, 所以这一次不再只对源码做静态断言. 三种情形按顺序:
+ * ① 普通安装 (node_modules 里有) 就用真的; ② 工位里通常只有 fork 检出那一份 (junction), 从
+ * `third_party/deepseek-harness/node_modules` 取真的; ③ 都没有时补一个最小影子 —— 只补
+ * `defineTool` 在这里唯一要做的两件事 (参数表收成 `{type:'object', properties}`, 定义原样交回),
+ * 于是插件走的还是它自己那条执行路径, 而第四节对 `parameters.properties.*` 的断言两种情形都成立
+ */
+const vendoredDshTools = resolve('third_party/deepseek-harness/node_modules/@deepseek-ai/dsh-tools/lib/index.js')
+
+const loadable = async (url) => {
+  if (!url) return null
+  try {
+    const module = await import(url)
+    return typeof module.defineTool === 'function' ? url : null
+  } catch {
+    return null
+  }
+}
+
+let realDshTools = await loadable((() => {
+  try {
+    return import.meta.resolve('@deepseek-ai/dsh-tools')
+  } catch {
+    return null
+  }
+})()) ?? await loadable(existsSync(vendoredDshTools) ? pathToFileURL(vendoredDshTools).href : null)
+
+if (!realDshTools) {
+  realDshTools = 'data:text/javascript;base64,' + Buffer.from(`
+export function defineTool(definition) {
+  const table = definition.parameters ?? {}
+  const properties = {}
+  for (const [key, spec] of Object.entries(table)) {
+    const { required: _required, ...rest } = spec ?? {}
+    properties[key] = rest
+  }
+  return {
+    ...definition,
+    parameters: Object.keys(properties).length > 0 ? { type: 'object', properties } : {},
+  }
+}
+`).toString('base64')
+}
+
+/** 插件里的裸名一律走上面那一份: 真包与影子都从同一个入口进, 不各写一条路 */
+register('data:text/javascript;base64,' + Buffer.from(`
+export async function resolve(specifier, context, next) {
+  if (specifier === '@deepseek-ai/dsh-tools') {
+    return { url: ${JSON.stringify(realDshTools)}, shortCircuit: true }
+  }
+  return next(specifier, context)
+}
+`).toString('base64'))
 
 const check = (() => {
   let failures = 0
@@ -267,6 +325,107 @@ check.run(
   'phone.md 的主屏例外里没有"快应用要建屏"的说法',
   !/快应用[\s\S]{0,40}lw_screen_create/.test(phone),
   '建屏只留给"任务真的需要一块自己控制的屏"那一档',
+)
+
+/* ── 六、点按找不到名字: 回三个最像的候选 (#27) ─────────────────────────── */
+
+/**
+ * 一棵没有"设置"这个名字的树, 加一份三行读屏
+ *
+ * 三行都与输入顺序、分数都岔开: 一眼看得出候选是真的排过序, 而不是把读到的原样倒回去
+ */
+const treeSaysNothing = {
+  outcome: 'none',
+  clicked: false,
+  via: 'a11y',
+  displayId: 0,
+  holdMs: 0,
+  long: false,
+  error: 'nothing on this screen says that',
+  matches: [],
+}
+const readLines = [
+  { text: '蓝牙', score: 0.95, box: [100, 300, 300, 360], center: [200, 330] },
+  { text: '位置信息', score: 0.80, box: [100, 500, 420, 560], center: [260, 530] },
+  { text: '设备连接', score: 0.90, box: [100, 700, 460, 760], center: [280, 730] },
+]
+
+/** 一台只回答 tapText / ocr 的假设备: 一条连接一请求一行 JSON, 与真桥同一套协议 */
+const answerFor = (request) => (request.method === 'tapText'
+  ? treeSaysNothing
+  : { displayId: 0, screen: 'on', lines: readLines, backend: 'cpu', engine: 'local' })
+
+const channel = createServer((socket) => {
+  socket.setEncoding('utf8')
+  let buffer = ''
+  socket.on('data', (chunk) => {
+    buffer += chunk
+    const end = buffer.indexOf('\n')
+    if (end < 0) return
+    const request = JSON.parse(buffer.slice(0, end))
+    socket.write(`${JSON.stringify({ ok: true, result: answerFor(request) })}\n`)
+  })
+})
+await new Promise((listening) => channel.listen(0, '127.0.0.1', listening))
+process.env.LW_CHANNEL_ENDPOINT = `127.0.0.1:${channel.address().port}`
+process.env.LW_CHANNEL_TOKEN = 'check-phone-actions'
+
+const tapTool = registered.find((tool) => tool.name === 'lw_tap')
+const logged = []
+const realLog = console.log
+let tapAnswer = ''
+try {
+  console.log = (...parts) => { logged.push(parts.join(' ')) }
+  tapAnswer = await tapTool.execute({ text: '设置', displayId: 0, note: 'check-phone-actions' })
+} finally {
+  console.log = realLog
+  channel.close()
+  delete process.env.LW_CHANNEL_ENDPOINT
+  delete process.env.LW_CHANNEL_TOKEN
+}
+
+/** 答案尾巴上那段机器可读的 JSON, 与 lw_ocr 一样放在人读的那几句后面 */
+const tapReply = (() => {
+  const start = tapAnswer.indexOf('\n{\n')
+  return start < 0 ? {} : JSON.parse(tapAnswer.slice(start + 1))
+})()
+const candidates = Array.isArray(tapReply.candidates) ? tapReply.candidates : []
+
+check.run(
+  'lw_tap 找不到名字时回三个候选, 每项带 text / score / bbox (树里没有 + 读屏也没有)',
+  candidates.length === 3
+    && candidates.every((item) => typeof item.text === 'string' && item.text.length > 0
+      && typeof item.score === 'number'
+      && Array.isArray(item.bbox) && item.bbox.length === 4
+      && item.bbox.every((value) => typeof value === 'number')),
+  `got ${JSON.stringify(candidates)}`,
+)
+check.run(
+  'lw_tap 的候选按 score 降序, 而不是把读到的顺序原样倒回去',
+  candidates.length === 3
+    && candidates.every((item, index) => index === 0 || item.score <= candidates[index - 1].score)
+    && candidates.map((item) => item.text).join('|') !== readLines.map((line) => line.text).join('|'),
+  `order ${candidates.map((item) => `${item.text}=${item.score}`).join(', ')}`,
+)
+check.run(
+  'lw_tap 的答案把「没找到」换成「最像的这几个」, 并说清一个都没按',
+  /closest lines on the screen/.test(tapAnswer)
+    && /nothing was pressed/.test(tapAnswer)
+    && /lw_tap\(x=\.\.\., y=\.\.\.\)/.test(tapAnswer),
+  tapAnswer.split('\n').slice(0, 3).join(' / '),
+)
+check.run(
+  'lw_tap 把候选条数写进日志 (真机 logcat 认这一行)',
+  logged.some((line) => line.includes('lw_tap: candidates=3')),
+  `logged ${JSON.stringify(logged.slice(-3))}`,
+)
+check.run(
+  'lw_tap 的说明里写明找不到名字会给最像的几行 (#27 的 op 描述)',
+  typeof tapTool?.description === 'string'
+    && /closest/i.test(tapTool.description)
+    && /three/i.test(tapTool.description)
+    && /score/i.test(tapTool.description),
+  '说明里不写, 模型下一次还是只会重读整屏',
 )
 
 if (!check.done()) process.exit(1)

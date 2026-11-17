@@ -2739,7 +2739,10 @@ const TOOLS = [
       + "phone's own screen with displayId 0. By name is the reliable "
       + 'way: pass text exactly as lw_ui reported it and the device finds that control and presses '
       + 'it, reporting what it pressed. If the name reaches more than one control nothing is '
-      + 'pressed and the candidates come back, so the next attempt can be more specific. A point '
+      + 'pressed and the candidates come back, so the next attempt can be more specific. A name '
+      + 'that matches nothing is not a dead end either: the screen is read as pixels too, and the '
+      + 'three lines that came closest come back with their text, a score and their rectangle - '
+      + 'press one of those, or use the closer name they suggest. A point '
       + 'is for when there is no name to use - a canvas, or a place you measured on a screenshot - '
       + 'and it is in the screen\'s own pixels, with 0,0 at its top left. Either way the call '
       + 'returns once the device has delivered the press, so a screenshot or an lw_ui taken after '
@@ -2787,7 +2790,10 @@ const TOOLS = [
         const source = args.source ?? 'auto'
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
         if (source === 'ocr') {
-          return said(await tapByReading(args.displayId, args.text, held), args.note)
+          const reading = await tapByReading(args.displayId, args.text, held)
+          return said(reading.candidates.length > 0
+            ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined)
+            : reading.report, args.note)
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
@@ -2797,7 +2803,10 @@ const TOOLS = [
           return formatNamedTap(tree, args.note)
         }
         const reading = await tapByReading(args.displayId, args.text, held)
-        return said(`${namedTapReport(tree)}\n${reading}`, args.note)
+        // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
+        return said(reading.candidates.length > 0
+          ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree)
+          : `${namedTapReport(tree)}\n${reading.report}`, args.note)
       }
       return formatGesture('tapped', await call('tap', {
         displayId: args.displayId,
@@ -6902,14 +6911,19 @@ function asleepLine(result) {
  * Press a name that exists only as pixels
  *
  * Reading is a guess, so it never guesses twice: an exact match wins, otherwise a line that
- * contains the name, and more than one candidate presses nothing at all
+ * contains the name, and more than one candidate presses nothing at all. Nothing at all is
+ * answered with the lines that came closest (`candidates`), which the caller turns into "press
+ * one of these" rather than "there is nothing here"
  */
 async function tapByReading(displayId, text, hold = 0) {
   const result = await call('ocr', { displayId })
-  if (result.error) return `the screen could not be read: ${result.error}`
+  if (result.error) return { report: `the screen could not be read: ${result.error}`, candidates: [] }
   if (result.screen && result.screen !== 'on') {
-    return `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
-      + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.'
+    return {
+      report: `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
+        + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.',
+      candidates: [],
+    }
   }
   const lines = result.lines ?? []
   const needle = String(text).trim()
@@ -6918,24 +6932,136 @@ async function tapByReading(displayId, text, hold = 0) {
     ? exact
     : lines.filter((line) => String(line.text ?? '').includes(needle))
   if (candidates.length === 0) {
-    return lines.length === 0
-      ? 'reading the screen found no text at all'
-      : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
-        + ' lines it could read; call lw_ocr to see them'
+    return {
+      report: lines.length === 0
+        ? 'reading the screen found no text at all'
+        : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
+          + ' lines it could read',
+      candidates: closestReadLines(lines, needle),
+    }
   }
   if (candidates.length > 1) {
-    return `${candidates.length} lines on the screen say that, so nothing was pressed: `
-      + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
-        .join(', ')
-      + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.'
+    return {
+      report: `${candidates.length} lines on the screen say that, so nothing was pressed: `
+        + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
+          .join(', ')
+        + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
+      candidates: [],
+    }
   }
   const only = candidates[0]
   const point = scatterInside(only.box ?? [])
   const pressed = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
-  return `pressed the line ${JSON.stringify(only.text)} (read off the screen with score`
-    + ` ${(only.score ?? 0).toFixed(2)}) at ${point.x},${point.y} on displayId`
-    + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
-    + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`
+  return {
+    report: `pressed the line ${JSON.stringify(only.text)} (read off the screen with score`
+      + ` ${(only.score ?? 0).toFixed(2)}) at ${point.x},${point.y} on displayId`
+      + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
+      + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`,
+    candidates: [],
+  }
+}
+
+/**
+ * How many close guesses a name that matched nothing hands back
+ *
+ * Three: one is a guess the model has to take or leave, two is a coin toss, and past three the
+ * list stops being "the closest few" and turns into a second screen dump
+ */
+const MAX_TAP_CANDIDATES = 3
+
+/**
+ * 名字一个也没匹配上时, 屏幕上最像的那几行
+ *
+ * 「没找到」对模型是死胡同: 它下一步只能整屏重读, 或者猜一个坐标. 给三行候选, 一次就够它
+ * 改成"点那个看起来最像的" —— 每行带 `text` / `score` / `bbox`, 按分数从高到低, 与 lw_ocr
+ * 报出来的矩形同一套像素
+ *
+ * 分数以**像不像**为主 (`alikeText`, 0.8), 以识别器对那一行自己的置信为辅 (0.2): 单纯按置信排
+ * 会把"清楚但是完全无关"的一行排在最前. 同分时先看置信, 再看读出来的先后, 所以顺序是稳定的
+ */
+function closestReadLines(lines, wanted, limit = MAX_TAP_CANDIDATES) {
+  const needle = squashText(wanted)
+  return lines
+    .map((line, order) => ({ line, order, score: closenessScore(line, needle) }))
+    .sort((left, right) => right.score - left.score
+      || (Number(right.line.score) || 0) - (Number(left.line.score) || 0)
+      || left.order - right.order)
+    .slice(0, limit)
+    .map(({ line, score }) => ({
+      text: String(line.text ?? ''),
+      score,
+      bbox: Array.isArray(line.box) ? line.box.slice(0, 4) : [],
+    }))
+}
+
+/** 比较之前先抹掉大小写与空白: 屏上的字经常是 "设 置" 或 "Wi-Fi" 这种写法 */
+function squashText(value) {
+  return String(value ?? '').toLowerCase().replace(/\s+/gu, '')
+}
+
+/**
+ * 两串字有多像, 0 到 1
+ *
+ * 逐字相同是 1; 一边整个出现在另一边里按比例给 0.6~0.9 (短的那个占比越大越像); 其余看公共
+ * 子序列占长边的比例, 封顶 0.6. 中文按字比就够用: "设置" 与 "设备连接" 共享一个「设」, 与
+ * "蓝牙" 一个都不共享
+ */
+function alikeText(left, right) {
+  if (left === '' || right === '') return 0
+  if (left === right) return 1
+  const short = left.length <= right.length ? left : right
+  const long = left.length <= right.length ? right : left
+  if (long.includes(short)) return 0.6 + 0.3 * (short.length / long.length)
+  return 0.6 * (commonLetters(left, right) / long.length)
+}
+
+/** 最长公共子序列的长度 (逐行滚动, 只留一行) */
+function commonLetters(left, right) {
+  const row = new Array(right.length + 1).fill(0)
+  for (let i = 1; i <= left.length; i += 1) {
+    let diagonal = 0
+    for (let j = 1; j <= right.length; j += 1) {
+      const above = row[j]
+      row[j] = left[i - 1] === right[j - 1] ? diagonal + 1 : Math.max(row[j], row[j - 1])
+      diagonal = above
+    }
+  }
+  return row[right.length]
+}
+
+/** 一行读出来的字离想要的名字有多近, 0 到 1, 保留三位小数 */
+function closenessScore(line, needle) {
+  const alike = alikeText(needle, squashText(line.text))
+  const read = Math.min(Math.max(Number(line.score) || 0, 0), 1)
+  return Math.round((alike * 0.8 + read * 0.2) * 1000) / 1000
+}
+
+/**
+ * 什么都没按到时给模型的那段话: 换成"最像的这几个", 并带上机器可读的 candidates
+ *
+ * 尾部的 JSON 与 `lw_ocr` 一样是给人之外的那一层看的: `candidates` 每项是 `{text, score, bbox}`,
+ * 按 score 从高到低. 屏幕上真的一行字都没有时这个列表是空的, 那句"没读到任何字"才回来
+ */
+function tapCandidatesAnswer(displayId, wanted, candidates, tree) {
+  const name = JSON.stringify(wanted)
+  // 树没被读到 (无障碍关着) 时不能写成"树里没有": 那是另一件事, 模型据此会去关掉无障碍的闸
+  const head = tree === undefined
+    ? `no line on displayId ${displayId} says ${name}`
+    : tree.outcome === 'unavailable'
+      ? `the control tree on displayId ${displayId} could not be read (accessibility is off), and no`
+        + ` line on the screen says ${name}`
+      : `no control on displayId ${displayId} is named ${name}, and no line on the screen says it`
+        + ' either'
+  // 真机上这条是唯一能证明候选真的给出来了的读数 (2026-11-17, 落实表 #27)
+  console.log(`lw_tap: candidates=${candidates.length} on displayId ${displayId}`
+    + ` for ${JSON.stringify(wanted)}`)
+  return withJson([
+    `${head}: nothing was pressed. The closest lines on the screen are:`,
+    ...candidates.map((candidate) => `- ${JSON.stringify(candidate.text)}`
+      + ` at [${candidate.bbox.join(',')}] score ${candidate.score.toFixed(3)}`),
+    'Press one of them by a point inside its bbox with lw_tap(x=..., y=...), or call lw_ui to see'
+      + ' what the screen actually says.',
+  ], { displayId, text: String(wanted), candidates })
 }
 
 /**
