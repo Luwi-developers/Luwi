@@ -115,6 +115,7 @@ import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.sync.SyncSetting
+import io.github.yuloong07star.luwi.tool.LwForge
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OpenFile
 import androidx.core.content.ContextCompat
@@ -240,8 +241,23 @@ fun HostScreen(modifier: Modifier = Modifier) {
     val setWindowHidden: (Boolean) -> Unit = { ScreenWindow.hidden = it }
     // 浮标菜单里的「Luwi反馈」: 与设置页 ⋮ 第一条同一个窗 (2026-10-29)
     var feedbackOpen by remember { mutableStateOf(false) }
+    // 门户 / 球菜单那一行「开发」: 弹的是与设置页同一份 DevItems (2026-11-17)
+    var devOpen by remember { mutableStateOf(false) }
     // 正在弹的那条虚拟屏错误, null 表示没有 (2.8.0 B2-c): 以前这里是一行常驻文字, 现在是一次性的
     var screenError by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // 前台「开发」面板里那两件要人动手的: 起名字 / 选一份 zip (2026-11-17)
+    val devImport = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val line = withContext(Dispatchers.IO) { importToolchain(context, uri) }
+                PortalDev.note(line)
+                Toast.makeText(context, line, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
     // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
@@ -251,6 +267,17 @@ fun HostScreen(modifier: Modifier = Modifier) {
             PortalAsk.Target.SETTINGS -> navigator.push(Screen.Settings)
             PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
             PortalAsk.Target.FEEDBACK -> feedbackOpen = true
+            PortalAsk.Target.DEV -> devOpen = true
+            PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
+                if (name != null) {
+                    scope.launch {
+                        val line = withContext(Dispatchers.IO) { LwForge.newProject(context, name) }
+                        PortalDev.note(line)
+                        Toast.makeText(context, line, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            PortalAsk.Target.DEV_IMPORT -> devImport.launch("application/zip")
             null -> Unit
         }
         if (askTarget != null) PortalAsk.clear()
@@ -363,6 +390,7 @@ fun HostScreen(modifier: Modifier = Modifier) {
                     onSettings = { navigator.push(Screen.Settings) },
                     onTavern = { navigator.push(Screen.TavernHome) },
                     onFeedback = { feedbackOpen = true },
+                    onDev = { devOpen = true },
                     windowHidden = windowHidden,
                     onToggleWindow = { setWindowHidden(!windowHidden) },
                     modifier = Modifier.padding(innerPadding),
@@ -391,6 +419,10 @@ fun HostScreen(modifier: Modifier = Modifier) {
             }
             if (feedbackOpen) {
                 FeedbackDialog(onDismissRequest = { feedbackOpen = false })
+            }
+            // 门户「更多」与球菜单那一行「开发」: 与设置页同一份 DevItems, 一个普通应用内弹窗
+            if (devOpen) {
+                DevPanelDialog(onDismissRequest = { devOpen = false })
             }
             // 门户判断 / 探索面板动作行最右那颗「设置」(2026-11-13 主人: "加在打开唤醒/刷新 的右侧"):
             // 页面只翻 `PortalAsk` 这一个开关, 弹的窗与设置页那一张是**同一份** (`SimSettingsDialog`),
@@ -431,6 +463,7 @@ private fun MenuButton(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -443,6 +476,7 @@ private fun MenuButton(
             onSettings = onSettings,
             onTavern = onTavern,
             onFeedback = onFeedback,
+            onDev = onDev,
             windowHidden = windowHidden,
             onToggleWindow = onToggleWindow,
         ),
@@ -623,6 +657,7 @@ private fun FloatingBall(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -741,6 +776,7 @@ private fun FloatingBall(
                 onSettings = onSettings,
                 onTavern = onTavern,
                 onFeedback = onFeedback,
+                onDev = onDev,
                 windowHidden = windowHidden,
                 onToggleWindow = onToggleWindow,
                 // 球的底由外面这层给, 菜单按钮自己就不用再画一层
@@ -767,6 +803,7 @@ private fun mainMenu(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
 ): List<DropdownEntry> {
@@ -792,65 +829,43 @@ private fun mainMenu(
             items = listOfNotNull(
                 DropdownItem(
                     text = "虚拟屏",
-                    summary = selected?.label,
+                    // 2026-11-17 主人: 触摸控制收进这一层; 屏名与「接受控制」那行刹车撤掉
                     children = buildList {
                         if (screens.isEmpty()) {
                             add(DropdownItem(text = "还没有已创建的虚拟屏", enabled = false))
                         }
-                        screens.forEach { screen ->
-                            add(
-                                DropdownItem(
-                                    text = screen.label,
-                                    summary = screen.shape,
-                                    selected = screen.displayId == selected?.displayId,
-                                    onClick = { VirtualScreen.toggle(screen) },
-                                ),
-                            )
-                        }
-                        // 手动的刹车: 停的是模型的下一步动作, 不是这块屏也不是预览, 用户自己的手指
-                        // 照样能碰画面
+                        // "现在这块画面能不能摸"要边看边切, 所以放在这一层第一条
                         add(
                             DropdownItem(
-                                text = if (selected?.acceptsControl == false) {
-                                    "继续接受控制"
-                                } else {
-                                    "暂停接受控制"
-                                },
-                                summary = selected?.label,
-                                enabled = selected != null,
-                                onClick = {
-                                    selected?.let { VirtualScreen.setAcceptsControl(it, !it.acceptsControl) }
-                                },
+                                text = "虚拟屏触摸控制",
+                                summary = "禁用以避免误操作",
+                                selected = PreviewControl.allowed,
+                                onClick = { PreviewControl.set(context, !PreviewControl.allowed) },
                             ),
                         )
                         // 建屏不在这里: 一块屏叫什么、多大, 是工具在造它的时候决定的, 界面只负责看和关
-                        // byUser = true: 之后模型再动这个 id, 桥要能说出"这是用户关的"
                         add(
                             DropdownItem(
                                 text = "释放虚拟屏",
-                                summary = selected?.label,
                                 enabled = selected != null,
                                 onClick = { selected?.let { VirtualScreen.release(it, byUser = true) } },
                             ),
                         )
-                        // 减号收起来的窗从这里叫回来: 它收得干净, 界面上不留把手, 所以这一项是唯一
-                        // 的路。放在"虚拟屏"这一栏里而不是一级菜单, 是因为它管的正是这一块屏
+                        // 减号收起来的窗从这里叫回来: 它收得干净, 界面上不留把手
                         add(
                             DropdownItem(
                                 text = windowToggle,
-                                summary = selected?.label,
                                 enabled = selected != null,
                                 onClick = onToggleWindow,
                             ),
                         )
                     },
                 ),
-                // 这个开关放在一级菜单而不是设置页: 它是"现在这块画面能不能摸", 边看边切才对
+                // 「开发」: 与门户「更多」里那一行同一件事, 弹出设置页同一份 DevItems (2026-11-17)
                 DropdownItem(
-                    text = "虚拟屏触摸控制",
-                    summary = "禁用以避免误操作",
-                    selected = PreviewControl.allowed,
-                    onClick = { PreviewControl.set(context, !PreviewControl.allowed) },
+                    text = "开发",
+                    summary = "新建应用 / 工具链 / 打开开发台",
+                    onClick = onDev,
                 ),
                 // 「同步」: 与设置页那一段同一个开关 (默认关)。关→开需要先有仓库地址, 没有就把人送到
                 // 设置页那一段去填; 改完必须重启 host 才生效, 所以这一下顺手重启 (主人点的那一下)

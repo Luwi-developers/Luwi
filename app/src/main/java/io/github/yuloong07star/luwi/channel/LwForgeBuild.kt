@@ -1,6 +1,7 @@
 package io.github.yuloong07star.luwi.channel
 
 import android.util.Log
+import io.github.yuloong07star.luwi.forge.ForgeAligner
 import io.github.yuloong07star.luwi.forge.ForgePlan
 import org.json.JSONArray
 import org.json.JSONObject
@@ -106,6 +107,8 @@ internal object LwForgeBuild {
         val forge = File(projectDir, ".lwforge").apply { mkdirs() }
         val log = File(forge, "build.log")
         workDir.mkdirs()
+        // d8 要一个**已存在的**目录当输出: 新项目第一次构建时它还没被建过
+        File(workDir, "dex").mkdirs()
         // 签名密钥先备好: 它是这套流水线的固定前提, 不由计划给 (计划里只写它落在哪)
         ensureKeystore()?.let { failure ->
             writeLastBuild(forge, ok = false, apk = "", bytes = 0, sha = "", label = "", error = failure.output)
@@ -132,6 +135,9 @@ internal object LwForgeBuild {
                 "dex-merge" -> mergeDex(step.apk, step.dex, step.out)
                 "jar" -> zipClasses(step.apk, step.out)
                 "copy" -> copyFile(step.apk, step.out)
+                "align" -> ForgeAligner.align(File(step.apk), File(step.out))?.let { why ->
+                    LwLinuxSandbox.Outcome(2, why)
+                } ?: LwLinuxSandbox.Outcome(0, "")
                 else -> LwLinuxSandbox.runArgv(
                     argv = step.argv,
                     cwd = workDir.absolutePath,
@@ -243,7 +249,7 @@ internal object LwForgeBuild {
             if (argv.size > MAX_ARGS) continue
             if (argv.any { it.contains('\u0000') || it.contains('\n') }) continue
             val kind = item.optString("kind")
-            if (kind != "dex-merge" && kind != "copy" && argv.isEmpty()) continue
+            if (kind !in setOf("dex-merge", "copy", "align", "jar") && argv.isEmpty()) continue
             steps += Step(
                 id = id,
                 label = item.optString("label").ifBlank { id },

@@ -1231,7 +1231,7 @@
     <!-- 2.8.1 #16: 开发板块, 两件伴侣软件由用户自己下载 -->
     <string name="settings_section_dev">开发</string>
     <string name="settings_section_dev_summary">给开发用的伴侣软件, 自己点下载</string>
-    <string name="settings_dev_note">Luwi 只把包装下来交给系统安装器, 装不装由你在那一页点的那一下定。HyperOS 对「新包」还要过一道: 登录小米账号, 或打开开发者选项里的「USB 安装」</string>
+    <string name="settings_dev_note">与 设置 → 开发 是同一份: 建项目 → 构建 / 安装 / 预览; 工具链是 Luwi 里的数据包 (不装第二个应用), 构建在特权进程里跑, 进度写进项目的 .lwforge</string>
     <string name="settings_dev_console">Luwi 开发台</string>
     <string name="settings_dev_console_summary">会话 / 插件 / 日志同屏</string>
     <string name="settings_dev_absent">没装 · 点一下下载</string>
@@ -1247,6 +1247,16 @@
     <string name="settings_dev_import_summary">选一份已经下好的 luwi-toolchain.zip</string>
     <string name="settings_dev_open_title">打开开发台 (虚拟屏)</string>
     <string name="settings_dev_open_summary">她干活时在上面看构建进度</string>
+    <string name="dev_console_title">Luwi 开发台</string>
+    <string name="dev_console_empty">还没有项目。到 Luwi 设置的「开发」段建一个。</string>
+    <string name="dev_console_no_access">给它文件访问权限，它才读得到项目目录。</string>
+    <string name="dev_console_refresh">刷新</string>
+    <string name="dev_console_log">构建日志</string>
+    <string name="dev_console_current">当前项目</string>
+    <string name="dev_console_build">上次构建</string>
+    <string name="settings_dev_new_title">新建应用</string>
+    <string name="settings_dev_new_summary">建一个项目，并把开发台拉到虚拟屏上</string>
+    <string name="dev_panel_title">开发</string>
 </resources>
 
 

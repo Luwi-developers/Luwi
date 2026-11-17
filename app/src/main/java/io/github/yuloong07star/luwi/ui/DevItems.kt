@@ -20,7 +20,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.constants.UiSpacing
-import io.github.yuloong07star.luwi.tool.DevConsole
 import io.github.yuloong07star.luwi.tool.DevToolchain
 import io.github.yuloong07star.luwi.tool.DevTools
 import io.github.yuloong07star.luwi.tool.LwForge
@@ -72,46 +71,24 @@ internal fun DevItems() {
         }
     }
 
-    Card {
-        DevTools.tools.forEach { tool ->
-            val version = remember(revision) { DevTools.installed(context, tool) }
-            val blurb = stringResource(tool.blurb)
-            val state = when {
-                busy == tool.id -> stringResource(R.string.settings_dev_busy)
-                version != null -> stringResource(R.string.settings_dev_installed, version)
-                else -> stringResource(R.string.settings_dev_absent)
-            }
-            ArrowPreference(
-                title = stringResource(tool.label),
-                summary = "$blurb · $state",
-                onClick = {
-                    if (busy != null) return@ArrowPreference
-                    haptic.confirm()
-                    busy = tool.id
-                    scope.launch {
-                        // 下载与安装都是阻塞的 (网络 + 可能一次 pm install), 而这里是主线程
-                        val line = withContext(Dispatchers.IO) { DevTools.download(context, tool) }
-                        busy = null
-                        said = line
-                        revision += 1
-                    }
-                },
-            )
-        }
-    }
 
     DevLines(said ?: stringResource(R.string.settings_dev_note))
 
-    // 2.8.1 的三行: 连开发台 / 装工具链 / 把开发台拉到虚拟屏上.
-    // 三件都要绑伴侣的 Service 或者起屏, 全是阻塞活儿 —— 一律下 IO, 结果回一句 `said`
+    // 2026-11-17 起这一段是四件事: 新建应用 / 下工具链 / 从文件导入 / 打开开发台.
+    // 开发台已经在本应用里, 所以既没有「下载开发台」也没有「连接开发台」两行
     Card {
         ArrowPreference(
-            title = stringResource(R.string.settings_dev_connect_title),
-            summary = stringResource(R.string.settings_dev_connect_summary),
+            title = stringResource(R.string.settings_dev_new_title),
+            summary = stringResource(R.string.settings_dev_new_summary),
             onClick = {
-                haptic.confirm()
-                scope.launch {
-                    said = withContext(Dispatchers.IO) { DevConsole.status(context) }
+                haptic.contextClick()
+                askProjectName(context) { name ->
+                    if (name != null) {
+                        scope.launch {
+                            said = withContext(Dispatchers.IO) { LwForge.newProject(context, name) }
+                            revision += 1
+                        }
+                    }
                 }
             },
         )
@@ -167,11 +144,29 @@ private fun DevLines(text: String) {
 }
 
 /**
+ * 问一个应用名 (系统输入框那一层, 少一层 Compose 依赖)
+ *
+ * 只收一个名字; slug 与包名由 [LwForge.newProject] 按规则生成
+ */
+internal fun askProjectName(context: Context, onName: (String?) -> Unit) {
+    val input = android.widget.EditText(context).apply {
+        hint = "比如 记账本"
+        setSingleLine(true)
+    }
+    android.app.AlertDialog.Builder(context)
+        .setTitle(R.string.settings_dev_new_title)
+        .setView(input)
+        .setPositiveButton(android.R.string.ok) { _, _ -> onName(input.text?.toString().orEmpty()) }
+        .setNegativeButton(android.R.string.cancel) { _, _ -> onName(null) }
+        .show()
+}
+
+/**
  * 把人选的那份 zip 抄进 Luwi 自己的目录, 再交给 [ToolchainPack.installFromZip]
  *
  * 选进来的东西只当**一份数据**看: 抄完先验整包 sha256, 不对就一句话回绝
  */
-private fun importToolchain(context: Context, uri: Uri): String {
+internal fun importToolchain(context: Context, uri: Uri): String {
     val root = context.getExternalFilesDir("toolchain-pack") ?: return "这块设备上没有外部目录"
     root.mkdirs()
     val target = java.io.File(root, DevTools.TOOLCHAIN_ASSET)

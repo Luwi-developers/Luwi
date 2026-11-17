@@ -4,7 +4,6 @@ import android.content.Context
 import io.github.yuloong07star.luwi.channel.LwForgeExec
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
 import io.github.yuloong07star.luwi.channel.VirtualScreen
-import io.github.yuloong07star.luwi.dev.api.DevApi
 import io.github.yuloong07star.luwi.forge.ForgeIcon
 import io.github.yuloong07star.luwi.forge.ForgePlan
 import io.github.yuloong07star.luwi.forge.ForgeProject
@@ -50,7 +49,11 @@ internal object LwForge {
     fun toolchainLine(context: Context): String = DevToolchain.status(context)
 
     /** 设置页那一行「连接开发台」与 `op=status` 共用的一句话 */
-    fun consoleLine(context: Context): String = DevConsole.status(context)
+    /**
+     * 开发台那一行**只读系统里的装没装** —— 这一个对象跑在特权进程 (shell uid) 里, 而开发台的
+     * Service 要 signature 级权限, shell uid 绑不上; 真正的连接在应用进程里 (设置页「连接开发台」)
+     */
+    fun consoleLine(context: Context): String = "开发台: 就在 Luwi 里 (设置 → 开发 → 打开开发台)"
 
     /**
      * 设置页那一行「打开开发台（虚拟屏）」: 建屏 + 拉起开发台, 不推项目
@@ -59,9 +62,6 @@ internal object LwForge {
      * 还没有项目可言 —— 屏上先有开发台, 它自己会记得上一次打开的是哪个项目
      */
     fun openConsole(context: Context): String {
-        if (!DevBridge.installed(context, DevApi.PACKAGE_CONSOLE)) {
-            return "先装 Luwi 开发台: 上面那一行点一下"
-        }
         val service = PrivilegedChannel.ensure()
             ?: return "建虚拟屏要特权通道: " + (PrivilegedChannel.state().error ?: "没有原因")
         val previous = VirtualScreen.screens.firstOrNull()
@@ -71,8 +71,8 @@ internal object LwForge {
             val (code, output) = service.launch(
                 displayId = screen.displayId,
                 userId = 0,
-                packageName = DevApi.PACKAGE_CONSOLE,
-                component = "",
+                packageName = context.packageName,
+                component = "${context.packageName}/.ui.DevConsoleActivity",
                 timeoutMs = LAUNCH_TIMEOUT_MS,
             )
             "exit $code" + if (output.isBlank()) "" else " (${output.trim().take(120)})"
@@ -90,15 +90,15 @@ internal object LwForge {
         "status" -> status(context, request)
         "logs" -> logs(context, request)
         "toolchain" -> text(DevToolchain.install(context))
-        // 开发台那一件 APK 的下载入口 (与设置页那一行同一条路): 下完交系统安装器, 装不装由人点
-        "console" -> text(DevTools.download(context, DevTools.tools.single()))
+        // 设置页「新建应用」那一行走同一条路; 单独留一条 op 是为了让真机能验它
+        "create" -> text(newProject(context, request.string("name")))
         "build" -> build(context, request)
         "install" -> install(context, request)
         "screen" -> screen(context, request)
         "preview" -> preview(context, request)
         "back" -> back(context)
         else -> throw IllegalArgumentException(
-            "op has to be one of init, meta, icon, status, logs, toolchain, console, build, install, screen," +
+            "op has to be one of init, meta, icon, status, logs, toolchain, create, build, install, screen," +
                 " preview, back, not \"$op\"",
         )
     }
@@ -206,7 +206,7 @@ internal object LwForge {
         if (staged != null) {
             lines += "工具链 (特权区): " + staged.output.trim().replace('\n', '·')
         }
-        lines += DevConsole.status(context)
+        lines += consoleLine(context)
         return text(lines.joinToString("\n"))
     }
 
@@ -303,25 +303,62 @@ internal object LwForge {
 
     // ---- 虚拟屏那一套 -------------------------------------------------------------------------
 
+    /**
+     * 设置页「新建应用」: 只建项目, 不构建 (构建是 `op=build` 的事)
+     *
+     * 名字当显示名; slug 从名字里挑字母数字, 包名固定 `com.example.<slug 去横线>`
+     */
+    fun newProject(context: Context, rawName: String): String {
+        val title = rawName.trim()
+        if (title.isEmpty()) return "名字不能是空的"
+        val slug = title.lowercase().map { if (it in 'a'..'z' || it in '0'..'9') it else '-' }
+            .joinToString("").trim('-').replace(Regex("-+"), "-")
+        // 中文名字挑不出字母时给一个稳定的 slug (`app` + 名字的 hash), 而不是拒掉
+        val safe = slug.ifEmpty { "app" + Integer.toHexString(title.hashCode()) }
+        ProjectPath.slugProblem(safe)?.let { return it }
+        val workspace = listOf(
+            "/sdcard/DSH/Luwi",
+            "/sdcard/Android/media/${context.packageName}/DSH/Luwi",
+        ).firstOrNull { File(it).isDirectory } ?: return "还没有工作区目录 (/sdcard/DSH/Luwi)"
+        ProjectPath.workspaceProblem(workspace)?.let { return it }
+        val project = ProjectPath.projectDir(workspace, safe)
+        if (File(project, "project.json").isFile) return "已经有叫 $safe 的项目了"
+        val meta = ForgeProject.Meta(
+            name = title,
+            packageName = "com.example." + safe.replace("-", ""),
+            versionCode = 1,
+            versionName = "1.0",
+            minSdk = 24,
+            targetSdk = 37,
+            language = "java",
+            template = "java-basic",
+            icon = "",
+        )
+        val problem = ForgeProject.create(context, project, meta, force = false)
+        if (problem.isNotBlank()) return problem
+        return "建好了 ${meta.name} → ${project.absolutePath} (包名 ${meta.packageName}); 下一步 op=build"
+    }
+
     private fun screen(context: Context, request: JsonObject): JsonObject {
         val project = projectOf(context, request)
         val (meta, problem) = ForgeProject.read(project)
         if (meta == null) return text(problem)
-        if (!DevBridge.installed(context, DevApi.PACKAGE_CONSOLE)) {
-            return text("先装 Luwi 开发台: 设置 → 开发 那一行点一下")
-        }
         val service = PrivilegedChannel.ensure()
             ?: return text("建虚拟屏要特权通道: " + (PrivilegedChannel.state().error ?: "没有原因"))
         val previous = VirtualScreen.screens.firstOrNull()
         val screen = VirtualScreen.create(name = "开发台")
             ?: return text("虚拟屏没建起来: ${VirtualScreen.lastError ?: "没有原因"}")
-        val pushed = DevConsole.open(context, project.absolutePath, meta.name)
+        // 开发屏读的是 `app-projects/.current` 这一行; 建屏前先把它写成这个项目
+        val pushed = runCatching {
+            File(project.parentFile, ".current").writeText(project.absolutePath)
+            "已选中 ${meta.name}"
+        }.getOrElse { "记号没写成 (${it.message ?: it.javaClass.simpleName})" }
         val launched = runCatching {
             val (code, output) = service.launch(
                 displayId = screen.displayId,
                 userId = 0,
-                packageName = DevApi.PACKAGE_CONSOLE,
-                component = "",
+                packageName = context.packageName,
+                component = "${context.packageName}/.ui.DevConsoleActivity",
                 timeoutMs = LAUNCH_TIMEOUT_MS,
             )
             "exit $code" + if (output.isBlank()) "" else " (${output.trim().take(120)})"
@@ -354,7 +391,7 @@ internal object LwForge {
                 displayId = displayId,
                 userId = 0,
                 packageName = meta.packageName,
-                component = "",
+                component = "${context.packageName}/.ui.DevConsoleActivity",
                 timeoutMs = LAUNCH_TIMEOUT_MS,
             )
             "exit $code" + if (output.isBlank()) "" else " (${output.trim().take(120)})"

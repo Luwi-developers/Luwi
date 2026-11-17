@@ -73,35 +73,25 @@ internal object PortalMenu {
         val screensItem = Item(
             id = "screens",
             title = "虚拟屏",
-            summary = selected?.label.orEmpty(),
+            // 2026-11-17 主人: 触摸控制收进这一层; 屏名与那行"接受控制"的刹车撤掉
+            // (同一时刻只一块屏, 名字与刹车都不必在这里点)
             children = buildList {
                 if (screens.isEmpty()) {
                     add(Item(id = "none", title = "还没有已创建的虚拟屏", enabled = false))
                 }
-                screens.forEach { screen ->
-                    add(
-                        Item(
-                            id = "screen:${screen.displayId}",
-                            title = screen.label,
-                            summary = screen.shape,
-                            on = screen.displayId == selected?.displayId,
-                        ),
-                    )
-                }
-                // 手动的刹车: 停的是模型的下一步动作, 不是这块屏
+                // "现在这块画面能不能摸"要边看边切, 所以放在这一层第一条
                 add(
                     Item(
-                        id = "screen-control",
-                        title = if (selected?.acceptsControl == false) "继续接受控制" else "暂停接受控制",
-                        summary = selected?.label.orEmpty(),
-                        enabled = selected != null,
+                        id = "touch",
+                        title = "虚拟屏触摸控制",
+                        summary = "禁用以避免误操作",
+                        on = PreviewControl.allowed,
                     ),
                 )
                 add(
                     Item(
                         id = "screen-release",
                         title = "释放虚拟屏",
-                        summary = selected?.label.orEmpty(),
                         enabled = selected != null,
                     ),
                 )
@@ -110,7 +100,6 @@ internal object PortalMenu {
                     Item(
                         id = "screen-window",
                         title = windowToggle,
-                        summary = selected?.label.orEmpty(),
                         enabled = selected != null,
                     ),
                 )
@@ -118,13 +107,6 @@ internal object PortalMenu {
         )
         return listOf(
             screensItem,
-            // 放在一级而不是设置页: "现在这块画面能不能摸"要边看边切
-            Item(
-                id = "touch",
-                title = "虚拟屏触摸控制",
-                summary = "禁用以避免误操作",
-                on = PreviewControl.allowed,
-            ),
             Item(
                 id = "sync",
                 title = context.getString(R.string.menu_sync),
@@ -159,16 +141,11 @@ internal object PortalMenu {
     private fun run(context: Context, id: String) {
         when {
             id == "screens" || id == "none" -> Unit
-            id.startsWith("screen:") -> {
-                val displayId = id.removePrefix("screen:").toIntOrNull() ?: return
-                VirtualScreen.screens.firstOrNull { it.displayId == displayId }?.let { VirtualScreen.toggle(it) }
-            }
-            id == "screen-control" -> VirtualScreen.selected?.let {
-                VirtualScreen.setAcceptsControl(it, !it.acceptsControl)
-            }
             id == "screen-release" -> VirtualScreen.selected?.let { VirtualScreen.release(it, byUser = true) }
             id == "screen-window" -> ScreenWindow.hidden = !ScreenWindow.hidden
             id == "touch" -> PreviewControl.set(context, !PreviewControl.allowed)
+            // 页面那一行「开发」(排在探索下面) 走这里: 落一个掷标, 由 HostScreen 弹原生面板
+            id == "dev" -> PortalAsk.ask(PortalAsk.Target.DEV)
             id == "sync" -> toggleSync(context)
             id == "tavern" -> PortalAsk.ask(PortalAsk.Target.TAVERN)
             // 与球菜单那一条同一句: 方向由页面报上来的 `PortalState.open` 决定

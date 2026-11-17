@@ -77,7 +77,7 @@ internal object ToolchainPack {
      *
      * 已经装好就直接回一句 —— 不重下 113 MB
      */
-    fun install(context: Context): String {
+    fun install(context: Context, hosts: List<String> = DevTools.HOSTS): String {
         val before = forgeStatus(context)?.output.orEmpty()
         if (before.lineSequence().any { it.trim() == "installed=true" }) {
             return "工具链已经在: " + before.lineSequence().firstOrNull { it.startsWith("version=") }
@@ -90,7 +90,7 @@ internal object ToolchainPack {
         val ready = zip.isFile && sha256(zip).equals(DevTools.TOOLCHAIN_SHA256, true)
         if (!ready) {
             val reasons = mutableListOf<String>()
-            val urls = DevTools.toolchainUrls()
+            val urls = hosts.map { base -> "$base/${DevTools.TOOLCHAIN_ASSET}" }
             for ((index, url) in urls.withIndex()) {
                 try {
                     downloadResumable(url, zip)

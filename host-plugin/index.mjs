@@ -3014,7 +3014,7 @@ const TOOLS = [
     },
   }),
 
-  // 手机应用工坊 (2.8.2): 改应用名 / 图标 / 内容, 在手机上构建并装上一个 Android App
+  // 手机应用工坊 (2.8.1): 改应用名 / 图标 / 内容, 在手机上构建并装上一个 Android App
   //
   // 与文件工具的分工: 代码与 res 是**普通文件**, 用现成的读写编辑工具直接改
   // (`<workspace>/app-projects/<slug>/`); 这一条只管那几件文件工具做不了的事 —— 建项目、改元信息、
@@ -3039,8 +3039,8 @@ const TOOLS = [
       op: {
         type: 'string',
         required: true,
-        description: 'init | meta | icon | status | toolchain | console | build | install | logs | screen | preview | back',
-        enum: ['init', 'meta', 'icon', 'status', 'toolchain', 'console', 'build', 'install', 'logs', 'screen', 'preview', 'back'],
+        description: 'init | meta | icon | status | toolchain | create | build | install | logs | screen | preview | back',
+        enum: ['init', 'meta', 'icon', 'status', 'toolchain', 'create', 'build', 'install', 'logs', 'screen', 'preview', 'back'],
       },
       project: {
         type: 'string',
@@ -13021,7 +13021,7 @@ const PROACTIVE_ACT_TABLE = new Map([
   // 她的表情 (2026-11-10): 列素材 / 贴一张 / 按情绪词挑一张都不动设备; `fetch` 会外发请求并落盘,
   // 而 `tag` 写的是 `lw/stickers/tags.json` —— 那两面算写动 (2026-11-15 加的 pick / tag)
   ['lw_sticker', new Set(['list', 'say', 'pick'])],
-  // 工坊 (2.8.2): 读项目状态与构建日志不动设备; 建 / 改 / 图标 / 构建 / 装机 / 建屏全归写动
+  // 工坊 (2.8.1): 读项目状态与构建日志不动设备; 建 / 改 / 图标 / 构建 / 装机 / 建屏全归写动
   ['lw_forge', new Set(['status', 'logs'])],
   // 没有只读那一面: 一调就是动手
   ['lw_app_control', new Set()],

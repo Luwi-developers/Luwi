@@ -31,7 +31,7 @@ function check(name, got, want) {
 }
 
 const OPS = [
-  'init', 'meta', 'icon', 'status', 'logs', 'toolchain', 'console',
+  'init', 'meta', 'icon', 'status', 'logs', 'toolchain', 'create',
   'build', 'install', 'screen', 'preview', 'back',
 ]
 
@@ -88,11 +88,9 @@ check(
   OPS.filter((op) => docs.includes(`\`${op}\``)).length,
   OPS.length,
 )
-check('docs 23 说清了"没有 zipalign"', /没有 zipalign/.test(docs), true)
-const lwdev = await readdir(new URL('lwdev-api/src/main/java/io/github/yuloong07star/luwi/dev/api', root))
-check('lwdev-api 只剩 DevApi 与 IDevConsole', lwdev.sort(), ['DevApi.kt', 'IDevConsole.kt'])
+check('docs 23 说清了"对齐自己写"', /对齐自己写/.test(docs), true)
 const aidl = []
-for (const dir of ['lwdev-api', 'devtools', 'devconsole']) {
+for (const dir of ['app']) {
   const found = await readdir(new URL(`${dir}/src/main`, root), { recursive: true }).catch(() => [])
   found.filter((name) => String(name).endsWith('.aidl')).forEach((name) => aidl.push(`${dir}/${name}`))
 }

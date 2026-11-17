@@ -46,6 +46,7 @@ internal object ForgePlan {
     private const val LABEL_JAR = "打包 class"
     private const val LABEL_DEX = "d8 转 dex"
     private const val LABEL_MERGE = "合并 dex 进 APK"
+    private const val LABEL_ALIGN = "对齐资源表"
     private const val LABEL_SIGN = "apksigner 签名"
     private const val LABEL_BADGING = "aapt2 读清单"
     private const val LABEL_VERIFY = "apksigner 验签"
@@ -75,6 +76,7 @@ internal object ForgePlan {
         val classesJar = File(work, "classes.jar")
         val dex = File(work, "dex")
         val merged = File(work, "merged.apk")
+        val aligned = File(work, "aligned.apk")
         val signed = File(work, "signed.apk")
         val sourcesFile = File(work, "sources.txt")
         val sources = if (src.isDirectory) {
@@ -182,6 +184,14 @@ internal object ForgePlan {
                 .put("out", merged.absolutePath),
         )
         steps.put(
+            JSONObject()
+                .put("id", "align")
+                .put("label", LABEL_ALIGN)
+                .put("kind", "align")
+                .put("apk", merged.absolutePath)
+                .put("out", aligned.absolutePath),
+        )
+        steps.put(
             step(
                 "sign",
                 LABEL_SIGN,
@@ -197,7 +207,7 @@ internal object ForgePlan {
                     "--key-pass",
                     "file:$KEY_KEY_PASS_FILE",
                     "--in",
-                    merged.absolutePath,
+                    aligned.absolutePath,
                     "--out",
                     signed.absolutePath,
                 ),

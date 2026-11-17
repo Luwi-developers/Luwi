@@ -10,7 +10,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * 构建计划那一份 argv 的判据 (2.8.2)
+ * 构建计划那一份 argv 的判据 (2.8.1)
  *
  * 这份计划是"模型碰不到命令行"那句话的落点, 所以每一步的参数顺序都按真值表钉住 —— 顺序错一步
  * (比如 `-o` 跑到输入前面) 在真机上只会得到一句 aapt2 的 usage, 而那种错误没有一条单测兜着就会一路
@@ -64,7 +64,7 @@ class ForgePlanTest {
         val steps = plan.getJSONArray("steps")
         val ids = (0 until steps.length()).map { steps.getJSONObject(it).getString("id") }
         assertEquals(
-            listOf("compile", "link", "javac", "jar", "dex", "merge", "sign", "badging", "verify"),
+            listOf("compile", "link", "javac", "jar", "dex", "merge", "align", "sign", "badging", "verify"),
             ids,
         )
     }

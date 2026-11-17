@@ -585,6 +585,13 @@ internal class PortalBridge(private val context: Context) {
      */
     @JavascriptInterface
     fun portalMenuPick(id: String): String = PortalMenu.pick(context, id.trim())
+    /** 前台「开发」面板顶上那几行读数 (工具链 / 当前项目 / 上一句结论) */
+    @JavascriptInterface
+    fun portalDev(): String = PortalDev.status(context)
+
+    /** 前台「开发」面板里点了一行: 重活丢线程池, 当场回一句 */
+    @JavascriptInterface
+    fun portalDevPick(id: String): String = PortalDev.pick(context, id.trim())
 
     /**
      * 开始这一趟探索: 投一行 `source:"explore"`, 正文就是那张任务卡 (`lw/explore-card.md`)

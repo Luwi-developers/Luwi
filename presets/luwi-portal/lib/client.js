@@ -4261,6 +4261,9 @@ window.__ModuleLoader__.load({
         // 她自己的两张面板一直在最上面: 那是这一页的东西
         drawerRow('判断', '她什么时候开口那一套读数', '›', false, true, function () { openDrawer('router') })
         drawerRow('探索', '探索排期与上一次摘要', '›', false, true, function () { openDrawer('work') })
+        // 2026-11-17 主人: 探索下面再来一行「开发」——点进去是这一页上的开发面板, 排法与判断 / 探索
+        // / 虚拟屏同一套; 后台球菜单那一份仍是原生下拉 (那一层没有这一页可画)
+        drawerRow('开发', '新建应用 / 工具链 / 打开开发台', '›', false, true, function () { openDrawer('dev') })
         // 原生那一份 (2026-11-14: 前台不画浮球之后, 球菜单里那几件全搬到这里)
         // 老宿主没有 `portalMenu` 时回 null, 于是抽屉就还是原来那三行 —— 不回归
         var menu = call('portalMenu')
@@ -4318,6 +4321,55 @@ window.__ModuleLoader__.load({
       }
 
       /** 「虚拟屏」那一层: 屏列表 / 暂停接受控制 / 释放 / 显示隐藏窗口 */
+      /**
+       * 「开发」面板 (2026-11-17 主人: 面板要像判断 / 探索 / 虚拟屏那样画在这一页上)
+       *
+       * 顶上两行读数 (已有项目 / 工具链) 由原生现算; 下面三行动作都只投一个 id,
+       * 真正干活的是 app 那一侧 (`portalDevPick`) —— 下 113 MB 与建开发屏都在那边丢线程池, 这里只
+       * 当场收一句「开始了」, 干完原生自己 Toast 报结果
+       */
+      function renderDevDrawer() {
+        var dev = call('portalDev') || {}
+        els.drawer.appendChild(h('h3', null, '开发'))
+        els.drawer.appendChild(kv('已有项目', String(dev.projects || '') || '还没有'))
+        els.drawer.appendChild(kv('工具链', String(dev.toolchain || '') || '状态读不到'))
+        var act = function (id) {
+          var line = call('portalDevPick', id)
+          showNote(line === null ? '这一版宿主还不支持' : String(line), line === null)
+          setTimeout(function () { if (drawer === 'dev') renderDrawer() }, 1200)
+        }
+        // 2026-11-17 主人: 这一层只留三行; 导入工具链还在设置页那一段里
+        drawerRow('新建开发应用', '建一个项目', '', false, true, function () { act('new') })
+        // 开发屏开着时这一行变「关闭开发台」, 点一下把所有虚拟屏收掉 (主人 2026-11-17)
+        var screenOpen = dev.screenOpen === true
+        drawerRow(
+          screenOpen ? '关闭开发台' : '打开开发台（虚拟屏）',
+          screenOpen ? '释放所有虚拟屏' : '构建时在上面看进度',
+          '›',
+          screenOpen,
+          true,
+          function () { act(screenOpen ? 'screen.close' : 'screen') },
+        )
+        drawerRow('下载 luwi 开发安卓工具', '先选直链还是镜像', '›', false, true, function () { openDrawer('devdl') })
+      }
+
+      /**
+       * 「下载 luwi 开发安卓工具」的第二层: 直链 / 镜像 (2026-11-17 主人: 点下载要弹一下让选)
+       *
+       * 两档打的是同一份 `luwi-toolchain.zip`: 直链 = GitHub Releases 直连, 镜像 = 三个加速代理。
+       * 选完回上一层并把结果用 note 说出来 (真正的进度由原生 Toast 报)
+       */
+      function renderDevDownloadDrawer() {
+        els.drawer.appendChild(h('h3', null, '下载 luwi 开发安卓工具'))
+        els.drawer.appendChild(kv('包', 'luwi-toolchain.zip · 113 MB'))
+        var pickOne = function (id) {
+          var line = call('portalDevPick', id)
+          showNote(line === null ? '这一版宿主还不支持' : String(line), line === null)
+          openDrawer('dev')
+        }
+        drawerRow('直链', 'GitHub Releases 直连', '', false, true, function () { pickOne('download:direct') })
+        drawerRow('镜像', 'ghproxy / gh-proxy / ghfast 三个代理', '', false, true, function () { pickOne('download:mirror') })
+      }
       function renderScreenDrawer() {
         // 每画一次都拿最新的那一份: 点「释放」之后列表里那块就该没了
         var menu = call('portalMenu')
@@ -4355,6 +4407,8 @@ window.__ModuleLoader__.load({
           if (drawer === 'menu') renderMenuDrawer()
           else if (drawer === 'screen') renderScreenDrawer()
           else if (drawer === 'router') renderRouterDrawer()
+          else if (drawer === 'dev') renderDevDrawer()
+          else if (drawer === 'devdl') renderDevDownloadDrawer()
           else renderWorkDrawer()
         }
         if (els.moreButton) els.moreButton.setAttribute('data-on', drawer === '' ? 'off' : 'on')

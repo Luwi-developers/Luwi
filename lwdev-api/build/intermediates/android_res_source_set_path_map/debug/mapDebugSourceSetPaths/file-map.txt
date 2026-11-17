@@ -1,9 +1,0 @@
-io.github.yuloong07star.luwi.dev.api.lwdev-api-pngs-0 D:\apk\Luwi\lwdev-api\build\generated\res\pngs\debug
-io.github.yuloong07star.luwi.dev.api.lwdev-api-updated_navigation_xml-1 D:\apk\Luwi\lwdev-api\build\generated\updated_navigation_xml\debug
-io.github.yuloong07star.luwi.dev.api.lwdev-api-mergeDebugResources-2 D:\apk\Luwi\lwdev-api\build\intermediates\incremental\debug\mergeDebugResources\merged.dir
-io.github.yuloong07star.luwi.dev.api.lwdev-api-mergeDebugResources-3 D:\apk\Luwi\lwdev-api\build\intermediates\incremental\debug\mergeDebugResources\stripped.dir
-io.github.yuloong07star.luwi.dev.api.lwdev-api-debug-4 D:\apk\Luwi\lwdev-api\build\intermediates\merged_res\debug\mergeDebugResources
-io.github.yuloong07star.luwi.dev.api.lwdev-api-debug-5 D:\apk\Luwi\lwdev-api\build\intermediates\packaged_res\debug\packageDebugResources
-io.github.yuloong07star.luwi.dev.api.lwdev-api-debug-6 D:\apk\Luwi\lwdev-api\src\debug\res
-io.github.yuloong07star.luwi.dev.api.lwdev-api-main-7 D:\apk\Luwi\lwdev-api\src\main\res
-gradleHome-0 D:\apk\gradle-home

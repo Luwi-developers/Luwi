@@ -10,7 +10,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * `project.json` 与 Manifest 那几处同步 (2.8.2)
+ * `project.json` 与 Manifest 那几处同步 (2.8.1)
  *
  * 这三条是"改名字 / 改版本 / 换包名"在磁盘上的样子: 三处 (json / strings.xml / Manifest) 只要有一处没跟上,
  * 装出来的 APK 就会是旧名字或旧版本, 而界面上看不出哪里错了

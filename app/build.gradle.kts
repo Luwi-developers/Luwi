@@ -525,8 +525,6 @@ dependencies {
     // LW 插件的接口那一份 (手写 Binder 的两个接口 + 常量, 批次 9): 伴侣样例与这里引的是同一个模块,
     // 于是"两侧同一份接口"不是一句口号 —— 描述符与 transaction code 只有一处定义
     implementation(project(":lwplugin-api"))
-    // 开发台那一套的接口 (2.8.2): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用同一份
-    implementation(project(":lwdev-api"))
     // 「Edge 在线」那条朗读引擎: 那条接口是 WebSocket, 用它比手写握手可靠
     implementation(libs.okhttp)
     // 老 WebView 那条兼容层 (2.7.10): dsh 的前端产物用了 `Promise.withResolvers` (Chrome 119 才有),

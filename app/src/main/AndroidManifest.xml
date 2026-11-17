@@ -144,7 +144,7 @@
         android:name="io.github.yuloong07star.luwi.permission.LINK"
         android:protectionLevel="signature" />
 
-    <!-- 开发台那条路 (2.8.2): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用它护住。
+    <!-- 开发台那条路 (2.8.1): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用它护住。
          signature 级 = 只有同一张证书签出来的应用绑得上 —— 那两件与主 APK 同一把 debug key,
          于是"自行下载"进来的东西天然是同一档, 不需要谁点同意; 我们自己也要 uses-permission,
          否则绑不上护住了的 Service -->
@@ -181,6 +181,12 @@
              真机现场 (docs/Luwi-真机-界面加载中-检查-2026-11-13.md 第四节) 就是 shell `am start` 那个
              与桌面图标那个一起活着, 两份 HostScreen / 两个 FloatingBall / 两个 renderer 各吃 200~260 MB,
              把一台 5.6 GB 的机器直接推进 lmkd 连环杀那一段。它的复位逻辑本来就在 onNewIntent 里 -->
+        <activity
+            android:name=".ui.DevConsoleActivity"
+            android:exported="true"
+            android:label="@string/dev_console_title"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
