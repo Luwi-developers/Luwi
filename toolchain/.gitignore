@@ -1,0 +1,5 @@
+# 工具链的原始文件不进 git (百 MB 级), 说明与来源留下
+*
+!.gitignore
+!README.md
+!NOTICE-toolchain.md

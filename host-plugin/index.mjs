@@ -3023,6 +3023,85 @@ const TOOLS = [
     },
   }),
 
+  // 手机应用工坊 (2.8.1): 改应用名 / 图标 / 内容, 在手机上构建并装上一个 Android App
+  //
+  // 与文件工具的分工: 代码与 res 是**普通文件**, 用现成的读写编辑工具直接改
+  // (`<workspace>/app-projects/<slug>/`); 这一条只管那几件文件工具做不了的事 —— 建项目、改元信息、
+  // 落图标、装工具链、跑构建、装机、把开发台拉到虚拟屏上
+  defineTool({
+    name: 'lw_forge',
+    description:
+      'Build an Android app on the phone itself. A project lives at <workspace>/app-projects/<slug>/'
+      + ' and its source and res are ordinary files: edit them with the file tools, and use this tool'
+      + ' for everything that is not a text edit. op=init creates a project from the java-basic'
+      + ' template (name / package are required, the package cannot change later); op=meta renames'
+      + ' it or bumps the version; op=icon turns a picture from the workspace into the launcher'
+      + ' icon (raster mipmaps plus an adaptive icon); op=status prints the project, the last build'
+      + ' and whether the toolchain and the dev console are ready; op=toolchain installs the'
+      + ' toolchain the Android-dev-tools companion app carries; op=build compiles, dexes, signs and'
+      + ' verifies the APK and keeps the previous one when it fails; op=install installs the built'
+      + ' APK; op=logs prints the tail of the build log; op=screen opens the dev console on a virtual'
+      + ' screen so the progress can be watched on this phone (op=preview puts the built app on that'
+      + ' same screen, op=back closes it). Nothing here takes a command line: the build steps are'
+      + ' fixed and only the project name and options are yours.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'init | meta | icon | status | toolchain | create | build | install | logs | screen | preview | back',
+        enum: ['init', 'meta', 'icon', 'status', 'toolchain', 'create', 'build', 'install', 'logs', 'screen', 'preview', 'back'],
+      },
+      project: {
+        type: 'string',
+        description: 'The project slug: lower-case letters, digits, dash or underscore, e.g. hello',
+      },
+      name: {
+        type: 'string',
+        description: 'For init / meta: the name shown under the launcher icon',
+      },
+      package: {
+        type: 'string',
+        description: 'For init: the application id, e.g. com.example.hello. It cannot be changed later',
+      },
+      file: {
+        type: 'string',
+        description: 'For icon: a picture inside the workspace (or lw-in/), absolute or workspace-relative',
+      },
+      versionName: {
+        type: 'string',
+        description: 'For meta: the version name, e.g. 1.1',
+      },
+      lines: {
+        type: 'integer',
+        description: 'For logs: how many lines from the end, default 60, at most 200',
+      },
+      force: {
+        type: 'boolean',
+        description: 'For init: overwrite an existing project (its files are kept; the json is rewritten)',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args, exec) {
+      const workspace = sessionCwdOf(exec)
+      const answer = await call('forge', {
+        op: args?.op,
+        project: args?.project,
+        name: args?.name,
+        package: args?.package,
+        file: args?.file,
+        versionName: args?.versionName,
+        lines: args?.lines,
+        force: args?.force === true,
+        workspace: workspace || '',
+      })
+      return String(answer?.text ?? '').trim() || '(no answer)'
+    },
+  }),
+
   // 这一版认得哪些手机直连动作, 每条走哪条路、要什么权限、失败时说什么 (B3-c ⑧)
   //
   // 它是"选通道前先看一眼"的那一条: 动作表与路由都只有应用那一侧一份, 这里只把答案念出来,
@@ -13068,6 +13147,8 @@ const PROACTIVE_ACT_TABLE = new Map([
   // 她的表情 (2026-11-10): 列素材 / 贴一张 / 按情绪词挑一张都不动设备; `fetch` 会外发请求并落盘,
   // 而 `tag` 写的是 `lw/stickers/tags.json` —— 那两面算写动 (2026-11-15 加的 pick / tag)
   ['lw_sticker', new Set(['list', 'say', 'pick'])],
+  // 工坊 (2.8.1): 读项目状态与构建日志不动设备; 建 / 改 / 图标 / 构建 / 装机 / 建屏全归写动
+  ['lw_forge', new Set(['status', 'logs'])],
   // 没有只读那一面: 一调就是动手
   ['lw_app_control', new Set()],
   ['lw_launch', new Set()],

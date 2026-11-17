@@ -166,13 +166,16 @@
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
-- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 触摸控制 / 同步 /
+- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 开发 / 触摸控制 / 同步 /
   酒馆 / 回到后台 / 反馈 / 设置) 由宿主 `ui/PortalMenu.kt` 出清单 (`portalMenu` / `portalMenuPick` 两条桥),
   门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`); **回到 dsh 后台浮球自己回来**
   (`PortalState.open` 为假时画) —— 后台没有门户头栏, 那时球是唯一的门; **球菜单没有撤**, 两份语义逐条对齐
   (判据 `check-luwi-portal` 第十一节); 跨到界面的三件 (设置 / 酒馆 / 反馈) 走 `PortalAsk.pending` 由 `HostScreen` 消费;
   **`__LUWI_PORTAL__.show()` 里不再问 `portal.isOpen()`** —— 那个方法从没暴露在对象上, 一按就是 TypeError,
   「回到前台」因此一直是死的 (2026-11-14 真机 logcat 抓到; `mount()` 自己幂等, 直接调它)
+- **「开发」那一行在 探索 下面** (2026-11-17): 前台点进去是**页内抽屉** (`drawer === 'dev'` → `renderDevDrawer`), 与判断 / 探索 / 虚拟屏同一套排法, 读数走 `portalDev`, 动作走 `portalDevPick`; 后台球菜单那一份仍是**原生**下拉, 点「开发」弹 `DevPanelDialog`
+  **虚拟屏子项 = 触摸控制 / 释放 / 显隐小窗**: 屏名那几行与「接受控制」那行刹车撤掉 (两个菜单同口径), 屏名连 `summary`
+  都不再写 —— 同一时刻只一块屏, 那些行只是占位置
 - **首启直接默认使用 `<工作区根>/Luwi`, 门户里没有任何选工作区入口** (2026-11-13 改口径, 原 #37 的按钮作废):
   ① 宿主一起来 (客户端开屏前) 就 `ensureExploreWorkspace` —— 目录不在就建 (`/sdcard/DSH/Luwi`), 建完注册,
   dsh 那一侧于是不会去问系统 Documents (安卓上必失败, 日志 `system Documents directory is unavailable`);
@@ -186,10 +189,7 @@
   那一段, 高亮跟着纵向滚动走; 段下标 = `SettingsListLeadingItems` + `SettingsSectionKeys` 的顺序 +
   `SettingsGroupTitleBefore` 那两处组标题 (页面上只有「常用」「能力」两处), **新加一段必须同时进
   `SettingsSectionKeys` 与 `SettingsSectionTitleRes`** (判据 `check-settings-sections.mjs` 第三节)
-- **「开发」那一段是两件伴侣软件的下载入口** (2.8.1 #16): 「安卓开发工具」/「Luwi 开发台」两行, 点一下经
-  `PluginCompanion.ensure` 下 APK 再交系统安装器 —— **"自行下载" = 不代装**, 装不装由人在安装器那一页点的那一下定;
-  装没装读 `CompanionApk.installed` (不记自己的账)。地址只有一条表: `tool/DevTools.kt` (`luwi-plugins` 的 `packages/`
-  经 jsDelivr, 主址 + 镜像), 发布侧换地方只改那里; 判据 `DevToolsTest`
+- **「开发」段只剩一个应用** (2.8.1 #16; 2026-11-17 第三次改口径): 开发台搬进主 APK —— `ui/DevConsoleActivity` 由 `lw_forge op=screen` 用 `am start` 拉到虚拟屏 (没有桌面图标), 读 `app-projects/.current` 与项目目录里的 `.lwforge/*`; **伴侣 APK 与手写 Binder 那套已删** (`lwdev-api` / `devconsole` / `DevBridge` / `IDevConsole`)。工具链仍是一份数据包: `ToolchainPack` 下 `luwi-toolchain.zip`、验 sha256、解包, 再交特权进程 `forge.stage`。设置段四行: 新建应用 / 开发工具链 / 从文件导入 / 打开开发台 (+ 下载页)
 - **跨门户记录那一段按时间合并** (2026-11-14): `mergeTimeline(carried, orderTimeline(…))` —— 记录那一段**不再**
   盲接在头上 (盲拼接会把"冷启 / 换场那一拍只有她的行"的半截线冻进记录, 之后她的话整组压在自己的消息上面);
   同一身份留 live 那份、按 `time` 稳定排、缺时间沉底、尾部 240 截; `carryRecord()` 在 `lastUsers === 0`
@@ -304,6 +304,27 @@
   `presets/luwi` / `presets/explore` 的 `tool-ask-user` 都是 `disabled: true` —— 那个选项卡长在 dsh 自己的会话
   界面里, 门户 / 球盖着时前台看不见, 一问就卡住; 要问就在正文里问 (那句话会进门户的时间线); 判据
   `check-presets.mjs` 第 ⑥ 节 (行在就必须 disabled)
+
+## 手机应用工坊
+
+- **`app-projects/` 落在会话工作区里** (`<cwd>/app-projects/<slug>/`): 模型用现成读写工具改 Java 与 res,
+  `lw_forge` 只管结构化动作 (init / meta / icon / build / install / screen / preview); **没有 `write` op**
+- **argv 由 `forge/ForgePlan.kt` 这个纯函数出, 模型碰不到命令行**; 特权侧只认 `/data/local/tmp/lwforge/` 下的
+  二进制与项目根, 白名单之外一句拒
+- **中间产物不进 `/sdcard`** (`/data/local/tmp/lwforge/work/<sha1(项目)>/`): FUSE 上没 exec 位, `/sdcard` 也不能
+  当编译目录; 成品才复制进 `.lwforge/app.apk`
+- **进度只认文件**: `.lwforge/progress.json` + `build.log` 一份真源, 开发台与 Luwi 都读它, 不另开事件通道
+- **开发台只读**: 它改不了项目; 编辑由 agent 与文件工具负责, 唯一写的是它自己的 `current.json`
+- **对齐自己写** (`forge/ForgeAligner.kt`): targetSdk >= 30 的包要求 `resources.arsc` 不压缩且 4 字节对齐, 工具链里没有 zipalign 就重写 zip 做这两件事; 质量仍由 `aapt2 dump badging` + `apksigner verify` 兜
+- **工具链是 Termux 的 aarch64 构建**: JDK / aapt2 链着 `libz.so.1` / `libfmt` / `libabsl_*` 这一套, 全摊在
+  `toolchain/lib`, `runArgv` 里写死 `LD_LIBRARY_PATH` (2026-11-17 真机: 少了它 java 报 libz.so.1 找不到)
+- **javac 只能 `-source 8 -target 8` + `-bootclasspath`**: JDK 21 只在 8 这一档还允许 bootclasspath
+  (17 会被 "not allowed with target 17" 挡回); 安卓侧 24+ 全收 v52
+- **签名两份口令文件** (`keys/pass` 与 `keys/key-pass`): apksigner 的 `--ks-pass file:` 与 `--key-pass file:`
+  各读到 EOF, 同一个文件用两次第二条会 `end of file reached`
+- 工具链（JDK / aapt2 / d8 / apksigner / android.jar）**不是应用也不是模块**: 它是一份 `luwi-toolchain.zip`
+  （113 MB，发布在下载仓），由 `tool/ToolchainPack.kt` 下到 Luwi 自己的外部目录、解包、再交特权进程搬进
+  `/data/local/tmp/lwforge/toolchain`；二进制既不进主包也不合进源码
 
 ## 主屏 / 语音 / 无障碍
 

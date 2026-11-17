@@ -38,7 +38,7 @@ internal object PortalAsk {
      * 拿不到 CompositionLocal —— 于是它只在这里落一个掷标, 由 `HostScreen` 的 `LaunchedEffect` 消费
      * 完再清掉。同一刻只有一件 (点一下走一件, 抽屉会先收起)
      */
-    enum class Target { SETTINGS, TAVERN, FEEDBACK }
+    enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT }
 
     /** 待办的那一件; 读它就会跟着重组 */
     val pending = mutableStateOf<Target?>(null)

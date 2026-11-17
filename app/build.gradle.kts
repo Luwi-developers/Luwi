@@ -550,6 +550,9 @@ dependencies {
     // 各走各的, 不是同一份
     implementation(files(sherpaAarLocal.takeIf { it.isFile } ?: sherpaAar.get().asFile))
     testImplementation(libs.junit)
+    // 工坊那几条纯函数用 `org.json` 读项目文件; 单元测试的 JVM 上没有它 (安卓的那份只是桩),
+    // 所以只在 test 这一档补一份真实现 —— APK 里用的仍是系统自带那份
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

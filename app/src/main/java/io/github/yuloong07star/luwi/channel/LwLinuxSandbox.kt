@@ -497,10 +497,78 @@ internal object LwLinuxSandbox {
      * 超时的处置是三层: SIGTERM 给 [KILL_GRACE_MS], 还不走就 SIGKILL 这条命令, 最后按 **进程组**
      * 再收一遍 —— `setsid` 那层就是为最后这一步准备的 (实测: 只 SIGKILL proot 会留下 guest 的孤儿进程)
      */
+    /**
+     * 按一份**固定 argv**跑一个可执行件, 不经 proot (2.8.1 的手机应用工坊用)
+     *
+     * 与 [run] 的区别只有一处: 那条是"把一段 shell 文本交给 guest 里的 `/bin/sh -lc`", 这一条是"argv 已经
+     * 是列表, 一个字节都不再给 shell". 工坊的五步构建全靠这一条 —— 工具链是 bionic 的, 进不了 musl 的
+     * proot; 而它的 argv 由应用侧的 `forge/ForgePlan.kt` 这个纯函数产出, 模型碰不到命令行
+     *
+     * 环境只留一份写死的底子 + 几个 Android 自己的变量 (从本进程的环境抄值, 名字固定): JDK 在 bionic 上
+     * 要认 `ANDROID_ROOT` / `ANDROID_DATA` 这一套, `env -i` 把它们抹掉会得到一句"找不到 tzdata"
+     *
+     * @param argv 可执行件与参数 (第一项是绝对路径); 空列表直接拒
+     * @param cwd 工作目录 (必须在 `/data/local/tmp/lwforge/work/` 底下, 由调用方给, 这里只验形状)
+     * @param timeoutMs 这一次最多跑多久, 到点整组收掉
+     */
+    fun runArgv(
+        argv: List<String>,
+        cwd: String,
+        timeoutMs: Long,
+    ): Outcome {
+        if (argv.isEmpty()) return Outcome(2, "argv is empty")
+        val first = argv.first()
+        if (!first.startsWith("/")) return Outcome(2, "argv[0] has to be an absolute path, not \"$first\"")
+        if (argv.any { it.any { ch -> ch == '\u0000' || ch == '\n' } }) {
+            return Outcome(2, "an argument has a NUL or a newline in it")
+        }
+        val directory = File(cwd)
+        if (!directory.isDirectory) return Outcome(2, "the working directory \"$cwd\" is not a directory")
+        val environment = buildList {
+            add("setsid")
+            add("env")
+            add("-i")
+            add("HOME=$cwd")
+            add("TMPDIR=$cwd")
+            add("LANG=C.UTF-8")
+            add("TERM=dumb")
+            add("PATH=/system/bin:/system/xbin")
+            // 工坊那套二进制是 Termux 的构建: libz / libfmt / libabsl 这些在系统的 linker 命名空间里没有,
+            // 统一从工具链自己的 lib 目录里找 (2026-11-17 真机实测: 少了它 java 报 libz.so.1 找不到)
+            add("LD_LIBRARY_PATH=${LwForgeExec.TOOLCHAIN_DIRECTORY}/lib")
+            PASS_THROUGH.forEach { name -> System.getenv(name)?.let { add("$name=$it") } }
+            // 与 proot 那条同一条理由: 路径里出现 `=` 时, 直接交给 env 会被当成赋值吃掉
+            add("/system/bin/sh")
+            add("-c")
+            add("exec \"\$0\" \"\$@\"")
+        } + argv
+        return execute(
+            command = environment,
+            stdin = null,
+            timeoutMs = timeoutMs.coerceIn(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
+            directory = directory,
+        )
+    }
+
+    /** 跑 argv 时从本进程环境抄过去的那几个名字 (值来自特权进程自己, 不由调用方给) */
+    private val PASS_THROUGH = listOf(
+        "ANDROID_ROOT",
+        "ANDROID_DATA",
+        "ANDROID_ART_ROOT",
+        "ANDROID_I18N_ROOT",
+        "ANDROID_TZDATA_ROOT",
+        "ANDROID_RUNTIME_ROOT",
+        "ANDROID_ASSETS",
+        "BOOTCLASSPATH",
+        "DEX2OATBOOTCLASSPATH",
+        "EXTERNAL_STORAGE",
+    )
+
     private fun execute(
         command: List<String>,
         stdin: File?,
         timeoutMs: Long,
+        directory: File? = null,
     ): Outcome {
         // 记账目录自己保证在 (install 那一条会在建目录之前就问 df); 它在 base 外面 —— reset 删的
         // 就是 base, 住在里面的 pid 文件会被自己这一趟抹掉, 见 [RUN_DIRECTORY]
@@ -516,7 +584,10 @@ internal object LwLinuxSandbox {
                 listOf("sh", "-c", "echo \$\$ > \"\$0\" && exec \"\$@\"", pidFile.absolutePath) + command,
             )
                 .redirectErrorStream(true)
-                .apply { if (stdin != null) redirectInput(stdin) }
+                .apply {
+                    if (stdin != null) redirectInput(stdin)
+                    if (directory != null) directory(directory)
+                }
                 .start()
         } catch (error: Throwable) {
             return Outcome(127, "could not start ${command.first()}: ${error.message}")

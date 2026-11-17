@@ -16,6 +16,7 @@ import io.github.yuloong07star.luwi.tool.LwAutomation
 import io.github.yuloong07star.luwi.tool.LwCalendar
 import io.github.yuloong07star.luwi.tool.LwEvents
 import io.github.yuloong07star.luwi.tool.LwFiles
+import io.github.yuloong07star.luwi.tool.LwForge
 import io.github.yuloong07star.luwi.tool.LwGallery
 import io.github.yuloong07star.luwi.tool.LwKeepAwake
 import io.github.yuloong07star.luwi.tool.LwLinux
@@ -1091,6 +1092,9 @@ object PrivilegedBridge {
         // 2.8.1 B2: 主人自己装的那几个工具, 登记在 `$DSH_HOME/lw/external-apps.json` 里
         // 与 `apps` 的分工: 那一条列全机, 这一条只认登记过的 id, 于是模型既不必猜包名也不必读 label
         "external" -> appContext { ExternalApps.dispatch(it, request) }
+        // 手机应用工坊 (2.8.1): 项目 / 元信息 / 图标 / 工具链 / 构建 / 装机 / 开发屏
+        // 项目目录在会话工作区里 (`<workspace>/app-projects/<slug>`), 所以模型用普通文件工具改代码
+        "forge" -> appContext { LwForge.dispatch(it, request) }
         "takePhoto" -> appContext { LwPhoto.dispatch(it, request) }
         // 通知栏那一侧: 读的是系统绑在本进程里的监听服务, 与无障碍同一条路
         "notifications" -> appContext { LwNotifications.dispatch(it, request) }
