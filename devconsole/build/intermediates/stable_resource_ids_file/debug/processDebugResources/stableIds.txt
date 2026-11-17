@@ -1,0 +1,8 @@
+io.github.yuloong07star.luwi.devconsole:string/console_refresh = 0x7f010007
+io.github.yuloong07star.luwi.devconsole:string/console_no_project = 0x7f010006
+io.github.yuloong07star.luwi.devconsole:string/console_log = 0x7f010004
+io.github.yuloong07star.luwi.devconsole:string/console_empty = 0x7f010003
+io.github.yuloong07star.luwi.devconsole:string/console_current = 0x7f010002
+io.github.yuloong07star.luwi.devconsole:string/console_no_access = 0x7f010005
+io.github.yuloong07star.luwi.devconsole:string/console_build = 0x7f010001
+io.github.yuloong07star.luwi.devconsole:string/app_name = 0x7f010000

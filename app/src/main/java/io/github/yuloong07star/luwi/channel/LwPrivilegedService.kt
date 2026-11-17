@@ -243,6 +243,11 @@ class LwPrivilegedService(private val context: Context?) : Binder() {
                     "install" -> LwLinuxSandbox.install(context, source, version)
                     "run" -> LwLinuxSandbox.run(context, command, work, timeoutMs)
                     "reset" -> LwLinuxSandbox.reset()
+                    // 手机应用工坊 (2.8.1): 工具链的落位与复核, 构建在 LwForgeBuild
+                    // 挂在这条事务下是为了不动手写 Binder 的编号: operation 本来就是一个字符串
+                    "forge.stage" -> LwForgeExec.stageFromJson(command)
+                    "forge.status" -> LwForgeExec.status()
+                    "forge.build" -> LwForgeBuild.run(command, work, timeoutMs)
                     "status" -> {
                         val status = LwLinuxSandbox.status()
                         // 一行一个键的文本: 这条协议的回执本来就是"给模型看的话", 而状态这几个数
@@ -260,7 +265,8 @@ class LwPrivilegedService(private val context: Context?) : Binder() {
                     }
                     else -> LwLinuxSandbox.Outcome(
                         2,
-                        "op has to be one of install, run, status, reset, not \"$operation\"",
+                        "op has to be one of install, run, status, reset, forge.stage, forge.status," +
+                            " forge.build, not \"$operation\"",
                     )
                 }
                 writeInt(result.code)

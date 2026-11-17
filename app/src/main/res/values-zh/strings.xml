@@ -3,6 +3,8 @@
     <string name="a11y_description">允许 DSH 读取屏幕上文本及其精确位置以减少端侧 OCR 调用</string>
     <string name="permission_plugin_label">连接 Luwi 插件</string>
     <string name="permission_plugin_description">允许一个伴侣应用作为 Luwi 插件: 应用会绑定它的服务, 并把你在插件页勾过的那几条能力交给它</string>
+    <string name="permission_dev_label">连接 Luwi 开发台</string>
+    <string name="permission_dev_description">允许 Luwi 连上「开发」段下装的那两件伴侣软件: 安卓开发工具与 Luwi 开发台</string>
 
     <string name="button_cancel">取消</string>
     <string name="button_confirm">确定</string>
@@ -1229,9 +1231,7 @@
     <!-- 2.8.1 #16: 开发板块, 两件伴侣软件由用户自己下载 -->
     <string name="settings_section_dev">开发</string>
     <string name="settings_section_dev_summary">给开发用的伴侣软件, 自己点下载</string>
-    <string name="settings_dev_note">Luwi 只把包装下来交给系统安装器, 装不装由你在那一页点的那一下定</string>
-    <string name="settings_dev_android">安卓开发工具</string>
-    <string name="settings_dev_android_summary">手机内的编译与签名工具链</string>
+    <string name="settings_dev_note">Luwi 只把包装下来交给系统安装器, 装不装由你在那一页点的那一下定。HyperOS 对「新包」还要过一道: 登录小米账号, 或打开开发者选项里的「USB 安装」</string>
     <string name="settings_dev_console">Luwi 开发台</string>
     <string name="settings_dev_console_summary">会话 / 插件 / 日志同屏</string>
     <string name="settings_dev_absent">没装 · 点一下下载</string>
@@ -1239,6 +1239,14 @@
     <string name="settings_dev_installed">已装 %1$s</string>
     <string name="settings_dev_page">打开下载页</string>
     <string name="settings_dev_page_summary">直链下不动时, 去那里自己挑一份</string>
+    <string name="settings_dev_connect_title">连接开发台</string>
+    <string name="settings_dev_connect_summary">绑上它, 读出它当前打开的项目</string>
+    <string name="settings_dev_toolchain_title">开发工具链</string>
+    <string name="settings_dev_toolchain_summary">下到 Luwi 自己的目录, 再交给特权进程 —— 不用装第二个应用</string>
+    <string name="settings_dev_import_title">从文件导入工具链</string>
+    <string name="settings_dev_import_summary">选一份已经下好的 luwi-toolchain.zip</string>
+    <string name="settings_dev_open_title">打开开发台 (虚拟屏)</string>
+    <string name="settings_dev_open_summary">她干活时在上面看构建进度</string>
 </resources>
 
 

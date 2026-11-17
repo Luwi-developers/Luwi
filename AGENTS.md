@@ -186,10 +186,11 @@
   那一段, 高亮跟着纵向滚动走; 段下标 = `SettingsListLeadingItems` + `SettingsSectionKeys` 的顺序 +
   `SettingsGroupTitleBefore` 那两处组标题 (页面上只有「常用」「能力」两处), **新加一段必须同时进
   `SettingsSectionKeys` 与 `SettingsSectionTitleRes`** (判据 `check-settings-sections.mjs` 第三节)
-- **「开发」那一段是两件伴侣软件的下载入口** (2.8.1 #16): 「安卓开发工具」/「Luwi 开发台」两行, 点一下经
-  `PluginCompanion.ensure` 下 APK 再交系统安装器 —— **"自行下载" = 不代装**, 装不装由人在安装器那一页点的那一下定;
-  装没装读 `CompanionApk.installed` (不记自己的账)。地址只有一条表: `tool/DevTools.kt` (`luwi-plugins` 的 `packages/`
-  经 jsDelivr, 主址 + 镜像), 发布侧换地方只改那里; 判据 `DevToolsTest`
+- **「开发」那一段是「一个应用 + 一份数据包」** (2.8.1 #16, 2026-11-17 改口径): 「Luwi 开发台」是伴侣 APK,
+  经 `PluginCompanion.ensure` 下下来交系统安装器 (**"自行下载" = 不代装**); 「开发工具链」不是应用 ——
+  `ToolchainPack` 把 `luwi-toolchain.zip` 下到 Luwi 自己的外部目录、解包、再交特权进程 `forge.stage`,
+  **不装第二个应用**。地址只有一条表: `tool/DevTools.kt` (下载仓 Release 主 / 官网 `/dl` 兜底),
+  发布侧换地方只改那里; 判据 `DevToolsTest`
 - **跨门户记录那一段按时间合并** (2026-11-14): `mergeTimeline(carried, orderTimeline(…))` —— 记录那一段**不再**
   盲接在头上 (盲拼接会把"冷启 / 换场那一拍只有她的行"的半截线冻进记录, 之后她的话整组压在自己的消息上面);
   同一身份留 live 那份、按 `time` 稳定排、缺时间沉底、尾部 240 截; `carryRecord()` 在 `lastUsers === 0`
@@ -304,6 +305,27 @@
   `presets/luwi` / `presets/explore` 的 `tool-ask-user` 都是 `disabled: true` —— 那个选项卡长在 dsh 自己的会话
   界面里, 门户 / 球盖着时前台看不见, 一问就卡住; 要问就在正文里问 (那句话会进门户的时间线); 判据
   `check-presets.mjs` 第 ⑥ 节 (行在就必须 disabled)
+
+## 手机应用工坊
+
+- **`app-projects/` 落在会话工作区里** (`<cwd>/app-projects/<slug>/`): 模型用现成读写工具改 Java 与 res,
+  `lw_forge` 只管结构化动作 (init / meta / icon / build / install / screen / preview); **没有 `write` op**
+- **argv 由 `forge/ForgePlan.kt` 这个纯函数出, 模型碰不到命令行**; 特权侧只认 `/data/local/tmp/lwforge/` 下的
+  二进制与项目根, 白名单之外一句拒
+- **中间产物不进 `/sdcard`** (`/data/local/tmp/lwforge/work/<sha1(项目)>/`): FUSE 上没 exec 位, `/sdcard` 也不能
+  当编译目录; 成品才复制进 `.lwforge/app.apk`
+- **进度只认文件**: `.lwforge/progress.json` + `build.log` 一份真源, 开发台与 Luwi 都读它, 不另开事件通道
+- **开发台只读**: 它改不了项目; 编辑由 agent 与文件工具负责, 唯一写的是它自己的 `current.json`
+- **没有 zipalign**: 侧载不要求 4 字节对齐; 质量由 `aapt2 dump badging` + `apksigner verify` 兜
+- **工具链是 Termux 的 aarch64 构建**: JDK / aapt2 链着 `libz.so.1` / `libfmt` / `libabsl_*` 这一套, 全摊在
+  `toolchain/lib`, `runArgv` 里写死 `LD_LIBRARY_PATH` (2026-11-17 真机: 少了它 java 报 libz.so.1 找不到)
+- **javac 只能 `-source 8 -target 8` + `-bootclasspath`**: JDK 21 只在 8 这一档还允许 bootclasspath
+  (17 会被 "not allowed with target 17" 挡回); 安卓侧 24+ 全收 v52
+- **签名两份口令文件** (`keys/pass` 与 `keys/key-pass`): apksigner 的 `--ks-pass file:` 与 `--key-pass file:`
+  各读到 EOF, 同一个文件用两次第二条会 `end of file reached`
+- 工具链（JDK / aapt2 / d8 / apksigner / android.jar）**不是应用也不是模块**: 它是一份 `luwi-toolchain.zip`
+  （113 MB，发布在下载仓），由 `tool/ToolchainPack.kt` 下到 Luwi 自己的外部目录、解包、再交特权进程搬进
+  `/data/local/tmp/lwforge/toolchain`；二进制既不进主包也不合进源码
 
 ## 主屏 / 语音 / 无障碍
 

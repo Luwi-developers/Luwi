@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luwi 开发台</string>
+    <string name="console_build">上次构建</string>
+    <string name="console_current">当前项目</string>
+    <string name="console_empty">还没有项目。到 Luwi 设置的「开发」段建一个。</string>
+    <string name="console_log">构建日志</string>
+    <string name="console_no_access">给它文件访问权限, 它才读得到项目目录。</string>
+    <string name="console_no_project">还没打开项目。</string>
+    <string name="console_refresh">刷新</string>
+</resources>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「Luwi 开发台」(2.8.2)
+
+  与「安卓开发工具」不同, 这一件人可以直接打开 (LAUNCHER): 它是看得见的那一半 —— 项目 / 元信息 / 日志 /
+  构建进度. Service 那条只给 Luwi 用, 护住它的是同一条 signature 级权限
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="io.github.yuloong07star.luwi.permission.DEV" />
+    <!-- 项目目录在 /sdcard/DSH/Luwi/app-projects 下: 只读它也要 all-files 这一档 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ConsoleService"
+            android:exported="true"
+            android:permission="io.github.yuloong07star.luwi.permission.DEV">
+            <intent-filter>
+                <action android:name="io.github.yuloong07star.luwi.devconsole.BIND" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

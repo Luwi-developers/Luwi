@@ -3,6 +3,8 @@
     <string name="a11y_description">Lets DSH read the text on a screen and exactly where it is, which means fewer on-device OCR calls</string>
     <string name="permission_plugin_label">Connect to a Luwi plugin</string>
     <string name="permission_plugin_description">Lets a companion app act as a Luwi plugin: Luwi binds its service and hands it the capabilities you allowed</string>
+    <string name="permission_dev_label">Connect to the Luwi dev console</string>
+    <string name="permission_dev_description">Lets Luwi reach the two companion apps under Development: the toolchain carrier and the dev console</string>
 
     <string name="button_cancel">Cancel</string>
     <string name="button_confirm">OK</string>
@@ -1230,9 +1232,7 @@
     <!-- 2.8.1 #16: 开发板块, 两件伴侣软件由用户自己下载 -->
     <string name="settings_section_dev">Development</string>
     <string name="settings_section_dev_summary">Companion apps for development, you download them</string>
-    <string name="settings_dev_note">Luwi only fetches the package and hands it to the system installer: whether it gets installed is the tap you make on that page</string>
-    <string name="settings_dev_android">Android dev tools</string>
-    <string name="settings_dev_android_summary">aapt2 / d8 / apksigner on the phone</string>
+    <string name="settings_dev_note">Luwi only fetches the package and hands it to the system installer: whether it gets installed is the tap you make on that page. HyperOS also wants a Xiaomi account (or "Install via USB") before it accepts a brand-new package</string>
     <string name="settings_dev_console">Luwi dev console</string>
     <string name="settings_dev_console_summary">Sessions, plugins and logs on one screen</string>
     <string name="settings_dev_absent">not installed - tap to download</string>
@@ -1240,6 +1240,14 @@
     <string name="settings_dev_installed">installed %1$s</string>
     <string name="settings_dev_page">Open the download page</string>
     <string name="settings_dev_page_summary">Pick a copy there if a direct link will not come down</string>
+    <string name="settings_dev_connect_title">Connect the dev console</string>
+    <string name="settings_dev_connect_summary">Bind it and read the project it has open</string>
+    <string name="settings_dev_toolchain_title">Dev toolchain</string>
+    <string name="settings_dev_toolchain_summary">Download the toolchain into Luwi and hand it to the privileged side - no second app</string>
+    <string name="settings_dev_import_title">Import a toolchain zip</string>
+    <string name="settings_dev_import_summary">Pick a luwi-toolchain.zip you already downloaded on this phone</string>
+    <string name="settings_dev_open_title">Open the dev console on a virtual screen</string>
+    <string name="settings_dev_open_summary">Watch the build progress while the agent works</string>
 </resources>
 
 

@@ -144,6 +144,17 @@
         android:name="io.github.yuloong07star.luwi.permission.LINK"
         android:protectionLevel="signature" />
 
+    <!-- 开发台那条路 (2.8.2): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用它护住。
+         signature 级 = 只有同一张证书签出来的应用绑得上 —— 那两件与主 APK 同一把 debug key,
+         于是"自行下载"进来的东西天然是同一档, 不需要谁点同意; 我们自己也要 uses-permission,
+         否则绑不上护住了的 Service -->
+    <permission
+        android:name="io.github.yuloong07star.luwi.permission.DEV"
+        android:label="@string/permission_dev_label"
+        android:description="@string/permission_dev_description"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.yuloong07star.luwi.permission.DEV" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

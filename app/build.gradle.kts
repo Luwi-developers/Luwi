@@ -525,6 +525,8 @@ dependencies {
     // LW 插件的接口那一份 (手写 Binder 的两个接口 + 常量, 批次 9): 伴侣样例与这里引的是同一个模块,
     // 于是"两侧同一份接口"不是一句口号 —— 描述符与 transaction code 只有一处定义
     implementation(project(":lwplugin-api"))
+    // 开发台那一套的接口 (2.8.2): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用同一份
+    implementation(project(":lwdev-api"))
     // 「Edge 在线」那条朗读引擎: 那条接口是 WebSocket, 用它比手写握手可靠
     implementation(libs.okhttp)
     // 老 WebView 那条兼容层 (2.7.10): dsh 的前端产物用了 `Promise.withResolvers` (Chrome 119 才有),
@@ -550,6 +552,9 @@ dependencies {
     // 各走各的, 不是同一份
     implementation(files(sherpaAarLocal.takeIf { it.isFile } ?: sherpaAar.get().asFile))
     testImplementation(libs.junit)
+    // 工坊那几条纯函数用 `org.json` 读项目文件; 单元测试的 JVM 上没有它 (安卓的那份只是桩),
+    // 所以只在 test 这一档补一份真实现 —— APK 里用的仍是系统自带那份
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

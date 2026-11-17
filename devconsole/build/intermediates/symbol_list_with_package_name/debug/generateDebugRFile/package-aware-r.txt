@@ -1,0 +1,9 @@
+io.github.yuloong07star.luwi.devconsole
+string app_name
+string console_build
+string console_current
+string console_empty
+string console_log
+string console_no_access
+string console_no_project
+string console_refresh

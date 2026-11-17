@@ -1,0 +1,26 @@
+{
+    "logs": [
+        {
+            "outputFile": "io.github.yuloong07star.luwi.devconsole-mergeDebugResources-1:/values/values.xml",
+            "map": [
+                {
+                    "source": "D:\\apk\\Luwi\\devconsole\\src\\main\\res\\values\\strings.xml",
+                    "from": {
+                        "startLines": "2,5,4,3,6,8,9,7",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,274,214,109,327,429,540,377",
+                        "endColumns": "53,52,59,104,49,110,69,51",
+                        "endOffsets": "104,322,269,209,372,535,605,424"
+                    },
+                    "to": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,109,162,222,327,377,488,558",
+                        "endColumns": "53,52,59,104,49,110,69,51",
+                        "endOffsets": "104,157,217,322,372,483,553,605"
+                    }
+                }
+            ]
+        }
+    ]
+}
