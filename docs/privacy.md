@@ -78,6 +78,8 @@
 ```
 
 - 没有云同步。会话不上传，除非你自己把某段对话复制出去。
+- **自动备份会绕开这些目录**：`res/xml/backup_rules.xml` 和 `data_extraction_rules.xml` 里排除了 `dsh-home/.credentials.yaml`（含 API Key）、`dsh-home/sessions`、`dsh-home/lw`、`dsh-home/memory` 与 `files/ocr`，所以手机自带的云备份不会替你把这些送出去；换机直传只带会话，凭据仍然要重新登录。
+- **明文只走本机与局域网**：自建接口地址、同步对端地址填 `http://` 时，只放行 `127.x` / `localhost` / `10.x` / `172.16–31.x` / `192.168.x`，公网域名必须用 `https://`，否则保存时就会提示。
 - **卸载即全部删除**。注意：GitHub 上发布的是 debug 签名包，换签名（比如自己重新编译）必须卸载重装，数据会一起没了。
 - 「局域网访问」如果打开，只在你自己的 Wi-Fi 内、由你手动开、带一次性令牌；关掉就断。
 
