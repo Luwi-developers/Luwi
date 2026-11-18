@@ -27,8 +27,8 @@ import kotlinx.serialization.json.JsonPrimitive
  * 应用偏好里**一个字符的令牌都没有**
  *
  * 常驻链交上来的是**内存里的采样** (`FloatArray`, 16 kHz), 界面那条交上来的是**一个 wav 文件**;
- * 两处都要过 [wav] 与 [pieces] 这一对 (前者封字节, 后者按 60 s 切开), 免得拿一段三分钟的话去撞官方
- * 那两条上限
+ * 两处都要过 [wav] 与 [pieces] 这一对 (前者封字节, 后者按 60 s 切开并在接缝上叠 400 ms), 免得拿一段
+ * 三分钟的话去撞官方那两条上限
  */
 internal object LwDeepseekAsr {
 
@@ -60,11 +60,44 @@ internal object LwDeepseekAsr {
      */
     const val CHUNK_SECONDS = 60
 
+    /**
+     * 相邻两片叠多长 (2.8.1 #28)
+     *
+     * 切点落到能量低谷也仍是一刀: 边界那两个字的韵母两边各听见半截, 于是相邻两片在这 400 ms 上是同一
+     * 段音频, 拼的时候再按识别文本把重复的那一截剪掉 (见 [stitch])
+     */
+    const val PIECE_OVERLAP_MS = 400
+
+    /** 找低谷的搜索半径: 名义切点前后各这么多毫秒 (2.8.1 #28) */
+    const val CUT_SEARCH_MS = 3_000
+
+    /** 低谷窗多长: 300 ms 里 RMS 最低的那一处才算两句话之间的缝 (2.8.1 #28) */
+    const val CUT_WINDOW_MS = 300
+
+    /** 扫低谷的步长: 10 ms, 16 kHz 下 160 个采样 */
+    const val CUT_STEP_MS = 10
+
+    /** 拼接时最多往两边看几个字 (400 ms 的中文大约两三个字, 留一倍余量) */
+    const val SEAM_CHARS = 6
+
     /** RIFF 那块头一共 44 字节 (16 位单声道 PCM: fmt 那一段 16 字节 + 8 字节的 RIFF/WAVE 壳 + 12 字节的 data 头) */
     const val HEADER_BYTES = 44
 
     /** 每一片最多几个采样 */
     fun chunkSamples(sampleRate: Int = SAMPLE_RATE): Int = sampleRate * CHUNK_SECONDS
+
+    /** 相邻两片叠几个采样 (16 kHz 下 6400) */
+    fun overlapSamples(sampleRate: Int = SAMPLE_RATE): Int =
+        (sampleRate.toLong() * PIECE_OVERLAP_MS / 1000L).toInt()
+
+    /** 切点允许从名义位置前后挪多少采样 (3 s) */
+    fun searchSamples(sampleRate: Int = SAMPLE_RATE): Int = sampleRate * CUT_SEARCH_MS / 1000
+
+    /** 低谷窗多长 (300 ms) */
+    fun windowSamples(sampleRate: Int = SAMPLE_RATE): Int = sampleRate * CUT_WINDOW_MS / 1000
+
+    /** 扫低谷每步几个采样 (10 ms, 至少 1, 否则原地打转) */
+    fun stepSamples(sampleRate: Int = SAMPLE_RATE): Int = maxOf(1, sampleRate * CUT_STEP_MS / 1000)
 
     /** 这么多采样是几秒 (报读数与判上限都用它) */
     fun secondsOf(samples: Int, sampleRate: Int = SAMPLE_RATE): Double =
@@ -125,20 +158,85 @@ internal object LwDeepseekAsr {
     /**
      * 这一段按 [CHUNK_SECONDS] 切成几片 (不够一片时就是它自己)
      *
-     * 切的是采样而不是字节: 中途切开一个采样点听到的是咔哒声, 而这一侧拼回去的时候是按整片拼的
+     * 与 2.8.1 #28 之前的硬切比, 两件事变了:
+     *   1. 切点不再钉死在 60 s 上, 而是在名义切点前后各 [CUT_SEARCH_MS] 里找一段 [CUT_WINDOW_MS]
+     *      的 RMS 最低点 —— 60 s 那一刀常常正落在一个字上, 那个字两边各认半截, 谁都认不出来
+     *   2. 相邻两片按 [PIECE_OVERLAP_MS] 重叠: 下一片从切点**往前** 400 ms 起, 于是边界那句在两片
+     *      里都完整, 拼回去时再剪掉重复的那一截 (见 [stitch])
+     *
+     * 采样本身一片不少: 重叠的那 400 ms 在相邻两片里各有一份, 所以"拼采样"不再等于原长 (原先那条
+     * 判据是零重叠时代的), 判据改成"每一片首尾相接 + 去掉重叠正好覆盖原段"
      */
     fun pieces(samples: FloatArray, sampleRate: Int = SAMPLE_RATE): List<FloatArray> {
         val limit = chunkSamples(sampleRate)
         if (samples.isEmpty()) return emptyList()
         if (samples.size <= limit) return listOf(samples)
+        val overlap = overlapSamples(sampleRate)
         val pieces = ArrayList<FloatArray>((samples.size + limit - 1) / limit)
         var from = 0
-        while (from < samples.size) {
-            val to = minOf(from + limit, samples.size)
-            pieces += samples.copyOfRange(from, to)
-            from = to
+        while (from + limit < samples.size) {
+            val nominal = from + limit
+            // 窗口不越出这一段: 末尾只剩几秒时搜到边界就停
+            val low = maxOf(from + 1, nominal - searchSamples(sampleRate))
+            val high = minOf(samples.size - 1, nominal + searchSamples(sampleRate))
+            val cut = quietCut(samples, low, high, windowSamples(sampleRate), stepSamples(sampleRate))
+                .coerceIn(low, high)
+            pieces += samples.copyOfRange(from, cut)
+            // 下一片从切点往前 overlap 起; 至少往前一步, 否则原地打转
+            from = maxOf(cut - overlap, from + 1)
         }
+        pieces += samples.copyOfRange(from, samples.size)
         return pieces
+    }
+
+    /**
+     * 在 `[low, high]` 里找一段 [window] 个采样的能量最低点 (2.8.1 #28)
+     *
+     * 比的是均方 (RMS 不开方也一样的排序, 少一次 sqrt), 返回那个窗口的**中线** —— 切在窗口正中,
+     * 两边各留半个窗的余地; 都差不多时取最早的那一处, 于是同样的采样永远切在同一处 (判据钉得住)
+     */
+    fun quietCut(samples: FloatArray, low: Int, high: Int, window: Int, step: Int): Int {
+        if (high <= low) return low
+        val span = minOf(window, high - low + 1).coerceAtLeast(1)
+        val stride = maxOf(1, step)
+        var bestAt = low
+        var best = Double.MAX_VALUE
+        var at = low
+        val last = high - span + 1
+        while (at <= last) {
+            var sum = 0.0
+            for (index in at until at + span) {
+                val value = samples[index].toDouble()
+                sum += value * value
+            }
+            if (sum < best) {
+                best = sum
+                bestAt = at
+            }
+            at += stride
+        }
+        return bestAt + span / 2
+    }
+
+    /**
+     * 把上一片与下一片的识别文本按重叠区拼起来 (2.8.1 #28)
+     *
+     * 相邻两片有 400 ms 是同一段音频, 于是那两三个字在两边各出现一次: 先看上一片的结尾是不是正好就是
+     * 下一片开头那几个字 (从长到短试, 最多 [SEAM_CHARS]), 命中就把下一片那一截剪掉; 连两个字都对不上
+     * (两片都把这半句认成了别的) 时只留一个空格 —— 与 2.8.1 #28 之前的接法一致, 宁可多一个空格也不猜
+     */
+    fun stitch(previous: String, next: String): String {
+        if (previous.isEmpty()) return next
+        if (next.isEmpty()) return previous
+        val tail = previous.trimEnd()
+        val head = next.trimStart()
+        val room = minOf(SEAM_CHARS, tail.length, head.length)
+        for (length in room downTo 2) {
+            if (tail.endsWith(head.substring(0, length))) {
+                return tail + next.substring(next.length - head.length + length)
+            }
+        }
+        return "$previous $next"
     }
 
     /** 这一片封好之后是不是还在官方那条 8 MiB 之内 (按秒算, 不真去封) */

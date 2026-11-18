@@ -16,6 +16,8 @@
  *   6. 上游报错时把令牌抹掉再往外带
  *   7. 常驻链与页面那颗麦克风都按 `lw/voice-source.json` 分岔, 而"没下模型"不再是错误
  *   8. 设置页两行 + 两份 strings + privacy 的出站表 + 接口文档
+ *   9. 一分钟以上的长语音怎么切片: 60 s 不再硬切, 切点找 300 ms 的能量低谷 (前后各 3 s), 相邻两片叠
+ *      400 ms, 拼回去时把重叠处重复的那几个字剪掉 (2026-11-18, 2.8.1 #28)
  *
  * 不需要设备, 也不需要 host。用法: node tools/check-voice-asr.mjs
  */
@@ -402,6 +404,190 @@ check(
     doc.includes('按音频时长计费'),
   ],
   [true, true, true, true, true],
+)
+
+/* ── 五、长语音的切片接缝: 低谷回溯切 + 400 ms 重叠拼接 (2026-11-18, 2.8.1 #28) ────────────
+ *
+ * 这一节把 `LwDeepseekAsr.pieces` 的算术在 JS 里重写一份 (常数从 Kotlin 源码里读), 然后拿一段 75 s
+ * 的合成朗读跑真值表: 60 s 那一刀不再硬切, 而是往前/往后 3 s 里找一段 300 ms 的能量低谷, 相邻两片
+ * 叠 400 ms, 拼回来时重叠处重复的字剪掉。Kotlin 那一份的对应判据在 LwDeepseekAsrTest 里。
+ */
+
+const constant = (name) => {
+  const found = new RegExp(`const val ${name} = ([0-9_]+)`).exec(asr)
+  if (!found) throw new Error(`LwDeepseekAsr.kt 里没有 ${name}`)
+  return Number(found[1].replaceAll('_', ''))
+}
+
+const SR = constant('SAMPLE_RATE')
+const CHUNK_SECONDS = constant('CHUNK_SECONDS')
+const PIECE_OVERLAP_MS = constant('PIECE_OVERLAP_MS')
+const CUT_SEARCH_MS = constant('CUT_SEARCH_MS')
+const CUT_WINDOW_MS = constant('CUT_WINDOW_MS')
+const CUT_STEP_MS = constant('CUT_STEP_MS')
+const SEAM_CHARS = constant('SEAM_CHARS')
+
+check(
+  '接缝那几个刻度: 400 ms 重叠 / 3 s 搜索 / 300 ms 低谷窗 / 10 ms 步长',
+  [SR, CHUNK_SECONDS, PIECE_OVERLAP_MS, CUT_SEARCH_MS, CUT_WINDOW_MS, CUT_STEP_MS],
+  [16000, 60, 400, 3000, 300, 10],
+)
+
+const chunkSamples = (sr) => sr * CHUNK_SECONDS
+const overlapSamples = (sr) => Math.floor((sr * PIECE_OVERLAP_MS) / 1000)
+const searchSamples = (sr) => (sr * CUT_SEARCH_MS) / 1000
+const windowSamples = (sr) => (sr * CUT_WINDOW_MS) / 1000
+const stepSamples = (sr) => Math.max(1, (sr * CUT_STEP_MS) / 1000)
+
+check(
+  '重叠按采样率折成采样数 (16 kHz 下 6400)',
+  [overlapSamples(SR), (overlapSamples(SR) / SR) * 1000],
+  [6400, 400],
+)
+
+/** LwDeepseekAsr.quietCut 的镜像: 均方最低那个窗口的中线, 平手取最早 */
+function quietCut(samples, low, high, window, step) {
+  if (high <= low) return low
+  const span = Math.max(1, Math.min(window, high - low + 1))
+  const stride = Math.max(1, step)
+  let bestAt = low
+  let best = Number.POSITIVE_INFINITY
+  for (let at = low; at <= high - span + 1; at += stride) {
+    let sum = 0
+    for (let index = at; index < at + span; index += 1) sum += samples[index] * samples[index]
+    if (sum < best) {
+      best = sum
+      bestAt = at
+    }
+  }
+  return bestAt + Math.floor(span / 2)
+}
+
+/** LwDeepseekAsr.pieces 的镜像: 名义 60 s 前后找低谷, 下一片从切点往前 400 ms 起 */
+function piecesOf(samples, sr) {
+  const limit = chunkSamples(sr)
+  if (!samples.length) return []
+  if (samples.length <= limit) return [samples]
+  const overlap = overlapSamples(sr)
+  const out = []
+  let from = 0
+  while (from + limit < samples.length) {
+    const nominal = from + limit
+    const low = Math.max(from + 1, nominal - searchSamples(sr))
+    const high = Math.min(samples.length - 1, nominal + searchSamples(sr))
+    const cut = Math.min(high, Math.max(low, quietCut(samples, low, high, windowSamples(sr), stepSamples(sr))))
+    out.push(samples.subarray(from, cut))
+    from = Math.max(cut - overlap, from + 1)
+  }
+  out.push(samples.subarray(from))
+  return out
+}
+
+/** LwDeepseekAsr.stitch 的镜像: 上一片结尾就是下一片开头那几个字时剪掉, 否则只留一个空格 */
+function stitch(previous, next) {
+  if (!previous) return next
+  if (!next) return previous
+  const tail = previous.replace(/\s+$/, '')
+  const head = next.replace(/^\s+/, '')
+  const room = Math.min(SEAM_CHARS, tail.length, head.length)
+  for (let length = room; length >= 2; length -= 1) {
+    if (tail.endsWith(head.slice(0, length))) {
+      return tail + next.slice(next.length - head.length + length)
+    }
+  }
+  return `${previous} ${next}`
+}
+
+/** 75 s 合成朗读: 59 s 一条 V 形低谷, 60 s 一包「设置」的能量 (0.9), 别处是普通语音 */
+function synth(seconds = 75, sr = SR) {
+  const total = seconds * sr
+  const out = new Float32Array(total)
+  for (let index = 0; index < total; index += 1) {
+    const at = index / sr
+    let amplitude = 0.35
+    const away = Math.abs(at - 59.0)
+    if (away < 0.5) amplitude = 0.02 + 0.6 * away
+    if (at >= 60.0 && at < 60.2) amplitude = 0.9
+    out[index] = amplitude * Math.sin(2 * Math.PI * 180 * at)
+  }
+  return out
+}
+
+const SECONDS = 75
+const TOTAL = SECONDS * SR
+const SENTENCE = '先打开设置，再点 WLAN，然后把代理改成手动，最后保存'
+const CHAR_SAMPLES = 3200
+const samples = synth(SECONDS, SR)
+const pieces = piecesOf(samples, SR)
+const overlap = overlapSamples(SR)
+const cut = pieces[0].length
+
+check('75 s 的朗读切成 2 片', pieces.length, 2)
+check('第二片从切点往前 400 ms 起 (两片重叠 6400 采样)', pieces[0].length - (TOTAL - pieces[1].length), 6400)
+check(
+  '切点落在 59 s 那条低谷里, 不在 60 s 那包能量上',
+  [Math.abs(cut / SR - 59.0) <= 0.05, Math.abs(cut - 60 * SR) >= SR / 2],
+  [true, true],
+)
+
+/** 一个窗口的均方 (与切点判据同一个量) */
+function meanSquare(from, window, data = samples) {
+  let sum = 0
+  for (let index = from; index < from + window; index += 1) sum += data[index] * data[index]
+  return sum / window
+}
+check(
+  '切点处的能量比 60 s 那包低一个量级以上',
+  meanSquare(cut - windowSamples(SR) / 2, windowSamples(SR)) * 10 < meanSquare(60 * SR, windowSamples(SR)),
+  true,
+)
+check(
+  '两片都在官方那两条上限之内 (120 s / 8 MiB)',
+  pieces.every((piece) => piece.length / SR <= 120 && 44 + piece.length * 2 <= 8 * 1024 * 1024),
+  true,
+)
+
+/** 这一段里被"听见"的字: 与 [from, to) 有交集的字都算 (重叠处两边各听见一次) */
+function spoken(truth, from, to) {
+  const per = TOTAL / truth.length
+  let said = ''
+  for (let index = 0; index < truth.length; index += 1) {
+    if ((index + 1) * per > from && index * per < to) said += truth[index]
+  }
+  return said
+}
+
+const truth = SENTENCE.repeat(Math.ceil(TOTAL / CHAR_SAMPLES / SENTENCE.length) + 1).slice(0, TOTAL / CHAR_SAMPLES)
+const first = spoken(truth, 0, cut)
+const second = spoken(truth, cut - overlap, TOTAL)
+const joined = stitch(first, second)
+
+check('真值表: 每个字 0.2 s, 75 s 一共 375 个字', truth.length, 375)
+check('重叠区正好跨两个字 (不去重就会多 2 字)', first.length + second.length - truth.length, 2)
+check(
+  '拼接后与原句逐字一致 (差异 0 字, 也不含重复字)',
+  [joined === truth, joined.length, truth.length],
+  [true, 375, 375],
+)
+
+check(
+  'Kotlin 那一侧真的是低谷回溯切 (叠 400 ms / 窗口 / 中线 / 不原地打转)',
+  [
+    /fun pieces\(samples: FloatArray, sampleRate: Int = SAMPLE_RATE\): List<FloatArray> \{[\s\S]{0,1400}quietCut\(/.test(asr),
+    /fun quietCut\(samples: FloatArray, low: Int, high: Int, window: Int, step: Int\): Int \{/.test(asr),
+    /fun overlapSamples\(sampleRate: Int = SAMPLE_RATE\): Int/.test(asr),
+    /from = maxOf\(cut - overlap, from \+ 1\)/.test(asr),
+  ],
+  [true, true, true, true],
+)
+check(
+  'text() 走去重叠拼接, 并打一行 pieces=N overlap=Nms (tag LwAsr)',
+  [
+    /LwDeepseekAsr\.stitch\(said, answer\.text\)/.test(transcribe),
+    /private const val TAG_PIECES = "LwAsr"/.test(transcribe),
+    /Log\.i\(TAG_PIECES, "pieces=\$\{pieces\.size\} overlap=\$\{overlapMs\}ms"\)/.test(transcribe),
+  ],
+  [true, true, true],
 )
 
 console.log(`\n${checks - failures} / ${checks} 通过`)
