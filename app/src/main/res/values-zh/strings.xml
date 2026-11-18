@@ -630,6 +630,13 @@
     <string name="settings_sim_router_chat_after_summary">%1$d 小时</string>
     <string name="settings_sim_router_ignored">没人理之后退让多久</string>
     <string name="settings_sim_router_ignored_summary">%1$d 小时</string>
+    <string name="settings_sim_interrupt_game">游戏 / 视频在前台</string>
+    <string name="settings_sim_interrupt_game_summary">这一刻开口扣 %1$d 分</string>
+    <string name="settings_sim_interrupt_call">刚打完电话</string>
+    <string name="settings_sim_interrupt_call_summary">半小时内有过通话, 扣 %1$d 分</string>
+    <string name="settings_sim_interrupt_recent">刚说过话</string>
+    <string name="settings_sim_interrupt_recent_summary">上一次开口还没过多久, 扣 %1$d 分</string>
+    <string name="settings_sim_interrupt_note">打扰成本: 三项加起来最多 3 分, 扣到 3 分这一拍就不开口 —— 那句话攒着, 下一拍接着算</string>
     <string name="settings_sim_checks_note">她盯什么 (探索每天自己加, 这里只开关与忘掉)</string>
     <string name="settings_sim_checks_empty">探索还没交过检测项 —— 每天她自己会加</string>
     <string name="settings_sim_checks_calendar">事件型检测项要日历权限: 现在读不到, 那几条不会命中</string>
@@ -645,6 +652,7 @@
     <string name="settings_sim_unit_chars">字</string>
     <string name="settings_sim_unit_mb">MB</string>
     <string name="settings_sim_unit_sheets">张</string>
+    <string name="settings_sim_unit_points">分</string>
     <string name="settings_sim_sticker_group">表情</string>
     <string name="settings_sim_sticker_max">单张表情最大</string>
     <string name="settings_sim_sticker_max_summary">单张最多 %1$d MB</string>

@@ -74,6 +74,9 @@ const expected = {
   CHAT_CHANCE_STEP: 0.2, // ROUTER_DEFAULTS.chatChanceStep (2.8.1 #11)
   CHAT_AFTER_MS: 14_400_000, // ROUTER_DEFAULTS.chatAfterMs
   IGNORED_COOLDOWN_MS: 86_400_000, // ROUTER_DEFAULTS.ignoredCooldownMs
+  GAME_COST: 2, // ROUTER_DEFAULTS.gameCost (2.8.1 #29)
+  CALL_COST: 3, // ROUTER_DEFAULTS.callCost
+  RECENT_COST: 1, // ROUTER_DEFAULTS.recentCost
 }
 
 check('缺省值逐个与 QQ 桥接 socialV2 对齐', Object.fromEntries(
@@ -122,8 +125,8 @@ if (chatAt < 0 || chatEnd < 0) {
   console.error('FAIL the router block is not in host-plugin/index.mjs any more')
   process.exit(1)
 }
-const { routerChatChance, ROUTER_DEFAULTS: HOST_ROUTER } = new Function(
-  `${host.slice(chatAt, chatEnd)}\nreturn { routerChatChance, ROUTER_DEFAULTS }`,
+const { routerChatChance, routerCostOf, ROUTER_DEFAULTS: HOST_ROUTER, ROUTER_COST_MAX } = new Function(
+  `${host.slice(chatAt, chatEnd)}\nreturn { routerChatChance, routerCostOf, ROUTER_DEFAULTS, ROUTER_COST_MAX }`,
 )()
 
 check('宿主那侧缺省就是 0.35 起 / 每次 0.2 / 夹 1.0', [
@@ -135,6 +138,68 @@ check('宿主那侧缺省就是 0.35 起 / 每次 0.2 / 夹 1.0', [
 check('写 0 时行为与改动前逐字一致 (概率恒等于 chatChance)', [0, 1, 2, 3, 9].map(
   (n) => routerChatChance({ chatChanceStep: 0 }, n),
 ), [0.35, 0.35, 0.35, 0.35, 0.35])
+
+/* ── 一之三、打扰成本那三档 (2.8.1 #29) ─────────────────────────────────── */
+
+/*
+ * 主人那一句: "判断层加一档打扰成本: 压得住的事不必这一刻说". 这一页给三个 0..3 的格子, 宿主
+ * 判断层按它扣分 (`routerCostOf`). 这一节钉三件:
+ *   ① 缺省值 (2 / 3 / 1) 与宿主 `ROUTER_DEFAULTS` 是同一套数
+ *   ② 落盘与读回走同一个键, 范围 0..3 (写 9 就夹回 3)
+ *   ③ 宿主那一侧真跑一遍: 写 9 进来, 读到的成本是 3 (不是 9, 也不是 0)
+ */
+
+check('三档成本缺省 2 / 3 / 1, 范围 0..3', [
+  kotlinConst(sim, 'GAME_COST'),
+  kotlinConst(sim, 'CALL_COST'),
+  kotlinConst(sim, 'RECENT_COST'),
+  /val INTERRUPT_COST_RANGE = 0\.\.3/.test(sim),
+], [2, 3, 1, true])
+
+check('宿主那侧是同一套数 (缺省 2 / 3 / 1, 封顶 3)', [
+  HOST_ROUTER.gameCost,
+  HOST_ROUTER.callCost,
+  HOST_ROUTER.recentCost,
+  ROUTER_COST_MAX,
+], [2, 3, 1, 3])
+
+check('三个格子写进 sim.json 的 interrupt 段, 读回时夹进范围', [
+  /data class Interrupt\(\s*val gameCost: Int = Default\.GAME_COST,\s*val callCost: Int = Default\.CALL_COST,\s*val recentCost: Int = Default\.RECENT_COST,\s*\)/.test(sim),
+  /gameCost = interrupt\.int\("gameCost", Default\.GAME_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /callCost = interrupt\.int\("callCost", Default\.CALL_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /recentCost = interrupt\.int\("recentCost", Default\.RECENT_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /put\("interrupt", buildJsonObject \{/.test(sim),
+  /put\("gameCost", plan\.interrupt\.gameCost\)/.test(sim),
+  /put\("callCost", plan\.interrupt\.callCost\)/.test(sim),
+  /put\("recentCost", plan\.interrupt\.recentCost\)/.test(sim),
+  // 宿主从 sim.json 的 interrupt 段读它 (缺键 / 坏值都不放进规则表, 由 ROUTER_DEFAULTS 兜底)
+  /put\('gameCost', sim\?\.interrupt\?\.gameCost\)/.test(host),
+  /put\('callCost', sim\?\.interrupt\?\.callCost\)/.test(host),
+  /put\('recentCost', sim\?\.interrupt\?\.recentCost\)/.test(host),
+], [true, true, true, true, true, true, true, true, true, true, true])
+
+check('写 9 夹回 3 (真跑宿主那段: 9 进来读到的成本是 3)', [
+  routerCostOf({
+    now: 0,
+    usage: { today: [], foreground: { pkg: 'com.tencent.tmgp.sgame' } },
+  }, { gameCost: 9 }).cost,
+  routerCostOf({ now: 600_000, lastSpokenAt: 1 }, { recentCost: 99 }).cost,
+], [3, 3])
+
+check('这一页有三行能改它 (游戏 / 通话 / 刚说过话), 摆在判断层那张卡里', [
+  /R\.string\.settings_sim_interrupt_game\b/.test(page),
+  /settings_sim_interrupt_game_summary/.test(page),
+  /R\.string\.settings_sim_interrupt_call\b/.test(page),
+  /settings_sim_interrupt_call_summary/.test(page),
+  /R\.string\.settings_sim_interrupt_recent\b/.test(page),
+  /settings_sim_interrupt_recent_summary/.test(page),
+  /settings_sim_interrupt_note/.test(page),
+  /SimSetting\.INTERRUPT_COST_RANGE/.test(page),
+  // 与判断层那几个阈值同一张卡 (这一页仍是四段, 不另起一组)
+  page.indexOf('settings_sim_interrupt_note') > page.indexOf('settings_sim_router_ignored'),
+  page.indexOf('settings_sim_interrupt_note') < page.indexOf('settings_sim_sticker_group'),
+  !page.includes('settings_sim_interrupt_group'),
+], [true, true, true, true, true, true, true, true, true, true, true])
 
 // 2026-11-10 主人: "那两个设置应该由探索或主动对话时自己决定" —— 游戏线 / 提前天数从这一页搬走,
 // 改由 `router.json.rules` 写; 这两条负断言钉住"界面与数据层都不再回潮", 并确认老 sim.json 不再盖住它
@@ -285,11 +350,13 @@ check('四组都在 (wake / send / router / sticker), 检测项只读 + 开关 +
   page.includes('settings_sim_router_group'),
   // 2026-11-10 主人: "在设置活动的更多设置版块里加表情包图片上限设置"
   page.includes('settings_sim_sticker_group'),
+  // 2.8.1 #29 的打扰成本不另起一段: 它落在判断层那张卡里 (见上面那一节)
+  !page.includes('settings_sim_interrupt_group'),
   !page.includes('settings_sim_wait_group'),
   !page.includes('settings_sim_context_group'),
   /RouterChecks\.setEnabled\(context, one\.id, on\)/.test(page),
   /RouterChecks\.drop\(context, one\.id\)/.test(page),
-], [true, true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true, true])
 
 // 防回潮: 那 14 项的名字一个都不许再出现在数据层与页面里 (写回来 = 又长了群味)
 check('数据层与页面里不再有群味那 14 项的名字', [
@@ -367,6 +434,14 @@ const keys = [
   // 2026-11-16: 每错过一次加多少 (2.8.1 #11, 紧跟在"随口问一句的概率"那两行后面)
   'settings_sim_router_chance_step',
   'settings_sim_router_chance_step_summary',
+  // 2.8.1 #29: 打扰成本那三行 (紧跟在判断层那几行后面, 同一张卡)
+  'settings_sim_interrupt_game',
+  'settings_sim_interrupt_game_summary',
+  'settings_sim_interrupt_call',
+  'settings_sim_interrupt_call_summary',
+  'settings_sim_interrupt_recent',
+  'settings_sim_interrupt_recent_summary',
+  'settings_sim_interrupt_note',
   'settings_sim_checks_note',
   'settings_sim_checks_empty',
   'settings_sim_checks_how',
@@ -375,6 +450,8 @@ const keys = [
   // 2026-11-10: 表情那一格 (插入位置就是文件里的相对位置, 顺序对不上会在这里红)
   'settings_sim_unit_mb',
   'settings_sim_unit_sheets',
+  // 2.8.1 #29: 打扰成本那一组用的单位 (排在 sheets 后面, 两份文件同址)
+  'settings_sim_unit_points',
   'settings_sim_sticker_group',
   'settings_sim_sticker_max',
   'settings_sim_sticker_max_summary',

@@ -81,6 +81,14 @@ internal object SimSetting {
      */
     val STICKER_EVERY_RANGE = 0..20
 
+    /**
+     * 打扰成本那三档的范围 (2.8.1 #29, 主人: "压得住的事不必这一刻说")
+     *
+     * 0 = 这一档不扣分, 3 = 这一档单独就能把这一拍压到底 (宿主 `routerWorthwhile` 读同一个上界);
+     * 三档相加也夹在 3 以内 —— 顶上那一档是"这一刻根本不该开口"
+     */
+    val INTERRUPT_COST_RANGE = 0..3
+
     /** 每一档的缺省值 (与 `qq-bridge/config.json` 的 `socialV2` 对齐, 见 `tools/check-sim.mjs`) */
     object Default {
         const val WAKE_MODE = MODE_DIVING
@@ -108,6 +116,15 @@ internal object SimSetting {
         const val CHAT_CHANCE_STEP = 0.2f
         const val CHAT_AFTER_MS = 14_400_000L
         const val IGNORED_COOLDOWN_MS = 86_400_000L
+        /**
+         * 打扰成本那三档 (2.8.1 #29, 与宿主 `ROUTER_DEFAULTS` 是同一套数)
+         *
+         * 游戏 / 视频在前台 2 / 半小时内有过通话 3 / 刚说过话 1 —— 三项相加夹到 3, 顶到 3 就一句
+         * 都不说。改这三个数就是改"她多怕打扰你", 判断层的净收益那一侧不用再动
+         */
+        const val GAME_COST = 2
+        const val CALL_COST = 3
+        const val RECENT_COST = 1
         const val QUIET_FROM = "23:00"
         const val QUIET_TO = "07:00"
         const val ACTING = ACTING_REMIND
@@ -187,10 +204,23 @@ internal object SimSetting {
         val maxBytes: Long get() = maxMb.toLong() * 1024L * 1024L
     }
 
+    /**
+     * 打扰成本那三档 (2.8.1 #29)
+     *
+     * 判断层以前只看"这件事有多重"; 现在再扣一笔"这一刻开口有多贵", 三档相加夹到 3.
+     * 宿主读 `sim.json` 的 `interrupt` 段 (`simRouterRules`), 判断与排序都在那一侧 (`routerCostOf`)
+     */
+    data class Interrupt(
+        val gameCost: Int = Default.GAME_COST,
+        val callCost: Int = Default.CALL_COST,
+        val recentCost: Int = Default.RECENT_COST,
+    )
+
     data class Plan(
         val wake: Wake = Wake(),
         val send: Send = Send(),
         val router: Router = Router(),
+        val interrupt: Interrupt = Interrupt(),
         val proactive: Acting = Acting(),
         val sticker: Sticker = Sticker(),
     )
@@ -212,6 +242,7 @@ internal object SimSetting {
         val wake = root?.obj("wake")
         val send = root?.obj("send")
         val router = root?.obj("router")
+        val interrupt = root?.obj("interrupt")
         val proactive = root?.obj("proactive")
         val sticker = root?.obj("sticker")
         val gapMin = wake.long("gapMinMs", Default.WAKE_GAP_MIN_MS, GAP_RANGE)
@@ -250,6 +281,12 @@ internal object SimSetting {
                     Default.IGNORED_COOLDOWN_MS,
                     60_000L..604_800_000L,
                 ),
+            ),
+            // 打扰成本那三档 (2.8.1 #29): 越界夹回 [INTERRUPT_COST_RANGE], 缺键取缺省
+            interrupt = Interrupt(
+                gameCost = interrupt.int("gameCost", Default.GAME_COST, INTERRUPT_COST_RANGE),
+                callCost = interrupt.int("callCost", Default.CALL_COST, INTERRUPT_COST_RANGE),
+                recentCost = interrupt.int("recentCost", Default.RECENT_COST, INTERRUPT_COST_RANGE),
             ),
             proactive = Acting(
                 // 不认识的串按最保守的那一档; 旧布尔 allowActing 只读迁移一次 (true → act, false → remind)
@@ -310,6 +347,12 @@ internal object SimSetting {
             put("chatChanceStep", plan.router.chatChanceStep)
             put("chatAfterMs", plan.router.chatAfterMs)
             put("ignoredCooldownMs", plan.router.ignoredCooldownMs)
+        })
+        // 打扰成本那三档 (2.8.1 #29): 宿主 `simRouterRules` 读的正是这一段
+        put("interrupt", buildJsonObject {
+            put("gameCost", plan.interrupt.gameCost)
+            put("callCost", plan.interrupt.callCost)
+            put("recentCost", plan.interrupt.recentCost)
         })
         put("proactive", buildJsonObject {
             put("acting", plan.proactive.tier)

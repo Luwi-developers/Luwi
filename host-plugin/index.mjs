@@ -5479,6 +5479,9 @@ const TOOLS = [
       + 'ahead a promise is brought up (wishDays) - '
       + 'the owner no longer has those two rows in settings (2026-11-10), '
       + 'so use this op when your own judgement says the scale should change. '
+      + 'Each tick also pays an interruption cost (a game or video in the foreground, a call within '
+      + 'the last 30 minutes, or having just spoken) and op=status shows the last tick that cost held '
+      + 'back (heldBack: what, how costly, why) - that one is being kept for a later tick, not dropped. '
       + 'It never opens a conversation by itself - op=judge only answers.',
     parameters: {
       op: {
@@ -5541,6 +5544,8 @@ const TOOLS = [
           // 2.8.1 #11: "错过几次"与"下一拍随口一句的概率" —— 递增那一条只看这一段就够
           chatMisses: Math.max(0, Number(inputs?.chatMisses ?? 0) || 0),
           chatChance: routerChatChance(inputs?.rules ?? state.rules ?? {}, inputs?.chatMisses ?? 0),
+          // 2.8.1 #29: 上一拍被"打扰成本"压住的那一件攒着的账 (真说出来了由 routerMarkSaid 清掉)
+          heldBack: state.heldBack ?? null,
           // 探索交来的检测项 (2026-11-07 晚): 看一眼"现在盯着什么"就是这一段
           checks: inputs?.checks ?? [],
           checksSaid: inputs?.checksSaid ?? {},
@@ -9838,7 +9843,36 @@ const ROUTER_DEFAULTS = Object.freeze({
    * "不理她她就别一直说". 一天一次, 而不是从此不开口
    */
   ignoredCooldownMs: 24 * 60 * 60 * 1000,
+  /**
+   * 打扰成本那三档 (2.8.1 #29, 主人: "压得住的事不必这一刻说")
+   *
+   * 判断层以前只看"这件事有多重" (`score`); 现在再扣一笔"这一刻开口有多贵"`cost`:
+   *
+   * - `gameCost` 2: 游戏 / 视频在前台 —— 一句话打断的是一局牌
+   * - `callCost` 3: 半小时内有过通话 (正在通话那一条前面那道闸已经拦住了, 这里管"刚挂")
+   * - `recentCost` 1: 距上次开口还不到 `chatAfterMs / 3`
+   *
+   * 三项相加夹到 [ROUTER_COST_MAX]; 顶到那档就一句都不说 (见 [routerWorthwhile])
+   */
+  gameCost: 2,
+  callCost: 3,
+  recentCost: 1,
 })
+
+/** 打扰成本的封顶: 三项相加超过它就是这一刻根本不说话 */
+const ROUTER_COST_MAX = 3
+
+/**
+ * 净收益 (`score - cost`) 到这条线才值得打扰
+ *
+ * 取 2 是刻意的: 随口一句本来就是 2 分, 于是**没成本时与改动前逐字一致** (2 - 0 = 2 刚好过线);
+ * 一旦有成本, 随口一句先攒着 (2 - 1 = 1), 检测项在成本 2 时也攒着 (3 - 2 = 1), 只有
+ * "用得久了" (5) 与"未了的事" (4) 这种分量才压得住
+ */
+const ROUTER_COST_MIN_NET = 2
+
+/** 通话那一档看多远: 半小时内有过 `call` 信号 */
+const ROUTER_CALL_RECENT_MS = 30 * 60 * 1000
 
 /**
  * 兜底的游戏包名
@@ -10157,6 +10191,99 @@ function nextChatMisses(state, decision) {
 }
 
 /**
+ * 这一格成本收成 0..[ROUTER_COST_MAX] 的整数 (纯函数)
+ *
+ * 坏值 / 缺键回落到缺省: `sim.json` 是应用写的, 写歪一个数不该让判断层换一套刻度
+ */
+function routerCostTier(value, fallback) {
+  const number = Number(value)
+  const base = Number.isFinite(number) ? number : Number(fallback)
+  if (!Number.isFinite(base)) return 0
+  return Math.min(ROUTER_COST_MAX, Math.max(0, Math.round(base)))
+}
+
+/**
+ * 前台这个应用是不是"正看在兴头上"的那一类 (纯函数)
+ *
+ * `usage.json` 的 `foreground` 只有 `{ pkg, since }` 两格 (见 `UsageLedger`), 所以这一档靠包名
+ * 认, 再借今天那一行读数拿到 `game` 标记与名字 —— 桌面 / 输入法 / 她自己不算 (解锁就在的应用
+ * 不是"正在玩")
+ *
+ * @returns `{ pkg, label, game }` 或者 null (前台是别的东西)
+ */
+function routerBusyUseApp(foreground, today) {
+  const pkg = String(foreground?.pkg ?? '')
+  if (pkg === '') return null
+  const rows = Array.isArray(today) ? today : []
+  const row = rows.find((one) => String(one?.pkg ?? '') === pkg)
+  // 桌面 / 输入法 / 她自己: 那几行本来就不算"用了一个应用", 前台也不算"正在忙"
+  if (routerExcludedApp(row ?? { pkg })) return null
+  const label = String(row?.label ?? '').trim() || pkg
+  if (row?.game === true || ROUTER_GAME_PACKAGES.has(pkg)) return { pkg, label, game: true }
+  if (row?.social === true || ROUTER_SOCIAL_PACKAGES.has(pkg)) return { pkg, label, game: false }
+  return null
+}
+
+/**
+ * 这一刻"打扰一下"值多少 (纯函数, 无 fs 无时钟)
+ *
+ * 2.8.1 #29: 判断层以前只回答"这件事有多重", 于是 "随口问一句" 与 "今天刷了三小时" 抢同一个
+ * 出口; 主人这一条要的是再算一笔 —— 主人正在打游戏 / 刚打完电话 / 刚被她自己打断过的时候,
+ * 低价值的那一句攒着不说, 账记进 `router.json`, 下一拍接着算
+ *
+ * 三档相加夹到 [ROUTER_COST_MAX]: 那一档是"根本不该开口" (见 [routerWorthwhile])
+ *
+ * @returns `{ cost, why }` —— `why` 是这几条原因 (给 `heldBack` 与日志用)
+ */
+function routerCostOf(input, rules) {
+  const now = Number(input?.now ?? Date.now())
+  const gameCost = routerCostTier(rules?.gameCost, ROUTER_DEFAULTS.gameCost)
+  const callCost = routerCostTier(rules?.callCost, ROUTER_DEFAULTS.callCost)
+  const recentCost = routerCostTier(rules?.recentCost, ROUTER_DEFAULTS.recentCost)
+  const why = []
+  let cost = 0
+  // ① 游戏 / 视频在前台: 一局牌被一句话打断, 比 "歇会儿吧" 贵得多
+  const busy = routerBusyUseApp(input?.usage?.foreground, input?.usage?.today)
+  if (busy && gameCost > 0) {
+    cost += gameCost
+    why.push(`${busy.game ? 'a game' : 'a video'} in the foreground (${busy.label})`)
+  }
+  // ② 半小时内有过通话: 正在通话那一条在更前面就 return 了, 这一档管"刚挂"
+  const signals = Array.isArray(input?.signals) ? input.signals : []
+  const called = signals.some(
+    (one) => one?.kind === 'call' && now - Number(one?.at ?? 0) <= ROUTER_CALL_RECENT_MS,
+  )
+  if (called && callCost > 0) {
+    cost += callCost
+    why.push('a call within the last 30 minutes')
+  }
+  // ③ 上一次开口还没过多久: 她刚说过一句, 再挤一句就是追着说
+  const lastSpokenAt = Number(input?.lastSpokenAt ?? 0) || 0
+  const quietFor = Number(rules?.chatAfterMs ?? ROUTER_DEFAULTS.chatAfterMs) / 3
+  if (recentCost > 0 && lastSpokenAt > 0 && Number.isFinite(quietFor) && quietFor > 0
+    && now - lastSpokenAt < quietFor) {
+    cost += recentCost
+    why.push(`she spoke ${Math.max(1, Math.round((now - lastSpokenAt) / 60000))} min ago`)
+  }
+  return { cost: Math.min(ROUTER_COST_MAX, cost), why }
+}
+
+/**
+ * 这一件值不值得为它打扰 (纯函数)
+ *
+ * 两条一起看:
+ * - **成本顶到头就一句都不说**: 3 分是"这一刻根本不该开口", 连"用得久了"也不说
+ * - 否则净收益 (`score - cost`) 得够 [ROUTER_COST_MIN_NET] —— 随口一句 (2) 一有成本就攒着
+ */
+function routerWorthwhile(score, cost) {
+  const one = Number(score)
+  const paid = Number(cost)
+  if (!Number.isFinite(one) || !Number.isFinite(paid)) return true
+  if (paid >= ROUTER_COST_MAX) return false
+  return one - paid >= ROUTER_COST_MIN_NET
+}
+
+/**
  * 这一次要不要开口 (纯函数, 无 fs 无时钟无随机源)
  *
  * 主人这一批要的是"她自己挑时机": 打游戏久了提醒歇一会儿、记着的事到点提一句、太久没说话随口问
@@ -10164,6 +10291,9 @@ function nextChatMisses(state, decision) {
  * 不会因为模型慢而错过时机
  *
  * 闸的顺序是刻意的: 静默 -> 冷却 -> 通话中 -> 打分, 任何一条过了就不再往下看
+ *
+ * 2.8.1 #29: 打完分还要扣一笔"打扰成本" (见 [routerCostOf]) —— 排序按净收益排, 压不住的那一拍
+ * 一句都不说, 带上 `heldBack` 让 [routerTick] 记账
  */
 function judgeRouter(input) {
   const now = Number(input?.now ?? Date.now())
@@ -10200,6 +10330,8 @@ function judgeRouter(input) {
   const callEnded = recent.some((one) => one?.kind === 'call' && one?.state === 'end')
   if (callStarted && !callEnded) return { say: false, why: 'a call is running' }
 
+  // 这一刻开口有多贵 (2.8.1 #29): 三档相加夹到 [ROUTER_COST_MAX], `why` 只说触发的那几条
+  const interrupt = routerCostOf({ ...input, now, lastSpokenAt }, rules)
   const candidates = []
   const minuteMs = 60 * 1000
   const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
@@ -10211,6 +10343,7 @@ function judgeRouter(input) {
     candidates.push({
       kind: 'rest',
       score: 5,
+      cost: interrupt.cost,
       to: 'ball',
       tier: routerRestTier(heaviest),
       brief: `${heaviest.label} 今天 ${heaviest.minutes} 分钟, 现在 ${routerClockText(now)}`,
@@ -10230,6 +10363,7 @@ function judgeRouter(input) {
     candidates.push({
       kind: 'wish',
       score: 4,
+      cost: interrupt.cost,
       to: 'ball',
       id: String(one?.id ?? ''),
       brief: `${one?.what ?? '那件事'}还有 ${days} 天, 今天还没提过`,
@@ -10254,6 +10388,7 @@ function judgeRouter(input) {
     candidates.push({
       kind: 'check',
       score: 3,
+      cost: interrupt.cost,
       to: 'ball',
       id,
       key: hit.key,
@@ -10272,6 +10407,7 @@ function judgeRouter(input) {
       candidates.push({
         kind: 'chat',
         score: 2,
+        cost: interrupt.cost,
         to: 'ball',
         brief: lastSpokenAt > 0
           ? `已经 ${Math.round(idleFor / minuteMs)} 分钟没说话了, 随口问一句`
@@ -10285,8 +10421,19 @@ function judgeRouter(input) {
       ? { say: false, why: 'nothing worth saying', chatMissed: true }
       : { say: false, why: 'nothing worth saying' }
   }
-  candidates.sort((a, b) => b.score - a.score)
+  // 排序按**净收益**排 (2.8.1 #29): 同样是 5 分的那一句, 在游戏里就不如"没成本的时候"值钱
+  candidates.sort((a, b) => (b.score - b.cost) - (a.score - a.cost))
   const best = candidates[0]
+  // 压不住就攒着 (2.8.1 #29): 账交给 [routerTick] 记进 `router.json.heldBack`, 下一拍接着算。
+  // `chatMissed` 跟着走 —— 该找句话的那一拍被成本压住, 与"抽签没抽中"是同一件事: 她还想说
+  if (!routerWorthwhile(best.score, best.cost)) {
+    return {
+      say: false,
+      why: `held back (cost ${best.cost})`,
+      ...(best.kind === 'chat' ? { chatMissed: true } : {}),
+      heldBack: { kind: best.kind, score: best.score, cost: best.cost, why: interrupt.why },
+    }
+  }
   // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到。
   // `key` 是同一件事的"说过没有"那把尺子 (2026-11-10): 事件型那一条一次发生一个键
   return {
@@ -12217,6 +12364,10 @@ function simRouterRules(sim) {
   put('chatAfterMs', sim?.router?.chatAfterMs)
   put('ignoredCooldownMs', sim?.router?.ignoredCooldownMs)
   put('preSleepWaitMs', sim?.wake?.preSleepWaitMs)
+  // 打扰成本那三档 (2.8.1 #29): 由「更多设置」的 `interrupt` 段给, 缺键就由 ROUTER_DEFAULTS 兜底
+  put('gameCost', sim?.interrupt?.gameCost)
+  put('callCost', sim?.interrupt?.callCost)
+  put('recentCost', sim?.interrupt?.recentCost)
   return out
 }
 
@@ -12604,6 +12755,8 @@ async function routerMarkSaid(decision, quota = { checkMessages: 1 }) {
     // **开口即清零** (2.8.1 #11): 这一支本来就只在真的说出来之后调, 所以那一笔"错过几次"的
     // 欠账直接写 0 —— +1 只在 [routerTick] 的未开口分支里 (见 [nextChatMisses])
     chatMisses: 0,
+    // 压住的那笔账真说出来了就清掉 (2.8.1 #29): 留着它会让 `lw_router op=status` 一直报"攒着"
+    heldBack: null,
     ...(Object.keys(checksSaid).length > 0 ? { checksSaid } : {}),
   })
   if (decision?.kind !== 'wish' || !decision?.id) return
@@ -12709,6 +12862,7 @@ async function routerTick(ctx) {
   const decision = judgeRouter(inputs)
   if (decision.say !== true) {
     const state = (await readRouterJson(routerStatePath())) ?? {}
+    const held = decision.heldBack && typeof decision.heldBack === 'object' ? decision.heldBack : null
     await writeRouterJson(routerStatePath(), {
       ...state,
       v: 1,
@@ -12717,7 +12871,25 @@ async function routerTick(ctx) {
       // 这一拍"该找句话却没说出口"就记一笔 (2.8.1 #11): 下一拍随口一句的概率高 20%,
       // 静默 / 冷却 / 退让期那些拍不算 (见 [nextChatMisses])
       chatMisses: nextChatMisses(state, decision),
+      // **被成本压住的那一拍会计账** (2.8.1 #29): 哪一件、多贵、为什么 —— 下一拍接着算,
+      // 真的开口了由 [routerMarkSaid] 清掉。别的拍 (静默 / 冷却) 不动上一笔账
+      ...(held
+        ? {
+          heldBack: {
+            at: inputs.now,
+            kind: String(held.kind ?? ''),
+            cost: Number(held.cost) || 0,
+            why: Array.isArray(held.why) ? held.why : [],
+          },
+        }
+        : {}),
     })
+    if (held) {
+      console.log(
+        `luwi-channel: the router held back (cost ${Number(held.cost) || 0}, ${String(held.kind ?? '')}`
+          + ` ${Number(held.score) || 0})`,
+      )
+    }
     return { said: false, why: decision.why }
   }
   // 这一场能发几条 / 检测项占几条: 由 `send` 段算 (2026-11-14), 开场与记账用的是同一个数
