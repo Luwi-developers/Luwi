@@ -202,7 +202,17 @@ class ModeModelTest {
         val target = file(root)
         assertNotNull(ModeModel.setEndpointIn(target, "api.example.com/v1", "", "acme-think"))
         assertNotNull(ModeModel.setEndpointIn(target, "ftp://api.example.com", "", "acme-think"))
-        assertNull(ModeModel.setEndpointIn(target, "http://api.example.com/v1", "", "acme-think"))
+        assertNull(ModeModel.setEndpointIn(target, "https://api.example.com/v1", "", "acme-think"))
+    }
+
+    // 明文 HTTP 只留给本机与局域网 (PlainHttp, 2.8.1 云备份那条): 公网地址必须 https
+    @Test
+    fun `公网 http 被拒而本机 http 放行`() {
+        val root = dir()
+        val target = file(root)
+        assertNotNull(ModeModel.setEndpointIn(target, "http://api.example.com/v1", "", "acme-think"))
+        assertNull(ModeModel.setEndpointIn(target, "http://127.0.0.1:8080/v1", "", "acme-think"))
+        assertNull(ModeModel.setEndpointIn(target, "http://192.168.1.20:8080/v1", "", "acme-think"))
     }
 
     @Test
