@@ -805,7 +805,7 @@ console.log(
 // (applied 3 / already 1 / hot-memory 1 answered 0 unanswered)
 // **2026-11-14 升到 0.15.1** (2.8.0 出包当天): 只改了它自己 wiki/claims 的验证基线 (工作区脏时记不住
 // 那一版改动), 与 Luwi 的面板与补丁面都无关; 判据重跑仍 PASS (applied 3 / already 1 / failed 0)
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.16.0' }
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.16.1' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })
