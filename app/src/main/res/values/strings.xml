@@ -631,6 +631,13 @@
     <string name="settings_sim_router_chat_after_summary">%1$d hours</string>
     <string name="settings_sim_router_ignored">How long she steps back for</string>
     <string name="settings_sim_router_ignored_summary">%1$d hours</string>
+    <string name="settings_sim_interrupt_game">Game or video in the foreground</string>
+    <string name="settings_sim_interrupt_game_summary">saying it now costs %1$d points</string>
+    <string name="settings_sim_interrupt_call">Just off a call</string>
+    <string name="settings_sim_interrupt_call_summary">a call within the last 30 minutes costs %1$d points</string>
+    <string name="settings_sim_interrupt_recent">Just spoke</string>
+    <string name="settings_sim_interrupt_recent_summary">her last line was not long ago, costs %1$d points</string>
+    <string name="settings_sim_interrupt_note">cost of interrupting: the three add up to at most 3 points, and at 3 nothing is said this turn - the line waits for the next one</string>
     <string name="settings_sim_checks_note">What she watches (added by the exploration itself, this page only toggles and forgets)</string>
     <string name="settings_sim_checks_empty">nothing handed in yet - the daily exploration adds it</string>
     <string name="settings_sim_checks_calendar">event checks need calendar access: it is not granted, so those will never hit</string>
@@ -646,6 +653,7 @@
     <string name="settings_sim_unit_chars">chars</string>
     <string name="settings_sim_unit_mb">MB</string>
     <string name="settings_sim_unit_sheets">pcs</string>
+    <string name="settings_sim_unit_points">pts</string>
     <string name="settings_sim_sticker_group">Stickers</string>
     <string name="settings_sim_sticker_max">Biggest single sticker</string>
     <string name="settings_sim_sticker_max_summary">at most %1$d MB each</string>

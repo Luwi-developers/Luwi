@@ -471,6 +471,51 @@ fun SimSettingsDialog(
                             },
                             onCommit = { commit() },
                         )
+                        // 打扰成本那三档 (2.8.1 #29, 主人: "压得住的事不必这一刻说") —— 与上面那几个
+                        // 阈值同属判断层, 所以摆在同一张卡里 (这一页仍是四段, 不另起一组)
+                        Note(stringResource(R.string.settings_sim_interrupt_note))
+                        NumberRow(
+                            title = stringResource(R.string.settings_sim_interrupt_game),
+                            summary = stringResource(
+                                R.string.settings_sim_interrupt_game_summary,
+                                plan.interrupt.gameCost,
+                            ),
+                            value = plan.interrupt.gameCost,
+                            range = SimSetting.INTERRUPT_COST_RANGE,
+                            unit = stringResource(R.string.settings_sim_unit_points),
+                            onChange = {
+                                plan = plan.copy(interrupt = plan.interrupt.copy(gameCost = it))
+                            },
+                            onCommit = { commit() },
+                        )
+                        NumberRow(
+                            title = stringResource(R.string.settings_sim_interrupt_call),
+                            summary = stringResource(
+                                R.string.settings_sim_interrupt_call_summary,
+                                plan.interrupt.callCost,
+                            ),
+                            value = plan.interrupt.callCost,
+                            range = SimSetting.INTERRUPT_COST_RANGE,
+                            unit = stringResource(R.string.settings_sim_unit_points),
+                            onChange = {
+                                plan = plan.copy(interrupt = plan.interrupt.copy(callCost = it))
+                            },
+                            onCommit = { commit() },
+                        )
+                        NumberRow(
+                            title = stringResource(R.string.settings_sim_interrupt_recent),
+                            summary = stringResource(
+                                R.string.settings_sim_interrupt_recent_summary,
+                                plan.interrupt.recentCost,
+                            ),
+                            value = plan.interrupt.recentCost,
+                            range = SimSetting.INTERRUPT_COST_RANGE,
+                            unit = stringResource(R.string.settings_sim_unit_points),
+                            onChange = {
+                                plan = plan.copy(interrupt = plan.interrupt.copy(recentCost = it))
+                            },
+                            onCommit = { commit() },
+                        )
                     }
                 }
             }

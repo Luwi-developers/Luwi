@@ -38,11 +38,14 @@ const {
   judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey, ROUTER_DEFAULTS,
   heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES, ROUTER_SOCIAL_PACKAGES,
   routerChatChance, nextChatMisses, ROUTER_CHAT_CHANCE_MAX, ROUTER_CHAT_MISSES_MAX,
+  routerCostOf, routerWorthwhile, routerBusyUseApp, ROUTER_COST_MAX, ROUTER_COST_MIN_NET,
+  ROUTER_CALL_RECENT_MS,
 } = new Function(
   `${host.slice(at, end)}\nreturn { judgeRouter, routerCheckHit, routerInsideQuiet, routerDayKey,`
     + ' ROUTER_DEFAULTS, heaviestUsageApp, routerRestTier, routerExcludedApp, ROUTER_GAME_PACKAGES,'
     + ' ROUTER_SOCIAL_PACKAGES, routerChatChance, nextChatMisses, ROUTER_CHAT_CHANCE_MAX,'
-    + ' ROUTER_CHAT_MISSES_MAX }',
+    + ' ROUTER_CHAT_MISSES_MAX, routerCostOf, routerWorthwhile, routerBusyUseApp, ROUTER_COST_MAX,'
+    + ' ROUTER_COST_MIN_NET, ROUTER_CALL_RECENT_MS }',
 )()
 
 /* ── 两把"她自己定"的尺子 (2026-11-10) ─────────────────────────────────── */
@@ -166,15 +169,20 @@ check(
 )
 
 check(
-  '通话结束之后就能说了',
-  judgeRouter(base({
-    signals: [
-      { at: NOW - 20 * 60 * 1000, kind: 'call', state: 'start' },
-      { at: NOW - 60 * 1000, kind: 'call', state: 'end' },
-    ],
-    usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] },
-  })).kind,
-  'rest',
+  // 2.8.1 #29 起: 挂了电话那道硬闸是开了, 但"半小时内有过通话"这一档成本 (3) 接着压住这一拍
+  // —— 那一句攒着, 见下面的第十一节
+  '通话结束之后那道闸就放开了 (这一拍改由成本压住)',
+  (() => {
+    const one = judgeRouter(base({
+      signals: [
+        { at: NOW - 20 * 60 * 1000, kind: 'call', state: 'start' },
+        { at: NOW - 60 * 1000, kind: 'call', state: 'end' },
+      ],
+      usage: { today: [{ pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }] },
+    }))
+    return [one.why === 'a call is running', one.heldBack?.cost]
+  })(),
+  [false, 3],
 )
 
 /* ── 二、今天用得最久的那个应用 (2.8.1 #10: 任意应用, 不只是游戏) ───────── */
@@ -808,6 +816,205 @@ check('开口那一笔写 0 (routerMarkSaid 与「唤醒一下」各一处)', [
   /const chatMisses = Math\.max\(0, Number\(state\?\.chatMisses \?\? 0\) \|\| 0\)/u.test(host),
   /put\('chatChanceStep', sim\?\.router\?\.chatChanceStep\)/u.test(host),
 ], [2, true, true, true])
+
+/* ── 十一、打扰成本 (2.8.1 #29) ──────────────────────────────────────────── */
+
+/*
+ * 主人那一句: "判断层加一档「打扰成本」: 压得住的事不必这一刻说". 判断层以前只回答"这件事有多重"
+ * (`score`), 于是 "随口问一句" 与 "今天刷了三小时" 抢同一个出口 —— 这一节给那一侧加一笔
+ * "这一刻开口有多贵" (`cost`), 按净收益 (`score - cost`) 排序, 压不住的那一拍一句都不说
+ *
+ * 真值表一节钉五件:
+ *   ① 三档成本各自的读数: 游戏 / 视频在前台 2, 半小时内有过通话 3, 刚说过话 (< chatAfterMs/3) 1
+ *   ② 相加夹到 [ROUTER_COST_MAX]: 顶到 3 就是"这一刻根本不该开口"
+ *   ③ 净收益到 [ROUTER_COST_MIN_NET] 才值 —— 没成本时与改动前那条排序逐字一致 (2 - 0 = 2 刚好)
+ *      三种成本各一行: 游戏里 (cost 1) 开口 rest / 刚挂电话 (cost 3) 全压住 / 刚说过话 (cost 1)
+ *      只放 rest 不放 chat
+ *   ④ 压住的那一拍 `say:false` 且带 `heldBack`, 由 routerTick 记进 `router.json`, 开口即清
+ *   ⑤ 账在 `lw_router op=status` 里看得见
+ */
+
+check('成本三档的缺省值 / 封顶 / 那条净收益线', [
+  ROUTER_DEFAULTS.gameCost,
+  ROUTER_DEFAULTS.callCost,
+  ROUTER_DEFAULTS.recentCost,
+  ROUTER_COST_MAX,
+  ROUTER_COST_MIN_NET,
+  ROUTER_CALL_RECENT_MS,
+], [2, 3, 1, 3, 2, 30 * 60 * 1000])
+
+/** 成本那几行的底座: 五小时前说过话 (已经过了"刚说过"那一档), 其余都空 */
+const costBase = (over = {}) => base({ lastSpokenAt: NOW - 5 * HOUR, ...over })
+
+/** 一个前台读数的形状 (应用那一侧只写 `pkg` 与 `since`, 名字与 game 标记在今天的行里) */
+const front = (pkg, over = {}) => ({ pkg, since: NOW - 60 * 1000, ...over })
+const gameRow = { pkg: GAME, label: '王者荣耀', ms: 130 * 60 * 1000 }
+
+check('什么都没发生时不扣分', routerCostOf(costBase(), {}), { cost: 0, why: [] })
+
+check('游戏在前台扣 2', routerCostOf(costBase({
+  usage: { today: [gameRow], foreground: front(GAME) },
+}), {}), { cost: 2, why: ['a game in the foreground (王者荣耀)'] })
+
+check('视频 / 社交在前台也扣 2 (那一档不只有游戏)', routerCostOf(costBase({
+  usage: {
+    today: [{ pkg: 'com.ss.android.ugc.aweme', label: '抖音', ms: 40 * 60 * 1000 }],
+    foreground: front('com.ss.android.ugc.aweme'),
+  },
+}), {}), { cost: 2, why: ['a video in the foreground (抖音)'] })
+
+check('桌面 / 输入法 / 她自己在前台不扣 (解锁就在的应用不算在忙)', [
+  routerCostOf(costBase({ usage: { today: [], foreground: front('com.miui.home') } }), {}).cost,
+  routerCostOf(costBase({ usage: { today: [], foreground: front('com.sohu.inputmethod.sogou') } }), {}).cost,
+  routerCostOf(costBase({ usage: { today: [], foreground: front('io.github.yuloong07star.luwi') } }), {}).cost,
+  routerCostOf(costBase({ usage: { today: [], foreground: front('com.android.chrome') } }), {}).cost,
+], [0, 0, 0, 0])
+
+check('半小时内有过通话扣 3 (正在通话那一条在更前面就拦住了, 这一档管"刚挂")', routerCostOf(costBase({
+  signals: [
+    { at: NOW - 20 * 60 * 1000, kind: 'call', state: 'start' },
+    { at: NOW - 10 * 60 * 1000, kind: 'call', state: 'end' },
+  ],
+}), {}).cost, 3)
+
+check('40 分钟前的通话不算 (那一条只看半小时)', routerCostOf(costBase({
+  signals: [
+    { at: NOW - 50 * 60 * 1000, kind: 'call', state: 'start' },
+    { at: NOW - 40 * 60 * 1000, kind: 'call', state: 'end' },
+  ],
+}), {}).cost, 0)
+
+check('刚说过 40 分钟也扣 1 (不到 chatAfterMs / 3 = 80 分钟)', routerCostOf(costBase({
+  lastSpokenAt: NOW - 40 * 60 * 1000,
+}), {}), { cost: 1, why: ['she spoke 40 min ago'] })
+
+check('过了 chatAfterMs / 3 就不再扣那一档', routerCostOf(costBase({
+  lastSpokenAt: NOW - 2 * HOUR,
+}), {}).cost, 0)
+
+check('三档相加夹到 3 (游戏 2 + 通话 3 = 5 -> 3)', routerCostOf(costBase({
+  usage: { today: [gameRow], foreground: front(GAME) },
+  signals: [{ at: NOW - 10 * 60 * 1000, kind: 'call', state: 'end' }],
+}), {}).cost, 3)
+
+check('三档一起时为什么那几句都在 (日志与 heldBack.why 读它)', routerCostOf(costBase({
+  lastSpokenAt: NOW - 20 * 60 * 1000,
+  usage: { today: [gameRow], foreground: front(GAME) },
+  signals: [{ at: NOW - 10 * 60 * 1000, kind: 'call', state: 'end' }],
+}), {}).why, [
+  'a game in the foreground (王者荣耀)',
+  'a call within the last 30 minutes',
+  'she spoke 20 min ago',
+])
+
+check('每一档写 9 都夹回 3 (夹的是那一档, 不是只有总和)', [
+  routerCostOf(costBase({ usage: { today: [gameRow], foreground: front(GAME) } }), { gameCost: 9 }).cost,
+  routerCostOf(costBase({ signals: [{ at: NOW - 60 * 1000, kind: 'call', state: 'end' }] }), { callCost: 9 }).cost,
+  routerCostOf(costBase({ lastSpokenAt: NOW - 10 * 60 * 1000 }), { recentCost: 9 }).cost,
+], [3, 3, 3])
+
+check('坏值 / 负数: 坏值回落到缺省, 负数当 0', [
+  routerCostOf(costBase({ usage: { today: [gameRow], foreground: front(GAME) } }), { gameCost: '很贵' }).cost,
+  routerCostOf(costBase({ usage: { today: [gameRow], foreground: front(GAME) } }), { gameCost: -3 }).cost,
+  routerCostOf(costBase({ usage: { today: [gameRow], foreground: front(GAME) } }), { gameCost: 0 }).cost,
+], [2, 0, 0])
+
+check('前台认包名 (应用那一侧只写 pkg; 旧版应用不写 game 标记也认得出王者)', routerBusyUseApp(
+  front(GAME),
+  [],
+)?.game, true)
+
+check('值不值得打扰: 净收益真值表 cost 0/1/2/3 × rest 5 / check 3 / chat 2', [
+  [[5, 0], [3, 0], [2, 0]],
+  [[5, 1], [3, 1], [2, 1]],
+  [[5, 2], [3, 2], [2, 2]],
+  [[5, 3], [3, 3], [2, 3]],
+].map((row) => row.map(([score, cost]) => routerWorthwhile(score, cost))), [
+  [true, true, true], // 没成本: 与改动前逐字一致 (随口一句也说得出口)
+  [true, true, false], // 刚说过话: 只放 rest / check, 随口一句攒着
+  [true, false, false], // 在游戏里: 只剩"用得久了"压得住
+  [false, false, false], // 顶到 3: 一句都不说
+])
+
+/*
+ * 三种成本各一行, 同一组候选 (rest 5 / check 3):
+ * 随口一句只在前两档里出现 —— 它的入口是"别的候选一个都没有" (见 judgeRouter), 所以那一眼
+ * 在下面单独一只 (游戏里随口一句被压住)
+ */
+const costCandidates = { usage: { today: [gameRow] }, checks: [checkTime] }
+const costlyGame = { ...costCandidates, usage: { ...costCandidates.usage, foreground: front(GAME) } }
+
+check('① 游戏里 (cost 1, 把 gameCost 调成 1) -> 开口 rest', (() => {
+  const one = judgeRouter(base({ rules: { gameCost: 1 }, ...costlyGame }))
+  return [one.say, one.kind, one.heldBack]
+})(), [true, 'rest', undefined])
+
+check('② 刚挂电话 (cost 3) -> 全压住, heldBack.cost = 3 且点名分最高的那一件', (() => {
+  const one = judgeRouter(base({
+    ...costCandidates,
+    signals: [
+      { at: NOW - 20 * 60 * 1000, kind: 'call', state: 'start' },
+      { at: NOW - 10 * 60 * 1000, kind: 'call', state: 'end' },
+    ],
+  }))
+  return [one.say, one.kind, one.heldBack.cost, one.heldBack.kind, one.why]
+})(), [false, undefined, 3, 'rest', 'held back (cost 3)'])
+
+check('③ 刚说过话 (cost 1) -> 只放 rest 不放 chat (冷却按 0 摆, 否则那一道先挡住)', (() => {
+  const one = judgeRouter(base({
+    rules: { cooldownMs: 0 },
+    lastSpokenAt: NOW - 40 * 60 * 1000,
+    ...costCandidates,
+  }))
+  // rest 的净收益 4 过得去; 随口一句 2 - 1 = 1 过不去 (真值表第 2 行)
+  return [one.say, one.kind, routerWorthwhile(2, 1), routerWorthwhile(5, 1)]
+})(), [true, 'rest', false, true])
+
+check('在游戏里随口一句那一拍被压住 (chat 2 - 2 = 0), 而且记成"该说没说"', (() => {
+  const one = judgeRouter(base({
+    lastSpokenAt: NOW - 5 * HOUR,
+    random: () => 0.1,
+    usage: { today: [], foreground: front(GAME) },
+  }))
+  return [one.say, one.heldBack.kind, one.heldBack.cost, one.chatMissed]
+})(), [false, 'chat', 2, true])
+
+check('有一条未了的事时, 游戏里 (cost 2) 仍然说 (4 - 2 = 2 刚好过线)', judgeRouter(base({
+  usage: { today: [], foreground: front(GAME) },
+  wishes: [{ id: 'cet4', what: '考四级', due: in37, said: [] }],
+})).kind, 'wish')
+
+check('压住的那一拍不带 to / brief (routerTick 只认 say, 别让它误以为有话可说)', (() => {
+  const one = judgeRouter(base({
+    usage: { today: [gameRow], foreground: front(GAME) },
+    checks: [checkTime],
+    rules: { gameCost: 3 },
+  }))
+  return [one.say, one.to, one.brief]
+})(), [false, undefined, undefined])
+
+check('账记进 router.json (哪一件 / 多贵 / 为什么), 开口之后清掉', [
+  /heldBack: \{\s*at: inputs\.now,/.test(host),
+  /kind: String\(held\.kind \?\? ''\),/.test(host),
+  /cost: Number\(held\.cost\) \|\| 0,/.test(host),
+  /why: Array\.isArray\(held\.why\) \? held\.why : \[\],/.test(host),
+  /heldBack: null,/.test(host),
+  /console\.log\(\s*`luwi-channel: the router held back \(cost/.test(host),
+], [true, true, true, true, true, true])
+
+check('成本真的接到判断层上 (扣分 + 排序都按净收益), 三档由 sim.json 的 interrupt 段给', [
+  /routerCostOf\(\{ \.\.\.input, now, lastSpokenAt \}, rules\)/.test(host),
+  /candidates\.sort\(\(a, b\) => \(b\.score - b\.cost\) - \(a\.score - a\.cost\)\)/.test(host),
+  /if \(!routerWorthwhile\(best\.score, best\.cost\)\)/.test(host),
+  /put\('gameCost', sim\?\.interrupt\?\.gameCost\)/.test(host),
+  /put\('callCost', sim\?\.interrupt\?\.callCost\)/.test(host),
+  /put\('recentCost', sim\?\.interrupt\?\.recentCost\)/.test(host),
+], [true, true, true, true, true, true])
+
+check('这笔账在 lw_router op=status 里看得见, 工具描述也说了它 (模型才知道"攒着"不是"丢了")', [
+  /heldBack: state\.heldBack \?\? null,/.test(host),
+  host.includes('(heldBack: what, how costly, why)'),
+], [true, true])
 
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)
