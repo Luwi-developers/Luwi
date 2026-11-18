@@ -38,20 +38,23 @@ internal object LwDeepseekTranscribe {
     /**
      * 把内存里那一段采样认成一句话
      *
-     * 按 [LwDeepseekAsr.CHUNK_SECONDS] 切片, 一片一问, 回来按顺序接起来 (片与片之间一个空格, 中文
-     * 那一侧不影响阅读)。任何一片失败就整段失败: 半句接上半句比"没认出来"更难查
+     * 按 [LwDeepseekAsr.CHUNK_SECONDS] 切片 (切成低谷处, 相邻两片叠 400 ms), 一片一问, 回来按顺序
+     * 拼起来 —— 拼接走 [LwDeepseekAsr.stitch]: 重叠处那几个字两边都会认一遍, 只留上一片那份
+     * (2.8.1 #28), 任何一片失败就整段失败: 半句接上半句比"没认出来"更难查
      */
     fun text(context: Context, samples: FloatArray): String {
         val pieces = LwDeepseekAsr.pieces(samples)
         if (pieces.isEmpty()) return ""
-        val said = StringBuilder()
+        var said = ""
         for (piece in pieces) {
             val answer = answer(context, LwDeepseekAsr.wav(piece))
             if (answer.text.isBlank()) continue
-            if (said.isNotEmpty()) said.append(' ')
-            said.append(answer.text)
+            said = if (said.isEmpty()) answer.text else LwDeepseekAsr.stitch(said, answer.text)
         }
-        return said.toString()
+        // 真机判据 (2.8.1 #28): 一段 75 s 的朗读在这里必须是一行 pieces=2 overlap=400ms
+        val overlapMs = if (pieces.size > 1) LwDeepseekAsr.PIECE_OVERLAP_MS else 0
+        Log.i(TAG_PIECES, "pieces=${pieces.size} overlap=${overlapMs}ms")
+        return said
     }
 
     /** 认一段已经封好的 wav (界面那条麦克风与 `lw_speech op=transcribe` 走它) */
@@ -140,6 +143,9 @@ internal object LwDeepseekTranscribe {
     }
 
     private const val TAG = "LwDeepseekAsr"
+
+    /** 切片那一行单独一个 tag: 真机读数是 `adb logcat -d -s LwAsr` (2.8.1 #28) */
+    private const val TAG_PIECES = "LwAsr"
 
     /** 回环这一跳: 连不上是"宿主没在跑", 一秒里就该知道 */
     private const val CONNECT_TIMEOUT_MS = 5_000

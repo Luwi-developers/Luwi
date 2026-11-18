@@ -1,10 +1,13 @@
 package io.github.yuloong07star.luwi.tool
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
+import kotlin.math.sin
 
 /**
  * DeepSeek 官方语音输入那一档的纯算术: wav 怎么封、一段切成几片、回执怎么读 (2.8.1 #6)
@@ -78,18 +81,120 @@ class LwDeepseekAsrTest {
     }
 
     @Test
-    fun `三段 60 秒的话切成三片, 一片不多一片不少`() {
+    fun `三段 60 秒的话切成三片, 接缝处叠 400 ms`() {
         val samples = FloatArray(LwDeepseekAsr.SAMPLE_RATE * 150) { it.toFloat() }
         val pieces = LwDeepseekAsr.pieces(samples)
         assertEquals(3, pieces.size)
+        val overlap = LwDeepseekAsr.overlapSamples()
+        assertEquals(6400, overlap)
+        assertEquals(0.4, LwDeepseekAsr.secondsOf(overlap), 0.0001)
         val limit = LwDeepseekAsr.chunkSamples()
-        assertEquals(limit, pieces[0].size)
-        assertEquals(30 * LwDeepseekAsr.SAMPLE_RATE, pieces[2].size)
-        // 拼回去一个采样都不差 (切在整片上, 不是字节上)
-        assertEquals(samples.size, pieces.sumOf { it.size })
-        assertEquals(samples[0], pieces[0][0])
-        assertEquals(samples[samples.size - 1], pieces[2].last())
+        val search = LwDeepseekAsr.searchSamples()
+        // 切点可以在名义位置前后各 3 s 挪, 于是每一片落在 57 s ~ 63 s 之间
+        for (piece in pieces.dropLast(1)) {
+            assertTrue("${piece.size} 不在低谷窗里", piece.size in (limit - search)..(limit + search))
+        }
+        // 去掉重叠之后正好覆盖原段 (每一片都从上一片尾巴里那 400 ms 起)
+        val covered = pieces.sumOf { it.size } - overlap * (pieces.size - 1)
+        assertEquals(samples.size, covered)
+        // 相邻两片首尾那 400 ms 逐采样相同: 那片音频两边各有一份
+        for (index in 1 until pieces.size) {
+            val tail = pieces[index - 1]
+            assertArrayEquals(
+                tail.copyOfRange(tail.size - overlap, tail.size),
+                pieces[index].copyOfRange(0, overlap),
+                0f,
+            )
+        }
+        assertEquals(samples[0], pieces.first()[0])
+        assertEquals(samples[samples.size - 1], pieces.last().last())
         assertEquals(60.0, LwDeepseekAsr.secondsOf(limit), 0.001)
+    }
+
+    @Test
+    fun `切点落在能量低谷, 不在 60 秒那包能量上`() {
+        val samples = synthetic()
+        val pieces = LwDeepseekAsr.pieces(samples)
+        assertEquals(2, pieces.size)
+        val cut = pieces[0].size
+        // 59 s 那条 V 形低谷是整段里唯一的最低点, 切点就该落在它正中 (前后 50 ms 都算对)
+        assertEquals(59.0, LwDeepseekAsr.secondsOf(cut), 0.05)
+        // 低谷的能量比 60 s 那包「设置」低一个量级以上: 那是真的避开了, 不是碰巧
+        val window = LwDeepseekAsr.windowSamples()
+        val atCut = meanSquare(samples, cut - window / 2, window)
+        val atBurst = meanSquare(samples, 60 * LwDeepseekAsr.SAMPLE_RATE, window)
+        assertTrue("切点 $atCut 不比能量包 $atBurst 低", atCut * 10 < atBurst)
+        // 两片都在官方那两条上限之内
+        for (piece in pieces) {
+            assertTrue(LwDeepseekAsr.secondsOf(piece.size) <= LwDeepseekAsr.MAX_SECONDS)
+            assertTrue(LwDeepseekAsr.HEADER_BYTES + piece.size * 2 <= LwDeepseekAsr.MAX_BYTES)
+        }
+    }
+
+    /* ── 拼接: 重叠处重复的字只留一份 (2.8.1 #28) ─────────────────────────── */
+
+    @Test
+    fun `75 秒合成朗读, 两片接回来与原句逐字一致`() {
+        val samples = synthetic()
+        val pieces = LwDeepseekAsr.pieces(samples)
+        val overlap = LwDeepseekAsr.overlapSamples()
+        // 每个字 0.2 s: 75 s 正好 375 个字, 重叠那 400 ms 跨两个字
+        val total = LwDeepseekAsr.SAMPLE_RATE * 75
+        val truth = SENTENCE.repeat(14).take(total / CHAR_SAMPLES)
+        assertEquals(375, truth.length)
+        val first = spoken(truth, total, 0, pieces[0].size)
+        val second = spoken(truth, total, pieces[0].size - overlap, total)
+        // 不做去重会多出重叠区那两个音
+        assertEquals(2, first.length + second.length - truth.length)
+        assertEquals(truth, LwDeepseekAsr.stitch(first, second))
+    }
+
+    @Test
+    fun `对不上时只留一个空格, 命中的那截剪掉`() {
+        // 这两句在 400 ms 里确实是同一段音频: 上一片的结尾就是下一片的开头
+        assertEquals("先打开设置 然后", LwDeepseekAsr.stitch("先打开设置", "然后"))
+        assertEquals("先把代理改成手动，最后保存", LwDeepseekAsr.stitch("先把代理改成手动，", "手动，最后保存"))
+        // 空格只留一个, 不叠成两个
+        assertEquals("保存，最后", LwDeepseekAsr.stitch("保存 ", "保存，最后"))
+        assertEquals("", LwDeepseekAsr.stitch("", ""))
+    }
+
+    /** 同一段合成音频两边各一份: 75 s, 59 s 处一条 V 形低谷, 60 s 处一包「设置」的能量 */
+    private fun synthetic(
+        sampleRate: Int = LwDeepseekAsr.SAMPLE_RATE,
+        seconds: Int = 75,
+    ): FloatArray {
+        val total = sampleRate * seconds
+        val samples = FloatArray(total)
+        for (index in 0 until total) {
+            val at = index.toDouble() / sampleRate
+            var amplitude = 0.35
+            val away = abs(at - 59.0)
+            if (away < 0.5) amplitude = 0.02 + 0.6 * away
+            if (at >= 60.0 && at < 60.2) amplitude = 0.9
+            samples[index] = (amplitude * sin(2 * Math.PI * 180.0 * at)).toFloat()
+        }
+        return samples
+    }
+
+    /** 一个窗口里的均方 (与切点判据同一个量) */
+    private fun meanSquare(samples: FloatArray, from: Int, window: Int): Double {
+        var sum = 0.0
+        for (index in from until from + window) {
+            val value = samples[index].toDouble()
+            sum += value * value
+        }
+        return sum / window
+    }
+
+    /** 这一段里被"听见"的那几个字: 与 [from, to) 有交集的字都算 (交叠处两边各听见一次) */
+    private fun spoken(truth: String, total: Int, from: Int, to: Int): String {
+        val per = total / truth.length
+        val said = StringBuilder()
+        for (index in truth.indices) {
+            if ((index + 1) * per > from && index * per < to) said.append(truth[index])
+        }
+        return said.toString()
     }
 
     @Test
@@ -139,4 +244,13 @@ class LwDeepseekAsrTest {
             ((bytes[at + 1].toInt() and 0xff) shl 8) or
             ((bytes[at + 2].toInt() and 0xff) shl 16) or
             ((bytes[at + 3].toInt() and 0xff) shl 24)
+
+    private companion object {
+
+        /** 真机那一段 75 s 朗读的原文 (验收用的就是这一句) */
+        const val SENTENCE = "先打开设置，再点 WLAN，然后把代理改成手动，最后保存"
+
+        /** 合成音频里一个字占 0.2 s: 重叠那 400 ms 正好跨两个字 (与 tools/check-voice-asr.mjs 同一份真值) */
+        const val CHAR_SAMPLES = 3200
+    }
 }
