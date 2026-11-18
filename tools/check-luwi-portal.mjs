@@ -1934,11 +1934,14 @@ if (wakeSource === '') {
   if (present.length > 0) failures.push(`routerWakeNow 里又接上了判断闸: ${present.join(' / ')}`)
   else notes.push('ok   routerWakeNow 一道判断闸都不看 (人点了就必须出声)')
 }
-expect('host-plugin', hostPlugin, 'text: wakeStartLine(chosen.text)')
+expect('host-plugin', hostPlugin, 'text: wakeStartLine(chosen.text, chosen)')
 expect('host-plugin', hostPlugin, 'openLine: chosen.text')
 expect('host-plugin', hostPlugin, "via: 'wake'")
 // 那一声已经说出去了: 开场要交代"别重复它", 否则模型把同一句再发一遍就是两条一样的气泡
 expect('host-plugin', hostPlugin, '不要重复它')
+// 2.8.1 #31: 第一句由宿主从判断层里挑 (检测项 / 未了的事), 不是模型那一轮赶出来
+expect('host-plugin', hostPlugin, 'wakeTopicFor(before, await readWishes()')
+expect('host-plugin', hostPlugin, 'wakeStartLine(chosen.text, chosen)')
 
 // 应声要**排在投第一句之前**: 气泡先到, 模型那一轮后到 —— 反过来就又要等模型
 const startAt = hostPlugin.indexOf('async function startProactive(ctx, options = {}) {')
@@ -1983,15 +1986,124 @@ if (lineSource === '') {
   }
 }
 
-// 池子本身至少三句且不重复 (只有一句 = 连点三次同一句, 正是验收里不许的那一条)
-const poolAt = hostPlugin.indexOf('const ROUTER_WAKE_LINES = Object.freeze([')
+// 池子本身至少三句且不重复, 并且**一句被动应声都不许有** (2.8.1 #31)
+const poolAt = hostPlugin.indexOf('const ROUTER_WAKE_TOPICS = Object.freeze([')
 const poolEnd = poolAt < 0 ? -1 : hostPlugin.indexOf('])', poolAt)
 const poolSource = poolAt < 0 || poolEnd < 0 ? '' : hostPlugin.slice(poolAt, poolEnd)
 const wakeLines = [...poolSource.matchAll(/'([^']+)'/gu)].map((one) => one[1])
-if (wakeLines.length >= 3 && new Set(wakeLines).size === wakeLines.length) {
-  notes.push(`ok   应声池子 ${wakeLines.length} 句且不重复`)
+const passiveWake = ['怎么了', '怎么啦', '叫我', '在呢', '嗯?', '嗯嗯']
+const passiveHits = wakeLines.filter((one) => passiveWake.some((word) => one.includes(word)))
+if (wakeLines.length >= 3 && new Set(wakeLines).size === wakeLines.length && passiveHits.length === 0) {
+  notes.push(`ok   唤醒开场池子 ${wakeLines.length} 句, 全是主动找话题 (没有「怎么了」「嗯?」这类)`)
 } else {
-  failures.push(`应声池子不足三句或有重复: ${JSON.stringify(wakeLines)}`)
+  failures.push(`唤醒开场池子不对 (句数 / 重复 / 被动句): ${JSON.stringify(wakeLines)}`)
+}
+if (hostPlugin.includes('const ROUTER_WAKE_LINES')) {
+  failures.push('host-plugin: 被动应声池 ROUTER_WAKE_LINES 还在 (2.8.1 #31 要的是主动找话题)')
+} else {
+  notes.push('ok   被动应声池已撤 (ROUTER_WAKE_LINES 不在了)')
+}
+
+// 2.8.1 #31 (主人 2026-11-18: "要求必须主动找话题, 话题必须依据判断层内容展开"): 抽纯函数真跑一张
+// 真值表 —— 话题从 `router.json` 的检测项 / `wishes.json` 的未了的事里长出来, 关掉的那条不算,
+// 今天说过的沉底, 一件都没有才回闲话池; 连点三次既不是同一句, 也不出现被动应声
+
+/** 从一段正文里抽一个整函数 (头一行到它自己的收尾 `}`) */
+function sliceWakeFunction(source, header) {
+  const at = source.indexOf(header)
+  const end = at < 0 ? -1 : source.indexOf('\n}\n', at)
+  return at < 0 || end < 0 ? '' : source.slice(at, end + 3)
+}
+
+/** 从一段正文里抽一个 `const X = ...` 声明 (到下一个空行为止) */
+function sliceWakeConst(source, name) {
+  const at = source.indexOf(`const ${name} = `)
+  if (at < 0) return ''
+  const end = source.indexOf('\n\n', at)
+  return end < 0 ? '' : source.slice(at, end)
+}
+
+const wakeConsts = [
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_TOPICS'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_TOPIC_LINES'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_FALLBACK'),
+].filter((one) => one !== '').join('\n')
+const wakeDayKey = sliceWakeFunction(hostPlugin, 'function routerDayKey(now) {')
+const wakeLineFn = sliceWakeFunction(hostPlugin, 'function wakeLineFor(lines, cursor) {')
+const wakeTopicsFn = sliceWakeFunction(hostPlugin, 'function wakeTopicsOf(state, wishes, now) {')
+const wakeTopicFn = sliceWakeFunction(hostPlugin, 'function wakeTopicFor(state, wishes, now, cursor) {')
+const wakeStartFn = sliceWakeFunction(hostPlugin, 'function wakeStartLine(alreadySaid, material = {}) {')
+if ([wakeConsts, wakeDayKey, wakeLineFn, wakeTopicsFn, wakeTopicFn, wakeStartFn]
+  .some((one) => one === '')) {
+  failures.push('host-plugin: 抽不出唤醒话题那几段 (wakeTopicsOf / wakeTopicFor / wakeStartLine 名字或缩进改过?)')
+} else {
+  const api = new Function([
+    wakeConsts,
+    wakeDayKey,
+    wakeLineFn,
+    wakeTopicsFn,
+    wakeTopicFn,
+    wakeStartFn,
+    'return { wakeTopicsOf, wakeTopicFor, wakeStartLine, ROUTER_WAKE_TOPICS, ROUTER_WAKE_TOPIC_LINES }',
+  ].join('\n'))()
+  const wakeNow = Date.parse('2026-11-18T21:00:00+08:00')
+  const wakeDay = '2026-11-18'
+  const wakeState = {
+    checks: [
+      { id: 'c1', what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, enabled: true },
+      { id: 'c2', what: '开会前提醒', when: { kind: 'event', beforeMinutes: 30 }, enabled: true },
+      { id: 'c3', what: '关掉的那条', when: { kind: 'time' }, at: '09:00', enabled: false },
+    ],
+    checksSaid: { c1: wakeDay },
+  }
+  const wakeWishes = [{ id: 'w1', what: '考四级', said: [] }]
+  const wakeOrdered = api.wakeTopicsOf(wakeState, wakeWishes, wakeNow).map((one) => one.what)
+  const wakeFirst = api.wakeTopicFor(wakeState, wakeWishes, wakeNow, 0)
+  const wakeClicks = []
+  let wakeCursor = 0
+  for (let i = 0; i < 3; i += 1) {
+    const one = api.wakeTopicFor(wakeState, wakeWishes, wakeNow, wakeCursor)
+    wakeClicks.push(one.text)
+    wakeCursor = one.cursor
+  }
+  const wakeChats = []
+  wakeCursor = 0
+  for (let i = 0; i < 3; i += 1) {
+    const one = api.wakeTopicFor({}, [], wakeNow, wakeCursor)
+    wakeChats.push(one.text)
+    wakeCursor = one.cursor
+  }
+  const wakeAllSaid = api.wakeTopicFor(
+    { checks: wakeState.checks, checksSaid: { c1: wakeDay, c2: wakeDay } },
+    wakeWishes,
+    wakeNow,
+    0,
+  )
+  const wakePrompt = api.wakeStartLine(wakeFirst.text, wakeFirst)
+  const wakeCases = [
+    ['今天说过的沉底 / 关掉的不算', JSON.stringify(wakeOrdered)
+      === JSON.stringify(['开会前提醒', '考四级', '打游戏太久'])],
+    ['第一句带判断层里的那件事', wakeFirst.text.includes('「开会前提醒」')],
+    ['连点三次不是同一句', new Set(wakeClicks).size === 3],
+    ['三次都从判断层里挑', wakeClicks.every((one) => one.includes('「')
+      && (one.includes('开会前提醒') || one.includes('考四级') || one.includes('打游戏太久')))],
+    ['没有被动应声的句子', [...wakeClicks, ...wakeChats]
+      .every((one) => passiveWake.every((word) => !one.includes(word)))],
+    ['判断层空了就挑闲话', wakeChats.every((one) => api.ROUTER_WAKE_TOPICS.includes(one))
+      && new Set(wakeChats).size === 3],
+    ['两件都说过了也挑得出一件', wakeAllSaid.text.includes('「考四级」')],
+    ['开场交代别重复那一句', wakePrompt.includes('不要重复它')],
+    ['开场要求主动找话题', wakePrompt.includes('主动找话题')],
+    ['开场把话题单子交给她', wakePrompt.includes('开会前提醒') && wakePrompt.includes('考四级')],
+    ['开场点名不许被动应声', wakePrompt.includes('「怎么了」「嗯?」')],
+  ]
+  const wakeBroken = wakeCases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (wakeBroken.length === 0) {
+    notes.push('ok   wakeTopicFor: 话题从判断层里挑 (沉底 / 关掉 / 空判断层 / 连点三句不同)')
+  } else {
+    failures.push(`wakeTopicFor 真值表不对: ${wakeBroken.join(' / ')}`
+      + ` (ordered=${JSON.stringify(wakeOrdered)})`)
+  }
 }
 
 // 门户那一侧: 点完自己补几拍, 换场不清屏上已有的气泡, 连点之间被覆盖的那一场也补得上

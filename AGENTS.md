@@ -211,9 +211,15 @@
   球换场先 `clearReplies`; **`BoxView.replies` 的 `inputType=TYPE_NULL` 会把换行压成空格, 必须 `setSingleLine(false)`**;
   回复之间**单换行**合并 (`kept.joinToString("\n")`)
 - **判断层的「唤醒一下」一点就说话** (2026-11-16, 2.8.1 #8): 那颗按钮投 `source:"wake"` (与闹钟那一拍 `router` 分开),
-  宿主那一支**一道判断闸都不看** (`routerWakeNow`); 先按 `ROUTER_WAKE_LINES` 轮转落一句应声进那一场的 `lw/out`
+  宿主那一支**一道判断闸都不看** (`routerWakeNow`); 先轮转落一句进那一场的 `lw/out`
   (3 s 内必见气泡, 连点不是同一句), 再开一场主动对话; 门户点完自己补 8 拍, 并照 `proactive.json` 的 `recent`
   把连点之间被 `run` 覆盖掉的那一场也补进来 (换场不清屏上已有的气泡); 判据 `check-luwi-portal` 第十七节
+- **那一句必须主动找话题, 不能是被动应声** (2026-11-18, 2.8.1 #31): 被动池 (`我在, 怎么啦?` / `嗯? 叫我?`)
+  整池撤掉, 换成 `wakeTopicFor` 从判断层里挑 —— `router.json` 的 `checks` (跳过 `enabled:false`, 今天说过的
+  `checksSaid` 沉底) 与 `wishes.json` 的未了的事依次排, 挑中那件的原话带进 `「」` (`你之前提到的「开会前提醒」,
+  我还记着呢~`); 一件都没有才回 `ROUTER_WAKE_TOPICS` 那一池闲话 (`今天过得怎么样呀?`); 轮转跨"话题 x 句式"
+  两维; 开场正文 (`wakeStartLine`) 再把整张话题单子交给她并点名不许回 `怎么了` / `嗯?`; `router.json.wake`
+  多记 `from` / `what`; 判据 `check-luwi-portal` 第十七节真跑 `wakeTopicsOf` / `wakeTopicFor` / `wakeStartLine`
 - **时间线按轮排**: `orderTimeline` 把 user → 她的话 (按 seq) → error → 兜底 放同轮, 行按 `at` 归轮 (同毫秒算上一轮),
   缺时间的 user 沉底; 补句的 `at` 取 `event.time` (`lwOutAppend` 的 `atHint`); 判据 `tools/check-portal-order.mjs`
 - **余额两条触发**: ① 每轮结束覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷); ② 点「看余额」: 上次那份

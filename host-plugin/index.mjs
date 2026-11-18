@@ -12912,34 +12912,41 @@ async function routerTick(ctx) {
   return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
 }
 
-/* ── 点「唤醒一下」那一下 (2.8.1 #8) ─────────────────────────────────────────
+/* ── 点「唤醒一下」那一下 (2.8.1 #8 / #31) ───────────────────────────────────
  *
  * 主人 2026-11-15: "点击唤醒一下时, 必须主动说话". 那一颗按钮在判断层 (门户 `⋯ → 判断`), 投的是
  * `source:"wake"`, 与闹钟那一拍 `router` 分开 —— 见 [routerWakeNow] 与应用的 `VoiceInbox.SOURCE_WAKE`
+ *
+ * 2026-11-18 (#31, 主人: "发送的内容不能是'怎么了''嗯?'这种疑问句 ... 要求必须主动找话题, 话题必须
+ * 依据判断层内容展开"): 先应一声的那一池被动话整池撤掉, 换成"从判断层里挑一件说出来" —— 检测项 /
+ * 未了的事有就按它的原话开场 (像"你之前提到的「开会前提醒」, 我还记着呢~"), 一件都没有才回到
+ * [ROUTER_WAKE_TOPICS] 那一池闲话; 那一场的开场正文同时把整张话题单子交给她, 让她接着聊
  */
 
 /**
- * 主人亲手点「唤醒一下」时, 宿主先替她应哪一句 (轮转池)
+ * 判断层里一件能聊的事都没有时, 她先抛的那一句 (轮转池)
  *
- * 为什么由宿主先应一声: 那一颗按钮要的是"按下去就有回音", 而模型那一轮从开会话到 `lw_say` 落盘
- * 最快也要一两秒, 赶上慢的那几拍就是"点了没反应" (2026-11-15 主人报的原话)。这一句**先**落进
- * `lw/out`, 门户照那份文件画, 于是 3 s 里必有一颗气泡; 她要接着说, 那一场里照常投 (一是应声,
- * 一是正话, 两句话不冲突)
- *
- * 池子写在这里而不是 `router.json`: 判断层那几把"她自己的尺子"是行为刻度 (`lw_router op=rules`
- * 写的), 而这一句只是"被叫了一声"的语气 —— 多一个键就多一处要同步的地方, 也没有要改它的入口
+ * 只有**主动找话题**的句子: 被动应一声的那几句 ("我在, 怎么啦?" / "嗯? 叫我?") 在 #31 里整池撤掉,
+ * 主人点一下要的是"她来找你聊", 不是"她等你开口"
  */
-const ROUTER_WAKE_LINES = Object.freeze([
-  '我在, 怎么啦?',
-  '嗯? 叫我?',
-  '在呢.',
-  '怎么了?',
-  '我听着呢.',
-  '嗯嗯, 在的.',
+const ROUTER_WAKE_TOPICS = Object.freeze([
+  '今天过得怎么样呀?',
+  '今天有什么想跟我说的吗?',
+  '在忙什么呢? 跟我说说呗.',
+  '今天有什么开心的事吗?',
+  '吃饭了没? 今天吃了什么好吃的?',
+  '今天累不累? 要不要聊会儿天.',
+])
+
+/** 拿判断层记着的事开场时套的句式: `{what}` 换成那件事的原话 (检测项 / 未了的事) */
+const ROUTER_WAKE_TOPIC_LINES = Object.freeze([
+  '你之前提到的「{what}」, 我还记着呢, 别忘了哦~',
+  '对了, 「{what}」这件事我一直帮你记着, 后来怎么样啦?',
+  '想起你之前说的「{what}」, 现在要不要聊两句?',
 ])
 
 /** 池子是空的那一句 (池子不该是空的, 但"点了没回音"这条不许再回来) */
-const ROUTER_WAKE_FALLBACK = '在呢.'
+const ROUTER_WAKE_FALLBACK = '今天过得怎么样呀?'
 
 /**
  * 下一次点「唤醒一下」先应哪一句 (纯函数, 判据 `check-luwi-portal` 真跑)
@@ -12963,49 +12970,148 @@ function wakeLineFor(lines, cursor) {
   return { text: pool[at], cursor: (at + 1) % pool.length }
 }
 
-/** `router.json` 里这一笔的游标 (`wake.cursor`): 读不到就从第一句起 */
-async function readWakeCursor() {
-  const state = (await readRouterJson(routerStatePath())) ?? {}
-  const cursor = Number(state?.wake?.cursor ?? 0)
-  return Number.isFinite(cursor) ? cursor : 0
+/**
+ * 判断层里现在能拿来开场的话题 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * 两处来源就是判断层自己读的那两份: `router.json` 的 `checks` (探索交来的检测项) 与
+ * `wishes.json` 的 `items` (主人亲口交代的未了的事). **关掉的检测项不算** —— 他关过一次就是不想提.
+ * 今天说过的沉到后面 (检测项看 `checksSaid`, 未了的事看 `said`), 于是连点两下先聊没提过的那件;
+ * 同一句话在两份里都出现时只留前面那份
+ *
+ * @param {object} state `router.json` 那一份 (坏 / 没有就当空)
+ * @param {object[]} wishes `wishes.json` 的 items
+ * @param {number} now 现在 (今天按这台机器的本地日期算, 与判断层同一把尺子)
+ * @returns {{id: string, kind: string, what: string, saidToday: boolean}[]}
+ */
+function wakeTopicsOf(state, wishes, now) {
+  const day = routerDayKey(now)
+  const said = state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {}
+  const checks = (Array.isArray(state?.checks) ? state.checks : [])
+    .filter((one) => one && one.enabled !== false && String(one?.what ?? '').trim() !== '')
+    .map((one) => {
+      const key = String(said[String(one?.id ?? '')] ?? '')
+      return {
+        id: String(one?.id ?? ''),
+        kind: 'check',
+        what: String(one.what).trim(),
+        saidToday: key !== '' && key.startsWith(day),
+      }
+    })
+  const items = (Array.isArray(wishes) ? wishes : [])
+    .filter((one) => one && String(one?.what ?? '').trim() !== '')
+    .map((one) => ({
+      id: String(one?.id ?? ''),
+      kind: 'wish',
+      what: String(one.what).trim(),
+      saidToday: Array.isArray(one?.said) && one.said.map(String).includes(day),
+    }))
+  const seen = new Set()
+  const all = [...checks, ...items].filter((one) => {
+    if (seen.has(one.what)) return false
+    seen.add(one.what)
+    return true
+  })
+  return [...all.filter((one) => !one.saidToday), ...all.filter((one) => one.saidToday)]
+}
+
+/**
+ * 点「唤醒一下」先开口的那一句 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * 2.8.1 #31: 这一句必须**主动找话题**. 判断层里有记着的事就把它说出来 —— 原话带在「」里, 于是
+ * "话题依据判断层展开"在**他看见的第一颗气泡**上就成立, 不靠模型那一轮赶上来; 一件都没有才退回
+ * [ROUTER_WAKE_TOPICS] 那一池. 轮转跨"话题 x 句式"两维: 连点三下既不是同一句, 也不会拿同一个
+ * 句式连着说同一件事 (与 #8 那条"连点不是同一句"同一条验收)
+ *
+ * @param {object} state `router.json` 那一份
+ * @param {object[]} wishes `wishes.json` 的 items
+ * @param {number} now 现在
+ * @param {number} cursor 上一次用到哪一格 (负数 / 坏值都夹回来)
+ * @returns {{text: string, cursor: number, kind: string, id: string, what: string, topics: object[], saidToday: boolean}}
+ */
+function wakeTopicFor(state, wishes, now, cursor) {
+  const topics = wakeTopicsOf(state, wishes, now)
+  const raw = Number(cursor)
+  const wanted = Number.isFinite(raw) ? Math.floor(raw) : 0
+  if (topics.length === 0) {
+    const pick = wakeLineFor(ROUTER_WAKE_TOPICS, wanted)
+    return {
+      text: pick.text,
+      cursor: pick.cursor,
+      kind: 'chat',
+      id: '',
+      what: '',
+      topics,
+      saidToday: false,
+    }
+  }
+  const cycle = topics.length * ROUTER_WAKE_TOPIC_LINES.length
+  const at = ((wanted % cycle) + cycle) % cycle
+  const topic = topics[at % topics.length]
+  const line = ROUTER_WAKE_TOPIC_LINES[Math.floor(at / topics.length) % ROUTER_WAKE_TOPIC_LINES.length]
+  return {
+    text: line.split('{what}').join(topic.what),
+    cursor: (at + 1) % cycle,
+    kind: topic.kind,
+    id: topic.id,
+    what: topic.what,
+    topics,
+    saidToday: topic.saidToday,
+  }
 }
 
 /**
  * 点「唤醒一下」那一场的开场正文 (纯函数)
  *
  * 与 `proactiveStartLine` 分开: 那一份允许"没有值得说的就保持沉默", 而这一颗是主人亲手点的 ——
- * 应声已经由宿主先落了, 这里只交代两件事: 那一句已经说出去 (别重复), 想补就补一句。
+ * 第一句已经由宿主先落了, 这里只交代三件事: 那一句已经说出去 (别重复), **接着说下去** (2.8.1 #31:
+ * 不许再回 "怎么了" "嗯?" 这类等他开口的话), 判断层里还有哪些事可以聊.
  * **不说来路**: 按钮 / 面板 / 判断层 / 指令这些字一个都不进她的嘴 (与 #43 同一条口径)
  *
- * @param {string} alreadySaid 宿主先应出去的那一句
+ * @param {string} alreadySaid 宿主先开口出去的那一句
+ * @param {{topics?: {what: string, saidToday?: boolean}[]}} material 判断层里能聊的事 (由 [wakeTopicFor] 带出来)
  */
-function wakeStartLine(alreadySaid) {
+function wakeStartLine(alreadySaid, material = {}) {
   const said = String(alreadySaid ?? '').trim()
+  const rows = (Array.isArray(material?.topics) ? material.topics : [])
+    .filter((one) => one && String(one?.what ?? '').trim() !== '')
+    .map((one) => {
+      const hint = one?.saidToday === true ? ' · 今天已经提过' : ''
+      return `- ${String(one.what).trim()}${hint}`
+    })
   return [
     '主人刚在手机上戳了你一下, 想听你说句话.',
-    said === '' ? '' : `你先应了一声「${said}」, 那一句已经发出去了, 不要重复它.`,
-    '还有顺带想说的就再补一句 (lw_say), 没有就保持沉默, 一条都不写.',
-    '别说按钮 / 面板 / 判断层 / 指令 / 系统这类来路, 就像平时随口接一句.',
+    said === '' ? '' : `你先开口说的那一句是: ${said}`,
+    said === '' ? '' : '那一句已经发出去了, 不要重复它.',
+    '这一下要你**主动找话题**: 不要只回「怎么了」「嗯?」这类等他开口的话, 顺着你刚说的那句往下聊, 把话递到他手里.',
+    rows.length > 0
+      ? ['话题从他记着的这些事里长出来 (挑一件真的与他有关的):', ...rows].join('\n')
+      : '一件记着的事都没有, 那就挑一件此刻能聊的: 今天过得怎么样 / 在忙什么 / 吃饭了没.',
+    '还想补就再补一句 (lw_say), 没有别的就保持沉默, 一条都不写.',
+    '别说按钮 / 面板 / 判断层 / 指令 / 系统这类来路, 就像平时随口接着说.',
   ].filter((one) => one !== '').join('\n')
 }
 
 /**
- * 判断层那颗「唤醒一下」: 人亲手点的, 不是闹钟 (2.8.1 #8)
+ * 判断层那颗「唤醒一下」: 人亲手点的, 不是闹钟 (2.8.1 #8 / #31)
  *
  * 与 [routerTick] 分两支是刻意的: 那一支是她自己在挑时机, 静默时段 / 冷却 / 沉睡前等待 /
  * "没什么值得说的"每一道都能让它不出声; 而这一颗是人当面戳她 —— 他等了, 就得有回音。所以这里
- * **一道闸都不看**: 直接开一场主动对话 (那一场照旧归 `proactive` 预设与三张表), 并把应声先落进
+ * **一道闸都不看**: 直接开一场主动对话 (那一场照旧归 `proactive` 预设与三张表), 并把第一句先落进
  * 它的 `lw/out`
+ *
+ * #31 起那一句**不是应声**: 从 `router.json` 的检测项 / `wishes.json` 的未了的事里挑一件说出来
+ * ([wakeTopicFor]), 一件都没有才用闲话池; 挑中的是哪一件也写进 `wake`, 面板与判据读同一份
  */
 async function routerWakeNow(ctx) {
-  const cursor = await readWakeCursor()
-  const chosen = wakeLineFor(ROUTER_WAKE_LINES, cursor)
+  const before = (await readRouterJson(routerStatePath())) ?? {}
+  const cursor = Number(before?.wake?.cursor ?? 0)
+  const now = Date.now()
+  const chosen = wakeTopicFor(before, await readWishes(), now, Number.isFinite(cursor) ? cursor : 0)
   const started = await startProactive(ctx, {
-    text: wakeStartLine(chosen.text),
+    text: wakeStartLine(chosen.text, chosen),
     via: 'wake',
     openLine: chosen.text,
   })
-  const now = Date.now()
   // 这一笔只记"开口了"与游标: `awaiting` 不写 (点了按钮不等于要主人再回一句), 冷却那一格照旧归
   // 自动那一支; `lastSpokenAt` 要写 —— 面板上「上一次开口」读的就是它, 刚说完却显示「—」也是错的
   const state = (await readRouterJson(routerStatePath())) ?? {}
@@ -13014,19 +13120,37 @@ async function routerWakeNow(ctx) {
     v: 1,
     at: now,
     lastSpokenAt: now,
-    last: { say: true, kind: 'wake', brief: '主人在判断层点了「唤醒一下」', why: '点了一下' },
+    last: {
+      say: true,
+      kind: 'wake',
+      brief: chosen.what === ''
+        ? '主人在判断层点了「唤醒一下」'
+        : `主人在判断层点了「唤醒一下」: ${chosen.what}`,
+      why: '点了一下',
+    },
     // 人亲手戳了一下也是"开口" (2.8.1 #11): 错过那笔账一样清零
     chatMisses: 0,
-    wake: { at: now, cursor: chosen.cursor, text: chosen.text, session: started?.session ?? null },
+    // `from` / `what` 是 #31 那一句"从哪一件事开的口": 面板与判据读同一份, 不必从 text 里拆
+    wake: {
+      at: now,
+      cursor: chosen.cursor,
+      text: chosen.text,
+      from: chosen.kind,
+      what: chosen.what,
+      session: started?.session ?? null,
+    },
   })
   console.log(
     `luwi-channel: the wake button: conversation ${String(started?.session ?? '').slice(0, 8)} pulled up,`
-      + ` first line #${Number(started?.open ?? 0) || 0} ("${chosen.text}")`,
+      + ` first line #${Number(started?.open ?? 0) || 0}`
+      + ` (${chosen.kind}${chosen.what === '' ? '' : `: ${chosen.what}`}) "${chosen.text}"`,
   )
   return {
     said: true,
     kind: 'wake',
     brief: 'the wake button',
+    topic: chosen.kind,
+    what: chosen.what,
     session: started?.session ?? null,
     line: chosen.text,
     via: 'wake',
