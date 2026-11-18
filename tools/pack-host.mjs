@@ -682,7 +682,11 @@ console.log(`pack-host: ${webui} imports cleanly`)
 // —— 本树基座正是 0.2.2, 1.17.0 在那一层可能对不上; 1.17.2 另带「恢复历史结果 / 修侧栏 tab / 参考图反推」。
 // 同一套逐条复核照旧: 三处 homedir 仍**恰好 3 次** (下面那道闸会拦)、`src/templates/` 仍是离线快照、
 // 工具名仍是 `generate_image` / `edit_image`、依赖仍是 schemastery + lucide-react。真机读数: 待装机复验
-const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.17.2' }
+// **2026-11-18 升到 1.19.0** (2.8.1 每轮一升, 本轮名额给了 image): 本地先取 tarball 逐条复核过
+// —— 三处 homedir 仍**恰好 3 次**、`src/templates/` 仍是 5 个离线快照、工具名仍是
+// `generate_image` / `edit_image`、依赖仍是 `schemastery ^3.18.4` + `lucide-react ^1.41.0`。
+// 真机读数见本轮落实报告 (装完开生图面板 / 模板栏)
+const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.19.0' }
 
 /** 拉 npm 的那条 registry: 这台开发机上 registry.npmjs.org 不通, 缺省走 npmmirror */
 const npmRegistry = process.env.LW_NPM_REGISTRY ?? 'https://registry.npmmirror.com'
