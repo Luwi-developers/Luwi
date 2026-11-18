@@ -1332,6 +1332,7 @@ private fun ChannelItems() {
         }
         AccessibilityRows()
         OcrRows()
+        RootOptInRow()
         if (state?.connected != true) {
             Button(
                 onClick = { ChannelSetting.connect() },
@@ -1393,6 +1394,40 @@ private fun KeepAliveRow() {
                 Toast.makeText(context, R.string.settings_power_keepalive_failed, Toast.LENGTH_LONG).show()
             }
             whitelisted = BatteryWhitelist.ignored(context)
+        },
+    )
+}
+
+/**
+ * 「用 root 连接」那一行 (2.8.1 #30)
+ *
+ * 这是"现在能不能去要授权"的唯一开关: 关着的时候 root 那条路一声不响 (首启就是这样), 点开才会去问
+ * 一次 su. 右侧那句话按 [RouteState.granted] 的三态走, 所以"还没试过"不会被说成"不可用" —— 一台装
+ * 着 KernelSU 但还没授权过的机器, 从前那两件事是同一句"没装, 或者没在跑"
+ *
+ * 开关自己那份读数直接取磁盘 (第一帧就是对的), 之后跟着这里自己的手; 点开的那一趟由
+ * [ChannelSetting.setRootOptedIn] 落盘并触发一次连接
+ */
+@Composable
+private fun RootOptInRow() {
+    val context = LocalContext.current
+    val working = ChannelSetting.working
+    val granted = ChannelSetting.routes.firstOrNull { it.backend == RemoteBackend.ROOT }?.granted
+    var optedIn by remember { mutableStateOf(ChannelSetting.readRootOptedIn(context)) }
+    SwitchPreference(
+        title = stringResource(R.string.settings_channel_root_opt_in),
+        summary = stringResource(
+            when {
+                optedIn && granted == false -> R.string.settings_channel_root_opt_in_refused
+                optedIn -> R.string.settings_channel_root_opt_in_on
+                else -> R.string.settings_channel_root_opt_in_off
+            },
+        ),
+        checked = optedIn,
+        enabled = !working,
+        onCheckedChange = { value ->
+            optedIn = value
+            ChannelSetting.setRootOptedIn(context, value)
         },
     )
 }
