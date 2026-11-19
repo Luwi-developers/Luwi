@@ -527,7 +527,12 @@ expect('client.js', client, "drawerRow('探索', '探索排期与上一次摘要
 expect('client.js', client, "h('h3', null, '判断')")
 expect('client.js', client, "h('h3', null, '探索')")
 expect('client.js', client, 'id = \'lwp-more-btn\'')
-expect('client.js', client, 'id = \'lwp-history-btn\'')
+// 头栏那颗「历史」胶囊 2026-11-19 撤了: 入口并进左边那颗头像 (见 §二十三)
+if (!client.includes('lwp-history-btn') && !client.includes("'lwp-tab', '历史'")) {
+  notes.push('ok   头栏的历史胶囊已撤 (入口并进头像)')
+} else {
+  failures.push('client.js: 头栏还挂着「历史」那颗胶囊 —— 2026-11-19 起它的入口是头像')
+}
 expect('client.js', client, 'function renderMenuDrawer')
 expect('client.js', client, "drawer === 'menu'")
 expect('client.js', client, "'‹ 返回'")
@@ -2562,6 +2567,38 @@ if (hostLimit !== '' && hostLimit === portalLimit) {
   notes.push(`ok   说明牌的上限与宿主 LwIn.MAX_BYTES 同一个数 (${hostLimit} MB)`)
 } else {
   failures.push(`说明牌的上限与宿主对不上: 宿主=${hostLimit || '?'} 门户=${portalLimit || '?'}`)
+}
+
+// ── 二十三、头像 = 历史 + 「已开新对话」是浮层 (2026-11-19, 主人) ────────────────
+//
+// 原话: "点击头像开新对话改为打开历史" + "头像点击进入新对话按钮生效范围缩小到头像大小" +
+// "新对话的提示弹窗要单独一层, 否则会导致中间的图文受弹窗影响下移, 弹窗消失后又上移"
+
+// ① 头像那颗钮开的是历史窗, 而且里面**只有头像** (昵称搬出去当标识)
+expect('client.js', client, 'els.brand.onclick = function () { openHistory() }')
+expect('client.js', client, 'els.brand.setAttribute(\'aria-label\', \'历史对话\')')
+if (!client.includes('els.brand.appendChild(brandText)')) {
+  notes.push('ok   昵称不在那颗按钮里 (点名字不再开任何东西)')
+} else {
+  failures.push('client.js: 昵称又塞回头像按钮里了 —— 点名字会被当成点按钮')
+}
+// ② 热区 = 头像本身: 28x28 的圆钮, 不是原来那条 flex:1 的大胶囊
+if (client.includes("'#lwp-brand{display:block;flex:none;width:28px;height:28px;")
+  && !client.includes("'#lwp-brand{display:flex")) {
+  notes.push('ok   头像按钮就是头像那么大 (28x28, 主体热区没有外扩)')
+} else {
+  failures.push('client.js: 头像按钮还是那条 flex:1 的大胶囊 (热区没有缩到头像)')
+}
+// ③ 新对话仍有入口: 历史窗底部那一颗 (头栏不再是入口)
+expect('client.js', client, 'function startFromHistory')
+expect('client.js', client, 'els.historyNew.onclick = function () { startFromHistory() }')
+// ④ 「已开新对话」是 absolute 的一层: 不参与排版, top 按头栏实际高度写
+expect('client.js', client, "'#lwp-undo{position:absolute;left:50%;transform:translateX(-50%);z-index:2;pointer-events:none;")
+expect('client.js', client, 'els.undo.style.top = String(')
+if (!client.includes("'#lwp-undo{align-self:center")) {
+  notes.push('ok   「已开新对话」不再占流里的高度 (出现/收起都不顶动中间的图文)')
+} else {
+  failures.push('client.js: 提示还是流里的一块 —— 一出现中间那张脸就被顶下去')
 }
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────

@@ -607,20 +607,21 @@ window.__ModuleLoader__.load({
 
       '#lwp-head{position:relative;z-index:1;display:flex;align-items:center;gap:8px;padding:8px 14px;',
       'border-bottom:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.1));flex:none}',
-      // 左边那一块 = 身份 (2026-11-10 主人: "右上角 luwi 图标和 luwi 名可在外观设置中修改" +
-      // 本轮定下的布局 B: 身份在左、按钮在右). 整块仍可点 = 开一场新对话
-      '#lwp-brand{display:flex;align-items:center;gap:9px;flex:1;min-width:0;appearance:none;',
-      'border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:4px 6px;',
-      'margin-left:-6px;border-radius:14px;cursor:pointer;',
-      'transition:background-color .15s ease,transform .15s ease}',
-      '#lwp-brand:active{background:rgba(1,180,255,.1);transform:scale(.98)}',
-      '@media (hover:hover){#lwp-brand:hover{background:rgba(1,180,255,.08)}}',
+      // 左边 = 头像 (2026-11-10 主人: "右上角 luwi 图标和 luwi 名可在外观设置中修改")
+      // **2026-11-19 改口径** (主人: "点击头像开新对话改为打开历史" + "生效范围缩小到头像大小"):
+      // 这颗钮只有头像那么大 (28x28 的圆钮, 热区就是头像), 点它开历史窗; 昵称搬到旁边当标识, 点不动
+      '#lwp-brand{display:block;flex:none;width:28px;height:28px;padding:0;margin:0;appearance:none;',
+      'border:0;background:transparent;color:inherit;line-height:0;border-radius:999px;cursor:pointer;',
+      'transition:transform .15s ease}',
+      '#lwp-brand:active{transform:scale(.94)}',
+      '@media (hover:hover){#lwp-brand:hover{background:rgba(1,180,255,.12)}}',
       '#lwp-brand:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3964fe);outline-offset:2px}',
-      '#lwp-brand .lwp-mark{position:relative;flex:none;width:28px;height:28px;display:grid;place-items:center}',
+      '#lwp-brand .lwp-mark{position:relative;flex:none;width:28px;height:28px;display:block}',
       // 头像换成自定义那张时可能是方图: 圆裁 + 铺满, 28px 的框不变 (布局不跟着图抖)
       '#lwp-brand .lwp-mark img{display:block;width:28px;height:28px;border-radius:999px;object-fit:cover}',
-      '#lwp-brand .lwp-brand-text{display:flex;flex-direction:column;min-width:0;gap:1px}',
-      '#lwp-brand .lwp-brand-name{font-size:15px;font-weight:600;line-height:1.15;letter-spacing:.01em;',
+      // 昵称与读数在头栏只是标识 (2026-11-19: 搬出按钮, 于是点那两个字什么都不发生)
+      '#lwp-head .lwp-brand-text{display:flex;flex-direction:column;min-width:0;gap:1px}',
+      '#lwp-head .lwp-brand-name{font-size:15px;font-weight:600;line-height:1.15;letter-spacing:.01em;',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:34vw}',
       '#lwp-head .lwp-meta{display:none}',
       // 「正在做」那颗点 (2026-11-10 主人: "正在做的标识改成右上角加黄色点表示" +
@@ -634,14 +635,15 @@ window.__ModuleLoader__.load({
       '@keyframes lwp-pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.42)}',
       '50%{box-shadow:0 0 0 5px rgba(245,158,11,0)}}',
       '@media (prefers-reduced-motion:reduce){#lwp-busy[data-state="busy"]{animation:none}}',
-      // 右边那两颗: 历史 / 更多. 类名而不是 `#lwp-head > button` —— 后者特异性比 `#lwp-brand` 高,
-      // 会把品牌按钮也套进"圆角描边小按钮"那一套里 (2026-11-08 预览里就是一颗白胶囊)
+      // 右边那一颗: 更多 (`⋯`)。**「历史」那颗已撤** (2026-11-19: 入口并进左边那颗头像)。
+      // 类名而不是 `#lwp-head > button` —— 后者特异性比 `#lwp-brand` 高,
+      // 会把头像也套进"圆角描边小按钮"那一套里 (2026-11-08 预览里就是一颗白胶囊)
       '#lwp-head .lwp-tab{appearance:none;border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
       'background:transparent;color:inherit;border-radius:999px;padding:4px 10px;font:inherit;font-size:12px;',
       'line-height:1.5;flex:none}',
       '#lwp-head .lwp-tab[data-on="on"]{background:var(--dsw-alias-button-info-fill,#3b82f6);color:#fff;border-color:transparent}',
-      // `⋯` 那顆比文字按钮宽一点, 点起来才不憋
-      '#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px}',
+      // `⋯` 那顆比文字按钮宽一点, 点起来才不憋; `margin-left:auto` 把它顶到最右 (中间那段名字不再占满)
+      '#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px;margin-left:auto}',
 
       /* ── 历史记录窗 (2026-11-10 主人: "左边再加上历史记录 … 弹窗显示, 上方显示搜索框") ────
        *
@@ -908,9 +910,11 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary,#6b7280);background:rgba(15,23,42,.045);',
       '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}',
       '@media (prefers-color-scheme:dark){.lwp-sep span{color:#9aa1ab;background:rgba(255,255,255,.07)}}',
-      // 开新对话之后那 3 秒的退路: 是流里的一块 (不是浮在消息上), 收起时 display:none 不占高度
-      '#lwp-undo{align-self:center;flex:none;display:flex;align-items:center;gap:8px;margin:8px 0 0;',
-      'padding:6px 10px 6px 12px;border-radius:999px;font-size:12px;',
+      // 「已开新对话」那颗读数 (2026-11-19 主人: "新对话的提示弹窗要单独一层, 否则会导致中间的图文
+      // 受弹窗影响下移, 弹窗消失后又上移"): **absolute 的一层, 不参与排版** —— 出现与收起都不改
+      // #lwp-flow 的高度, 中间那张脸与对话一个字都不动; `top` 由 showUndo 按头栏实际高度写
+      '#lwp-undo{position:absolute;left:50%;transform:translateX(-50%);z-index:2;pointer-events:none;',
+      'display:flex;align-items:center;gap:8px;padding:6px 10px 6px 12px;border-radius:999px;font-size:12px;',
       'color:var(--dsw-alias-label-primary,#18181b);background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
       '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur);',
       '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent)}',
@@ -1929,9 +1933,15 @@ window.__ModuleLoader__.load({
        * **不做「撤销」** (2026-11-08 真机定): 上一场在切走后会被 dsh 卸载, 回来要重新 `openSession`,
        * 而 `sessions.retain` 只认当前工作区里还挂着的会话 —— 实测 `unknown session`, 重试 3.2 s 也
        * 救不回来。摆一颗按下去只回一句"打不开了"的按钮, 比没有这颗按钮更糟
+       *
+       * **它是浮层** (2026-11-19 主人: "提示弹窗要单独一层, 否则中间的图文受弹窗影响下移, 弹窗消失
+       * 后又上移"): `#lwp-undo` 是 `position:absolute`, 这里只把 `top` 顶到头栏下面 —— 流里的高度
+       * 一个像素都不占, 出现/收起都不重排对话区
        */
       function showUndo() {
         if (!els.undo) return
+        var headHeight = els.head ? els.head.offsetHeight : 0
+        els.undo.style.top = String((headHeight > 0 ? headHeight : 53) + 6) + 'px'
         els.undo.hidden = false
         if (undoTimer !== null) clearTimeout(undoTimer)
         undoTimer = setTimeout(hideUndo, 8000)
@@ -3174,7 +3184,12 @@ window.__ModuleLoader__.load({
         setTimeout(look, 150)
       }
 
-      /** 底部那颗「开始新的对话」: 与头栏那块身份同一个入口 */
+      /**
+       * 底部那颗「开始新的对话」
+       *
+       * **2026-11-19 起这是新对话的两条入口之一** (另一条是首启的 [autoStart]): 头栏那颗头像
+       * 改去开历史窗了, 所以"开一场新的"收敛到这一颗 —— 先关窗, 再走 [newConversation]
+       */
       function startFromHistory() {
         closeHistory()
         newConversation()
@@ -5469,12 +5484,14 @@ window.__ModuleLoader__.load({
 
         var head = h('div')
         head.id = 'lwp-head'
-        // 左边那一块 = 身份 (头像 + 昵称): 整块可点 = 开一场新对话 (2026-11-08 的规矩留着);
-        // 头像与昵称由 `applyIdentity()` 从 `portalLook` 那一份里填 (2026-11-10 起可在外观里改)
+        // 左边 = 头像 (2026-11-19 主人: "点击头像开新对话改为打开历史" + "生效范围缩小到头像大小"):
+        // 那颗钮里只有 28px 的头像, **热区就是头像** —— 昵称搬到它旁边当标识, 点不亮任何东西。
+        // 头像与昵称都由 `applyIdentity()` 从 `portalLook` 那一份里填 (2026-11-10 起可在外观里改)
+        els.head = head
         els.brand = h('button')
         els.brand.id = 'lwp-brand'
         els.brand.type = 'button'
-        els.brand.setAttribute('aria-label', '开一个新对话')
+        els.brand.setAttribute('aria-label', '历史对话')
         var mark = h('span', 'lwp-mark')
         els.markImg = document.createElement('img')
         els.markImg.src = MARK_PNG
@@ -5489,20 +5506,16 @@ window.__ModuleLoader__.load({
         els.busy.setAttribute('data-on', 'off')
         mark.appendChild(els.busy)
         els.brand.appendChild(mark)
+        els.brand.onclick = function () { openHistory() }
+        head.appendChild(els.brand)
+        // 昵称与读数: 只是标识 (不进那颗头像按钮, 否则又变成"整块可点")
         var brandText = h('span', 'lwp-brand-text')
         els.brandName = h('span', 'lwp-brand-name', DEFAULT_NAME)
         brandText.appendChild(els.brandName)
         els.meta = h('span', 'lwp-meta', '')
         brandText.appendChild(els.meta)
-        els.brand.appendChild(brandText)
-        els.brand.onclick = function () { newConversation() }
-        head.appendChild(els.brand)
-        // 右边: 历史 → 更多 (`⋯`)
-        els.historyButton = h('button', 'lwp-tab', '历史')
-        els.historyButton.id = 'lwp-history-btn'
-        els.historyButton.type = 'button'
-        els.historyButton.onclick = function () { openHistory() }
-        head.appendChild(els.historyButton)
+        head.appendChild(brandText)
+        // 右边只剩 `⋯`: 「历史」那颗胶囊 2026-11-19 撤了 (入口并进头像)
         els.moreButton = h('button', 'lwp-tab lwp-more', '⋯')
         els.moreButton.id = 'lwp-more-btn'
         els.moreButton.type = 'button'
@@ -5511,7 +5524,7 @@ window.__ModuleLoader__.load({
         head.appendChild(els.moreButton)
         root.appendChild(head)
 
-        // 「已开新对话」: head 与 flow 之间的一块 (流里的, 不遮消息), 8 秒后自己收
+        // 「已开新对话」: **浮在头栏下面的一层** (absolute, 不占排版), 8 秒后自己收
         els.undo = h('div')
         els.undo.id = 'lwp-undo'
         els.undo.hidden = true

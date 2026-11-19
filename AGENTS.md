@@ -160,9 +160,12 @@
   `--dsw-menu-backdrop-filter` / `--dsw-elevation-panel`); **待发附件行在文本区上面** (图/表情 64px 缩略 + `×`,
   非图 chip), **点表情只进待发栏** (`stageSticker`); 顶条不显示会话标题
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
-- **门户头栏**: 左身份 (头像 + 昵称, 整块点 = 开新对话), 右 **历史** + **`⋯` 更多** (判断 / 探索 进抽屉 `menu` 态,
-  顶上一行「‹ 返回」); 状态点是**头像右下角那颗** (`#lwp-busy`) 三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做**
-  (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`)
+- **门户头栏**: 左 **头像 (28px, 热区就是头像, 点 = 历史窗)** + 昵称 (只是标识, 点不动), 右只有 **`⋯` 更多**
+  (判断 / 探索 进抽屉 `menu` 态, 顶上一行「‹ 返回」); 那颗「历史」胶囊 2026-11-19 已撤 (入口并进头像),
+  新对话走历史窗底部「开始新的对话」与首启自动那一场; **「已开新对话」是浮层**
+  (`#lwp-undo` = `position:absolute` + `z-index:2` + `pointer-events:none`, `top` 按头栏高度写) ——
+  出现与收起都不占排版, 中间的图文不往下移再弹回来; 状态点是**头像右下角那颗** (`#lwp-busy`)
+  三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做** (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`)
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
