@@ -2745,10 +2745,17 @@ const TOOLS = [
       + 'press one of those, or use the closer name they suggest. A point '
       + 'is for when there is no name to use - a canvas, or a place you measured on a screenshot - '
       + 'and it is in the screen\'s own pixels, with 0,0 at its top left. Either way the call '
-      + 'returns once the device has delivered the press, so a screenshot or an lw_ui taken after '
-      + 'it shows the result. Pass hold to make it a long press, which is how a context menu, a '
-      + 'selection or a drag handle is reached; by name that uses the control\'s own long click '
-      + 'action, and a control without one is pressed with a held finger instead.',
+      + 'reads the screen back once, about 300ms after the press, and says what that did: '
+      + '"effect=changed" with up to five lines of text that appeared or went, or '
+      + '"effect=unchanged" with the three controls that come closest to what you meant - press '
+      + 'one of those instead of the same place again. Two presses in a row that leave the screen '
+      + 'exactly as it was stop the third one before it is sent (the answer says '
+      + 'reason=effect-missing), so a screen that ignores presses cannot be tapped at all day; a '
+      + 'screen that did change lets the next press through. Pass verify: "off" to skip that '
+      + 'read-back, which is the old behaviour word for word. Pass hold to make it a long press, '
+      + 'which is how a context menu, a selection or a drag handle is reached; by name that uses '
+      + 'the control\'s own long click action, and a control without one is pressed with a held '
+      + 'finger instead.',
     parameters: {
       displayId: DISPLAY_ID,
       text: {
@@ -2766,6 +2773,15 @@ const TOOLS = [
           + 'which is what a self-drawn screen needs. a11y is the tree alone, ocr is the pixels '
           + 'alone. An ambiguous name is never followed by a guess, whichever way it was found',
       },
+      verify: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'Whether to read the screen back after the press. auto (the default) reads '
+          + 'it twice - just before and 300ms after - and answers effect=changed with the text '
+          + 'difference, or effect=unchanged with the three closest controls to press instead. '
+          + 'off sends the press and answers exactly as this tool always did, which is what to '
+          + 'use when the screen answers in a picture, a sound or a toast that no tree shows',
+      },
       hold: holdParameter(
         'A hold past a long press is a press kept down, which is what a voice message being '
         + 'recorded or a drag that has to be started by holding expects.',
@@ -2776,7 +2792,7 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, context) {
       const named = args?.text !== undefined
       const placed = args?.x !== undefined && args?.y !== undefined
       if (named && placed) {
@@ -2786,34 +2802,71 @@ const TOOLS = [
         throw new Error('lw_tap needs either a text to press by name or both x and y')
       }
       const held = holdMs(args?.hold)
+      // 核对那一档 (落实表 #32): 缺省 auto, verify=off 与今天逐字相同
+      const verify = args?.verify === 'off' ? 'off' : 'auto'
+      const sessionId = sessionIdOf(context)
+      const before = verify === 'off' ? null : await tapEffectSnapshot(args.displayId)
+      const wanted = named
+        ? String(args.text)
+        : tapEffectLabelAt(before, args.x, args.y)
+      // 连着两下没变: 这一下不发出去, 让调用方在原地换一条路 (账只有 auto 那一档才记)
+      const brake = verify === 'off' ? null : tapEffectBrake(tapEffectLog, sessionId, before, wanted)
+      if (brake !== null) {
+        console.log(`lw_tap: not sent, reason=${brake.reason} after ${brake.streak} unchanged`
+          + ` on displayId ${before.displayId}`)
+        return said(tapEffectBrakeAnswer(brake, before.displayId), args.note)
+      }
+      const withEffect = (pressed, report, pressedLabel) => tapEffectCheck({
+        verify,
+        before,
+        pressed,
+        wanted: pressedLabel === undefined ? wanted : pressedLabel,
+        displayId: args.displayId,
+        sessionId,
+        step: exploreRun.steps,
+        holdMs: held,
+      }).then((effect) => (effect === '' ? report : `${report}\n\n${effect}`))
       if (named) {
         const source = args.source ?? 'auto'
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
         if (source === 'ocr') {
           const reading = await tapByReading(args.displayId, args.text, held)
-          return said(reading.candidates.length > 0
+          const report = reading.candidates.length > 0
             ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined)
-            : reading.report, args.note)
+            : reading.report
+          return said(await withEffect(reading.pressed === true, report, reading.pressedLabel), args.note)
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
         // 这里看的是 clicked 而不是 outcome: 无障碍动作被拒之后桥会用一根按住的手指兜底,
         // 那一下 outcome 仍是 unclicked 而 clicked 已经是真, 再退到读屏就会按第二次
         if (source === 'a11y' || tree.clicked === true || tree.outcome === 'ambiguous') {
-          return formatNamedTap(tree, args.note)
+          return said(await withEffect(tree.clicked === true, namedTapReport(tree)), args.note)
         }
         const reading = await tapByReading(args.displayId, args.text, held)
         // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
-        return said(reading.candidates.length > 0
+        const report = reading.candidates.length > 0
           ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree)
-          : `${namedTapReport(tree)}\n${reading.report}`, args.note)
+          : `${namedTapReport(tree)}\n${reading.report}`
+        return said(await withEffect(reading.pressed === true, report, reading.pressedLabel), args.note)
       }
-      return formatGesture('tapped', await call('tap', {
+      const delivered = await call('tap', {
         displayId: args.displayId,
         x: args.x,
         y: args.y,
         holdMs: held,
-      }), args.note)
+      })
+      const effect = await tapEffectCheck({
+        verify,
+        before,
+        pressed: delivered.tapped === true,
+        wanted,
+        displayId: args.displayId,
+        sessionId,
+        step: exploreRun.steps,
+        holdMs: held,
+      })
+      return said(formatGesture('tapped', delivered, undefined, effect === '' ? [] : ['', effect]), args.note)
     },
   }),
 
@@ -6549,8 +6602,13 @@ function fieldName(field) {
   return `${field.className}${said ? ` "${said}"` : ''} at ${formatRect(field.bounds)}`
 }
 
-/** What a gesture was delivered as, which is all a caller can know without looking */
-function formatGesture(verb, result, note) {
+/**
+ * What a gesture was delivered as, which is all a caller can know without looking
+ *
+ * `extra` 是接在正文之后、那段机器可读 JSON 之前的花絮 (点按那一档拿它放核对结果): JSON 必须仍是
+ * 尾巴, 否则调用方按"最后一个 `{`"解析的那条路就断了
+ */
+function formatGesture(verb, result, note, extra = []) {
   if (result.tapped === true || result.swiped === true) {
     const lines = result.swiped === true
       ? [`${verb} displayId ${result.displayId} over ${result.durationMs}ms`]
@@ -6561,6 +6619,7 @@ function formatGesture(verb, result, note) {
         + ' injected presses - the gesture was delivered to a display that is not listening.'
         + ' Send WAKEUP with lw_key first if something was supposed to happen.')
     }
+    if (extra.length > 0) lines.push('', ...extra)
     return said(withJson(lines, result), note)
   }
   return said(withJson([`the device did not report the gesture as delivered`], result), note)
@@ -6921,11 +6980,6 @@ function formatQuickOpened(result) {
   ].join('\n')
 }
 
-/** What pressing by name did, which is the one call that can be ambiguous */
-function formatNamedTap(result, note) {
-  return said(namedTapReport(result), note)
-}
-
 /** What reading a screen's pixels found */
 function formatOcr(result) {
   const where = `displayId ${result.displayId}`
@@ -7001,12 +7055,15 @@ function asleepLine(result) {
  */
 async function tapByReading(displayId, text, hold = 0) {
   const result = await call('ocr', { displayId })
-  if (result.error) return { report: `the screen could not be read: ${result.error}`, candidates: [] }
+  if (result.error) {
+    return { report: `the screen could not be read: ${result.error}`, candidates: [], pressed: false }
+  }
   if (result.screen && result.screen !== 'on') {
     return {
       report: `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
         + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.',
       candidates: [],
+      pressed: false,
     }
   }
   const lines = result.lines ?? []
@@ -7022,6 +7079,7 @@ async function tapByReading(displayId, text, hold = 0) {
         : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
           + ' lines it could read',
       candidates: closestReadLines(lines, needle),
+      pressed: false,
     }
   }
   if (candidates.length > 1) {
@@ -7031,6 +7089,7 @@ async function tapByReading(displayId, text, hold = 0) {
           .join(', ')
         + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
       candidates: [],
+      pressed: false,
     }
   }
   const only = candidates[0]
@@ -7042,6 +7101,9 @@ async function tapByReading(displayId, text, hold = 0) {
       + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
       + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`,
     candidates: [],
+    // 按下去了才值得回读核对 (落实表 #32): 上面三条"什么都没按"的路不占那一次读屏
+    pressed: true,
+    pressedLabel: String(only.text ?? ''),
   }
 }
 
@@ -7216,6 +7278,272 @@ function formatRect(rect) {
 
 function sameRect(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.every((value, index) => value === b[index])
+}
+
+/* ── 按完这一下先验一次 (2.8.1 落实表 #32) ────────────────────────────────
+ *
+ * 点按原来"送出去就算成功": 按钮是灰的、面板没开、点在动画中间 —— 界面一点没变, 而回执与真的生效
+ * 一模一样, 于是调用方照着没变的界面继续点下去 (探索那种连点十几下的流程一踩就是十几下, 依据
+ * VeriGUI https://arxiv.org/abs/2604.05477 说的"重复无效动作占全部失败 72.3%"就是这条)
+ *
+ * 这里补一次**回读**: 按下之前取一次树, 按下之后 [TAP_EFFECT_WAIT_MS] 再取一次, 比文本集合与目标
+ * 那一格的位置. 变了说变了 (附新旧文本差), 没变说没变并给出最像的三个候选 —— 调用方能在原地换一条
+ * 路. 连着两下没变时第三下**不发出去**, 回 `reason=effect-missing`
+ *
+ * 只在 `lw_tap` 上开 (`lw_swipe` / `lw_key` 不动): 每一下多两次树读取, 连点十几下的流程约 +0.3 s 一步
+ */
+
+/** 按下之后等多久再回读: 短了读到的还是按下那一帧, 长了每一步都慢 */
+const TAP_EFFECT_WAIT_MS = 300
+
+/** 一次树读取最多等这么久, 超了就不核对并回 `effect=unknown` (宁可不说, 不许阻塞主流程) */
+const TAP_EFFECT_READ_MS = 900
+
+/** 差额最多列几行: 五行走得完, 再多就是第二份整屏 */
+const TAP_EFFECT_DIFF_LINES = 5
+
+/** 账里留多少条: 只给探索的 status 与那一次刹车看, 不是审计 */
+const TAP_EFFECT_KEPT = 40
+
+/** 连着几条 `unchanged` 才踩那一脚 (`exploreEffectReason` 用的是同一个数) */
+const TAP_EFFECT_STREAK = 2
+
+/**
+ * 这一次进程里点过、核对过的那些一下
+ *
+ * 一行 `{ step, effect, displayId, at, fingerprint, session }`. **只由 `lw_tap` 的核对写**; 探索的
+ * status 按场次把它挑出来念 (`effects`). 不落盘 —— 它算的是"刚才连点的那十几下", 不是要跨重启记住的账
+ */
+const tapEffectLog = []
+
+/** 一块屏的指纹: 念得出字的那些节点的文本与矩形, 排好再拼起来 (便宜的相等判断) */
+function tapEffectFingerprint(snapshot) {
+  return (snapshot?.nodes ?? []).map((node) => `${node.label}@${node.bounds.join(',')}`).join('|')
+}
+
+/**
+ * 读一次树, 收成"能比的那一份": 只留念得出字的节点 (text 或 desc), 按矩形自上而下排好
+ *
+ * 读不到 (无障碍关着 / 通道超时 / 这块屏没了) 回 null —— 那是"这一次核不了", 不是"没有变化",
+ * 两者在回执上必须分开 (`effect=unknown`)
+ */
+async function tapEffectSnapshot(displayId) {
+  let result
+  try {
+    result = await withTimeout(call('ui', { displayId }), TAP_EFFECT_READ_MS)
+  } catch {
+    return null
+  }
+  if (result === null || typeof result !== 'object') return null
+  if (result.enabled !== true || result.error) return null
+  const nodes = (Array.isArray(result.nodes) ? result.nodes : [])
+    .map((node) => ({
+      label: String(node?.text ?? '') || String(node?.description ?? ''),
+      bounds: Array.isArray(node?.bounds) ? node.bounds.slice(0, 4) : [],
+    }))
+    .filter((node) => node.label !== '' && node.bounds.length === 4)
+    .sort((left, right) => left.bounds[1] - right.bounds[1]
+      || left.bounds[0] - right.bounds[0]
+      || left.label.localeCompare(right.label))
+  return {
+    displayId: Number(result.displayId ?? displayId) || 0,
+    label: String(result.label ?? ''),
+    nodes,
+    texts: [...new Set(nodes.map((node) => node.label))].sort(),
+  }
+}
+
+/** 两份快照之间新出现的 / 消失的文本 */
+function tapEffectDiff(before, after) {
+  const was = before?.texts ?? []
+  const now = after?.texts ?? []
+  return {
+    added: now.filter((text) => !was.includes(text)),
+    lost: was.filter((text) => !now.includes(text)),
+  }
+}
+
+/** 这一段文字在快照里的第一格 (按文本找), 找不到回 null */
+function tapEffectNodeFor(snapshot, label) {
+  const wanted = String(label ?? '').trim()
+  if (wanted === '') return null
+  return (snapshot?.nodes ?? []).find((node) => node.label === wanted) ?? null
+}
+
+/**
+ * 这一下有没有让界面变 (纯函数, 真值表就压它)
+ *
+ * 三分: `changed` = 文本集合变了, 或者目标那一格挪了位; `unchanged` = 两样都没变; `unknown` = 有一
+ * 份读不到. 自绘界面 (canvas) 本来就没有树, 那种屏只会走到 `unknown`, 不会把"变了"误判成"没变"
+ */
+function tapEffectOf(before, after, wanted) {
+  if (before === null || after === null) return 'unknown'
+  const { added, lost } = tapEffectDiff(before, after)
+  if (added.length > 0 || lost.length > 0) return 'changed'
+  const was = tapEffectNodeFor(before, wanted)
+  const now = tapEffectNodeFor(after, wanted)
+  if (was !== null && now !== null && !sameRect(was.bounds, now.bounds)) return 'changed'
+  return 'unchanged'
+}
+
+/**
+ * 没变的时候"接下来该按哪几个": 屏幕上除了刚按的那一格之外, 最像的三个
+ *
+ * 分数还是 [closenessScore] 那一套 (像不像 0.8 + 识别置信 0.2), 树里读到的文本算满置信 —— 不新写一
+ * 套打分. **按过的那一格排掉**: 让调用方"再按一次同一个地方"正是这一整条要治的病
+ */
+function tapEffectCandidates(snapshot, wanted, limit = MAX_TAP_CANDIDATES) {
+  const pressed = String(wanted ?? '').trim()
+  const lines = (snapshot?.nodes ?? [])
+    .filter((node) => node.label !== pressed)
+    .map((node) => ({ text: node.label, box: node.bounds, score: 1 }))
+  return closestReadLines(lines, pressed, limit)
+}
+
+/** 一个点上压着的那一格叫什么: 点按那一档按过的那一格就是从这里读出来的 */
+function tapEffectLabelAt(snapshot, x, y) {
+  const atX = Number(x)
+  const atY = Number(y)
+  if (!Number.isFinite(atX) || !Number.isFinite(atY)) return ''
+  let best = null
+  for (const node of snapshot?.nodes ?? []) {
+    const [left, top, right, bottom] = node.bounds
+    if (atX < left || atX > right || atY < top || atY > bottom) continue
+    const area = (right - left) * (bottom - top)
+    if (best === null || area < best.area) best = { node, area }
+  }
+  return best === null ? '' : best.node.label
+}
+
+/**
+ * 核对那一段回执: 一行机器可读的 `effect=`, 后面跟人读的差额或候选
+ *
+ * `changed` 附新旧文本差最多 [TAP_EFFECT_DIFF_LINES] 行; `unchanged` 附三个候选 (text / score /
+ * bbox, 按分数降序) 与一句"先看一眼再按"; `unknown` 说明这次核不了, 别据此另点
+ */
+function formatTapEffect(effect, before, after, candidates = []) {
+  if (effect === 'unknown') {
+    return 'effect=unknown: the screen could not be read back after the press, so whether anything'
+      + ' changed is not known - read it with lw_ui before the next press'
+  }
+  if (effect === 'changed') {
+    const { added, lost } = tapEffectDiff(before, after)
+    const lines = ['effect=changed: the screen answered the press']
+    for (const text of added.slice(0, TAP_EFFECT_DIFF_LINES)) {
+      lines.push(`  + ${JSON.stringify(text)}`)
+    }
+    const room = Math.max(0, TAP_EFFECT_DIFF_LINES - added.length)
+    for (const text of lost.slice(0, room)) lines.push(`  - ${JSON.stringify(text)}`)
+    const total = added.length + lost.length
+    if (total > TAP_EFFECT_DIFF_LINES) {
+      lines.push(`  … ${total - TAP_EFFECT_DIFF_LINES} more changed line(s)`)
+    }
+    return lines.join('\n')
+  }
+  const lines = [
+    'effect=unchanged: the press was delivered and the screen is exactly as it was - nothing was'
+    + ' added, removed or moved. Pressing the same place again would do the same nothing.',
+  ]
+  if (candidates.length > 0) {
+    lines.push('The closest things to press instead are:')
+    for (const candidate of candidates) {
+      lines.push(`- ${JSON.stringify(candidate.text)} at [${candidate.bbox.join(',')}]`
+        + ` score ${candidate.score.toFixed(3)}`)
+    }
+    lines.push('Read the screen with lw_ui, or press one of those by a point inside its bbox.')
+  } else {
+    lines.push('Nothing else on this screen looks like it: read it again with lw_ui.')
+  }
+  return lines.join('\n')
+}
+
+/** 这一场 + 这一块屏最近的那几条 (纯函数): 从后往前收, 遇到一条 `changed` 就断开 */
+function tapEffectTail(log, sessionId, displayId) {
+  const entries = Array.isArray(log) ? log : []
+  const tail = []
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry?.session !== sessionId || entry?.displayId !== displayId) continue
+    tail.unshift(entry)
+    if (entry.effect !== 'unchanged') break
+  }
+  return tail
+}
+
+/** 尾巴上有几条连着的 `unchanged` (纯函数) */
+function tapEffectStreak(tail) {
+  let streak = 0
+  for (let index = tail.length - 1; index >= 0; index -= 1) {
+    if (tail[index]?.effect !== 'unchanged') break
+    streak += 1
+  }
+  return streak
+}
+
+/**
+ * 连着两下都没变之后的那一脚刹车 (纯函数)
+ *
+ * 只在"屏幕还是那一屏"时踩: 读回来的指纹与上一条 `unchanged` 记下的那份一样, 说明再按同一个地方还
+ * 是什么都不会发生 —— 这一下就不发出去, 回 `reason=effect-missing` 加三个候选. 屏幕真变了 (或者读不
+ * 到了) 就放行, 于是这个刹车不会把一场探索关死
+ *
+ * 回 null = 照常发出去; 回 `{ reason, streak, candidates }` = 这一下不发
+ */
+function tapEffectBrake(log, sessionId, snapshot, wanted, streakLimit = TAP_EFFECT_STREAK) {
+  if (snapshot === null) return null
+  const tail = tapEffectTail(log, sessionId, snapshot.displayId)
+  const streak = tapEffectStreak(tail)
+  if (streak < streakLimit) return null
+  if (tail[tail.length - 1].fingerprint !== tapEffectFingerprint(snapshot)) return null
+  return { reason: 'effect-missing', streak, candidates: tapEffectCandidates(snapshot, wanted) }
+}
+
+/** 刹车那一下的回执: 先说清"这一下没发出去", 再给三条别的路 */
+function tapEffectBrakeAnswer(brake, displayId) {
+  const lines = [
+    `not pressed: the last ${brake.streak} presses on displayId ${displayId} left the screen`
+    + ' exactly as it was, so this one was not sent (reason=effect-missing).',
+    'Pressing the same place again would do the same nothing. What is there to press instead:',
+  ]
+  for (const candidate of brake.candidates) {
+    lines.push(`- ${JSON.stringify(candidate.text)} at [${candidate.bbox.join(',')}]`
+      + ` score ${candidate.score.toFixed(3)}`)
+  }
+  lines.push('Read the screen with lw_ui first, then press one of those or a different name.')
+  return lines.join('\n')
+}
+
+/**
+ * 按下之后那一次回读: 回 `effect` 那一段, 顺手记一条账
+ *
+ * `verify=off` 或**这一下根本没按出去** (同名多个 / 没有这个名字 / 屏在睡) 时回空串 —— 那三条路不
+ * 占这一次读屏, 而"没按"本来就不需要核对
+ *
+ * 长按要等按住那一段走完再回读 (`holdMs`): 3 s 的长按在 300 ms 那一刻当然还没发生任何事, 拿那一帧
+ * 去判就是一句假的 `unchanged`
+ */
+async function tapEffectCheck({ verify, before, pressed, wanted, displayId, sessionId, step, holdMs = 0 }) {
+  if (verify === 'off' || pressed !== true) return ''
+  await new Promise((resume) => setTimeout(resume, TAP_EFFECT_WAIT_MS + Math.max(0, Number(holdMs) || 0)))
+  const at = before === null ? displayId : before.displayId
+  const after = await tapEffectSnapshot(at)
+  const effect = tapEffectOf(before, after, wanted)
+  const candidates = effect === 'unchanged' ? tapEffectCandidates(after ?? before, wanted) : []
+  const entry = {
+    step: Number(step) || 0,
+    effect,
+    displayId: Number(after?.displayId ?? at) || 0,
+    at: Date.now(),
+    fingerprint: effect === 'unchanged' ? tapEffectFingerprint(after) : '',
+    session: sessionId ?? null,
+  }
+  tapEffectLog.push(entry)
+  if (tapEffectLog.length > TAP_EFFECT_KEPT) tapEffectLog.splice(0, tapEffectLog.length - TAP_EFFECT_KEPT)
+  // 真机上这条是唯一能证明核对真的跑过、并且真的读出了三个候选的读数 (与 `lw_tap: candidates=` 同一档)
+  console.log(`lw_tap: effect=${effect}`
+    + `${effect === 'unchanged' ? ` candidates=${candidates.length}` : ''}`
+    + ` on displayId ${entry.displayId}`)
+  return formatTapEffect(effect, before, after, candidates)
 }
 
 /** A report a model can read, with the structured answer kept underneath it */
@@ -14140,6 +14468,38 @@ const exploreRun = {
   over: false,
 }
 
+/** status 里 `effects` 那一格留几条: 看的是"刚才连点的那十几下", 不是整场的审计 */
+const EXPLORE_EFFECTS_KEPT = 20
+
+/**
+ * 这一场点过、核对过的那些一下 (落实表 #32)
+ *
+ * 账在点按那一层 (`tapEffectLog`, 只由 `lw_tap` 的核对写), 这里按场次挑出来: 别的会话点的那几下不
+ * 属于这一场. `lw_explore op=status` 的 `effects` 与 `reason` 都读它
+ */
+function exploreEffectsFor(log, sessionId) {
+  const wanted = String(sessionId ?? '')
+  if (wanted === '') return []
+  return (Array.isArray(log) ? log : [])
+    .filter((one) => one?.session === wanted)
+    .slice(-EXPLORE_EFFECTS_KEPT)
+}
+
+/**
+ * 这一场该不该停一下 (纯函数): 尾巴上连着两条 `unchanged` 就报 `effect-missing`
+ *
+ * 尺子与点按那一层同一个数 (`TAP_EFFECT_STREAK`) —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ */
+function exploreEffectReason(effects) {
+  const list = Array.isArray(effects) ? effects : []
+  let streak = 0
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]?.effect !== 'unchanged') break
+    streak += 1
+  }
+  return streak >= TAP_EFFECT_STREAK ? 'effect-missing' : ''
+}
+
 /**
  * 探索自己建过的那几块屏 (2.8.0 B2-a): `$DSH_HOME/lw/explore.json` 的 `screens`
  *
@@ -15186,6 +15546,8 @@ async function exploreStatus(ctx) {
   const readings = await voiceWorkspaceReadings(ctx, exploreRun.session ?? '', exploreWorkspaceState)
   const power = await explorePowerSave()
   const task = await exploreTaskInfo()
+  // 这一场点过、核对过的那几下 (落实表 #32): 连着两条 unchanged 就报 reason=effect-missing
+  const effects = exploreEffectsFor(tapEffectLog, exploreRun.session)
   return {
     running: exploreRun.session !== null && exploreRun.over !== true,
     over: exploreRun.over,
@@ -15206,6 +15568,8 @@ async function exploreStatus(ctx) {
     steps: exploreRun.steps,
     stepLimit: exploreRun.stepLimit || EXPLORE_STEPS_DEFAULT,
     reminded: exploreRun.reminded,
+    effects,
+    effectReason: exploreEffectReason(effects),
     powerSave: power.powerSave,
     powerSaveKnown: power.known,
     powerSaveWhy: power.why,
@@ -15254,6 +15618,11 @@ async function exploreStatusText(ctx) {
       + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,
     `this run: ${readings.started} started, ${readings.finished} finished, ${readings.stubs} stub(s),`
       + ` ${readings.refusals} refused`,
+    // 点按效果那一段 (落实表 #32): 连着两条 unchanged 就是"再按同一个地方也不会变"
+    `press effects: ${readings.effects.length} recorded this run`
+      + `${readings.effectReason === ''
+        ? ''
+        : `, reason=${readings.effectReason} - change the screen or press another control instead`}`,
     `preset: ${readings.preset ?? '(the registry default)'}${readings.presetWhy ? ` - ${readings.presetWhy}` : ''}`,
   ]
   if (readings.lastRefusal) {
