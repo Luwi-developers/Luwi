@@ -928,6 +928,22 @@ window.__ModuleLoader__.load({
       'font-size:var(--dsh-content-font-size,14px);',
       'line-height:calc(24px + var(--dsh-content-font-delta,0px))}',
       '@media (pointer:coarse){#lwp-card{font-size:max(16px,var(--dsh-content-font-size,14px))}}',
+      // 拖文件进来那一刻 (2.8.1 #34): 卡上描一圈虚线, 松手就落在这一块 (贴边留 6px, 不盖住圆角)
+      '#lwp-card[data-drop="over"]{outline:2px dashed var(--dsw-alias-state-business-primary);',
+      'outline-offset:-6px}',
+      // 拖进来那一刻的说明牌 (2026-11-19 主人: "图可以放了, 但最好再加上如图所示的提示"): 与后台
+      // dsh 的 DropOverlay 同一形态 —— 居中两行, 一行说"拖到这儿就能加", 一行说上限. **不接点击**
+      // (`pointer-events:none`): 拖到哪儿都不会挡住 `+`、输入框与发送键
+      '#lwp-drop-hint{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;',
+      'justify-content:center;gap:10px;padding:16px;box-sizing:border-box;pointer-events:none;',
+      'border-radius:inherit;',
+      'background:var(--dsw-specific-input-major,#fff);',
+      'background:color-mix(in srgb,var(--dsw-specific-input-major,#fff) 88%,transparent)}',
+      '#lwp-card[data-drop="over"] #lwp-drop-hint{display:flex}',
+      '.lwp-drop-marks{display:flex;align-items:center;gap:10px;opacity:.95}',
+      '.lwp-drop-title{font-size:17px;font-weight:600;line-height:1.3;',
+      'color:var(--dsw-alias-label-primary);text-align:center}',
+      '.lwp-drop-sub{font-size:12px;color:var(--dsw-alias-label-caption);text-align:center}',
       '#lwp-input{box-sizing:border-box;min-height:36px;',
       'max-height:calc(14 * (24px + var(--dsh-content-font-delta,0px)));',
       'padding:4px 12px 0 14px;border:0;outline:none;resize:none;overflow-y:auto;background:transparent;',
@@ -1240,6 +1256,19 @@ window.__ModuleLoader__.load({
       var MAX_ATTACH = 6
       /** 一份最大多少字节 (与 PortalBridge.STASH_MAX_BYTES 同一个数: 12 MB) */
       var MAX_STASH_BYTES = 12 * 1024 * 1024
+      /**
+       * 拖进来那个说明牌上的两个图标 (图片 / 文件)
+       *
+       * 2026-11-19 主人: "图可以放了, 但最好再加上如图所示的提示" —— 形态照后台 dsh 的 DropOverlay
+       * 那两个圆角方块画, 内联 SVG (不新增图片资源, 也不用构建步骤)
+       */
+      var DROP_MARKS_SVG = '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        + '<rect x="3" y="3" width="18" height="18" rx="5" fill="#3b82f6"/>'
+        + '<circle cx="9" cy="9" r="1.8" fill="#fff"/>'
+        + '<path d="M5 17l4.2-4.2 3 3 2.3-2.3L19 17H5z" fill="#fff"/></svg>'
+        + '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        + '<rect x="3" y="3" width="18" height="18" rx="5" fill="#60a5fa"/>'
+        + '<path d="M8 9h8M8 12h8M8 15h5" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>'
       /**
        * 图片发送失败那三种说法 (落实表 #35, 2026-11-12)
        *
@@ -4919,6 +4948,83 @@ window.__ModuleLoader__.load({
         return btoa(parts.join(''))
       }
 
+      /**
+       * 拖进来那一刻: 输入卡描一圈虚线 (对齐 dsh 的 `DropOverlay`)
+       *
+       * 进 / 出 / 松手三条路都走这一处, 免得"拖走了那圈还亮着"
+       * @param over - 现在是不是拖在上面
+       */
+      function markDrop(over) {
+        if (!els || !els.card) return
+        if (over === true) els.card.setAttribute('data-drop', 'over')
+        else els.card.removeAttribute('data-drop')
+      }
+
+      /**
+       * 拖进来的那几份 = 待发栏那几行 (2.8.1 #34)
+       *
+       * 主人: "前台门户的输入框也要像后台DSH一样可拖放文件加入". 落点就是 `+` 选完那根链 ——
+       * 图走 `readImage`, 别的走 `stashOne`: 读字节 → `portalStash` 落 `lw-in/` → chip, 这里不自己
+       * 读一遍字节, 也不接新桥方法
+       *
+       * 拖进来的目录不带结构 (`DataTransfer.files` 里只有文件), 所以按单文件处理 —— 已知限制
+       * @param node - 从哪块接住的 (`lwp-card` / `lwp-dock`, 只进日志)
+       * @param event - 那个 drop 事件
+       */
+      function dropFiles(node, event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+        markDrop(false)
+        var files = event && event.dataTransfer ? event.dataTransfer.files : null
+        var total = files && typeof files.length === 'number' ? files.length : 0
+        var names = []
+        for (var i = 0; i < total; i += 1) {
+          names.push(files[i] && files[i].name ? String(files[i].name) : '?')
+        }
+        // 一行读数: 真机上"拖进来没有 / 从哪块接的 / 几份 / 叫什么"只能看这一行
+        console.log('[luwi-portal] drop ' + (node && node.id ? String(node.id) : '?')
+          + ' -> ' + total + ' 份: ' + names.join(', '))
+        if (total === 0) {
+          showNote('拖进来的东西没读出来', true)
+          return
+        }
+        onFilesChosen(files)
+      }
+
+      /**
+       * 给一块区域挂上"拖文件进来" (2.8.1 #34)
+       *
+       * `dragover` 一定要 `preventDefault()` —— 不叫这一声浏览器就不认这块能接, `drop` 永远不来
+       * (真机上就表现成"拖过来什么都没发生"). 输入卡与 dock 都挂: 落点常在卡片外沿或表情面板那块
+       * 空白上. 子节点的事件会冒泡上来, 所以四条都 `stopPropagation`, 一份文件只落一次
+       * @param node - 要挂的容器
+       */
+      function bindDropTarget(node) {
+        if (!node || typeof node.addEventListener !== 'function') return
+        node.addEventListener('dragenter', function (event) {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          markDrop(true)
+        })
+        node.addEventListener('dragover', function (event) {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          if (event && event.dataTransfer) {
+            try {
+              event.dataTransfer.dropEffect = 'copy'
+            } catch (_noDropEffect) {
+              // 老 WebView 的 dataTransfer 是只读的: 少了那个光标形状也能接
+            }
+          }
+          markDrop(true)
+        })
+        node.addEventListener('dragleave', function (event) {
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          markDrop(false)
+        })
+        node.addEventListener('drop', function (event) { dropFiles(node, event) })
+      }
+
       /** 选好的文件: 图片读成 base64 (等会儿跟 prompt 一起发), 别的落到盘上给路径 */
       function onFilesChosen(files) {
         if (typeof sessionId !== 'string' || sessionId === '') {
@@ -5610,6 +5716,34 @@ window.__ModuleLoader__.load({
         dock.appendChild(els.stickerPanel)
         root.appendChild(dock)
 
+        // **拖文件进来就能加附件** (2.8.1 #34 主人: "前台门户的输入框也要像后台DSH一样可拖放文件加入")
+        // 卡与 dock 都挂: 落点常在卡片外沿或表情面板那块空白上, 只挂一个就会"拖过来没反应"; 两条路
+        // 汇进同一个 `onFilesChosen`, 与 `+` 选完完全同一根链 (读字节 → portalStash 落 lw-in/ → chip)
+        // 拖进来的说明牌 (2026-11-19 主人: "图可以放了, 但最好再加上如图所示的提示"): 建在这里,
+        // 显示由 CSS 管 —— `#lwp-card[data-drop="over"] #lwp-drop-hint{display:flex}`, 与那圈虚线
+        // 同一把开关 (`markDrop`), 于是"拖进来就有提示、松手就没"不需要第二份状态
+        //
+        // 两行字里的上限取**本机真数** (MAX_ATTACH / MAX_STASH_BYTES): 后台 dsh 那句"20 张, 每张
+        // 50MB"是它自己的上限, 照抄过来就是骗人
+        els.hint = h('div')
+        els.hint.id = 'lwp-drop-hint'
+        var dropMarks = h('div', 'lwp-drop-marks')
+        dropMarks.innerHTML = DROP_MARKS_SVG
+        els.hint.appendChild(dropMarks)
+        var dropTitle = h('div', 'lwp-drop-title')
+        dropTitle.textContent = '文件或图片拖动到此处即可添加'
+        els.hint.appendChild(dropTitle)
+        var dropSub = h('div', 'lwp-drop-sub')
+        dropSub.textContent = '最多 ' + MAX_ATTACH + ' 个附件, 每份不超过 '
+          + Math.round(MAX_STASH_BYTES / (1024 * 1024)) + ' MB'
+        els.hint.appendChild(dropSub)
+        card.appendChild(els.hint)
+
+        els.card = card
+        els.dock = dock
+        bindDropTarget(els.card)
+        bindDropTarget(els.dock)
+
         els.drawer = h('div')
         els.drawer.id = 'lwp-drawer'
         els.drawer.hidden = true
@@ -6056,6 +6190,14 @@ window.__ModuleLoader__.load({
         reloadLook: reloadLook,
         /** 宿主推的键盘高度 (2026-11-09): 只改这一层的 padding, 不动 WebView 尺寸 */
         setKeyboard: applyIme,
+        /**
+         * 拖进来 / 拖走那一刻 (2026-11-19 主人: "再加上如图所示的提示")
+         *
+         * 系统拖放不给页面 HTML5 事件, 所以原生那一层 (`HostScreen.acceptDrop`) 在
+         * `ACTION_DRAG_ENTERED` / `DROP` / `EXITED` / `ENDED` 各喊一声; 这里只把它交给 [markDrop] ——
+         * 与桌面浏览器那条路 (dragenter / dragover / dragleave) 同一处开关, 虚线和高亮说明牌一起走
+         */
+        dropOver: function (over) { markDrop(over === true) },
         /**
          * 宿主对"选图"那一下的回话 (2026-11-12, 落实表 #35)
          *

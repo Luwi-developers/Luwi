@@ -717,12 +717,16 @@ internal class PortalBridge(private val context: Context) {
         val rejected = JSONArray()
         for (uri in uris) {
             val name = displayNameOf(uri)
+            // 读不动时要带一句真原因 (2026-11-19 真机: 拖放那份 `content://` 的授权松手就失效) ——
+            // 只留一句"这一份读不动"看不出是哪一档: 没权限、空流、还是 provider 自己抛的
+            var why = ""
             val bytes = runCatching {
                 context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
+            }.onFailure { why = "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }.getOrNull()
             if (bytes == null || bytes.isEmpty()) {
-                rejected.put(JSONObject().put("name", name).put("reason", PICKED_UNREADABLE))
-                Log.w(LOOK_TAG, "picked $name: $PICKED_UNREADABLE")
+                val said = if (why.isEmpty()) PICKED_UNREADABLE else "$PICKED_UNREADABLE ($why)"
+                rejected.put(JSONObject().put("name", name).put("reason", said))
+                Log.w(LOOK_TAG, "picked $name: $said")
                 continue
             }
             val result = LwIn.put(root, name, bytes)
