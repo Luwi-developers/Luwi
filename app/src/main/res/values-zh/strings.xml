@@ -153,6 +153,10 @@
     <string name="settings_channel_state_stopped">未运行</string>
     <string name="settings_channel_connect">连接</string>
     <string name="settings_channel_connecting">连接中...</string>
+    <string name="settings_channel_root_opt_in">用 root 连接</string>
+    <string name="settings_channel_root_opt_in_off">关着: 不会去要 root</string>
+    <string name="settings_channel_root_opt_in_on">开: 问一次 root, 答案在 root 管理器那边给</string>
+    <string name="settings_channel_root_opt_in_refused">被拒: 在 root 管理器里允许 Luwi, 再点一次这个开关</string>
     <string name="ready_title">开始使用</string>
     <string name="ready_remaining">还差 %1$d 步</string>
     <string name="ready_complete">全部就绪</string>

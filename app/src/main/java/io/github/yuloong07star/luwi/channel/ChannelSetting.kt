@@ -1,5 +1,7 @@
 package io.github.yuloong07star.luwi.channel
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -10,8 +12,9 @@ import java.util.concurrent.Executors
  * One way of reaching a privileged process, and where it stands right now
  *
  * @property backend which route this is
- * @property available whether the route exists on this device at all, which for root is always
- *   true: nothing an app can read says whether a root manager would answer it
+ * @property available whether the route could exist at all - for root that is "already granted, or
+ *   the user has turned on `connect with root`" (2.8.1 #30), not "granted", because a route that
+ *   was never asked for is not a missing one
  * @property granted `true` when the permission is in place, `false` when it was asked for and was
  *   not given, and `null` when nothing has asked yet - only root can be `null`, because Shizuku
  *   answers the question without being tried
@@ -38,6 +41,17 @@ data class RouteState(
 object ChannelSetting {
 
     private const val TAG = "LwChannel"
+
+    /** 与 [io.github.yuloong07star.luwi.host.HostSettings] / `PreviewControl` 同一个偏好文件, 全 app 一个 */
+    private const val STORE = "luwi"
+
+    /**
+     * 「用 root 连接」那个开关的落点 (2.8.1 #30)
+     *
+     * 关着 = root 那条路一声不响 (首启就是这样), 点开才允许它去要一次授权. 这是"现在能不能要授权",
+     * 与"这条路在不在" ([RouteState.available]) 是两个判断; 界面那份读数由 [readRootOptedIn] 直接取
+     */
+    private const val ROOT_OPT_IN = "channel-root-opt-in"
 
     /** One call at a time, since they all ask the same two backends */
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -66,6 +80,22 @@ object ChannelSetting {
         worker.execute { read() }
     }
 
+    /** 磁盘上那个选择, 界面第一帧读它 (没有这个键 = 不许要授权) */
+    fun readRootOptedIn(context: Context): Boolean =
+        preferences(context).getBoolean(ROOT_OPT_IN, false)
+
+    /**
+     * 拨「用 root 连接」: 先落盘再动通道, 点开的那一趟顺带要一次授权
+     *
+     * 关掉只是不再去问, 已经连上的 root 不动 —— 授权在 root 管理器那边, 这里只管"要不要开口".
+     * 点开时走 [connect]: 它本来就在 worker 线程上, 而且有 [working] 这道闸
+     */
+    fun setRootOptedIn(context: Context, optedIn: Boolean, done: () -> Unit = {}) {
+        RootAccessBackend.optedIn = optedIn
+        preferences(context).edit().putBoolean(ROOT_OPT_IN, optedIn).apply()
+        if (optedIn) connect(done) else refresh()
+    }
+
     /**
      * Try to connect, which is also how a permission is asked for on the route that needs one
      *
@@ -90,6 +120,10 @@ object ChannelSetting {
 
     /** Ask both routes where they stand, on the worker thread */
     private fun read() {
+        // 开关的落点在磁盘上, 进程刚起来时内存里那份还是缺省 false —— 先回填, 再问两个问题
+        PrivilegedChannel.context()?.let { app ->
+            RootAccessBackend.optedIn = readRootOptedIn(app)
+        }
         state = PrivilegedChannel.state()
         routes = listOf(
             RouteState(
@@ -107,4 +141,7 @@ object ChannelSetting {
         // 时机 —— 刚在 KernelSU / Shizuku 里给完授权、点连接之后那一趟也走得到
         if (state?.connected == true) AccessibilitySetting.autoEnableOnce()
     }
+
+    private fun preferences(context: Context): SharedPreferences =
+        context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
 }

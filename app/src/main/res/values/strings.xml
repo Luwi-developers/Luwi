@@ -154,6 +154,10 @@
     <string name="settings_channel_state_stopped">not running</string>
     <string name="settings_channel_connect">Connect</string>
     <string name="settings_channel_connecting">Connecting...</string>
+    <string name="settings_channel_root_opt_in">Connect with root</string>
+    <string name="settings_channel_root_opt_in_off">Off: root is never asked for</string>
+    <string name="settings_channel_root_opt_in_on">On: root is asked once, the root manager answers</string>
+    <string name="settings_channel_root_opt_in_refused">Refused: allow Luwi in the root manager, then turn this on again</string>
     <string name="ready_title">Getting started</string>
     <string name="ready_remaining">%1$d steps to go</string>
     <string name="ready_complete">All set</string>
