@@ -2184,6 +2184,16 @@ expect('client.js: 输入卡那块元素记下来了', client, 'els.card = card'
 expect('client.js: dock 那块元素记下来了', client, 'els.dock = dock')
 expect('client.js: 拖进来那一刻的高亮', client, '#lwp-card[data-drop="over"]')
 expect('client.js: 高亮摘掉', client, "els.card.removeAttribute('data-drop')")
+// 拖进来那一刻的说明牌 (2026-11-19 主人: "再加上如图所示的提示"): 两行字 + 那块盖在卡上的层
+expect('client.js: 说明牌那块层', client, '#lwp-drop-hint')
+expect('client.js: 说明牌只在拖进来时出现', client, '#lwp-card[data-drop="over"] #lwp-drop-hint{display:flex}')
+expect('client.js: 说明牌不接点击', client, 'pointer-events:none')
+expect('client.js: 第一行说拖到这儿就能加', client, '文件或图片拖动到此处即可添加')
+expect('client.js: 第二行的上限取本机真数', client, "'最多 ' + MAX_ATTACH + ' 个附件, 每份不超过 '")
+expect('client.js: 上限从一个常量来', client, "Math.round(MAX_STASH_BYTES / (1024 * 1024)) + ' MB'")
+expect('client.js: 两个图标是内联 SVG', client, 'var DROP_MARKS_SVG')
+// 真机上系统拖放不给页面 HTML5 事件, 说明牌只能由原生喊: 暴露一个 dropOver 给 HostScreen
+expect('client.js: 暴露 dropOver 给原生', client, 'dropOver: function (over) { markDrop(over === true) }')
 
 if (markDropSource === '' || dropFilesSource === '' || bindDropSource === '') {
   failures.push('client.js: 抽不出 markDrop / dropFiles / bindDropTarget (拖放那条路不在)')
@@ -2361,6 +2371,20 @@ expect(
   'uri.scheme == "content" || uri.scheme == "file"',
 )
 expect('HostScreen: 拖进来读挂了也不静默', hostScreen, 'nothingLanded(uris.size)')
+// 说明牌与那圈虚线在真机上只能由原生喊醒 (系统拖放不给页面 HTML5 事件)
+expect('HostScreen: 拖进来时点亮说明牌', hostScreen, 'DragEvent.ACTION_DRAG_ENTERED -> {')
+expect('HostScreen: 拖进来那一拍调 dropOver(true)', hostScreen, 'dropOver(true)')
+expect('HostScreen: 拖走 / 松手 / 结束三拍都灭', hostScreen, 'DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {')
+expect('HostScreen: 灭的那一句', hostScreen, 'dropOver(false)')
+// 一处一致性: 说明牌上写的 12 MB 与宿主落盘那一份上限必须是同一个数 (漂了就是在骗人)
+const lwInSource = read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwIn.kt')
+const hostLimit = /const val MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(lwInSource)?.[1] ?? ''
+const portalLimit = /var MAX_STASH_BYTES = (\d+) \* 1024 \* 1024/.exec(client)?.[1] ?? ''
+if (hostLimit !== '' && hostLimit === portalLimit) {
+  notes.push(`ok   说明牌的上限与宿主 LwIn.MAX_BYTES 同一个数 (${hostLimit} MB)`)
+} else {
+  failures.push(`说明牌的上限与宿主对不上: 宿主=${hostLimit || '?'} 门户=${portalLimit || '?'}`)
+}
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
