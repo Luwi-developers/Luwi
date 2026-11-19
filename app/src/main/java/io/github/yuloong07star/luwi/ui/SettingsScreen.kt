@@ -1399,8 +1399,7 @@ private fun KeepAliveRow() {
 @Composable
 private fun RefreshRow() {
     val working = ChannelSetting.working
-    val root = ChannelSetting.routes.firstOrNull { it.backend == RemoteBackend.ROOT }
-    val refused = root != null && root.available && root.granted == false
+    val refused = ChannelSetting.rootRefused
     Column(modifier = Modifier.fillMaxWidth()) {
         Button(
             onClick = { ChannelSetting.reprobe() },
