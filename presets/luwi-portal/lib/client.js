@@ -2016,6 +2016,10 @@ window.__ModuleLoader__.load({
           kind: kind,
           text: typeof line.text === 'string' ? line.text : '',
         }
+        // 2.8.1 #31: 「唤醒一下」那句带着宿主挑信号的来处 (`usage` / `schedule` / `check` / `wish` /
+        // `fallback`). 只进元数据 (`meta.topicSource`), 气泡上不加字 —— 历史与排障看得出就够了
+        var topicSource = typeof line.topicSource === 'string' ? line.topicSource : ''
+        if (topicSource !== '') item.meta = { topicSource: topicSource }
         if (kind === 'sticker') {
           item.sticker = typeof line.sticker === 'string' ? line.sticker : ''
           item.text = ''
@@ -3622,6 +3626,8 @@ window.__ModuleLoader__.load({
       function buildRow(item) {
         var row = h('div', 'lwp-row')
         row.setAttribute('data-who', item.who)
+        // 一句气泡从哪条信号来的 (2.8.1 #31): 值就是 `meta.topicSource`, 老行没有这一格就不写
+        if (item.meta && item.meta.topicSource) row.setAttribute('data-topic', item.meta.topicSource)
         if (item.who === 'user' && item.hasImage && !(item.attach && item.attach.length > 0)) {
           // 有图块却没有落盘那份 (stash 失败 / 旧消息): 补一行「（图）」, 不假装贴过也不整条丢掉
           var lostOnly = h('div', 'lwp-image', '（图）')

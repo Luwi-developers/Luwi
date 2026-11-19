@@ -12930,12 +12930,12 @@ async function routerTick(ctx) {
  * 主人点一下要的是"她来找你聊", 不是"她等你开口"
  */
 const ROUTER_WAKE_TOPICS = Object.freeze([
-  '今天过得怎么样呀?',
-  '今天有什么想跟我说的吗?',
-  '在忙什么呢? 跟我说说呗.',
-  '今天有什么开心的事吗?',
-  '吃饭了没? 今天吃了什么好吃的?',
-  '今天累不累? 要不要聊会儿天.',
+  '今天过得怎么样呀',
+  '今天有什么想跟我说的吗',
+  '在忙什么呢, 跟我说说呗.',
+  '今天有什么开心的事吗',
+  '吃饭了没, 今天吃了什么好吃的',
+  '今天累不累, 要不要聊会儿天.',
 ])
 
 /** 拿判断层记着的事开场时套的句式: `{what}` 换成那件事的原话 (检测项 / 未了的事) */
@@ -12945,8 +12945,8 @@ const ROUTER_WAKE_TOPIC_LINES = Object.freeze([
   '想起你之前说的「{what}」, 现在要不要聊两句?',
 ])
 
-/** 池子是空的那一句 (池子不该是空的, 但"点了没回音"这条不许再回来) */
-const ROUTER_WAKE_FALLBACK = '今天过得怎么样呀?'
+/** 池子空 / 三次重选都不合格时那一句 (点了没回音比一句平淡话更糟, 但它仍带一个话题) */
+const ROUTER_WAKE_FALLBACK = '我在呢, 今天过得怎么样呀'
 
 /**
  * 下一次点「唤醒一下」先应哪一句 (纯函数, 判据 `check-luwi-portal` 真跑)
@@ -12978,10 +12978,13 @@ function wakeLineFor(lines, cursor) {
  * 今天说过的沉到后面 (检测项看 `checksSaid`, 未了的事看 `said`), 于是连点两下先聊没提过的那件;
  * 同一句话在两份里都出现时只留前面那份
  *
+ * `source` 是这条信号的门类 (2.8.1 #31): `usage` / `schedule` / `check` / `wish` —— 门户把它透传成
+ * 那句气泡的 `meta.topicSource`, 排障时一眼看出这句是从哪条信号里来的
+ *
  * @param {object} state `router.json` 那一份 (坏 / 没有就当空)
  * @param {object[]} wishes `wishes.json` 的 items
  * @param {number} now 现在 (今天按这台机器的本地日期算, 与判断层同一把尺子)
- * @returns {{id: string, kind: string, what: string, saidToday: boolean}[]}
+ * @returns {{id: string, kind: string, source: string, what: string, saidToday: boolean}[]}
  */
 function wakeTopicsOf(state, wishes, now) {
   const day = routerDayKey(now)
@@ -12993,6 +12996,7 @@ function wakeTopicsOf(state, wishes, now) {
       return {
         id: String(one?.id ?? ''),
         kind: 'check',
+        source: wakeSourceOf(one?.when),
         what: String(one.what).trim(),
         saidToday: key !== '' && key.startsWith(day),
       }
@@ -13002,6 +13006,7 @@ function wakeTopicsOf(state, wishes, now) {
     .map((one) => ({
       id: String(one?.id ?? ''),
       kind: 'wish',
+      source: 'wish',
       what: String(one.what).trim(),
       saidToday: Array.isArray(one?.said) && one.said.map(String).includes(day),
     }))
@@ -13015,6 +13020,56 @@ function wakeTopicsOf(state, wishes, now) {
 }
 
 /**
+ * 一条检测项的判法归到哪个信号门类 (纯函数)
+ *
+ * 只用来给门户那一格 `meta.topicSource` 一个稳定的词, 不参与选句 —— 三档判法在判断层里本来就是
+ * 同一张 `checks` 表, 分门只是让人看得出这句是"用久了" / "到点" / "日历前"哪一种
+ */
+function wakeSourceOf(when) {
+  const kind = String(when?.kind ?? '')
+  if (kind === 'usage') return 'usage'
+  if (kind === 'time' || kind === 'event') return 'schedule'
+  return 'check'
+}
+
+/**
+ * 这一句是不是"被动等她开口" (纯函数, 2.8.1 #31)
+ *
+ * 主人口径: "发送的内容不能是'怎么了''嗯?'这种疑问句, 这还是相当于被动唤醒" —— 于是两类判被动:
+ * ① 以那几句应答语开头 (`怎么了` / `嗯?` / `在吗` / `有啥事` / `叫我` …)
+ * ② 以问号结尾且短于 [ROUTER_WAKE_PASSIVE_CHARS] 个字 (光秃秃一个问句, 没有话题)
+ *
+ * **主动开场那几句不带问号**: "今天过得怎么样呀" 这类按 ② 会被判被动, 而它恰恰是主人点名的样子 ——
+ * 所以池子里的句子都写成不带问号的口语, "长问句" (带具体那件事的) 一律放行
+ */
+const ROUTER_WAKE_PASSIVE_PREFIXES = Object.freeze([
+  '怎么了',
+  '怎么啦',
+  '嗯?',
+  '嗯？',
+  '嗯嗯',
+  '在吗',
+  '在不在',
+  '有啥事',
+  '叫我',
+  '我听着呢',
+])
+
+/** 以问号结尾且不到这么多字的, 算"光秃秃一个问句" */
+const ROUTER_WAKE_PASSIVE_CHARS = 12
+
+/** 判被动时最多重选几条 (重选满了就用 [ROUTER_WAKE_FALLBACK] 并记 `opener:"fallback"`) */
+const ROUTER_WAKE_RESELECT_MAX = 3
+
+function isPassiveOpener(text) {
+  const line = String(text ?? '').trim()
+  if (line === '') return true
+  if (ROUTER_WAKE_PASSIVE_PREFIXES.some((one) => line.startsWith(one))) return true
+  const asked = line.endsWith('?') || line.endsWith('？')
+  return asked && Array.from(line).length < ROUTER_WAKE_PASSIVE_CHARS
+}
+
+/**
  * 点「唤醒一下」先开口的那一句 (纯函数, 判据 `check-luwi-portal` 真跑)
  *
  * 2.8.1 #31: 这一句必须**主动找话题**. 判断层里有记着的事就把它说出来 —— 原话带在「」里, 于是
@@ -13022,40 +13077,59 @@ function wakeTopicsOf(state, wishes, now) {
  * [ROUTER_WAKE_TOPICS] 那一池. 轮转跨"话题 x 句式"两维: 连点三下既不是同一句, 也不会拿同一个
  * 句式连着说同一件事 (与 #8 那条"连点不是同一句"同一条验收)
  *
+ * 台词闸: 候选过一遍 [isPassiveOpener], 被判被动的往下一格重选 (最多 [ROUTER_WAKE_RESELECT_MAX]
+ * 次); 三次都不合格才用 [ROUTER_WAKE_FALLBACK] 并回 `opener:"fallback"` —— 点了没回音比一句平淡话
+ * 更糟, 但"等你开口"那一类句子一次都不许自己发出去
+ *
  * @param {object} state `router.json` 那一份
  * @param {object[]} wishes `wishes.json` 的 items
  * @param {number} now 现在
  * @param {number} cursor 上一次用到哪一格 (负数 / 坏值都夹回来)
- * @returns {{text: string, cursor: number, kind: string, id: string, what: string, topics: object[], saidToday: boolean}}
+ * @returns {{text: string, cursor: number, kind: string, source: string, opener: string, id: string, what: string, topics: object[], saidToday: boolean}}
  */
 function wakeTopicFor(state, wishes, now, cursor) {
   const topics = wakeTopicsOf(state, wishes, now)
   const raw = Number(cursor)
   const wanted = Number.isFinite(raw) ? Math.floor(raw) : 0
-  if (topics.length === 0) {
-    const pick = wakeLineFor(ROUTER_WAKE_TOPICS, wanted)
+  const slots = topics.length === 0
+    ? ROUTER_WAKE_TOPICS.length
+    : topics.length * ROUTER_WAKE_TOPIC_LINES.length
+  const cycle = Math.max(1, slots)
+  const start = ((wanted % cycle) + cycle) % cycle
+  for (let step = 0; step < ROUTER_WAKE_RESELECT_MAX; step += 1) {
+    const at = (start + step) % cycle
+    let text = ''
+    let topic = null
+    if (topics.length === 0) {
+      text = wakeLineFor(ROUTER_WAKE_TOPICS, at).text
+    } else {
+      topic = topics[at % topics.length]
+      const line = ROUTER_WAKE_TOPIC_LINES[Math.floor(at / topics.length) % ROUTER_WAKE_TOPIC_LINES.length]
+      text = line.split('{what}').join(topic.what)
+    }
+    if (isPassiveOpener(text)) continue
     return {
-      text: pick.text,
-      cursor: pick.cursor,
-      kind: 'chat',
-      id: '',
-      what: '',
+      text,
+      cursor: (start + step + 1) % cycle,
+      kind: topic === null ? 'chat' : topic.kind,
+      source: topic === null ? 'fallback' : topic.source,
+      opener: 'active',
+      id: topic === null ? '' : topic.id,
+      what: topic === null ? '' : topic.what,
       topics,
-      saidToday: false,
+      saidToday: topic === null ? false : topic.saidToday,
     }
   }
-  const cycle = topics.length * ROUTER_WAKE_TOPIC_LINES.length
-  const at = ((wanted % cycle) + cycle) % cycle
-  const topic = topics[at % topics.length]
-  const line = ROUTER_WAKE_TOPIC_LINES[Math.floor(at / topics.length) % ROUTER_WAKE_TOPIC_LINES.length]
   return {
-    text: line.split('{what}').join(topic.what),
-    cursor: (at + 1) % cycle,
-    kind: topic.kind,
-    id: topic.id,
-    what: topic.what,
+    text: ROUTER_WAKE_FALLBACK,
+    cursor: (start + ROUTER_WAKE_RESELECT_MAX) % cycle,
+    kind: 'fallback',
+    source: 'fallback',
+    opener: 'fallback',
+    id: '',
+    what: '',
     topics,
-    saidToday: topic.saidToday,
+    saidToday: false,
   }
 }
 
@@ -13111,6 +13185,7 @@ async function routerWakeNow(ctx) {
     text: wakeStartLine(chosen.text, chosen),
     via: 'wake',
     openLine: chosen.text,
+    openTopic: chosen.source,
   })
   // 这一笔只记"开口了"与游标: `awaiting` 不写 (点了按钮不等于要主人再回一句), 冷却那一格照旧归
   // 自动那一支; `lastSpokenAt` 要写 —— 面板上「上一次开口」读的就是它, 刚说完却显示「—」也是错的
@@ -13130,26 +13205,31 @@ async function routerWakeNow(ctx) {
     },
     // 人亲手戳了一下也是"开口" (2.8.1 #11): 错过那笔账一样清零
     chatMisses: 0,
-    // `from` / `what` 是 #31 那一句"从哪一件事开的口": 面板与判据读同一份, 不必从 text 里拆
+    // `from` / `source` / `opener` / `what` 是 #31 那一句"从哪一条信号开的口": 面板与判据读同一份
     wake: {
       at: now,
       cursor: chosen.cursor,
       text: chosen.text,
       from: chosen.kind,
+      source: chosen.source,
+      opener: chosen.opener,
       what: chosen.what,
       session: started?.session ?? null,
     },
   })
   console.log(
-    `luwi-channel: the wake button: conversation ${String(started?.session ?? '').slice(0, 8)} pulled up,`
+    `luwi-channel: the router spoke (wake: ${chosen.source}):`
+      + ` conversation ${String(started?.session ?? '').slice(0, 8)} pulled up,`
       + ` first line #${Number(started?.open ?? 0) || 0}`
-      + ` (${chosen.kind}${chosen.what === '' ? '' : `: ${chosen.what}`}) "${chosen.text}"`,
+      + ` (${chosen.opener}${chosen.what === '' ? '' : `: ${chosen.what}`}) "${chosen.text}"`,
   )
   return {
     said: true,
     kind: 'wake',
     brief: 'the wake button',
     topic: chosen.kind,
+    source: chosen.source,
+    opener: chosen.opener,
     what: chosen.what,
     session: started?.session ?? null,
     line: chosen.text,
@@ -13870,14 +13950,21 @@ async function startProactive(ctx, options = {}) {
   proactiveRecent.push({ session: sessionId, startedAt, via })
   while (proactiveRecent.length > PROACTIVE_RECENT_MAX) proactiveRecent.shift()
   await proactiveStateWrite()
-  // 「唤醒一下」那一路: **先把应声落进这一场的 jsonl, 再开轮** (2.8.1 #8)
+  // 「唤醒一下」那一路: **先把那一句落进这一场的 jsonl, 再开轮** (2.8.1 #8)
   // 门户画的是 `lw/out` 那份文件, 于是这一行落完就有一颗气泡, 不必等模型那一轮跑完; 写不进去只
   // 记一行 —— 那一场照旧开, 不许因为这一句把整场拖死
+  // `topicSource` (2.8.1 #31) 跟着行一起落盘: 门户把它透传成气泡的 `meta.topicSource`, 排障时看
+  // 得出这句是从哪条信号里挑的, 也不必回头读 `router.json`
   let openRow = null
   const openLine = String(options?.openLine ?? '').trim()
+  const openTopic = String(options?.openTopic ?? '').trim()
   if (openLine !== '') {
     try {
-      openRow = await lwOutAppend(sessionId, { kind: 'text', text: openLine })
+      openRow = await lwOutAppend(sessionId, {
+        kind: 'text',
+        text: openLine,
+        ...(openTopic === '' ? {} : { topicSource: openTopic }),
+      })
     } catch (error) {
       console.warn(`luwi-channel: the wake line was not written: ${error?.message ?? error}`)
     }
