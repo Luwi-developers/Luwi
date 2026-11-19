@@ -2,6 +2,7 @@ package io.github.yuloong07star.luwi.ui
 
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.graphics.Insets
@@ -10,6 +11,7 @@ import android.os.Environment
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import android.view.DragEvent
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.webkit.ConsoleMessage
@@ -137,6 +139,7 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Remove
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -1320,6 +1323,14 @@ private fun HostWebView(
                     setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
                         startDownload(context, downloadUrl, contentDisposition, mimeType)
                     }
+                    // **系统文件管理器拖进来的文件也要能进待发栏** (2.8.1 #34): Android 的 WebView
+                    // 对系统拖过来的 `content://` **不派发 HTML5 的 dragenter / dragover / drop** ——
+                    // 页面那一侧挂再多监听也等不到 drop, 真机上就是"拖过来什么都不发生"。所以在原生
+                    // 这一层接: 与 `+` 选完同一条链 (宿主读字节、宿主落进 `lw-in/`, 落好的几份再交回
+                    // 页面画成待发 chip)。只认带 Uri 的拖拽, 页面自己的拖拽与拖纯文本都不抢
+                    setOnDragListener { _, event ->
+                        acceptDrop(event, portal = portal, scope = scope)
+                    }
                     loadUrl(url)
                     launched[0] = url
                 }
@@ -1865,6 +1876,71 @@ private fun WebView.pickState(state: String) {
 private fun WebView.pickedFiles(payload: JSONObject) {
     val literal = payload.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.picked($literal)", null)
+}
+
+/**
+ * 系统文件管理器把一份文件拖进这一屏时该做什么 (2.8.1 #34)
+ *
+ * 页面那一侧的 `dragenter` / `dragover` / `drop` 只对浏览器自己造出来的 `DataTransfer` 有效: 从文件
+ * 管理器拖过来的 `content://` 在 Android 的 WebView 里**不派发 HTML5 drop**, 页面上永远等不到那一拍
+ * (2026-11-19 复核: 只有 JS 侧监听时真机拿不到"投 1 个文件 -> 出 1 个 chip"的读数)。于是改在原生这一
+ * 层接: [ClipData] 里的 Uri 交给 [PortalBridge.stashPicked] (与 `+` 选完那一趟同一份落盘实现), 落好的
+ * 几份再经 [pickedFiles] 交回页面, 页面照 `picked` 画成待发 chip
+ *
+ * 只认 `content` / `file` 两种 scheme: 拖一段选中的文本进来时用户要的是"粘贴", 那一档留给页面自己,
+ * 这里返回 false 放行 —— 也不能把所有拖拽都吃了, 否则页面内的拖拽 (排序、它自己的上传区) 全哑
+ * @param event 那一拍拖拽事件
+ * @param portal 门户桥 (读字节与落 `lw-in/` 都在它那边, 与 `+` 同一条链)
+ * @param scope 这一屏的作用域: 一份 3 MB 的图从相册读出来再写进 `/sdcard` 是几百毫秒, 要下 IO
+ * @return 这一拍接没接 (false = 交给系统继续问别人)
+ */
+private fun WebView.acceptDrop(
+    event: DragEvent,
+    portal: PortalBridge,
+    scope: CoroutineScope,
+): Boolean = when (event.action) {
+    DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()
+    DragEvent.ACTION_DROP -> {
+        val uris = dropUris(event.clipData)
+        // 一行读数: 真机上"拖进来没有 / 几份 / 叫什么"只能看这一行
+        val names = uris.joinToString(", ") { it.lastPathSegment ?: it.toString() }
+        Log.i(WEB_TAG, "drop -> ${uris.size} 份: $names")
+        if (uris.isEmpty()) {
+            false
+        } else {
+            scope.launch {
+                val landed = withContext(Dispatchers.IO) {
+                    runCatching { JSONObject(portal.stashPicked(uris)) }.getOrNull()
+                }
+                // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
+                pickedFiles(landed ?: nothingLanded(uris.size))
+            }
+            true
+        }
+    }
+    else -> true
+}
+
+/**
+ * 拖进来的那份 [ClipData] 里有哪几个能落盘的 Uri (2.8.1 #34)
+ *
+ * 文件管理器给的是 `content://`; 有的机型另塞一条 `text/uri-list` 文本项 —— 两种都认. 只有文字
+ * (拖一段选中的文本) 的那种不算, 交给页面自己处理
+ * @param clip 那一拍事件带的 ClipData (可能为 null)
+ */
+private fun dropUris(clip: ClipData?): List<Uri> {
+    if (clip == null) return emptyList()
+    val out = ArrayList<Uri>(clip.itemCount)
+    for (index in 0 until clip.itemCount) {
+        val item = clip.getItemAt(index)
+        val uri = item.uri ?: item.text?.toString()
+            ?.takeIf { it.startsWith("content://") || it.startsWith("file://") }
+            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (uri != null && (uri.scheme == "content" || uri.scheme == "file") && !out.contains(uri)) {
+            out.add(uri)
+        }
+    }
+    return out
 }
 
 /**

@@ -2342,6 +2342,203 @@ if (client.includes("typeof line.topicSource === 'string'")) {
 } else {
   failures.push('client.js: outItemOf 没读 line.topicSource')
 }
+// ── 二十一、拖文件进输入区 = 加附件 (2.8.1 #34) ───────────────────────────────
+//
+// 主人: "前台门户的输入框也要像后台DSH一样可拖放文件加入". 四条都真跑 (抽出原文, 假节点假事件):
+// 1) 输入卡 (`#lwp-card`) 与 dock (`#lwp-dock`) 都挂了 dragenter / dragover / dragleave / drop
+// 2) `dragover` 必须 `preventDefault()` (不叫这一声浏览器就不认这块能接, `drop` 永远不来) 并把
+//    `dropEffect` 置成 `copy`
+// 3) `drop` 把 `DataTransfer.files` 原样交给 `onFilesChosen` —— 与 `+` 选完同一根链
+//    (`portalStash` 落 `lw-in/` → 待发 chip), 不在这里再读一遍字节
+// 4) 一份都没有时说一句 (不静默), 卡上那圈高亮 (data-drop) 进出摘干净
+
+const markDropSource = takeFunction('markDrop')
+const dropFilesSource = takeFunction('dropFiles')
+const bindDropSource = takeFunction('bindDropTarget')
+
+expect('client.js: 输入卡挂拖放', client, 'bindDropTarget(els.card)')
+expect('client.js: dock 挂拖放', client, 'bindDropTarget(els.dock)')
+expect('client.js: 输入卡那块元素记下来了', client, 'els.card = card')
+expect('client.js: dock 那块元素记下来了', client, 'els.dock = dock')
+expect('client.js: 拖进来那一刻的高亮', client, '#lwp-card[data-drop="over"]')
+expect('client.js: 高亮摘掉', client, "els.card.removeAttribute('data-drop')")
+
+if (markDropSource === '' || dropFilesSource === '' || bindDropSource === '') {
+  failures.push('client.js: 抽不出 markDrop / dropFiles / bindDropTarget (拖放那条路不在)')
+} else {
+  /** 一块假节点: 记下挂上来的监听, 能按类型派一个事件 */
+  function dropNode(id) {
+    const listeners = new Map()
+    const attrs = new Map()
+    return {
+      id,
+      attrs,
+      listeners,
+      addEventListener: (type, fn) => { listeners.set(type, fn) },
+      setAttribute: (name, value) => { attrs.set(name, value) },
+      removeAttribute: (name) => { attrs.delete(name) },
+      dispatch: (type, event) => {
+        const fn = listeners.get(type)
+        if (fn === undefined) throw new Error(`没有挂 ${type} 监听`)
+        return fn(event)
+      },
+    }
+  }
+
+  /** 一个假事件: 数 preventDefault / stopPropagation 各叫了几次, `files` 是那几份 */
+  function dropEvent(files) {
+    const calls = { prevent: 0, stop: 0 }
+    return {
+      calls,
+      dataTransfer: files === undefined ? null : { files, dropEffect: 'none' },
+      preventDefault: () => { calls.prevent += 1 },
+      stopPropagation: () => { calls.stop += 1 },
+    }
+  }
+
+  const cardEl = dropNode('lwp-card')
+  const elsStub = { card: cardEl }
+  const markDrop = new Function('els', `${markDropSource}\nreturn markDrop`)(elsStub)
+
+  const landed = []
+  const saidNote = []
+  const logged = []
+  const dropFiles = new Function(
+    'markDrop', 'onFilesChosen', 'showNote', 'console',
+    `${dropFilesSource}\nreturn dropFiles`,
+  )(
+    markDrop,
+    (files) => { landed.push(files) },
+    (text, isError) => { saidNote.push({ text, isError }) },
+    { log: (line) => { logged.push(String(line)) } },
+  )
+  const bindDropTarget = new Function(
+    'markDrop', 'dropFiles', `${bindDropSource}\nreturn bindDropTarget`,
+  )(markDrop, dropFiles)
+
+  // ① 四条监听都挂上
+  const wired = dropNode('lwp-card')
+  bindDropTarget(wired)
+  const types = [...wired.listeners.keys()].sort().join(',')
+  if (types === 'dragenter,dragleave,dragover,drop') {
+    notes.push('ok   dragenter / dragover / dragleave / drop 四条都挂上了')
+  } else {
+    failures.push(`bindDropTarget 挂的是 ${types} (应 dragenter,dragleave,dragover,drop)`)
+  }
+  // 挂不上的输入 (null / 不是节点) 不许抛
+  let threw = ''
+  try {
+    bindDropTarget(null)
+    bindDropTarget({})
+  } catch (error) {
+    threw = error.message
+  }
+  if (threw === '') notes.push('ok   bindDropTarget 遇到空节点就地返回 (不抛)')
+  else failures.push(`bindDropTarget(null) 抛了: ${threw}`)
+
+  // ② dragover 必须 preventDefault, 并且置 dropEffect='copy' + 亮高亮
+  const over = dropEvent([])
+  wired.dispatch('dragover', over)
+  if (over.calls.prevent === 1 && over.calls.stop === 1) {
+    notes.push('ok   dragover: preventDefault + stopPropagation 各一下')
+  } else {
+    failures.push(`dragover 的 preventDefault ${String(over.calls.prevent)} 次 / stopPropagation ${String(over.calls.stop)} 次 (各应 1)`)
+  }
+  if (over.dataTransfer !== null && over.dataTransfer.dropEffect === 'copy') {
+    notes.push("ok   dragover: dropEffect 置成 copy")
+  } else {
+    failures.push('dragover 没把 dropEffect 置成 copy (光标显示成不收)')
+  }
+  if (cardEl.attrs.get('data-drop') === 'over') notes.push('ok   dragover: 卡上亮起 data-drop=over')
+  else failures.push('dragover 没让输入卡亮起来 (data-drop 不是 over)')
+
+  // dragenter 也要 preventDefault: 有的 WebView 只认这一声
+  const enter = dropEvent([])
+  wired.dispatch('dragenter', enter)
+  if (enter.calls.prevent === 1) notes.push('ok   dragenter: 也 preventDefault')
+  else failures.push('dragenter 没 preventDefault (老 WebView 上 drop 就不来)')
+
+  // dragleave 摘高亮
+  wired.dispatch('dragleave', dropEvent([]))
+  if (cardEl.attrs.has('data-drop') !== true) notes.push('ok   dragleave: 高亮摘掉')
+  else failures.push('dragleave 之后卡上还亮着 (data-drop 没摘)')
+
+  // ③ drop: DataTransfer.files 原样交给 onFilesChosen, 高亮摘掉, 一行读数带来源与文件名
+  const files = [
+    { name: '检查.png', size: 2048, type: 'image/png' },
+    { name: 'notes.md', size: 512, type: 'text/markdown' },
+  ]
+  landed.length = 0
+  logged.length = 0
+  const drop = dropEvent(files)
+  wired.dispatch('drop', drop)
+  if (drop.calls.prevent === 1) notes.push('ok   drop: preventDefault (不交给 WebView 当默认拖放)')
+  else failures.push('drop 没 preventDefault (WebView 会自己去打开那个文件)')
+  if (landed.length === 1 && landed[0] === files) {
+    notes.push('ok   drop: DataTransfer.files 原样交给 onFilesChosen (同一条附件链)')
+  } else {
+    failures.push(`drop 没把 files 交给 onFilesChosen (交了 ${String(landed.length)} 次)`)
+  }
+  if (cardEl.attrs.has('data-drop') !== true) notes.push('ok   drop: 落下后高亮摘掉')
+  else failures.push('drop 之后卡上还亮着 (data-drop 没摘)')
+  const dropLine = logged.find((line) => line.indexOf('[luwi-portal] drop ') === 0) || ''
+  if (dropLine.includes('lwp-card') && dropLine.includes('2') && dropLine.includes('检查.png')
+    && dropLine.includes('notes.md')) {
+    notes.push('ok   drop: 那行读数带来源 / 份数 / 文件名 (真机 logcat 只认它)')
+  } else {
+    failures.push(`drop 那行读数不对: ${JSON.stringify(dropLine)}`)
+  }
+
+  // ④ 一份都没有: 说一句, 不静默、也不空转 onFilesChosen
+  landed.length = 0
+  saidNote.length = 0
+  wired.dispatch('drop', dropEvent([]))
+  if (landed.length === 0 && saidNote.length === 1 && saidNote[0].isError === true) {
+    notes.push('ok   drop 空手而归: 说一句错话, 不调 onFilesChosen')
+  } else {
+    failures.push('drop 空手而归时既不说也不拦 (静默)')
+  }
+  // dataTransfer 都没有 (不是拖文件进来的 drop) 也一样要有个说法
+  wired.dispatch('drop', { preventDefault: () => {}, stopPropagation: () => {}, dataTransfer: null })
+
+  // 这里不许自己读字节 / 自己落盘: 那会是第二份文件读取逻辑
+  if (/portalStash|FileReader|readImage\(|stashOne\(/.test(dropFilesSource)) {
+    failures.push('client.js: dropFiles 里自己读字节 / 自己落盘了 (该只转手给 onFilesChosen)')
+  } else {
+    notes.push('ok   dropFiles 不自己读字节、不自己落盘 (只转手给 onFilesChosen)')
+  }
+}
+
+// ── 二十二、接住系统拖放的是原生这一层 (2.8.1 #34) ───────────────────────────
+//
+// 第二十节验的是"页面接得住 HTML5 drop", 但 Android 的 WebView 对文件管理器拖过来的 `content://`
+// **不派发 HTML5 drop** (2026-11-19 复核: 只挂 JS 监听时真机拿不到"投 1 个 -> 出 1 个 chip" 的读数),
+// 真正接住它的是 `HostScreen` 里那个 `setOnDragListener`. 这一节读源码盯五件:
+// 1) WebView 上确实挂了 setOnDragListener
+// 2) 落盘走与 `+` 选完同一份实现 (`PortalBridge.stashPicked`), 再把落好的几份交回页面 (`pickedFiles`)
+// 3) 只认带 Uri 的拖拽: 页面自己的拖拽与拖纯文本不被吃掉, 否则 dsh 页面里那些拖拽全哑
+// 4) drop 有一行读数 (真机上"拖进来没有 / 几份 / 叫什么"只认它)
+// 5) 一份都没落成时也得说一句 (`nothingLanded`, 与选文件那条路同一份)
+//
+// 注: 页面上那圈虚线高亮只对桌面浏览器有效 —— 系统拖进来时 WebView 不给页面 dragover, 所以真机上
+// 看到的是系统自己的拖拽影子, 那圈 `data-drop` 高亮不会亮. 这不是缺陷, 是那套事件的边界
+
+// 源码正文用上面那份 `hostScreen` (球菜单那一节读的), 这里不再读第二遍
+expect('HostScreen: WebView 挂上 setOnDragListener', hostScreen, 'setOnDragListener { _, event ->')
+expect('HostScreen: 拖放走 stashPicked (与 + 同一条落盘)', hostScreen, 'portal.stashPicked(uris)')
+expect('HostScreen: 落好的几份交回页面', hostScreen, 'pickedFiles(landed ?: nothingLanded(uris.size))')
+expect('HostScreen: drop 那行读数 (份数与文件名)', hostScreen, 'Log.i(WEB_TAG, "drop -> ')
+expect(
+  'HostScreen: 只认带 Uri 的拖拽 (不抢页面自己的拖拽)',
+  hostScreen,
+  'DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()',
+)
+expect(
+  'HostScreen: ClipData 只认 content / file',
+  hostScreen,
+  'uri.scheme == "content" || uri.scheme == "file"',
+)
+expect('HostScreen: 拖进来读挂了也不静默', hostScreen, 'nothingLanded(uris.size)')
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
