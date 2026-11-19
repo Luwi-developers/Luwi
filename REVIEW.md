@@ -5,7 +5,10 @@
 
 ## 这个仓库里，失败长什么样
 
-- **host 起不来**：`app/src/main/jniLibs` 缺 `libnode.so`，装机后只有开屏；正确读数是 `dsh web:` 行 + `pidof` 非空。
+- **host 起不来**：装机后只有开屏。正确读数是 `dsh web:` 行 + `pidof` 非空。
+  别拿 `jniLibs` 目录当依据（2026-11-18 实测：它只有 `arm64-v8a`、不带 `libnode.so`，而 debug / release APK
+  两者都含 `lib/arm64-v8a/libnode.so` 与 `liblwpty.so`，因为 native 产物是打包阶段注入的）——
+  判 APK 是否可跑，用 `unzip -l <apk> | findstr libnode`。
 - **判据绿但 PR 是虚的**：判据脚本没真跑（`checkScripts=未指定`），或验收格里的 `node tools/*.mjs` 被跳过。
 - **设备读数缺**：行为类改动没有 `[测试环境] 真机 - <型号> / Android <版本>`，只写「单测通过」。
 - **diff 夹带**：顺手改别的模块、整文件格式化、`build/` 或截图进 diff。
