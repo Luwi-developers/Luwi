@@ -9,10 +9,15 @@ nextTask + router 的 checks) 摆在同一屏上
    (`MARK_PNG`, 由 `tools/make-portal-mark.py` 从 `tools/brand/luwi-mark.png` 生成并内嵌, 透明底染
    `#01B4FF`) + `Luwi` + 一句「在的，说吧」。有消息时这一块不画 (屏幕中间归对话)。没有会话时
    多挂一颗「开一场」
-2. **左上角 = 开新对话**: `#lwp-brand` 是按钮 (标记 + `+` 徽标 + 名字 + 读数)。点一下走
+2. **左上角头像 = 历史窗** (2026-11-19 改口径, 原「开新对话」):
+   `#lwp-brand` 只有 28px 头像那么大 (**热区就是头像**), 点一下开 `#lwp-history`; 旁边的昵称与读数
+   只是标识, 点不动 —— 于是 `#lwp-head` 只剩「头像 + 名字 ... `⋯`」, 那颗「历史」胶囊已撤。
+   开新对话走历史窗底部的「开始新的对话」(`startFromHistory`) 与首启的 `autoStart()`, 路径仍是
    `newConversation()`: `startSession()` → 轮询 `currentSessionId()` 每 150 ms 最多 24 次 →
    `adopt` + **`portalBind`**(不写账会被 3 s 之后的 `pollLedger` 拽回旧场) + 8 s 的「已开新对话」读数。
    旧会话不删不归档, 只是这一层不再画它。
+   **那颗读数是一层浮层** (`position:absolute`, `z-index:2`, `pointer-events:none`, `top` 按头栏高度写):
+   出现与收起都不改 `#lwp-flow` 的高度, 中间的图文不跟着下移再弹回来。
    **这里没有「撤销」**: 上一场在切走后会被 dsh 卸载, 回来要重新 `openSession`, 而 `sessions.retain`
    只认当前工作区里还挂着的会话 —— 真机实测一律 `unknown session`, 异步重试 3.2 s 也救不回来。
    摆一颗按下去只回一句「打不开了」的按钮比没有更糟, 所以那一格只留读数
