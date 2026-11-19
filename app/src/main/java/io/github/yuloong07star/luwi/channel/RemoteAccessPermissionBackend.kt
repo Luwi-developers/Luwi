@@ -94,9 +94,10 @@ object RootAccessBackend : RemoteAccessPermissionBackend {
     override val backend = RemoteBackend.ROOT
 
     /**
-     * 主人在设置页点过「用 root 连接」没有 (2.8.1 #30)
+     * 这一拍允不允许 root 被问一次 (2.8.1 #30; 2026-11-19 改成按钮驱动)
      *
-     * 由 [ChannelSetting] 从偏好文件回填; 关掉就回今天的行为 —— 只有已经授权过的机器才走 root
+     * 由 [ChannelSetting.reprobe] 在**点「刷新状态」那一趟**置真, 问完立刻收回 —— 不落盘, 也就没有
+     * "开关开着一直问"这一档. 平时是 false, 首启一声不响仍然成立
      */
     @Volatile
     var optedIn: Boolean = false
@@ -109,7 +110,7 @@ object RootAccessBackend : RemoteAccessPermissionBackend {
      */
     override fun isAvailable(): Boolean = rootState() == true || optedIn
 
-    /** 现在能不能要授权: 只看主人有没有点过那个开关 */
+    /** 现在能不能要授权: 只看这一拍有没有人点过「刷新状态」 */
     override fun canPrompt(): Boolean = optedIn
 
     /** What the root manager last decided, which is unknown until something has been run */

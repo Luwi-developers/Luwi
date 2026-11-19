@@ -194,27 +194,48 @@ check(
   [true, true],
 )
 
+// 2026-11-19 主人: "最好不用加这个用 root 的按钮, 而是在『允许…内容』上方加一个刷新状态按钮" ——
+// 关掉那行开关之后, "要不要去问 root" 改由点一次刷新表态: 只在那一趟里置真, 问完收回, 不落盘
 check(
-  '开关: 偏好文件里一个键, 读回填, 写落盘, 点开顺带连一次',
+  '刷新状态: reprobe() 一过性放行 root, 问完 finally 里收回, 偏好键已撤',
   [
-    setting.includes('private const val ROOT_OPT_IN = "channel-root-opt-in"'),
-    setting.includes('RootAccessBackend.optedIn = readRootOptedIn(app)'),
-    setting.includes('preferences(context).edit().putBoolean(ROOT_OPT_IN, optedIn).apply()'),
-    setting.includes('if (optedIn) connect(done) else refresh()'),
+    setting.includes('fun reprobe('),
+    setting.includes('RootAccessBackend.optedIn = true'),
+    setting.includes('} finally {'),
+    setting.includes('optedIn = false'),
+    !setting.includes('ROOT_OPT_IN'),
+    !setting.includes('setRootOptedIn'),
   ],
-  [true, true, true, true],
+  [true, true, true, true, true, true],
 )
 
 check(
-  '设置页: 那一行开关调 setRootOptedIn, 三种副标题各有自己的键',
-  [
-    screen.includes('ChannelSetting.setRootOptedIn(context, value)'),
-    screen.includes('R.string.settings_channel_root_opt_in'),
-    screen.includes('R.string.settings_channel_root_opt_in_on'),
-    screen.includes('R.string.settings_channel_root_opt_in_off'),
-    screen.includes('R.string.settings_channel_root_opt_in_refused'),
-  ],
-  [true, true, true, true, true],
+  '设置页: 刷新按钮调 reprobe, 且那一行排在「允许 DSH 通过无障碍服务读取屏幕内容」那段之前',
+  (() => {
+    // 比的是 ChannelItems 里那两行调用的先后 (RefreshRow 的定义在文件下方, 拿它比行号会反)
+    const refresh = screen.indexOf('\n        RefreshRow()')
+    const access = screen.indexOf('\n        AccessibilityRows()')
+    return [
+      screen.includes('ChannelSetting.reprobe()'),
+      refresh > 0,
+      access > 0,
+      refresh > 0 && access > 0 && refresh < access,
+      !screen.includes('setRootOptedIn'),
+      screen.includes('R.string.settings_channel_refresh'),
+      screen.includes('R.string.settings_channel_refreshing'),
+    ]
+  })(),
+  [true, true, true, true, true, true, true],
+)
+
+check(
+  '两条路的顺序两处一致: Shizuku 在前, root 在后 (主人 2026-11-19 "优先 shizuku")',
+  (() => {
+    const routeOrder = /routes = listOf\(\s*Route\(ShizukuServiceConnector\(app\), ShizukuAccessBackend\),\s*Route\(RootServiceConnector\(app\), RootAccessBackend\)/.test(channel)
+    const readOrder = /routes = listOf\(\s*RouteState\(\s*backend = ShizukuAccessBackend\.backend[\s\S]*?RouteState\(\s*backend = RootAccessBackend\.backend/.test(setting)
+    return [routeOrder, readOrder]
+  })(),
+  [true, true],
 )
 
 console.log('')
