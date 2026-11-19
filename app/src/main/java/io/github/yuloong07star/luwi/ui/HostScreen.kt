@@ -1902,7 +1902,17 @@ private fun WebView.acceptDrop(
     scope: CoroutineScope,
 ): Boolean = when (event.action) {
     DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()
+    // 拖进来了: 页面那侧的说明牌与虚线一起亮 (2026-11-19 主人: "再加上如图所示的提示")
+    DragEvent.ACTION_DRAG_ENTERED -> {
+        dropOver(true)
+        true
+    }
+    DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {
+        dropOver(false)
+        true
+    }
     DragEvent.ACTION_DROP -> {
+        dropOver(false)
         val uris = dropUris(event.clipData)
         // 一行读数: 真机上"拖进来没有 / 几份 / 叫什么"只能看这一行
         val names = uris.joinToString(", ") { it.lastPathSegment ?: it.toString() }
@@ -1929,6 +1939,20 @@ private fun WebView.acceptDrop(
         }
     }
     else -> true
+}
+
+/**
+ * 告诉页面"现在有没有东西拖在这一块上" (2026-11-19 主人: "再加上如图所示的提示")
+ *
+ * 系统拖放不给页面 HTML5 事件, 所以那块说明牌 (`#lwp-drop-hint`) 与那圈虚线只能由原生这一层喊醒:
+ * `ACTION_DRAG_ENTERED` 亮, 松手 / 拖走 / 拖拽结束灭 —— 与桌面浏览器那条路同一个 `markDrop`
+ * @param on 拖进来为 true, 其余三拍为 false
+ */
+private fun WebView.dropOver(on: Boolean) {
+    evaluateJavascript(
+        "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.dropOver(${if (on) "true" else "false"})",
+        null,
+    )
 }
 
 /**
