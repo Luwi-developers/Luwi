@@ -2226,6 +2226,14 @@ if (sendWiring.includes('sendGesture(sendPress') && sendWiring.includes("held.ac
 } else {
   failures.push('client.js: 发送钮还在用 longPress 那套记号 —— 一次按下可能投两次')
 }
+// 长按投出去之后状态必须复位 (2026-11-19 审查): send() 同步把按钮置 disabled, 手指还按着时
+// pointerup 收不到 —— 不复位就卡在 `fired`, 之后每一次轻点都被判 'ignore', 正是这单要修的观感
+if (sendWiring.includes('sendPress = { pressed: false, fired: false }')
+  && /window\.addEventListener\('pointerup'[\s\S]{0,120}sendPress\.pressed/u.test(sendWiring)) {
+  notes.push('ok   长按投完复位 + 窗口捕获兜底 (按钮被禁用也不丢抬起)')
+} else {
+  failures.push('client.js: 长按投出去之后没有复位 sendPress —— 按钮被置 disabled 后 pointerup 丢失, 下一次轻点会被吞')
+}
 
 /**
  * 按大括号配对接一个具名函数的整段源 (缩进不是 6 空格的也认得 —— `describeError` 在模块那一层)

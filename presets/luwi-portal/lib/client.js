@@ -1701,7 +1701,19 @@ window.__ModuleLoader__.load({
           console.log('[luwi-portal] record not carried: no user node yet (users=' + String(lastUsers) + ')')
           return
         }
-        carried = mergeTimeline(carried, items)
+        // **本机画的那几行不抄** (2.8.1 #33 审查): 半透明占位行与两条本机失败行都不在 dsh 的账里,
+        // 抄进记录就撤不掉了 —— 换回来会多一条永远淡着的气泡 (真节点 id 不同, 去重也去不掉),
+        // 或者把上一场的「图片没发出去」捎到这一场
+        var keep = []
+        for (var i = 0; i < items.length; i += 1) {
+          var one = items[i]
+          if (one.pending === true) continue
+          if (one.fail === true) continue
+          if (String(one.id || '').indexOf('sendfail\u0001') === 0) continue
+          keep.push(one)
+        }
+        if (keep.length === 0) return
+        carried = mergeTimeline(carried, keep)
       }
 
       /**
@@ -5871,6 +5883,16 @@ window.__ModuleLoader__.load({
         // 那个纯函数里, 这里只负责挂计时器与调 send
         var sendPress = { pressed: false, fired: false }
         var sendTimer
+        /** 抬起 / 撤掉计时器一处收口: 状态机与计时器必须一起复位, 否则下一次按下会被判 'ignore' */
+        function endSendPress(event) {
+          var step = sendGesture(sendPress, event)
+          sendPress = step.state
+          if (sendTimer !== undefined) {
+            clearTimeout(sendTimer)
+            sendTimer = undefined
+          }
+          return step
+        }
         els.send.addEventListener('pointerdown', function () {
           var step = sendGesture(sendPress, 'down')
           sendPress = step.state
@@ -5879,26 +5901,28 @@ window.__ModuleLoader__.load({
             sendTimer = undefined
             var held = sendGesture(sendPress, 'hold')
             sendPress = held.state
-            if (held.act === 'hold') send('steer')
+            if (held.act === 'hold') {
+              send('steer')
+              // **投出去就复位** (2.8.1 #33 审查): send() 立刻把按钮置 disabled, 手指还按着时
+              // 表单项收不到 pointerup —— 不复位就卡在 `fired`, 此后每次轻点都判 'ignore',
+              // 屏上又是「按了没反应」
+              sendPress = { pressed: false, fired: false }
+            }
           }, SEND_HOLD_MS)
         })
         els.send.addEventListener('pointerup', function () {
-          var step = sendGesture(sendPress, 'up')
-          sendPress = step.state
-          if (sendTimer !== undefined) {
-            clearTimeout(sendTimer)
-            sendTimer = undefined
-          }
+          var step = endSendPress('up')
           if (step.act === 'tap') send('queue')
         })
-        els.send.addEventListener('pointercancel', function () {
-          var step = sendGesture(sendPress, 'cancel')
-          sendPress = step.state
-          if (sendTimer !== undefined) {
-            clearTimeout(sendTimer)
-            sendTimer = undefined
-          }
-        })
+        els.send.addEventListener('pointercancel', function () { endSendPress('cancel') })
+        // 按钮被置 disabled 之后 pointerup 不再送到它身上 (Chromium 不给 disabled 控件派发 pointer 事件):
+        // 补一条窗口捕获阶段的兜底, 只在还按着的时候收口 —— 正常那一路已经复位, 这里不会再投第二次
+        window.addEventListener('pointerup', function () {
+          if (sendPress.pressed) endSendPress('cancel')
+        }, true)
+        window.addEventListener('pointercancel', function () {
+          if (sendPress.pressed) endSendPress('cancel')
+        }, true)
         row.appendChild(els.send)
 
         card.appendChild(row)
