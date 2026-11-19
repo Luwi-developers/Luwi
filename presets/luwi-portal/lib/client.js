@@ -718,6 +718,8 @@ window.__ModuleLoader__.load({
       '.lwp-row[data-who="assistant"] .lwp-bubble{border-bottom-left-radius:6px}',
       '.lwp-row[data-who="error"] .lwp-bubble{color:var(--dsw-alias-state-error-primary,#b91c1c);',
       'background:linear-gradient(0deg,rgba(220,38,38,.1),rgba(220,38,38,.1)),var(--lwp-glass-fill)}',
+      // 本机占位那一行 (2.8.1 #33): 要淡一点, 与真落盘的那条分得开
+      '.lwp-row[data-pending="on"] .lwp-bubble{opacity:.6}',
       // 老 WebView 不认 backdrop-filter: 退回一块更实的底, 免得字压在照片上看不清
       '@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){',
       '.lwp-bubble{background:rgba(252,253,254,.92)}',
@@ -1275,6 +1277,29 @@ window.__ModuleLoader__.load({
        * turn-error 同一档), **不进 dsh 的会话账**: 这是本机的现场, 不是要发给模型的内容
        */
       var imageFails = []
+      /**
+       * 本机那几条「这句没发出去」 (2.8.1 #33): `{id, at, text}` —— 与 [imageFails] 同一档
+       * (`who:'error'`, 红字玻璃气泡), 画在门户自己的时间线上, **不进 dsh 的会话账**
+       *
+       * 主人报的是"点发送只有按钮变色, 正文没发出去, 过一会又恢复原状": 那时 `prompt()` 拒答只有一行
+       * `console.log`, 而门户盖着 dsh 自己的错误节点 —— 屏上就等于什么都没发生
+       */
+      var sendFails = []
+      /** 发送钮按住多久算长按 (长按 = steer, 轻点 = queue; 见 [sendGesture]) */
+      var SEND_HOLD_MS = 550
+      /**
+       * 这一次投递还没落进 dsh 快照时, 屏上先占那一行 (2.8.1 #33)
+       *
+       * dsh 的回显要等 Host 收下 prompt 才进快照 (`pendingSubmissions` 只装 accepted 的那几条),
+       * 于是"点了发送, 时间线上什么都没有"最长能空好几拍。这里先按本机这一份画一条半透明的行,
+       * 落盘那条 user 节点一出现就让位 (判据见 [pendingEchoState])
+       * `{id, at, text, attach}`; null = 没有欠着的那一行
+       */
+      var pendingEcho = null
+      /** 本机那条占位最多占多久: dsh 那边一直不认就撤, 免得屏上留一条永远不落地的气泡 */
+      var PENDING_ECHO_MS = 15000
+      /** 占位的序号 (同一条正文连发两次也不撞 id) */
+      var pendingSeq = 0
       /** 点 `+` 那一下的计时器 (宿主一回调就撤) */
       var pickWatch = null
       /** 这一趟选图还欠宿主一个回话 (`picked` / `empty` / `none` 里任意一个到了才算还清) */
@@ -1348,6 +1373,9 @@ window.__ModuleLoader__.load({
           clearAttach()
           // 上一场那几条「图片发送失败」也不带过去 (落实表 #35): 它们是这一场的现场
           imageFails = []
+          // 上一场那几条「这句没发出去」与还没落地的占位同样不带过去 (2.8.1 #33)
+          sendFails = []
+          pendingEcho = null
           userKey = ''
           loadOut(true)
         }
@@ -2197,6 +2225,22 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 本机占位那一行 (2.8.1 #33) —— 与真落盘那条 user 同一个形状, 只是多一位 `pending`
+       * @returns 能直接交给 [orderTimeline] 的一项
+       */
+      function pendingEchoItem() {
+        return {
+          who: 'user',
+          id: pendingEcho.id,
+          time: pendingEcho.at,
+          text: pendingEcho.text,
+          attach: pendingEcho.attach,
+          hasImage: false,
+          pending: true,
+        }
+      }
+
+      /**
        * 当前这一场的消息: user 节点 + 她说的话那份 jsonl, **按轮**合并 (2026-11-10)
        *
        * 两路流只按墙上时钟合并不够 (缺时间 / 同毫秒 / 宿主补句晚写都会把两条排反) —— 这里先把它们
@@ -2206,7 +2250,10 @@ window.__ModuleLoader__.load({
         // 这一场的节点还没到 (刚换场 / 场景还没恢复): 门户记录照画, 屏上不清空 (2026-11-12 #38)
         if (chatTarget === null) {
           lastUsers = 0
-          return carried.slice()
+          var before = carried.slice()
+          // 刚点过发送、这一场还没挂上: 本机那一行先占着, 屏上不是空的 (见 [pendingEcho])
+          if (pendingEcho !== null && sending) before.push(pendingEchoItem())
+          return before
         }
         var snapshot
         try {
@@ -2387,8 +2434,42 @@ window.__ModuleLoader__.load({
             diag: imageFails[f].diag,
           })
         }
+        // 本机那几条「这句没发出去」 (2.8.1 #33): 与图片失败同一档, 按它自己那一刻归轮
+        for (var sf = 0; sf < sendFails.length; sf += 1) {
+          extras.push({
+            who: 'error',
+            id: sendFails[sf].id,
+            time: sendFails[sf].at,
+            text: sendFails[sf].text,
+          })
+        }
+        // dsh 自己记下的那一条 prompt 拒答: 门户盖着它自己那块错误条, 这里补画一行
+        // (本机已经按同一句话记过的那条就不重复画 —— 两处说的是同一件事)
+        var rejected = promptErrorText(snapshot.promptError)
+        if (rejected !== '') {
+          var rejectedKnown = false
+          for (var rf = 0; rf < sendFails.length; rf += 1) {
+            if (sendFails[rf].text === rejected) rejectedKnown = true
+          }
+          if (!rejectedKnown) {
+            extras.push({ who: 'error', id: 'prompt-error\u0001' + rejected, time: 0, text: rejected })
+          }
+        }
+        // 本机那条占位: 落盘的 user 节点到了就让位, 失败 / 等太久就撤 (见 [pendingEchoState])
+        if (pendingEcho !== null) {
+          var holdNow = pendingEchoState(pendingEcho, users, sending, Date.now(), PENDING_ECHO_MS)
+          if (holdNow === 'done') {
+            console.log('[luwi-portal] pending echo landed: ' + String(pendingEcho.id))
+            pendingEcho = null
+          } else if (holdNow === 'drop') {
+            console.log('[luwi-portal] pending echo gave up: ' + String(pendingEcho.id))
+            pendingEcho = null
+          }
+        }
         // 记下这一拍读到了几个 user 节点 (给 [carryRecord] 当闸门, 见 [lastUsers])
         lastUsers = users.length
+        // 这一句还没进 dsh 的快照: 先按本机这一份占一行 (半透明), 点完发送屏上立刻有东西
+        if (pendingEcho !== null) users.push(pendingEchoItem())
         // 排好之后与门户记录**按时间**合成一条 (落实表 #38): 换场带过来那一段不再盲接在头上
         // (2026-11-14: 主人报的"她的话整组压在我的消息上面"就是那条盲拼接造成的)
         return mergeTimeline(carried, orderTimeline(users, rows, extras))
@@ -3610,6 +3691,8 @@ window.__ModuleLoader__.load({
           item.hasImage ? '1' : '', item.fallback ? '1' : '',
           // 有四行诊断才画「复制诊断」, 这一位也进身份: 少了它, 诊断补上那一拍不会重建那一行
           item.diag ? '1' : '',
+          // 本机占位那一行 (2.8.1 #33): 它变成真的那条时身份也换了, 那一行才重画一次
+          item.pending ? '1' : '',
         ].join('\u0001')
       }
 
@@ -3622,6 +3705,8 @@ window.__ModuleLoader__.load({
       function buildRow(item) {
         var row = h('div', 'lwp-row')
         row.setAttribute('data-who', item.who)
+        // 本机占位那一行 (2.8.1 #33): 还欠 dsh 一条落盘的 user 节点, 画淡一点 —— 人一眼看得出"还在送"
+        if (item.pending) row.setAttribute('data-pending', 'on')
         if (item.who === 'user' && item.hasImage && !(item.attach && item.attach.length > 0)) {
           // 有图块却没有落盘那份 (stash 失败 / 旧消息): 补一行「（图）」, 不假装贴过也不整条丢掉
           var lostOnly = h('div', 'lwp-image', '（图）')
@@ -4216,11 +4301,20 @@ window.__ModuleLoader__.load({
       }
 
 
-      /** 发送钮的两副面孔 (空草稿时是四成透明的那颗, 与 dsh 的 `.primary` 同一个读数) */
+      /**
+       * 发送钮的两副面孔 (转圈 / 箭头)
+       *
+       * **只管图标与禁用** (2.8.1 #33): 草稿什么时候清、什么时候还, 由 [send] 自己决定 —— 以前两件事
+       * 混在 `sending` 一个记号上, 失败那一路"还了草稿还把按钮锁回去", 屏上就是"转一圈、什么都没发、
+       * 过会自己恢复原状"
+       */
       function setSendBusy(busy) {
         if (!els.send) return
         els.send.innerHTML = busy ? SPIN_ICON : SEND_ICON
-        els.send.disabled = busy
+        els.send.disabled = busy === true
+        els.send.setAttribute('data-busy', busy === true ? 'on' : 'off')
+        // 转完这一圈就按草稿重新判一次能不能点 (失败时草稿被还回来了, 那颗钮必须还能点)
+        if (busy !== true) updateSendGate()
       }
 
       /** 空草稿 / 没有会话时发送钮按不动 (带了一张传好的图时, 文字可以为空) */
@@ -4231,6 +4325,142 @@ window.__ModuleLoader__.load({
         // 没有会话时不再把发送钮锁上: 它的禁用态只是 0.4 透明度, 看着还能点, 点了又什么都没发生,
         // 于是用户以为界面坏了. 现在让它能点, 由 send() 用一句话说清"先开一场对话"
         els.send.disabled = text === '' && !ready
+      }
+
+      /**
+       * 一次投递被拒 / 抛错时的那句人话 (2.8.1 #33)
+       *
+       * 以前 `prompt()` 回 `{ok:false}` 只有一行 `console.log`: 门户盖着 dsh 自己的错误节点, 于是
+       * 屏上只剩"按钮转一圈又回来、草稿还在"。这句就是屏上那一行。**能拿到码与话就照抄**, 拿不到才用
+       * 兜底那句 —— 不在屏上写一句没人对得上的话
+       *
+       * @param reason `prompt()` 的 `result.error` / 抛出来的 Error / 一句现成的串
+       * @returns 直接能画的那一句
+       */
+      function sendFailText(reason) {
+        var prefix = '这句没发出去'
+        if (reason === undefined || reason === null) return prefix
+        if (typeof reason === 'string') {
+          var said = reason.trim()
+          return said === '' ? prefix : prefix + ': ' + said
+        }
+        var code = typeof reason.code === 'string' ? reason.code : ''
+        var message = typeof reason.message === 'string' ? reason.message : ''
+        if (code !== '' && message !== '') return prefix + ': ' + code + ': ' + message
+        if (message !== '') return prefix + ': ' + message
+        if (code !== '') return prefix + ': ' + code
+        return prefix + ': ' + describeError(reason)
+      }
+
+      /**
+       * dsh 自己记下的那一条 prompt 拒答 (`snapshot.promptError`) → 屏上那一句
+       *
+       * 快照上那一格是 dsh 的 object-layer 状态, 门户这一层看不见它自己那块错误条, 所以读出来自己画
+       * @param promptError `{op, error:{code, message}}` (没有就是 null)
+       * @returns 能画的那一句; 没有拒答回空串
+       */
+      function promptErrorText(promptError) {
+        if (!promptError || typeof promptError !== 'object') return ''
+        // 那一格也是「停那一轮」失败时的落点 (`op:'stop'`): 那不是"没发出去", 不在这条链上说
+        if (typeof promptError.op === 'string' && promptError.op !== 'send') return ''
+        var reason = promptError.error
+        if (!reason) return ''
+        return sendFailText(reason)
+      }
+
+      /**
+       * 记一条「这句没发出去」并当场重画 (2.8.1 #33)
+       *
+       * 与 [imageFail] 同一个写法: 只留最近三条, 连发失败十次不该把整段对话顶走
+       * @param text 要画的那一句 (屏上就是一整句, 不再拼别的)
+       */
+      function pushSendFail(text) {
+        var said = String(text === undefined || text === null ? '' : text).trim()
+        if (said === '') said = '这句没发出去'
+        var at = Date.now()
+        sendFails.push({
+          id: 'sendfail\u0001' + String(at) + '\u0001' + String(sendFails.length),
+          at: at,
+          text: said,
+        })
+        while (sendFails.length > 3) sendFails.shift()
+        console.log('[luwi-portal] send failed: ' + said)
+        renderFlow()
+      }
+
+      /**
+       * 屏上那条 user 行是不是"我刚发出去的那一句"
+       *
+       * dsh 的 user 节点晚一拍才到: 正文一样 (附件那一段已被 `splitAttach` 拆走) 而且时刻不早于本机
+       * 记下的那一拍, 才算同一条 —— 只比正文的话, 同一句话连发两次会把旧的那条当成新的
+       * @param hold [pendingEcho]
+       * @param one 快照里的一条 user (见 [nodesOf])
+       * @returns 同一条 = true
+       */
+      function pendingEchoSame(hold, one) {
+        if (!hold || !one || one.who !== 'user') return false
+        // 空白归一之后再比: dsh 那边可能把行尾 / 连着的空行收了一下, 那不该让占位多留一拍
+        var mineText = String(hold.text || '').replace(/\s+/g, ' ').trim()
+        var thatText = String(one.text || '').replace(/\s+/g, ' ').trim()
+        if (thatText !== mineText) return false
+        var names = Array.isArray(one.attach) ? one.attach.join(',') : ''
+        var mine = Array.isArray(hold.attach) ? hold.attach.join(',') : String(hold.attach || '')
+        if (names !== mine) return false
+        var when = Number(one.time) || 0
+        return when === 0 || when >= Number(hold.at) - 2000
+      }
+
+      /**
+       * 本机那条占位还要不要占着 (2.8.1 #33)
+       *
+       * 纯函数, 判据工具直接抽出来真跑 (check-luwi-portal §20)
+       * @param hold [pendingEcho]
+       * @param users 快照里这一场的 user 节点 (已拆过附件)
+       * @param busy 这一句还在投 (`sending`)
+       * @param now 现在 (毫秒)
+       * @param limit 最多占多久 (`PENDING_ECHO_MS`)
+       * @returns `keep` 继续占 / `done` 落盘那条到了 / `drop` 撤掉 (失败或等太久)
+       */
+      function pendingEchoState(hold, users, busy, now, limit) {
+        if (!hold) return 'drop'
+        var list = Array.isArray(users) ? users : []
+        for (var i = 0; i < list.length; i += 1) {
+          if (pendingEchoSame(hold, list[i])) return 'done'
+        }
+        if (busy === true) return 'keep'
+        var ttl = Number(limit)
+        if (!isFinite(ttl) || ttl <= 0) ttl = 15000
+        return now - Number(hold.at) > ttl ? 'drop' : 'keep'
+      }
+
+      /**
+       * 发送钮那一次按下的判据 (2.8.1 #33): 一次 pointerdown→pointerup 只投一次
+       *
+       * 纯函数, 判据工具直接抽出来真跑。轻点 = `queue`, 按住到点 = `steer`, 长按之后那次抬起
+       * **不再**投 queue —— 以前靠"计时器有没有被清掉"当记号, 多一根手指 (第二次 pointerdown 覆盖了
+       * 计时器 id) 就会变成两次投递
+       * @param state `{pressed, fired}` 上一拍的状态 (不改它)
+       * @param event `down` / `hold` / `up` / `cancel`
+       * @returns `{state, act}`; act: `arm` 挂计时器 / `hold` 投 steer / `tap` 投 queue / `disarm` 撤计时器 / `ignore`
+       */
+      function sendGesture(state, event) {
+        var pressed = state !== null && state !== undefined && state.pressed === true
+        var fired = state !== null && state !== undefined && state.fired === true
+        if (event === 'down') {
+          // 已经按着就不再挂第二个计时器 (第二根手指不许变成第二次投递)
+          if (pressed) return { state: { pressed: true, fired: fired }, act: 'ignore' }
+          return { state: { pressed: true, fired: false }, act: 'arm' }
+        }
+        if (event === 'hold') {
+          if (!pressed || fired) return { state: { pressed: pressed, fired: fired }, act: 'ignore' }
+          return { state: { pressed: true, fired: true }, act: 'hold' }
+        }
+        if (event === 'up') {
+          if (!pressed) return { state: { pressed: false, fired: false }, act: 'ignore' }
+          if (fired) return { state: { pressed: false, fired: false }, act: 'ignore' }
+          return { state: { pressed: false, fired: false }, act: 'tap' }
+        }
+        return { state: { pressed: false, fired: false }, act: pressed ? 'disarm' : 'ignore' }
       }
 
       function kv(key, value) {
@@ -5204,7 +5434,38 @@ window.__ModuleLoader__.load({
       function imageBlocks() {
         return []
       }
-      /** 交给 dsh 自己投递: 与输入框同一条路 (beginSubmission 的 echo 让"发送中"也能画) */
+      /**
+       * 这一次投递在本机上先占的那一行 (2.8.1 #33)
+       *
+       * 只记"人说的那部分" (`text`) 与附件名字: 附件那一段路径挂在 `text` 后面进的 prompt, 而
+       * `splitAttach` 会把落盘那一条的正文重新拆成同样两份, 两边才比得上 (见 [pendingEchoSame])
+       * @param text 人写的那一句 (可能为空 = 只发附件)
+       * @param items 待发附件 (`attach` 那一份)
+       * @returns [pendingEcho]
+       */
+      function pendingEchoStart(text, items) {
+        var names = []
+        for (var i = 0; i < items.length; i += 1) {
+          if (items[i] && typeof items[i].name === 'string' && items[i].name !== '') names.push(items[i].name)
+        }
+        pendingSeq += 1
+        var at = Date.now()
+        return {
+          id: 'pending\u0001' + String(at) + '\u0001' + String(pendingSeq),
+          at: at,
+          text: text,
+          attach: names,
+        }
+      }
+
+      /**
+       * 交给 dsh 自己投递: 与输入框同一条路 (beginSubmission 的 echo 让"发送中"也能画)
+       *
+       * 2.8.1 #33 起这一条链的规矩是**点一次必然看见结果**: 投出去先在时间线上占一行 (本机那一份,
+       * 见 [pendingEcho]); 落盘那条 user 节点到了就换成它; 被拒 / 抛错就换成一条红字 (`who:'error'`),
+       * 并且只在这一刻把草稿还回去 —— 以前 `{ok:false}` 只有一行 `console.log`, 屏上就是"按钮转一圈、
+       * 什么都没发出去、过一会自己恢复原状"
+       */
       function send(mode) {
         if (sending) return
         var text = String(els.input.value || '').trim()
@@ -5225,6 +5486,9 @@ window.__ModuleLoader__.load({
             return
           }
         } else if (text === '') {
+          // 空草稿: 以前是**静默 return** —— 按了 Enter (或那颗钮还能点) 时什么都不发生, 与"按钮变色"
+          // 分不开。说一句, 而且那颗钮本来就按不动 (见 [updateSendGate])
+          showNote('先写点什么, 再发', true)
           return
         }
         var binding = bindingOf(sessionId)
@@ -5238,6 +5502,8 @@ window.__ModuleLoader__.load({
         sending = true
         setSendBusy(true)
         els.input.value = ''
+        // 本机先占一行: dsh 的回显要等 Host 收下 prompt 才进快照, 这几拍屏上不该是空的
+        pendingEcho = pendingEchoStart(text, attach)
         // 第一句之后把这一场写进账本: 球接下来 10 分钟接的就是这一场
         if (bound !== sessionId) {
           bound = sessionId
@@ -5257,30 +5523,62 @@ window.__ModuleLoader__.load({
         } catch (_noEcho) {
           requestId = undefined
         }
-        var started = Promise.resolve(session.prompt(blocks, mode, undefined, requestId)).then(function (result) {
+        // 这一次没成的那一句 (空串 = 成了): `{ok:false}` 与抛错两条路都写进这里, 收尾只判它
+        var failed = ''
+        // **同步抛也算这一趟的失败**: `session.prompt()` 在桥断了的时候是同步抛的
+        // (`Promise.resolve(x())` 拦不住它) —— 那一下会把 `sending` 永远钉在 true, 按钮就一直转圈
+        var started
+        try {
+          started = Promise.resolve(session.prompt(blocks, mode, undefined, requestId))
+        } catch (error) {
+          started = Promise.reject(error)
+        }
+        started = started.then(function (result) {
           // `prompt()` 回的是 `{ ok, value | error }` —— 不看它就会**静默失败** (2026-11-08 真机上就是这么
           // "点了发送没反应"的: 图片块被拒, 而 Promise 照样 resolve)
           if (result && result.ok === false) {
-            var reason = result.error ? (result.error.code + ': ' + result.error.message) : '这一轮没被接受'
-            console.log('[luwi-portal] prompt rejected: ' + reason)
-            throw new Error(reason)
+            failed = sendFailText(result.error)
+            console.log('[luwi-portal] prompt rejected: ' + failed)
+            return result
           }
+          // 成了才把待发栏清掉: 失败那一趟那几张图还在栏里, 人改一改就能重发
           clearAttach()
           return result
         })
         started
           .catch(function (error) {
-            // 失败由会话自己的错误节点显示, 这里只把草稿还回去
+            // 抛错 (桥不在 / 传输断了): 与 `{ok:false}` 同一档说法, 屏上不静默
+            if (failed === '') failed = sendFailText(error)
             console.log('[luwi-portal] send failed: ' + describeError(error))
-            if (els.input && els.input.value === '') els.input.value = text
-            if (attach.length > 0) showNote('这些文件没发出去: ' + describeError(error), true)
           })
           .then(function () {
+            if (failed !== '') {
+              // 本机占位让给那一条错误 (它不是"发出去了")
+              pendingEcho = null
+              // dsh 自己把这条拒答记在快照的 `promptError` 上 (门户盖着它那块错误条, 见 [promptErrorText]);
+              // 快照里读得到就让它画, 读不到 (抛错那一路) 就本机记一条 —— 两条都在时间线上, 不会两份
+              if (promptErrorOf() === '') pushSendFail(failed)
+              showNote(failed, true)
+              // 草稿只在这一刻还回去 (成了就不还): 人接着改、接着发
+              if (els.input && els.input.value === '') els.input.value = text
+            }
             sending = false
             setSendBusy(false)
             updateSendGate()
             scheduleRender()
           })
+      }
+
+      /** dsh 快照里记着的那一条 prompt 拒答 → 屏上那一句 (读不到回空串) */
+      function promptErrorOf() {
+        if (chatTarget === null || typeof chatTarget.getSnapshot !== 'function') return ''
+        var snap
+        try {
+          snap = chatTarget.getSnapshot()
+        } catch (_noSnap) {
+          return ''
+        }
+        return promptErrorText(snap && snap.promptError)
       }
 
       /** 账本换了场就跟着走 (球超时另开一场时, 门户不该还停在旧的) */
@@ -5569,23 +5867,37 @@ window.__ModuleLoader__.load({
         els.send.setAttribute('aria-label', '发送')
         els.send.innerHTML = SEND_ICON
         els.send.disabled = true
-        var longPress
+        // 轻点 = queue, 按住到点 = steer (2.8.1 #33): 一次按下只许投一次 —— 判据全在 [sendGesture]
+        // 那个纯函数里, 这里只负责挂计时器与调 send
+        var sendPress = { pressed: false, fired: false }
+        var sendTimer
         els.send.addEventListener('pointerdown', function () {
-          longPress = setTimeout(function () {
-            longPress = undefined
-            send('steer')
-          }, 550)
+          var step = sendGesture(sendPress, 'down')
+          sendPress = step.state
+          if (step.act !== 'arm') return
+          sendTimer = setTimeout(function () {
+            sendTimer = undefined
+            var held = sendGesture(sendPress, 'hold')
+            sendPress = held.state
+            if (held.act === 'hold') send('steer')
+          }, SEND_HOLD_MS)
         })
         els.send.addEventListener('pointerup', function () {
-          if (longPress !== undefined) {
-            clearTimeout(longPress)
-            longPress = undefined
-            send('queue')
+          var step = sendGesture(sendPress, 'up')
+          sendPress = step.state
+          if (sendTimer !== undefined) {
+            clearTimeout(sendTimer)
+            sendTimer = undefined
           }
+          if (step.act === 'tap') send('queue')
         })
         els.send.addEventListener('pointercancel', function () {
-          if (longPress !== undefined) clearTimeout(longPress)
-          longPress = undefined
+          var step = sendGesture(sendPress, 'cancel')
+          sendPress = step.state
+          if (sendTimer !== undefined) {
+            clearTimeout(sendTimer)
+            sendTimer = undefined
+          }
         })
         row.appendChild(els.send)
 
