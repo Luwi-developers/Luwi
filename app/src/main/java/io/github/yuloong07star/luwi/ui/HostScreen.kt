@@ -1,9 +1,11 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Insets
 import android.net.Uri
@@ -1908,10 +1910,18 @@ private fun WebView.acceptDrop(
         if (uris.isEmpty()) {
             false
         } else {
+            // **拖放那份读权限只在这一拍有效** (2026-11-19 真机踩到): 系统给拖进来那张
+            // `content://` 的授权是"一次性的", 松手之后 `openInputStream` 就再也打不开 —— 落盘那
+            // 一侧只看到"这一份读不动" (落成 0 份, 页面上就是一句"这些没进"). 所以先在主线程把
+            // 它要到手 (问的是 Activity), 读完再 release
+            val grant = runCatching { context.findActivity()?.requestDragAndDropPermissions(event) }
+                .getOrNull()
+            Log.i(WEB_TAG, "drop grant=${grant != null}")
             scope.launch {
                 val landed = withContext(Dispatchers.IO) {
                     runCatching { JSONObject(portal.stashPicked(uris)) }.getOrNull()
                 }
+                runCatching { grant?.release() }
                 // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
                 pickedFiles(landed ?: nothingLanded(uris.size))
             }
@@ -1919,6 +1929,21 @@ private fun WebView.acceptDrop(
         }
     }
     else -> true
+}
+
+/**
+ * 从这一层 [Context] 往上找到那个 Activity (2.8.1 #34)
+ *
+ * 拖放那份读权限 (`requestDragAndDropPermissions`) 只有 Activity 问得到; Compose 里拿到的是
+ * `LocalContext.current`, 宿主是 Activity 时它就是 Activity, 套了一层主题包装时不是 —— 所以往上走
+ */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 /**
