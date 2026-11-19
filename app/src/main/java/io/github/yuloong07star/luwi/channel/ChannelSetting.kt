@@ -1,7 +1,5 @@
 package io.github.yuloong07star.luwi.channel
 
-import android.content.Context
-import android.content.SharedPreferences
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,17 +40,6 @@ object ChannelSetting {
 
     private const val TAG = "LwChannel"
 
-    /** 与 [io.github.yuloong07star.luwi.host.HostSettings] / `PreviewControl` 同一个偏好文件, 全 app 一个 */
-    private const val STORE = "luwi"
-
-    /**
-     * 「用 root 连接」那个开关的落点 (2.8.1 #30)
-     *
-     * 关着 = root 那条路一声不响 (首启就是这样), 点开才允许它去要一次授权. 这是"现在能不能要授权",
-     * 与"这条路在不在" ([RouteState.available]) 是两个判断; 界面那份读数由 [readRootOptedIn] 直接取
-     */
-    private const val ROOT_OPT_IN = "channel-root-opt-in"
-
     /** One call at a time, since they all ask the same two backends */
     private val worker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "lw-channel-ui").apply { isDaemon = true }
@@ -80,20 +67,35 @@ object ChannelSetting {
         worker.execute { read() }
     }
 
-    /** 磁盘上那个选择, 界面第一帧读它 (没有这个键 = 不许要授权) */
-    fun readRootOptedIn(context: Context): Boolean =
-        preferences(context).getBoolean(ROOT_OPT_IN, false)
-
     /**
-     * 拨「用 root 连接」: 先落盘再动通道, 点开的那一趟顺带要一次授权
+     * 重新确认两条路现在在哪一档 (2.8.1 #30 改口径: 2026-11-19 主人「不要那个开关, 换成刷新状态按钮」)
      *
-     * 关掉只是不再去问, 已经连上的 root 不动 —— 授权在 root 管理器那边, 这里只管"要不要开口".
-     * 点开时走 [connect]: 它本来就在 worker 线程上, 而且有 [working] 这道闸
+     * 点这一下就是主人的明确表态 —— 只在**这一次刷新期间**允许 root 被问一次 (`optedIn` 一过性置真),
+     * 问完立刻收回, **不落盘**: 首启仍然一声不响 (那是 #30 保住的那半), 而"我想让它试一次"这句话由
+     * 按钮说, 不靠一个常驻开关记着
+     *
+     * 顺序照 [PrivilegedChannel] 那份 routes: **Shizuku 在前, root 在后** —— 已经把活干着的机器不会
+     * 再去碰 root 管理器 (`ensure()` 里 `live()` 先短路)
+     *
+     * @param done 读完状态之后在 worker 线程上回调
      */
-    fun setRootOptedIn(context: Context, optedIn: Boolean, done: () -> Unit = {}) {
-        RootAccessBackend.optedIn = optedIn
-        preferences(context).edit().putBoolean(ROOT_OPT_IN, optedIn).apply()
-        if (optedIn) connect(done) else refresh()
+    fun reprobe(done: () -> Unit = {}) {
+        if (working) return
+        working = true
+        worker.execute {
+            RootAccessBackend.optedIn = true
+            try {
+                PrivilegedChannel.ensure()
+            } catch (error: Throwable) {
+                Log.w(TAG, "re-reading the privileged channel failed", error)
+            } finally {
+                // 这一拍的许可用完就还: 下一次 ensure() 不该自己又去打扰 root 管理器
+                RootAccessBackend.optedIn = false
+            }
+            read()
+            working = false
+            done()
+        }
     }
 
     /**
@@ -120,28 +122,23 @@ object ChannelSetting {
 
     /** Ask both routes where they stand, on the worker thread */
     private fun read() {
-        // 开关的落点在磁盘上, 进程刚起来时内存里那份还是缺省 false —— 先回填, 再问两个问题
-        PrivilegedChannel.context()?.let { app ->
-            RootAccessBackend.optedIn = readRootOptedIn(app)
-        }
         state = PrivilegedChannel.state()
+        // 顺序与 [PrivilegedChannel] 那份 routes 一致: **Shizuku 先, root 后** (主人 2026-11-19
+        // "优先 shizuku") —— 界面读数的先后跟着实际尝试的先后走, 两处不会一个说 A 一个说 B
         routes = listOf(
-            RouteState(
-                backend = RootAccessBackend.backend,
-                available = RootAccessBackend.isAvailable(),
-                granted = RootAccessBackend.rootState(),
-            ),
             RouteState(
                 backend = ShizukuAccessBackend.backend,
                 available = ShizukuAccessBackend.isAvailable(),
                 granted = ShizukuAccessBackend.isGranted(),
+            ),
+            RouteState(
+                backend = RootAccessBackend.backend,
+                available = RootAccessBackend.isAvailable(),
+                granted = RootAccessBackend.rootState(),
             ),
         )
         // 通道真的通了就把"默认允许无障碍"那一趟走一次 (2.7.9 第 7 条): 记号管着只开一次, 这里只负责
         // 时机 —— 刚在 KernelSU / Shizuku 里给完授权、点连接之后那一趟也走得到
         if (state?.connected == true) AccessibilitySetting.autoEnableOnce()
     }
-
-    private fun preferences(context: Context): SharedPreferences =
-        context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
 }
