@@ -2331,6 +2331,37 @@ if (markDropSource === '' || dropFilesSource === '' || bindDropSource === '') {
   }
 }
 
+// ── 二十一、接住系统拖放的是原生这一层 (2.8.1 #34) ────────────────────────────
+//
+// 第二十节验的是"页面接得住 HTML5 drop", 但 Android 的 WebView 对文件管理器拖过来的 `content://`
+// **不派发 HTML5 drop** (2026-11-19 复核: 只挂 JS 监听时真机拿不到"投 1 个 -> 出 1 个 chip" 的读数),
+// 真正接住它的是 `HostScreen` 里那个 `setOnDragListener`. 这一节读源码盯五件:
+// 1) WebView 上确实挂了 setOnDragListener
+// 2) 落盘走与 `+` 选完同一份实现 (`PortalBridge.stashPicked`), 再把落好的几份交回页面 (`pickedFiles`)
+// 3) 只认带 Uri 的拖拽: 页面自己的拖拽与拖纯文本不被吃掉, 否则 dsh 页面里那些拖拽全哑
+// 4) drop 有一行读数 (真机上"拖进来没有 / 几份 / 叫什么"只认它)
+// 5) 一份都没落成时也得说一句 (`nothingLanded`, 与选文件那条路同一份)
+//
+// 注: 页面上那圈虚线高亮只对桌面浏览器有效 —— 系统拖进来时 WebView 不给页面 dragover, 所以真机上
+// 看到的是系统自己的拖拽影子, 那圈 `data-drop` 高亮不会亮. 这不是缺陷, 是那套事件的边界
+
+// 源码正文用上面那份 `hostScreen` (球菜单那一节读的), 这里不再读第二遍
+expect('HostScreen: WebView 挂上 setOnDragListener', hostScreen, 'setOnDragListener { _, event ->')
+expect('HostScreen: 拖放走 stashPicked (与 + 同一条落盘)', hostScreen, 'portal.stashPicked(uris)')
+expect('HostScreen: 落好的几份交回页面', hostScreen, 'pickedFiles(landed ?: nothingLanded(uris.size))')
+expect('HostScreen: drop 那行读数 (份数与文件名)', hostScreen, 'Log.i(WEB_TAG, "drop -> ')
+expect(
+  'HostScreen: 只认带 Uri 的拖拽 (不抢页面自己的拖拽)',
+  hostScreen,
+  'DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()',
+)
+expect(
+  'HostScreen: ClipData 只认 content / file',
+  hostScreen,
+  'uri.scheme == "content" || uri.scheme == "file"',
+)
+expect('HostScreen: 拖进来读挂了也不静默', hostScreen, 'nothingLanded(uris.size)')
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
