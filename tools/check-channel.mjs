@@ -210,6 +210,16 @@ check(
 )
 
 check(
+  '刷新时 root 单独真试一次 (shizuku 连着也进得到), 并留一行读数',
+  [
+    setting.includes('RootAccessBackend.requestPermission()'),
+    setting.includes('rootRefused = !rootGranted'),
+    setting.includes('reprobe: root'),
+  ],
+  [true, true, true],
+)
+
+check(
   '设置页: 刷新按钮调 reprobe, 且那一行排在「允许 DSH 通过无障碍服务读取屏幕内容」那段之前',
   (() => {
     // 比的是 ChannelItems 里那两行调用的先后 (RefreshRow 的定义在文件下方, 拿它比行号会反)

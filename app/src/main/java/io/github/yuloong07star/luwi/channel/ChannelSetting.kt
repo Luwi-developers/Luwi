@@ -58,8 +58,17 @@ object ChannelSetting {
     var state: ChannelState? by mutableStateOf(null)
         private set
 
-    /** Both routes in the order the channel tries them, root first */
+    /** Both routes in the order the channel tries them: Shizuku first, then root */
     var routes: List<RouteState> by mutableStateOf(emptyList())
+        private set
+
+    /**
+     * 最近一次「刷新状态」里 root 试过但没拿到 (2026-11-19)
+     *
+     * 界面拿它决定要不要在按钮下面说那句"去哪儿开": `RouteState.granted` 说不清这件事 —— 平时那格是
+     * `null`(还没问过) 还是 `false`(问过被拒) 分不开, 而这一趟问完许可就收回了
+     */
+    var rootRefused: Boolean by mutableStateOf(false)
         private set
 
     /** Read the state once, without connecting anything and without any prompt */
@@ -74,8 +83,10 @@ object ChannelSetting {
      * 问完立刻收回, **不落盘**: 首启仍然一声不响 (那是 #30 保住的那半), 而"我想让它试一次"这句话由
      * 按钮说, 不靠一个常驻开关记着
      *
-     * 顺序照 [PrivilegedChannel] 那份 routes: **Shizuku 在前, root 在后** —— 已经把活干着的机器不会
-     * 再去碰 root 管理器 (`ensure()` 里 `live()` 先短路)
+     * 两件事都做, 顺序是**先 shizuku 后 root**:
+     * 1. `ensure()` 走一遍 (已经连着就 `live()` 短路, 不会重连) —— 那是"现在有没有活路"
+     * 2. root 单独真试一次: 只靠 `ensure()` 的话, 一台 shizuku 已经连上的机器永远不会去问 root
+     *    (短路了), 那"确认两条路的可用状态"就只确认了一半 (2026-11-19 真机踩到)
      *
      * @param done 读完状态之后在 worker 线程上回调
      */
@@ -83,15 +94,29 @@ object ChannelSetting {
         if (working) return
         working = true
         worker.execute {
-            RootAccessBackend.optedIn = true
+            // ① 先保证有一条活路 (shizuku 优先; 已经连着就什么都不做)
+            RootAccessBackend.optedIn = false
             try {
                 PrivilegedChannel.ensure()
             } catch (error: Throwable) {
                 Log.w(TAG, "re-reading the privileged channel failed", error)
-            } finally {
-                // 这一拍的许可用完就还: 下一次 ensure() 不该自己又去打扰 root 管理器
-                RootAccessBackend.optedIn = false
             }
+            // ② root 单独试一次: 主人点这一下就是要知道它到底行不行, 而 shizuku 连着时 ensure()
+            //    根本进不到 root 那一支
+            val rootGranted = if (RootAccessBackend.rootState() == true) {
+                true
+            } else {
+                RootAccessBackend.optedIn = true
+                try {
+                    runCatching { RootAccessBackend.requestPermission() }.getOrDefault(false)
+                } finally {
+                    // 这一拍的许可用完就还: 下一次 ensure() 不该自己又去打扰 root 管理器
+                    RootAccessBackend.optedIn = false
+                }
+            }
+            rootRefused = !rootGranted
+            // 一行读数: 真机上"点完刷新 root 到底行不行"只能看这一行
+            Log.i(TAG, "reprobe: root ${if (rootGranted) "granted" else "was not granted (asked once, refused)"}")
             read()
             working = false
             done()
