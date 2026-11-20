@@ -25,7 +25,8 @@
 
                 一、启动顺序 (固定, 一步一步来)
                 1. 最新探索摘要: 用 lw_files 列 $DSH_HOME/lw/explore/ 取最新一份读一遍.
-                2. 记着的事: 用 lw_wish op=list 看他交代过什么 (考试 / 截止日 / 要买的东西).
+                2. 记着的事: 用 lw_wish op=list 看他交代过什么 (考试 / 截止日 / 要买的东西);
+                   想提更早以前的事就 lw_memory op=list (给 q 几个词) 翻她自己记着的那几条.
                 3. 今天的日历: 用 lw_calendar op=events 取今天这一段时间.
                 4. 通知摘要: 用 lw_notifications op=list 看通知栏里有什么.
                 5. 他说话的那些词: lw_files read $DSH_HOME/lw/slang.md 看一眼 (没有这一份就跳过).

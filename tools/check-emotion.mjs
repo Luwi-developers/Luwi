@@ -17,8 +17,9 @@
  * 跑法: `node tools/check-emotion.mjs` (不碰设备, 不碰 host)
  */
 
-import { readFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 
 import * as emotion from '../host-plugin/emotion/state.mjs'
@@ -327,6 +328,94 @@ check('主动场预设引用了同一张人格卡 (方案 §10 #15)', (() => {
   const preset = readFileSync(join(root, 'presets', 'proactive', 'cordis.patch.yml'), 'utf8')
   return [preset.includes('{{lw_persona}}'), preset.includes('与对话场同一张人格卡')]
 })(), [true, true])
+
+/* ── 九、加载闸: 模块真能 import (2026-11-20 审查补) ────────────────────────
+ *
+ * 上面那八节全是"读源码 + 正则", 于是 **模块求值期** 的错一条都抓不到 —— 这一轮第一个 blocker
+ * 就是那种: `lw_memory` 的参数描述在模块求值时拼 `PROFILE_KEYS`, 而那个 const 声明在两千行之后,
+ * import 当场 `Cannot access before initialization`, 39 个工具一个都不注册, 八节照样 64/64 全绿.
+ * 这里把 `@deepseek-ai/dsh-tools` 桩成一行, 真的 import 一次
+ */
+{
+  const loadDir = join(root, '.lwtmp', `emotion-load-${process.pid}`)
+  const stub = join(loadDir, 'node_modules', '@deepseek-ai', 'dsh-tools')
+  rmSync(loadDir, { recursive: true, force: true })
+  mkdirSync(stub, { recursive: true })
+  writeFileSync(join(stub, 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: '0.0.0', type: 'module', main: 'index.mjs' }), 'utf8')
+  writeFileSync(join(stub, 'index.mjs'), 'export const defineTool = (definition) => definition\n', 'utf8')
+  mkdirSync(join(loadDir, 'emotion'), { recursive: true })
+  copyFileSync(join(root, 'host-plugin', 'index.mjs'), join(loadDir, 'index.mjs'))
+  copyFileSync(join(root, 'host-plugin', 'emotion', 'state.mjs'), join(loadDir, 'emotion', 'state.mjs'))
+  let loaded = null
+  let failure = ''
+  try {
+    loaded = await import(pathToFileURL(join(loadDir, 'index.mjs')).href)
+  } catch (error) {
+    failure = String(error?.message ?? error)
+  }
+  check('模块能 import (桩掉 dsh-tools): 工具表求值不炸', [failure, typeof loaded?.apply], ['', 'function'])
+  check('导出面还是那三样 (name / inject / apply)', [loaded?.name, Array.isArray(loaded?.inject)], ['luwi-channel', true])
+  rmSync(loadDir, { recursive: true, force: true })
+}
+
+/* ── 十、这一轮补进来的那几条硬规矩 ─────────────────────────────────────── */
+
+check('隐私形状闸: 长数字串 / 金额 / 链接 / 验证码都拒收', [
+  /const AFFECT_PRIVATE_SHAPES = Object\.freeze\(\[/u.test(host),
+  /function privateShapeOf\(text\)/u.test(host),
+  /if \(shape !== ''\) throw new Error\(`not kept: 这条看着像/u.test(host),
+  /if \(what === '' \|\| privateShapeOf\(what\) !== ''\) continue/u.test(host),
+], [true, true, true, true])
+check('forget 落墓碑, 宿主补情节时跳过 (他要求忘掉的东西不许复活)', [
+  /async function addForgottenRefs\(refs\)/u.test(host),
+  /const forgotten = new Set\(await readForgottenRefs\(\)\)/u.test(host),
+  /forgotten\.has\(ref\)/u.test(host),
+  /await addForgottenRefs\(gone\.map/u.test(host),
+], [true, true, true, true])
+check('静音那一段连球那一路也拦 (不只 startProactive)', [
+  /if \(via !== 'wake'\) \{/u.test(host),
+  /const mutedUntil = Number\(\(await readRelation\(\)\)\?\.mutedUntil \?\? 0\) \|\| 0/u.test(host),
+  /the router stayed quiet \(he asked until/u.test(host),
+], [true, true, true])
+check('mute 要显式给 hours, 0 = 解除', [
+  /if \(!Number\.isFinite\(raw\)\) throw new Error\('op=mute needs hours/u.test(host),
+  /const hours = Math\.min\(168, Math\.max\(0, Math\.round\(raw\)\)\)/u.test(host),
+  /until === 0 \? 'quiet lifted'/u.test(host),
+], [true, true, true])
+check('hard 边界至少 4 字 (子串匹配不许把嘴堵上)', /args\?\.hard === true && what\.length < 4/u.test(host), true)
+check('念出来的那一行 (voice) 也过硬边界', /for \(const one of \[\.\.\.texts, String\(args\?\.voice \?\? ''\)\]\)/u.test(host), true)
+check('软边界真的进提示词 (以前没有任何调用点)', /const soft = emotion\.softBoundaryBlock\(boundaries\)/u.test(host), true)
+check('写不进就抛 (不许回一句"记住了"而一个字没落盘)', [
+  /async function writeMemoryJsonStrict\(path, payload, what\)/u.test(host),
+  /writeMemoryJsonStrict\(path, \{ v: 1, at: now, items: \[\.\.\.kept, item\]\.slice\(-40\) \}, 'boundaries\.json'\)/u.test(host),
+  /if \(!written\) throw new Error\('episodes\.jsonl was not written/u.test(host),
+], [true, true, true])
+check('关系账的减分只记一次 (ignored 涨一次扣一次)', [
+  /penalizedFor: nextPenalized/u.test(host),
+  /if \(ignored >= 2 && ignored > penalizedFor\)/u.test(host),
+], [true, true])
+check('状态那一拍读的是 inputs.phase (affectStep 不回 phase)', [
+  /const phase = inputs\.phase/u.test(host),
+  /\{ phase, busy: inputs\.busy \|\| inputs\.callRecent \}/u.test(host),
+  /phase=\$\{phase\}/u.test(host),
+], [true, true, true])
+check('打游戏过线那一条有产生点 (long_game 不再只是常量)', [
+  /const longGame = \(Array\.isArray\(usage\?\.today\)/u.test(host),
+  /longGame: longGame !== null/u.test(host),
+  /longGameMinutes: Number\(longGame\?\.minutes \?\? 0\) \|\| 0/u.test(host),
+], [true, true, true])
+check('affectEventOf: 带刺排在"他先开口"之前, 游戏过线只看水位', (() => {
+  const prev = { lastUserAt: NOW - HOUR, lastSpokenAt: NOW - 2 * HOUR, ignored: 0, negativeSeen: 0, phase: 'evening', longGame: false }
+  return [
+    // 他这一句里带刺: 同一拍 lastUserAt 也涨了, 但记的是"被骂"而不是"他先开口"
+    emotion.affectEventOf(prev, { lastUserAt: NOW, negativeHits: 2, ignored: 0 }),
+    // 上一拍已经记过游戏过线: 不再重复
+    emotion.affectEventOf({ ...prev, longGame: true }, { lastUserAt: prev.lastUserAt, negativeHits: 0, ignored: 0, longGame: true }),
+    // 第一次过线: 记一次
+    emotion.affectEventOf({ ...prev, lastUserAt: NOW }, { lastUserAt: NOW, negativeHits: 0, ignored: 0, longGame: true }),
+  ]
+})(), ['snapped_at_her', null, 'long_game'])
 
 if (failures > 0) {
   console.error(`check-emotion: FAIL (${failures}/${checks})`)

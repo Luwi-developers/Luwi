@@ -127,11 +127,15 @@ export function affectEventOf(previous, inputs) {
   const prevSpoken = asNumber(previous?.lastSpokenAt)
   const ignored = asNumber(inputs?.ignored)
   const prevIgnored = asNumber(previous?.ignored)
+  // 他这会儿话里带刺: **排在最前面** (2026-11-20 审查). 负面词只从他新说的话里数得出来, 所以
+  // "带刺"与"他先开口"必然同一拍发生 —— 顺序反了的话 snapped_at_her 永远走不到, 骂一句反而 +1
+  if (asNumber(inputs?.negativeHits) > asNumber(previous?.negativeSeen)) return 'snapped_at_her'
+  // 打游戏打久了: 过线只记一次 (水位落在 `longGame`, 下一拍还在打就不再记)
+  if (inputs?.longGame === true && previous?.longGame !== true) return 'long_game'
   // 她说过一句, 他接上了 —— 比"他先开口"更值得记一笔
   if (prevSpoken > 0 && lastSpoken > prevSpoken && lastUser > prevSpoken) return 'replied_her'
   if (lastUser > prevUser) return 'talked_to_her'
   if (ignored > prevIgnored) return 'ignored_her'
-  if (asNumber(inputs?.negativeHits) > asNumber(previous?.negativeHits)) return 'snapped_at_her'
   if (inputs?.foregroundGame === true && inputs?.phase === 'late' && previous?.phase !== 'late') return 'late_night'
   return null
 }
