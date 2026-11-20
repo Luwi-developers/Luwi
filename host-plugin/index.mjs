@@ -14204,6 +14204,288 @@ const PROACTIVE_START_VOICE = '开口的样子: 就当是你自己想到他, 顺
   + '不列工具名, 不复述这几行说明, 不贴界面上看到的原文. '
   + '语气柔和、客气一点: 先说你记挂着的那一件, 再轻轻问一句要不要看; 不催, 也不哄.'
 
+/* ── 本次消息快照 (2.8.1 #36, 2026-11-20) ──────────────────────────────────
+ *
+ * 主人口径: "截取当前门户显示的对话内容由新到旧取 20 条, 如果有文件或图片应当允许读取"。
+ *
+ * 三条来源只有两个:
+ *   · 他的话 —— dsh 的会话本身 (`session.snapshotEvents()` + `deriveEventMessage`, 每件事都带
+ *     `time`), 只认 `role === 'user'`: 门户画的主人气泡就是它
+ *   · 她的话 —— `$DSH_HOME/lw/out/<id>.jsonl` (宿主单写者, 见文件顶那条纪律), 只认 text / image /
+ *     file / sticker 四种 kind。**assistant 正文不取**: 门户也不画正文, 取了两边就对不上
+ *
+ * 附件: 她的图与文件落在 `$DSH_HOME/lw/out/assets/<id>/`, 而主动场的 read 关在工作区沙箱里 ——
+ * 所以先复制到 `<工作区>/.lw-snapshot/<id>/`, 快照行里给的是**工作区相对路径**, 她能直接
+ * `read` / `read_image`。他的话那一侧不用搬: 门户与浮标发送时已经把附件落进工作区的
+ * `lw-in/` 与 `.lw-inbox/`, 路径本来就在正文里
+ */
+
+/** 快照最多几条 (主人点名 20) */
+const PROACTIVE_SNAPSHOT_ROWS = 20
+
+/** 往回最多翻这么多条才凑满 [PROACTIVE_SNAPSHOT_ROWS] (工具调用之类不占名额) */
+const PROACTIVE_SNAPSHOT_CANDIDATES = 60
+
+/** 单条正文最多多少字, 超了截断 —— 粘一段代码不该把整段快照撑爆 */
+const PROACTIVE_SNAPSHOT_ROW_CHARS = 200
+
+/** 整段硬上限: 从最旧的开始丢, 最新那几条一定留 */
+const PROACTIVE_SNAPSHOT_MAX_CHARS = 4000
+
+/** 快照段的第一行: 固定措辞, 判据逐字比对 */
+const PROACTIVE_SNAPSHOT_HEAD = '本次消息快照: 门户里最近 20 条 (新->旧), 先看这个再决定开口;'
+  + ' 带路径的图 / 文件可以直接读, 不用先问.'
+
+/** 段尾那道隐私闸: 快照把她没资格复述的东西也带进来了, 这里拦住 */
+const PROACTIVE_SNAPSHOT_TAIL = '快照里出现的验证码 / 密码 / 金额 / 地址, 你看见了也当没看见:'
+  + ' 不念出来, 也不抄进文件.'
+
+/** 附件落到工作区的那个子目录 (相对工作区根) */
+const PROACTIVE_SNAPSHOT_DIR = '.lw-snapshot'
+
+/** 这一行是几点 (`21:04`); 时间是 0 / 坏值就回空串 (不编一个假时刻) */
+function snapshotClock(at) {
+  const ms = Number(at)
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** 一段正文压成一行 (换行折成空格), 超过 [PROACTIVE_SNAPSHOT_ROW_CHARS] 截断 */
+function snapshotText(text) {
+  const one = String(text ?? '').replace(/\s+/gu, ' ').trim()
+  if (one === '') return ''
+  const chars = Array.from(one)
+  return chars.length <= PROACTIVE_SNAPSHOT_ROW_CHARS
+    ? one
+    : `${chars.slice(0, PROACTIVE_SNAPSHOT_ROW_CHARS).join('')}…`
+}
+
+/**
+ * 一条消息里的正文 (纯函数)
+ *
+ * content 可以是字符串或 parts 数组; 图那几种 part 不取字节, 只留一句「[图 N 张]」—— 快照是给
+ * 她**看对话**用的, 不是给她搬一份附件
+ */
+function snapshotMessageText(message) {
+  const content = message?.content
+  if (typeof content === 'string') return snapshotText(content)
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  let images = 0
+  for (const part of content) {
+    if (part === null || typeof part !== 'object') continue
+    if (part.type === 'text' && typeof part.text === 'string') parts.push(part.text)
+    else if (part.type === 'image' || part.type === 'image_url') images += 1
+  }
+  const body = parts.join('\n').trim()
+  if (images === 0) return snapshotText(body)
+  return snapshotText(`${body}${body === '' ? '' : ' '}[图 ${images} 张]`)
+}
+
+/**
+ * 把两条来源的行拼成「本次消息快照」那一段 (纯函数, 判据真跑)
+ *
+ * 排序按 `at` 升序, 取**最后** [PROACTIVE_SNAPSHOT_ROWS] 条, 输出时反转成新->旧 (主人要的顺序)。
+ * 预算从最新那条往回累加, 超 [PROACTIVE_SNAPSHOT_MAX_CHARS] 就停 —— 于是"最新的一定在"是硬的
+ *
+ * @param {{at:number, who:'he'|'her', text?:string, marks?:string[]}[]} rows 两条来源合起来的行
+ * @param {{rows?:number, maxChars?:number}} options 覆盖条数与预算 (判据用)
+ * @returns {string} 整段 (含头尾两句); 没有可说的就回空串 —— 调用方据此整段不出现
+ */
+function proactiveSnapshotBlock(rows, options = {}) {
+  const limit = Number(options.rows) > 0 ? Math.floor(Number(options.rows)) : PROACTIVE_SNAPSHOT_ROWS
+  const budget = Number(options.maxChars) > 0 ? Math.floor(Number(options.maxChars)) : PROACTIVE_SNAPSHOT_MAX_CHARS
+  const all = (Array.isArray(rows) ? rows : [])
+    .filter((one) => one !== null && typeof one === 'object')
+    .map((one, index) => ({
+      at: Number(one.at) || 0,
+      who: one.who === 'he' ? 'he' : 'her',
+      text: snapshotText(one.text),
+      marks: (Array.isArray(one.marks) ? one.marks : []).filter((mark) => typeof mark === 'string' && mark.trim() !== ''),
+      index,
+    }))
+    .filter((one) => one.text !== '' || one.marks.length > 0)
+  if (all.length === 0) return ''
+  // 稳定排序: 同刻按来路顺序 (他的话与 lw/out 各自已经是有序的)
+  all.sort((a, b) => (a.at !== b.at ? a.at - b.at : a.index - b.index))
+  const picked = all.slice(-limit)
+  const lines = []
+  let used = 0
+  for (let i = picked.length - 1; i >= 0; i -= 1) {
+    const row = picked[i]
+    const clock = snapshotClock(row.at)
+    const who = row.who === 'he' ? '他' : '你'
+    const marks = row.marks.map((mark) => ` [${mark}]`).join('')
+    const line = `${picked.length - i}. ${clock === '' ? '' : `[${clock}] `}${who}: ${row.text}${marks}`.trimEnd()
+    const size = Array.from(line).length + 1
+    if (lines.length > 0 && used + size > budget) break
+    lines.push(line)
+    used += size
+  }
+  if (lines.length === 0) return ''
+  // 从最旧的往前丢时序号会重排: 输出的第 1 条必须是那一段里最新的一条
+  const numbered = lines.map((line, index) => line.replace(/^\d+\. /u, `${index + 1}. `))
+  return [PROACTIVE_SNAPSHOT_HEAD, ...numbered, PROACTIVE_SNAPSHOT_TAIL].join('\n')
+}
+
+/** 现在门户显示的那一场: 账本窗口内 -> 账本原文 (过期也认一次) -> null */
+async function portalSnapshotTarget() {
+  const fresh = await voiceCurrentSession().catch(() => null)
+  if (typeof fresh === 'string' && fresh !== '') return fresh
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  try {
+    const record = JSON.parse(await readFile(join(home, 'voice', 'session.json'), 'utf8'))
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    return id === '' ? null : id
+  } catch {
+    return null
+  }
+}
+
+/** 她那一场说过的话 (lw/out 那几行): 正文原样, 附件换成工作区里的可读路径 */
+async function portalSnapshotHerRows(sessionId, workspacePath) {
+  const path = lwOutPath(sessionId)
+  if (path === null) return []
+  let text = ''
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return []
+  }
+  const rows = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let row = null
+    try {
+      row = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const at = Number(row?.at ?? 0) || 0
+    const kind = String(row?.kind ?? 'text')
+    if (kind === 'text') {
+      const body = snapshotText(row?.text)
+      if (body !== '') rows.push({ at, who: 'her', text: body })
+      continue
+    }
+    if (kind === 'sticker') {
+      rows.push({ at, who: 'her', text: '发了一张表情', marks: [] })
+      continue
+    }
+    if (kind !== 'image' && kind !== 'file') continue
+    const rel = typeof row?.rel === 'string' ? row.rel : ''
+    const staged = await snapshotStageAsset(rel, workspacePath, sessionId)
+    const label = kind === 'image' ? '图' : '文件'
+    rows.push({
+      at,
+      who: 'her',
+      text: staged === '' ? `（${label}没取到）` : '',
+      marks: staged === '' ? [] : [`${label} ${staged}`],
+    })
+  }
+  return rows
+}
+
+/**
+ * 把她那份附件复制进工作区 (读得到才算数)
+ *
+ * @param {string} rel `lw/out` 里那个相对路径 (`assets/<id>/<名字>`)
+ * @param {string} workspacePath 主动场的工作区 (快照落它下面的 `.lw-snapshot/<id>/`)
+ * @param {string} sessionId 哪一场 (只用于目标目录)
+ * @returns {string} 工作区相对路径 (`.lw-snapshot/<id>/<名字>`); 复制不成回空串
+ */
+async function snapshotStageAsset(rel, workspacePath, sessionId) {
+  if (rel === '' || workspacePath === '') return ''
+  const dir = lwOutDir()
+  if (dir === null) return ''
+  const source = join(dir, rel)
+  const info = await stat(source).catch(() => null)
+  if (info === null || !info.isFile() || info.size <= 0) return ''
+  if (info.size > LW_IMAGE_MAX_BYTES) return ''
+  const name = basename(source)
+  if (name === '' || name.includes('..') || name.includes('/') || name.includes('\\')) return ''
+  const id = lwOutId(sessionId)
+  if (id === '') return ''
+  const targetDir = join(workspacePath, PROACTIVE_SNAPSHOT_DIR, id)
+  try {
+    await mkdir(targetDir, { recursive: true })
+    let target = join(targetDir, name)
+    for (let n = 2; existsSync(target); n += 1) target = join(targetDir, `${n}-${name}`)
+    await copyFile(source, target)
+    const written = await stat(target).catch(() => null)
+    if (written === null || written.size <= 0) return ''
+    return `${PROACTIVE_SNAPSHOT_DIR}/${id}/${basename(target)}`
+  } catch {
+    return ''
+  }
+}
+
+/** 他那一场说过的话 (dsh 会话本身): 只认 user 节点, 时间取事件那一刻 */
+async function portalSnapshotHisRows(ctx, sessionId) {
+  const controller = ctx?.get?.('sessionController')
+  if (!controller || typeof controller.resolveAgent !== 'function') return []
+  let session = null
+  try {
+    const resolved = await ctx.agents.withoutInitiator(() => controller.resolveAgent(sessionId))
+    session = resolved?.agent?.session ?? null
+  } catch (error) {
+    // 这一场开不出来 (已归档 / 不在当前工作区): 那一半就当没有, 但留一行读数
+    console.warn(`luwi-channel: the portal session ${sessionId} was not readable: ${error?.message ?? error}`)
+    return []
+  }
+  if (session === null || typeof session.snapshotEvents !== 'function') {
+    console.warn(`luwi-channel: the portal session ${sessionId} gave nothing to read`)
+    return []
+  }
+  const rows = []
+  for (const event of session.snapshotEvents()) {
+    let message = null
+    try {
+      message = session.deriveEventMessage(event)
+    } catch {
+      continue
+    }
+    if (!message || message.role !== 'user') continue
+    const body = snapshotMessageText(message)
+    if (body === '') continue
+    rows.push({ at: Number(event?.time ?? 0) || 0, who: 'he', text: body })
+  }
+  return rows
+}
+
+/**
+ * 这一次主动场要带上的「本次消息快照」
+ *
+ * 任何一步读不动都只回空串 (开场照旧发出去): 快照是加分项, 不是开场的前提
+ *
+ * @param {object} ctx 插件上下文 (要 `sessionController` 与 `agents`)
+ * @param {string} workspacePath 主动场的工作区 (附件要落到它下面)
+ * @returns {Promise<string>} 空串 = 没有可说的 / 读不到
+ */
+async function buildPortalSnapshot(ctx, workspacePath) {
+  const target = await portalSnapshotTarget()
+  if (target === null || target === '') return ''
+  const rows = []
+  const hers = await portalSnapshotHerRows(target, workspacePath).catch(() => [])
+  rows.push(...hers)
+  const his = await portalSnapshotHisRows(ctx, target).catch(() => [])
+  rows.push(...his)
+  // 读数 (验收就看这一行): 哪一场、两条来源各几条。快照为空时也要留痕 —— 否则"没出现"与
+  // "读不到"在日志里长得一样
+  console.log(`luwi-channel: portal snapshot source her=${hers.length} his=${his.length} of ${target}`)
+  if (rows.length === 0) return ''
+  // 只往回翻这么多条 (两端各自截): 一场几百轮的老对话不该整份读进来
+  const cap = Math.max(PROACTIVE_SNAPSHOT_CANDIDATES, PROACTIVE_SNAPSHOT_ROWS)
+  const trimmed = rows.length > cap
+    ? [...rows].sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0)).slice(-cap)
+    : rows
+  return proactiveSnapshotBlock(trimmed)
+}
+
 /**
  * 主动对话的开场正文 (纯函数)
  *
@@ -14216,9 +14498,19 @@ const PROACTIVE_START_VOICE = '开口的样子: 就当是你自己想到他, 顺
  *
  * 2026-11-13 (#43): 头一段换成"你自己想起他", 末尾加一段 [PROACTIVE_START_VOICE]. 排期、提醒、
  * 叫醒这些后台的事一个字都不写进来, 只留"看一眼 -> 想说就说一句"这件事本身
+ *
+ * 2026-11-20 (2.8.1 #36): 多第 4 个可选参数 `snapshot` —— 门户当前那一场最近 20 条, 由
+ * [buildPortalSnapshot] 出。空串时**这一段整块不出现**, 于是 2 参 / 3 参调用的输出一个字节不变
+ *
+ * @param {string} text 卡里的正文 (空 = 缺省那句)
+ * @param {string} summaryPath 最新那份探索摘要的绝对路径
+ * @param {string} acting 档位 (`remind` / `act` / `full`)
+ * @param {string} snapshot 「本次消息快照」整段 (空串 = 不带)
+ * @returns {string} 这一场的开场正文
  */
-function proactiveStartLine(text, summaryPath, acting) {
+function proactiveStartLine(text, summaryPath, acting, snapshot) {
   const asked = String(text ?? '').trim() || PROACTIVE_ASK_DEFAULT
+  const snap = String(snapshot ?? '').trim()
   const tier = PROACTIVE_ACTING_TIERS.has(acting) ? acting : PROACTIVE_ACTING_DEFAULT
   const permission = tier === PROACTIVE_ACTING_FULL
     ? '这一场全放开: 能写文件 / 开应用 / 跑命令, 也能建虚拟屏、截图、点、滑; 但动手前先说一句你要做什么.'
@@ -14234,6 +14526,8 @@ function proactiveStartLine(text, summaryPath, acting) {
     // 不存在的工具 —— "记着的事"才是这一档真正读得到的东西
     '启动顺序: 最新探索摘要 -> 记着的事 (lw_wish op=list) -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
     `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
+    // 本次消息快照 (2.8.1 #36): 没有就整块不出现 —— 空串不能留一行空标题
+    ...(snap === '' ? [] : ['', snap]),
     permission,
     // "可以沉默"先说, "怎么说"留到最后一行: 说完这段她就要动嘴, 最后读到的该是语气
     '没有值得说的就保持沉默, 一条话都不要写.',
@@ -14368,6 +14662,14 @@ async function startProactive(ctx, options = {}) {
   const summaryPath = await exploreLatestSummary()
   // 这一场开在哪一档: 与开场注入、那道闸读的是同一个函数 (3 s 缓存, 不重启也生效)
   const acting = proactiveActing()
+  // 本次消息快照 (2.8.1 #36): 门户当前那一场最近 20 条。读不到就整段不带 —— 快照是加分项,
+  // 不许因为它把这一场拖死 (与下面 `openLine` 写不进去同一个处理)
+  let snapshot = ''
+  try {
+    snapshot = await buildPortalSnapshot(ctx, workspace?.path ?? '')
+  } catch (error) {
+    console.warn(`luwi-channel: the portal snapshot was not built: ${error?.message ?? error}`)
+  }
   const request = {
     ...ballCreatePlace(workspace),
     ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
@@ -14393,6 +14695,11 @@ async function startProactive(ctx, options = {}) {
   proactiveRun.presetWhy = presetWhy
   proactiveRun.acting = acting
   proactiveStarts += 1
+  // 快照的读数 (判据与真机验收都看这一行): 几条、多少字进了哪一场
+  if (snapshot !== '') {
+    console.log(`luwi-channel: proactive snapshot ${Math.max(0, snapshot.split('\n').length - 2)} row(s),`
+      + ` ${Array.from(snapshot).length} chars into ${sessionId}`)
+  }
   // 这一场也记进"最近几场" (2.8.1 #8): `run` 会被下一场覆盖, 连点那几下里中间那一场就靠这一串
   proactiveRecent.push({ session: sessionId, startedAt, via })
   while (proactiveRecent.length > PROACTIVE_RECENT_MAX) proactiveRecent.shift()
@@ -14422,7 +14729,7 @@ async function startProactive(ctx, options = {}) {
       controller,
       sessionId,
       // `via: 'proactive'` 是给门户的记号: 开场提示词不进门户正文, 但她说的那几句照常投 (2026-11-12 #38)
-      { text: proactiveStartLine(options?.text, summaryPath, acting), via: 'proactive' },
+      { text: proactiveStartLine(options?.text, summaryPath, acting, snapshot), via: 'proactive' },
       { images: [] },
     )
   } catch (error) {

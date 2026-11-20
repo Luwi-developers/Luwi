@@ -73,7 +73,10 @@ const api = new Function(
     + ' PROACTIVE_ACTING_REMIND, PROACTIVE_ACTING_ACT, PROACTIVE_ACTING_FULL,'
     + ' PROACTIVE_ACTING_TIERS, PROACTIVE_ACTING_CACHE_MS, PROACTIVE_AUDIT_FILE,'
     + ' PROACTIVE_STATE_FILE, PROACTIVE_WORKSPACE_NAME, PROACTIVE_START_MARK,'
-    + ' PROACTIVE_ASK_DEFAULT, PROACTIVE_BANNED_OPENERS, PROACTIVE_START_VOICE }',
+    + ' PROACTIVE_ASK_DEFAULT, PROACTIVE_BANNED_OPENERS, PROACTIVE_START_VOICE,'
+    + ' proactiveSnapshotBlock, snapshotText, snapshotClock, snapshotMessageText,'
+    + ' PROACTIVE_SNAPSHOT_ROWS, PROACTIVE_SNAPSHOT_MAX_CHARS, PROACTIVE_SNAPSHOT_HEAD,'
+    + ' PROACTIVE_SNAPSHOT_TAIL, PROACTIVE_SNAPSHOT_DIR }',
 )(
   () => '', async () => [], join, () => '', async () => {}, async () => {}, async () => {}, async () => {},
   readFileSync, statSync, appendFile,
@@ -257,6 +260,72 @@ check('卡是空的时候也有一段缺省正文', (() => {
   return [line.includes('最新探索摘要'), line.includes('还没有')]
 })(), [true, true])
 
+/* ── 本次消息快照 (2.8.1 #36, 2026-11-20) ─────────────────────────────── */
+
+const SNAP_BASE = 1_700_000_000_000
+const SNAP_ROWS = Array.from({ length: 25 }, (_, index) => ({
+  at: SNAP_BASE + index * 60_000,
+  who: index % 2 === 0 ? 'he' : 'her',
+  text: `第 ${index + 1} 句`,
+}))
+const snapBlock = api.proactiveSnapshotBlock(SNAP_ROWS)
+
+check('快照: 头一行是那句固定话 + 段尾有隐私闸', [
+  snapBlock.split('\n')[0],
+  snapBlock.includes(api.PROACTIVE_SNAPSHOT_TAIL),
+], [api.PROACTIVE_SNAPSHOT_HEAD, true])
+check('快照: 最多 20 条, 由新到旧 (第 1 行是最新那句)', (() => {
+  const lines = snapBlock.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length, lines[0].includes('第 25 句'), lines[19].includes('第 6 句')]
+})(), [20, true, true])
+check('快照: 单条超过 200 字截断, 且不影响别人', (() => {
+  const long = api.proactiveSnapshotBlock([
+    { at: SNAP_BASE, who: 'he', text: 'x'.repeat(500) },
+    { at: SNAP_BASE + 1, who: 'her', text: '短句' },
+  ])
+  const lines = long.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length, lines[1].includes('…'), lines[1].length < 260, lines[0].includes('短句')]
+})(), [2, true, true, true])
+check('快照: 没有行 / 全是空白时整段回空串 (不留空标题)', [
+  api.proactiveSnapshotBlock([]),
+  api.proactiveSnapshotBlock([{ at: 0, who: 'he', text: '   ' }]),
+  api.proactiveSnapshotBlock(null),
+], ['', '', ''])
+check('快照: 预算从最新那条往回累加, 超了丢最旧', (() => {
+  const capped = api.proactiveSnapshotBlock(SNAP_ROWS, { maxChars: 200 })
+  const lines = capped.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length < 20, lines[0].includes('第 25 句')]
+})(), [true, true])
+check('快照: 附件那一段带工作区路径 (.lw-snapshot/<id>/<名字>)', (() => {
+  const block = api.proactiveSnapshotBlock([
+    { at: SNAP_BASE, who: 'her', text: '', marks: [`图 ${api.PROACTIVE_SNAPSHOT_DIR}/20261120-ab12cd/1-a.jpg`] },
+  ])
+  return [block.includes(`[图 ${api.PROACTIVE_SNAPSHOT_DIR}/`), block.includes('1-a.jpg')]
+})(), [true, true])
+check('快照: 一条消息里的正文 (parts / 字符串 / 只有图) 都认得', [
+  api.snapshotMessageText({ content: [{ type: 'text', text: '你好' }] }),
+  api.snapshotMessageText({ content: '直接是字符串' }),
+  api.snapshotMessageText({ content: [{ type: 'image' }] }),
+  api.snapshotMessageText({ content: [] }),
+], ['你好', '直接是字符串', '[图 1 张]', ''])
+check('开场正文: 带快照时那一整段在里面', api.proactiveStartLine(
+  '看看今天', '/x.md', 'remind', snapBlock,
+).includes(api.PROACTIVE_SNAPSHOT_HEAD), true)
+check('开场正文: 不带快照时一个字节不多 (2 参 / 3 参 / 空串)', [
+  api.proactiveStartLine('看看今天', '/x.md').includes('本次消息快照'),
+  api.proactiveStartLine('看看今天', '/x.md', 'remind').includes('本次消息快照'),
+  api.proactiveStartLine('看看今天', '/x.md', 'remind', '').includes('本次消息快照'),
+], [false, false, false])
+check('开场正文: 快照排在权限那一段前面 (先看对话再读档位)', (() => {
+  const line = api.proactiveStartLine('看看今天', '/x.md', 'remind', snapBlock)
+  return [line.indexOf(api.PROACTIVE_SNAPSHOT_HEAD) < line.indexOf('这一场只提醒')]
+})(), [true])
+check('startProactive 里真的接上了快照 (buildPortalSnapshot -> 开场正文)', [
+  /await buildPortalSnapshot\(ctx, workspace\?\.path/u.test(startBody),
+  /proactiveStartLine\(options\?\.text, summaryPath, acting, snapshot\)/u.test(startBody),
+  /the portal snapshot was not built/u.test(startBody),
+], [true, true, true])
+
 /* ── 四、三张表 × 三档的硬闸 (2026-11-10) ────────────────────────────── */
 
 check('startProactive 里没有一条建屏 / 选屏的路', [
@@ -272,11 +341,12 @@ check('旧名字 (proactiveScreenGate) 还留着, 不引新代码去挂它', [
 ], [true, false])
 check('三张表都在 (A 屏 / B 写动 / C 命令)', [
   api.PROACTIVE_SCREEN_DENIED.size,
-  api.PROACTIVE_ACT_TABLE.size, // 23 + lw_persona (2026-11-10) = 24
+  // 23 + lw_persona (2026-11-10) + lw_forge (2.8.1 工坊) = 25
+  api.PROACTIVE_ACT_TABLE.size,
   api.PROACTIVE_COMMAND_DENIED.has('lw_linux'),
   api.PROACTIVE_COMMAND_DENIED.has('bash'),
   api.PROACTIVE_COMMAND_DENIED.has('pwsh'),
-], [21, 24, true, true, true])
+], [21, 25, true, true, true])
 check('三档字面量与设置页 / SimSetting 同一套', [
   api.PROACTIVE_ACTING_REMIND, api.PROACTIVE_ACTING_ACT, api.PROACTIVE_ACTING_FULL,
   api.PROACTIVE_ACTING_CACHE_MS,
