@@ -381,7 +381,9 @@ export function planLine(plan, affect) {
     default: '',
   }[why] ?? ''
   const head = `这一场主调: ${PLAN_WORDS[lead]}`
-  const tail = [avoid === '' ? '' : AVOID_WORDS[avoid], budget === 1 ? '只说一条' : '', reason]
+  // 主调与避开那一档说的是同一句时只留一次 (2026-11-21 真机读数: "先陪着, 不急着给办法. 别急着给办法.")
+  const avoidText = lead === 'companion' && avoid === 'advise' ? '' : AVOID_WORDS[avoid]
+  const tail = [avoidText, budget === 1 ? '只说一条' : '', reason]
     .filter((one) => one !== '')
   const low = Number(affect?.valence ?? 0) <= -1 ? '他今天情绪偏低, 先照顾人再说事' : ''
   const all = [head, ...tail, low].filter((one) => one !== '')

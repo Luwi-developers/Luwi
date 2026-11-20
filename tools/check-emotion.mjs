@@ -421,10 +421,15 @@ check('策略那一行: 避开那一档用自己的说法 (不是"不要" + 正�
   const line = emotion.planLine({ lead: 'companion', avoid: 'advise', budget: 2, why: 'default' }, { valence: 1 })
   return [
     line.startsWith('这一场主调: 先陪着, 不急着给办法'),
-    line.includes(emotion.AVOID_WORDS.advise),
+    // 主调已经把"不急着给办法"说清楚了: 避开那一档不重复第二遍 (真机读数里出现过重复)
+    line.includes('别急着给办法') === false,
     line.includes('不要给办法, 但先说一句人话') === false,
   ]
 })(), [true, true, true])
+check('主调与避开不是同一句时两句都在', (() => {
+  const line = emotion.planLine({ lead: 'validate', avoid: 'distract', budget: 2, why: 'down today' }, { valence: -1 })
+  return [line.includes(emotion.AVOID_WORDS.distract), line.includes(emotion.PLAN_WORDS.validate)]
+})(), [true, true])
 check('留白那一档只说一条, 且带原因', (() => {
   const line = emotion.planLine({ lead: 'space', avoid: 'advise', budget: 1, why: 'two in a row unanswered' }, { valence: 1 })
   return [line.includes('只说一条'), line.includes('不问第二句'), line.includes(emotion.AVOID_WORDS.advise)]
