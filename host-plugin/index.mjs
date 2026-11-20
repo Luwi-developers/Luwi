@@ -2596,8 +2596,11 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
-      return formatUi(await call('ui', drop(args)))
+    async execute(args, exec) {
+      const result = await call('ui', drop(args))
+      // 跨应用记忆 (2.8.1 #36): 这一眼看的是哪个应用, 账上就切到哪个 (切走 / 切回来记在这里)
+      exploreMemoryNote(exec, result?.package, 'read', '')
+      return formatUi(result)
     },
   }),
 
@@ -2776,7 +2779,7 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const named = args?.text !== undefined
       const placed = args?.x !== undefined && args?.y !== undefined
       if (named && placed) {
@@ -2785,35 +2788,45 @@ const TOOLS = [
       if (!named && !placed) {
         throw new Error('lw_tap needs either a text to press by name or both x and y')
       }
+      // 跨应用记忆 (2.8.1 #36): 回执原样交回去, 只顺手往账上记这一下
+      const remember = (report, result, effect) => {
+        exploreMemoryNote(exec, '', effect ?? exploreMemoryEffect(result), exploreMemoryTapText(args))
+        return report
+      }
       const held = holdMs(args?.hold)
       if (named) {
         const source = args.source ?? 'auto'
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
         if (source === 'ocr') {
           const reading = await tapByReading(args.displayId, args.text, held)
-          return said(reading.candidates.length > 0
-            ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined)
-            : reading.report, args.note)
+          const pressed = reading.candidates.length === 0
+          return remember(said(pressed
+            ? reading.report
+            : tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined), args.note),
+          null, pressed ? 'changed' : 'failed')
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
         // 这里看的是 clicked 而不是 outcome: 无障碍动作被拒之后桥会用一根按住的手指兜底,
         // 那一下 outcome 仍是 unclicked 而 clicked 已经是真, 再退到读屏就会按第二次
         if (source === 'a11y' || tree.clicked === true || tree.outcome === 'ambiguous') {
-          return formatNamedTap(tree, args.note)
+          return remember(formatNamedTap(tree, args.note), tree)
         }
         const reading = await tapByReading(args.displayId, args.text, held)
         // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
-        return said(reading.candidates.length > 0
-          ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree)
-          : `${namedTapReport(tree)}\n${reading.report}`, args.note)
+        const pressedByReading = reading.candidates.length === 0
+        return remember(said(pressedByReading
+          ? `${namedTapReport(tree)}\n${reading.report}`
+          : tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree), args.note),
+        null, pressedByReading ? 'changed' : 'failed')
       }
-      return formatGesture('tapped', await call('tap', {
+      const tapped = await call('tap', {
         displayId: args.displayId,
         x: args.x,
         y: args.y,
         holdMs: held,
-      }), args.note)
+      })
+      return remember(formatGesture('tapped', tapped, args.note), tapped)
     },
   }),
 
@@ -2894,8 +2907,10 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
-      return formatGesture('swiped', await call('swipe', drop(args, 'note')), args?.note)
+    async execute(args, exec) {
+      const swiped = await call('swipe', drop(args, 'note'))
+      exploreMemoryNote(exec, '', exploreMemoryEffect(swiped), exploreMemorySwipeText(args))
+      return formatGesture('swiped', swiped, args?.note)
     },
   }),
 
@@ -3226,13 +3241,16 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const packageName = (args?.package ?? '').trim()
       const component = (args?.component ?? '').trim()
       if ((packageName === '') === (component === '')) {
         throw new Error('lw_launch takes either a package or a component, and exactly one of them')
       }
-      return formatLaunched(await call('launch', drop(args, 'note')), args?.note)
+      const launched = await call('launch', drop(args, 'note'))
+      // 跨应用记忆 (2.8.1 #36): 换应用是最直白的一次"切走", 账上切到刚起来的那个包
+      if (launched?.started === true) exploreMemoryNote(exec, launched?.package, 'read', '')
+      return formatLaunched(launched, args?.note)
     },
   }),
 
@@ -13882,6 +13900,230 @@ function exploreClamp(value, range, fallback) {
   return Math.min(range[1], Math.max(range[0], Math.round(number)))
 }
 
+/**
+ * 跨应用记忆 (2026-11-20, 2.8.1 #36): 一趟探索跨过几个应用, 回来还知道自己要找什么
+ *
+ * 账是 `{ pkg: { intent, confirmed, failed, interrupted, resumed, active, at } }` —— 一场探索只有
+ * 一个 intent (开场那句), 每个应用记自己那一份: 切走时标 `interrupted`, 切回来时 `resumed` +1 并把
+ * intent 取回来当下一步提示的第一行。**不重读整屏**: 每一步只归档工具回执里已经有的那一条
+ * (effect 与按的是什么), 判据在 `tools/check-explore.mjs` 第十九节
+ */
+const EXPLORE_MEMORY_MAX_DEFAULT = 8
+const EXPLORE_MEMORY_MAX_RANGE = [0, 20]
+const EXPLORE_MEMORY_CONFIRMED = 3
+const EXPLORE_MEMORY_TEXT_CHARS = 40
+const EXPLORE_MEMORY_INTENT_CHARS = 60
+
+/**
+ * 这一趟记几个应用 (纯函数): `EXPLORE_MEMORY_MAX` 缺省 8, 0 = 整本账关掉
+ *
+ * 认不出来的 (空串 / 不是数) 给缺省 —— 与 `exploreClamp` 同一条纪律, 但它把空串也当没写
+ */
+function exploreMemoryLimit(env = process.env) {
+  const raw = env?.EXPLORE_MEMORY_MAX
+  if (raw === undefined || raw === null) return EXPLORE_MEMORY_MAX_DEFAULT
+  const text = String(raw).trim()
+  if (text === '') return EXPLORE_MEMORY_MAX_DEFAULT
+  const number = Number(text)
+  if (!Number.isFinite(number)) return EXPLORE_MEMORY_MAX_DEFAULT
+  return Math.min(EXPLORE_MEMORY_MAX_RANGE[1], Math.max(EXPLORE_MEMORY_MAX_RANGE[0], Math.round(number)))
+}
+
+/** 一条短文本 (纯函数): 折成一行, 去掉首尾空白, 按上限截 */
+function exploreMemoryText(value, chars = EXPLORE_MEMORY_TEXT_CHARS) {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
+  return text.length > chars ? text.slice(0, chars) : text
+}
+
+/** 这一趟要找什么 (纯函数): 开场正文的第一个非空行, 标题 / 列表记号剥掉, 截到一句提示放得下的长度 */
+function exploreMemoryIntent(value) {
+  const lines = String(value ?? '')
+    .split('\n')
+    .map((line) => line.trim().replace(/^(?:#{1,6}|[-*+>])\s*/u, '').trim())
+    .filter((line) => line !== '')
+  return lines.length === 0 ? '' : exploreMemoryText(lines[0], EXPLORE_MEMORY_INTENT_CHARS)
+}
+
+/** 账里那一条 (纯函数): 形状不对就当没有 */
+function exploreMemoryEntry(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const list = (rows) => (Array.isArray(rows) ? rows : [])
+    .map((row) => exploreMemoryText(row))
+    .filter((row) => row !== '')
+    .slice(-EXPLORE_MEMORY_CONFIRMED)
+  return {
+    intent: exploreMemoryText(value.intent, EXPLORE_MEMORY_INTENT_CHARS),
+    confirmed: list(value.confirmed),
+    failed: list(value.failed),
+    interrupted: value.interrupted === true,
+    resumed: Math.max(0, Math.round(Number(value.resumed) || 0)),
+    active: value.active === true,
+    at: Math.max(0, Number(value.at) || 0),
+  }
+}
+
+/** 整本账读成规整的形状 (纯函数): 写歪的包名与行一律丢 */
+function exploreMemoryOpen(memory) {
+  const source = memory !== null && typeof memory === 'object' && !Array.isArray(memory) ? memory : {}
+  const out = {}
+  for (const [key, value] of Object.entries(source)) {
+    const pkg = String(key ?? '').trim()
+    const entry = exploreMemoryEntry(value)
+    if (pkg === '' || entry === null) continue
+    out[pkg] = entry
+  }
+  return out
+}
+
+/**
+ * 这一趟里走了一步 (纯函数): 归档一条, 并把"切走 / 切回来"记在账上
+ *
+ * `step` 是 `{ pkg, intent, effect, text, at }`: `effect` 用 #32 回读那一次算好的那三档
+ * (`changed` / `unchanged` / `failed`), 只是看了一眼的调用方给 `read`、回读不了的给 `unknown`
+ * (这两个两边都不进); `limit` 是记几个应用, 0 就是整本账关掉, 回空账
+ */
+function exploreMemoryStep(memory, step, limit = EXPLORE_MEMORY_MAX_DEFAULT) {
+  const cap = Math.max(0, Math.round(Number(limit) || 0))
+  if (cap === 0) return {}
+  const next = exploreMemoryOpen(memory)
+  const pkg = exploreMemoryText(step?.pkg, 120)
+  if (pkg === '') return next
+  const at = Math.max(0, Number(step?.at) || Date.now())
+  const asked = exploreMemoryIntent(step?.intent)
+  // 切走: 别处那条 active 的意图标 interrupted (回到它时才 +1 resumed)
+  for (const [key, entry] of Object.entries(next)) {
+    if (key === pkg || entry.active !== true) continue
+    next[key] = { ...entry, active: false, interrupted: true, at }
+  }
+  const before = next[pkg] ?? null
+  const back = before !== null && before.interrupted === true
+  const entry = before ?? {
+    intent: '', confirmed: [], failed: [], interrupted: false, resumed: 0, active: false, at: 0,
+  }
+  const effect = String(step?.effect ?? '').trim().toLowerCase()
+  const said = exploreMemoryText(step?.text)
+  // 同一条连着来两次 (连点同一个控件) 只占一行: 那三格是"确认过什么", 不是点击流水
+  const add = (rows, one) => (rows[rows.length - 1] === one
+    ? rows
+    : [...rows, one]).slice(-EXPLORE_MEMORY_CONFIRMED)
+  const confirmed = effect === 'changed' && said !== '' ? add(entry.confirmed, said) : entry.confirmed
+  const failed = (effect === 'unchanged' || effect === 'failed') && said !== ''
+    ? add(entry.failed, said)
+    : entry.failed
+  next[pkg] = {
+    ...entry,
+    intent: asked !== '' ? asked : entry.intent,
+    confirmed,
+    failed,
+    interrupted: false,
+    resumed: entry.resumed + (back ? 1 : 0),
+    active: true,
+    at,
+  }
+  // 记几个应用: 超了就从最久没碰过的 (不是手里这一个) 开始丢
+  const keys = Object.keys(next)
+  if (keys.length > cap) {
+    const order = keys
+      .filter((key) => key !== pkg)
+      .sort((left, right) => (next[left].at - next[right].at) || (left < right ? -1 : 1))
+    for (const key of order.slice(0, keys.length - cap)) delete next[key]
+  }
+  return next
+}
+
+/**
+ * 回到一个应用时该记起什么 (纯函数): intent + 至多 3 条 confirmed
+ *
+ * 账上还没有这个应用时拿这一趟的 intent 垫底 (`found: false`), 调用方不用先判空;
+ * 失败过的那几条只报个数, 不进下一步提示
+ */
+function exploreMemoryFor(memory, pkg, intent = '') {
+  const wanted = String(pkg ?? '').trim()
+  const entry = exploreMemoryOpen(memory)[wanted] ?? null
+  const asked = exploreMemoryIntent(intent)
+  return {
+    pkg: wanted,
+    found: entry !== null,
+    intent: entry !== null && entry.intent !== '' ? entry.intent : asked,
+    confirmed: entry === null ? [] : entry.confirmed.slice(-EXPLORE_MEMORY_CONFIRMED),
+    failed: entry === null ? 0 : entry.failed.length,
+    interrupted: entry !== null && entry.interrupted === true,
+    resumed: entry === null ? 0 : entry.resumed,
+  }
+}
+
+/**
+ * 下一步提示那几行 (纯函数): 第一行是这一趟要找什么, 后面最多 3 条已确认的短文本
+ *
+ * 不写失败过的那几条 —— 提示是"接着走", 不是把走过的路全铺一遍 (失败在 status 里看得到)
+ */
+function exploreMemoryHint(view) {
+  const intent = exploreMemoryText(view?.intent, EXPLORE_MEMORY_INTENT_CHARS)
+  if (intent === '') return []
+  const pkg = String(view?.pkg ?? '').trim()
+  const lines = [pkg === '' ? `接着找: ${intent}` : `回到 ${pkg}, 接着找: ${intent}`]
+  const confirmed = Array.isArray(view?.confirmed) ? view.confirmed : []
+  for (const one of confirmed.slice(0, EXPLORE_MEMORY_CONFIRMED)) {
+    const text = exploreMemoryText(one)
+    if (text !== '') lines.push(`已确认: ${text}`)
+  }
+  return lines
+}
+
+/** 三个读数 (纯函数): 记了几个应用 / 几个被打断 / 回来过几次 */
+function exploreMemoryCounts(memory) {
+  const entries = Object.values(exploreMemoryOpen(memory))
+  return {
+    packages: entries.length,
+    interrupted: entries.filter((entry) => entry.interrupted === true).length,
+    resumed: entries.reduce((sum, entry) => sum + entry.resumed, 0),
+  }
+}
+
+/** `lw_explore op=status` 里那一段读数 (纯函数): 三个数 + 手里这一个 + 开关 + 取回的下一步提示 */
+function exploreMemoryStatus(run, limit = exploreMemoryLimit()) {
+  const view = exploreMemoryFor(run?.memory, run?.pkg, run?.intent)
+  return {
+    ...exploreMemoryCounts(run?.memory),
+    current: String(run?.pkg ?? '').trim(),
+    enabled: limit > 0,
+    // 回到手里这个应用时下一步先看到的那几行 (还没记过这个应用时是空的)
+    hint: view.found ? exploreMemoryHint(view) : [],
+  }
+}
+
+/**
+ * 这一步算成什么 (纯函数): 有 #32 回读算的 `effect` 就用它, 没有就按"发出去没有"算
+ *
+ * 设备侧回 `tapped` / `swiped` / `clicked` 只说明动作用送到了, 所以没有回读的那一档只能算
+ * `changed` —— 它不是"确认界面变了", 是"没有别的说法"
+ */
+function exploreMemoryEffect(result) {
+  // 熄屏时注入是静默失效的 (与 formatGesture 那一句同一个判据): 动作算没成
+  if (typeof result?.screen === 'string' && result.screen !== 'on') return 'failed'
+  const effect = String(result?.effect ?? '').trim().toLowerCase()
+  if (effect === 'changed' || effect === 'unchanged' || effect === 'failed' || effect === 'unknown') {
+    return effect
+  }
+  if (result?.tapped === true || result?.swiped === true || result?.clicked === true) return 'changed'
+  return 'failed'
+}
+
+/** 这一步按的是什么 (纯函数): 按名字就是那个名字, 按点就是那个点 */
+function exploreMemoryTapText(args) {
+  const named = exploreMemoryText(args?.text, 120)
+  if (named !== '') return named
+  const x = Number(args?.x)
+  const y = Number(args?.y)
+  return Number.isFinite(x) && Number.isFinite(y) ? `(${x},${y})` : ''
+}
+
+/** 这一下划的是哪一段 (纯函数) */
+function exploreMemorySwipeText(args) {
+  const point = (x, y) => `${Number(x)},${Number(y)}`
+  return `滑动 ${point(args?.fromX, args?.fromY)} -> ${point(args?.toX, args?.toY)}`
+}
+
 /** 那一份摘要叫什么: `yyyyMMdd-HHmm` (本地时间, 按这一场开始那一刻算 —— 纯函数) */
 function exploreSummaryName(startedAt) {
   const at = new Date(Number(startedAt) || Date.now())
@@ -13927,6 +14169,10 @@ const exploreRun = {
   stepLimit: 0,
   reminded: false,
   over: false,
+  // 跨应用记忆 (2.8.1 #36): 这一场要找什么 / 手里是哪个应用 / 按应用记的那本账
+  intent: '',
+  pkg: '',
+  memory: {},
 }
 
 /**
@@ -14367,6 +14613,10 @@ async function exploreStateRestore() {
   exploreRun.stepLimit = Number(run.stepLimit) || EXPLORE_STEPS_DEFAULT
   exploreRun.reminded = run.reminded === true
   exploreRun.over = false
+  // 跨应用记忆也回来: 重启之后手里那个应用与那本账都还在 (EXPLORE_MEMORY_MAX=0 时一笔都不记)
+  exploreRun.intent = exploreMemoryIntent(run.intent)
+  exploreRun.pkg = typeof run.pkg === 'string' ? run.pkg.trim() : ''
+  exploreRun.memory = exploreMemoryLimit() === 0 ? {} : exploreMemoryOpen(run.memory)
   return true
 }
 
@@ -14381,6 +14631,9 @@ function exploreReset() {
   exploreRun.stepLimit = 0
   exploreRun.reminded = false
   exploreRun.over = false
+  exploreRun.intent = ''
+  exploreRun.pkg = ''
+  exploreRun.memory = {}
 }
 
 /** 最新那一份摘要的路径 (没有就是空串) —— pc=start 那一段要把它交给模型 (persona 第 17 条) */
@@ -14446,6 +14699,56 @@ async function exploreSay(ctx, text, options = {}) {
     const flushed = await ctx.sessions.flush(agent.session)
     return { sessionId, running, flushed }
   })
+}
+
+/**
+ * 这一趟走了一步: 归档进 [exploreRun] 的 memory (只认这一场)
+ *
+ * 从工具的执行里调 (同步, 不抛): 不是这一场 / 已经 over / `EXPLORE_MEMORY_MAX=0` 都只是一个 return。
+ * 切走与切回来那两下才落盘 —— 步数由 [exploreStepGuard] 每五步写一次, 这本账不必每步都写
+ */
+function exploreMemoryNote(exec, pkg, effect, text) {
+  if (exploreRun.session === null || exploreRun.over === true) return false
+  if (sessionIdOf(exec) !== exploreRun.session) return false
+  const limit = exploreMemoryLimit()
+  if (limit === 0) return false
+  const wanted = String(pkg ?? '').trim() || exploreRun.pkg
+  if (wanted === '') return false
+  const before = exploreMemoryCounts(exploreRun.memory)
+  exploreRun.memory = exploreMemoryStep(exploreRun.memory, {
+    pkg: wanted,
+    intent: exploreRun.intent,
+    effect,
+    text,
+    at: Date.now(),
+  }, limit)
+  exploreRun.pkg = wanted
+  const after = exploreMemoryCounts(exploreRun.memory)
+  if (after.packages !== before.packages || after.resumed !== before.resumed
+    || after.interrupted !== before.interrupted) void exploreStateWrite()
+  // 切回来那一下: 把这一趟要找什么交回去, 它下一步先看到的就是这一行
+  if (after.resumed > before.resumed) {
+    void exploreMemorySay(hostCtx, exploreMemoryFor(exploreRun.memory, wanted, exploreRun.intent))
+  }
+  return true
+}
+
+/**
+ * 回到原应用那一句: 下一步提示的第一行就是这一趟要找什么
+ *
+ * 从同步的工具执行里 `void` 出去, 所以失败只记读数 (与到步那一句同一个纪律)
+ */
+async function exploreMemorySay(ctx, view) {
+  if (ctx === null || ctx === undefined) return
+  const lines = exploreMemoryHint(view)
+  if (lines.length === 0) return
+  try {
+    await exploreSay(ctx, lines.join('\n'), { steer: true })
+    console.log(`luwi-channel: exploration ${shortSession(exploreRun.session)} came back to ${view.pkg}`)
+  } catch (error) {
+    exploreState.lastError = `the memory hint was not sent: ${error?.message ?? error}`
+    console.warn(`luwi-channel: ${exploreState.lastError}`)
+  }
 }
 
 /**
@@ -14706,6 +15009,10 @@ async function startExplore(ctx, options = {}) {
   exploreRun.stepLimit = stepLimit
   exploreRun.reminded = false
   exploreRun.over = false
+  // 跨应用记忆 (2.8.1 #36): 这一场要找什么先定下来, 每个应用那一份都由它垫底
+  exploreRun.intent = exploreMemoryIntent(options?.text) || '自由探索这台手机'
+  exploreRun.pkg = ''
+  exploreRun.memory = {}
   await exploreStateWrite()
   try {
     await exploreSay(ctx, exploreStartLine(options?.text, exploreRun, summaryPath))
@@ -15002,6 +15309,8 @@ async function exploreStatus(ctx) {
     nextTask: task,
     screens: exploreScreens,
     unreleasedScreens: exploreScreens.filter((one) => one.released !== true).length,
+    // 跨应用记忆 (2.8.1 #36): 记了几个应用 / 几个被打断 / 回来过几次
+    memory: exploreMemoryStatus(exploreRun),
     preset: exploreState.preset,
     presetWhy: exploreState.presetWhy,
     started: exploreState.started,
@@ -15041,6 +15350,10 @@ async function exploreStatusText(ctx) {
     `next task card: ${readings.nextTask.path || '(none yet)'} (${readings.nextTask.chars} chars)`,
     `screens: ${pendingScreens.length} unreleased of ${readings.screens.length} on the ledger`
       + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,
+    `memory: ${readings.memory.packages} app(s), ${readings.memory.interrupted} interrupted,`
+      + ` ${readings.memory.resumed} resumed`
+      + `${readings.memory.current ? ` (on ${readings.memory.current})` : ''}`
+      + `${readings.memory.enabled ? '' : ' - off (EXPLORE_MEMORY_MAX=0)'}`,
     `this run: ${readings.started} started, ${readings.finished} finished, ${readings.stubs} stub(s),`
       + ` ${readings.refusals} refused`,
     `preset: ${readings.preset ?? '(the registry default)'}${readings.presetWhy ? ` - ${readings.presetWhy}` : ''}`,
