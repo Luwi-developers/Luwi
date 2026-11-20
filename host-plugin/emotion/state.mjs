@@ -334,6 +334,19 @@ export const PLAN_WORDS = Object.freeze({
 export const PLAN_LEADS = Object.freeze(['companion', 'validate', 'advise', 'distract', 'space'])
 
 /**
+ * "这一场别做什么"那一句 (2026-11-20 真机读数修)
+ *
+ * 以前拿 [PLAN_WORDS] 拼成"不要{给办法, 但先说一句人话}" —— 自相矛盾. 避开的那一档要自己的说法
+ */
+export const AVOID_WORDS = Object.freeze({
+  companion: '别只陪着不说话',
+  validate: '别急着讲道理',
+  advise: '别急着给办法',
+  distract: '别硬换个话题',
+  space: '别再追问',
+})
+
+/**
  * (状态, 关系, 此刻) → 这一场怎么陪 (纯函数, 方案 §7.2 逐行)
  *
  * @returns {{lead: string, avoid: string, budget: number, why: string}}
@@ -368,7 +381,7 @@ export function planLine(plan, affect) {
     default: '',
   }[why] ?? ''
   const head = `这一场主调: ${PLAN_WORDS[lead]}`
-  const tail = [avoid === '' ? '' : `不要${PLAN_WORDS[avoid]}`, budget === 1 ? '只说一条' : '', reason]
+  const tail = [avoid === '' ? '' : AVOID_WORDS[avoid], budget === 1 ? '只说一条' : '', reason]
     .filter((one) => one !== '')
   const low = Number(affect?.valence ?? 0) <= -1 ? '他今天情绪偏低, 先照顾人再说事' : ''
   const all = [head, ...tail, low].filter((one) => one !== '')

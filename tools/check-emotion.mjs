@@ -417,6 +417,20 @@ check('affectEventOf: 带刺排在"他先开口"之前, 游戏过线只看水位
   ]
 })(), ['snapped_at_her', null, 'long_game'])
 
+check('策略那一行: 避开那一档用自己的说法 (不是"不要" + 正向描述)', (() => {
+  const line = emotion.planLine({ lead: 'companion', avoid: 'advise', budget: 2, why: 'default' }, { valence: 1 })
+  return [
+    line.startsWith('这一场主调: 先陪着, 不急着给办法'),
+    line.includes(emotion.AVOID_WORDS.advise),
+    line.includes('不要给办法, 但先说一句人话') === false,
+  ]
+})(), [true, true, true])
+check('留白那一档只说一条, 且带原因', (() => {
+  const line = emotion.planLine({ lead: 'space', avoid: 'advise', budget: 1, why: 'two in a row unanswered' }, { valence: 1 })
+  return [line.includes('只说一条'), line.includes('不问第二句'), line.includes(emotion.AVOID_WORDS.advise)]
+})(), [true, true, true])
+check('宿主每一场把这一段的字数与主调打进日志 (真机读数看它)', /proactive mood \$\{Array\.from\(mood\.block\)\.length\} chars/u.test(host), true)
+
 if (failures > 0) {
   console.error(`check-emotion: FAIL (${failures}/${checks})`)
   process.exit(1)

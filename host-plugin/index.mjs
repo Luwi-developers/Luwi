@@ -15505,6 +15505,12 @@ async function startProactive(ctx, options = {}) {
   } catch (error) {
     console.warn(`luwi-channel: the affect block was not built: ${error?.message ?? error}`)
   }
+  // 读数 (真机验收就看这一行): 那一段多少字、这一场是什么主调 —— 开场正文本身不落盘
+  if (typeof mood?.block === 'string' && mood.block !== '') {
+    console.log(`luwi-channel: proactive mood ${Array.from(mood.block).length} chars`
+      + ` (plan ${String(mood.plan?.lead ?? '?')}/${String(mood.plan?.avoid ?? '?')}`
+      + `, episodes ${Array.isArray(mood.episodes) ? mood.episodes.length : 0})`)
+  }
   const request = {
     ...ballCreatePlace(workspace),
     ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
