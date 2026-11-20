@@ -82,6 +82,100 @@ window.__ModuleLoader__.load({
     var ECHO_SEQ_BASE = 1000 * 1000
 
     /**
+     * 输入框那行灰字 (2026-11-20 主人: "发消息或长按说话")
+     *
+     * **这句话就是发现长按的唯一入口**: 输入卡上没有麦克风图标, 语音态靠"按住空输入框"或头栏那颗
+     * 「语音」叫出来, 所以灰字必须把那个动作说出来
+     */
+    var VOICE_HINT = '发消息或长按说话'
+    /** 按住输入框多久算"我要说话" (再短就是点了一下, 留给光标) */
+    var VOICE_LONG_PRESS_MS = 450
+    /** 一次最多录 60 s: 16 kHz 单声道 PCM16 约 1.92 MB, 与宿主 `PortalVoice.MAX_BYTES` 同一档 */
+    var VOICE_MAX_MS = 60 * 1000
+    /** 短于 0.5 s 当作误触: 不送转写, 只说一句"太短了" */
+    var VOICE_MIN_MS = 500
+    /** 转写等太久的那道闸 (原生没回推时把"正在识别…"收回 idle, 免得永远停在那儿) */
+    var VOICE_WATCH_MS = 45 * 1000
+    /** 头栏那颗「终端」在原生清单拿不到时的退路 (正常文案来自 `menu_sync` 那一句) */
+    var SYNC_TITLE = '终端'
+
+    /**
+     * 把页面收到的采样封成 16 kHz 单声道 PCM16 WAV (纯函数, 判据真跑)
+     *
+     * 宿主那条链只认这个形状 (`LwSpeech` 按 16 kHz 单声道解 wav), 而 WebView 的 `AudioContext`
+     * 通常给 48 kHz —— 所以先按线性插值降到 16 kHz 再封头
+     * @param chunks 每块都是 Float32Array (`ScriptProcessor` 一帧一块)
+     * @param rate 采样率 (拿不到 / 不是正数就按 16000)
+     * @returns 44 字节头 + 采样的 WAV 字节 (没有采样时只有头)
+     */
+    function wavOf(chunks, rate) {
+      var parts = []
+      var total = 0
+      var list = Array.isArray(chunks) ? chunks : []
+      for (var i = 0; i < list.length; i += 1) {
+        var chunk = list[i]
+        if (!chunk || typeof chunk.length !== 'number' || chunk.length === 0) continue
+        parts.push(chunk)
+        total += chunk.length
+      }
+      var samples = new Float32Array(total)
+      var at = 0
+      for (var j = 0; j < parts.length; j += 1) {
+        samples.set(parts[j], at)
+        at += parts[j].length
+      }
+      var source = Number(rate)
+      if (!(source > 0)) source = 16000
+      var out = samples
+      if (source !== 16000 && samples.length > 1) {
+        var length = Math.max(1, Math.floor(samples.length * 16000 / source))
+        out = new Float32Array(length)
+        var step = source / 16000
+        for (var k = 0; k < length; k += 1) {
+          var pos = k * step
+          var base = Math.floor(pos)
+          var frac = pos - base
+          var first = base < samples.length ? samples[base] : 0
+          var second = base + 1 < samples.length ? samples[base + 1] : first
+          out[k] = first + (second - first) * frac
+        }
+      }
+      var bytes = new Uint8Array(44 + out.length * 2)
+      var view = new DataView(bytes.buffer)
+      var ascii = function (offset, text) {
+        for (var n = 0; n < text.length; n += 1) bytes[offset + n] = text.charCodeAt(n)
+      }
+      ascii(0, 'RIFF')
+      view.setUint32(4, 36 + out.length * 2, true)
+      ascii(8, 'WAVE')
+      ascii(12, 'fmt ')
+      view.setUint32(16, 16, true)
+      view.setUint16(20, 1, true)
+      view.setUint16(22, 1, true)
+      view.setUint32(24, 16000, true)
+      view.setUint32(28, 16000 * 2, true)
+      view.setUint16(32, 2, true)
+      view.setUint16(34, 16, true)
+      ascii(36, 'data')
+      view.setUint32(40, out.length * 2, true)
+      for (var m = 0; m < out.length; m += 1) {
+        var clamped = out[m] > 1 ? 1 : (out[m] < -1 ? -1 : out[m])
+        view.setInt16(44 + m * 2, Math.round(clamped * 32767), true)
+      }
+      return bytes
+    }
+
+    /** 字节 → base64 (分段拼, 一次 `apply` 十万个参数会炸栈) */
+    function base64Of(bytes) {
+      var text = ''
+      var step = 0x8000
+      for (var i = 0; i < bytes.length; i += step) {
+        text += String.fromCharCode.apply(null, bytes.subarray(i, i + step))
+      }
+      return btoa(text)
+    }
+
+    /**
      * `+` 上那个加号: dsh 的 `IconPlusOutlineMedium` 就这两笔 —— 与 `presets/ui-fix` 同一条分寸
      * (只借形状, 不复制组件)
      */
@@ -126,6 +220,31 @@ window.__ModuleLoader__.load({
       ' stroke-width="1.4" stroke-linecap="round"/>',
       '<circle cx="6.1" cy="6.5" r="0.85" fill="currentColor"/>',
       '<circle cx="9.9" cy="6.5" r="0.85" fill="currentColor"/></svg>',
+    ].join('')
+
+    /**
+     * 头栏那颗自动朗读的两副图标 (2026-11-20 主人给的三张官方手机端截图)
+     *
+     * 图 1 (关) 是**喇叭带一道斜杠**, 图 2 (开) 是**喇叭带两道声波** —— 差别在形状, 不在颜色,
+     * 所以按状态换 `innerHTML`, `data-on` 只留底色与无障碍。笔画照 `+` / 发送那一档:
+     * `viewBox 0 0 16 16` / `stroke-width 1.3` / `currentColor` / `fill=none`。
+     * 喇叭本体两根: 声音从锥口进来 (左边的方块 + 向右张开的锥), 右边再挂两道弧
+     */
+    var SPEAKER_ON_ICON = [
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"',
+      ' stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">',
+      '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z"></path>',
+      '<path d="M10.7 5.6C11.75 6.3 12.35 7.1 12.35 8s-.6 1.7-1.65 2.4" stroke-linecap="round"></path>',
+      '<path d="M12.15 3.75C13.85 4.95 14.75 6.4 14.75 8s-.9 3.05-2.6 4.25" stroke-linecap="round"></path>',
+      '</svg>',
+    ].join('')
+
+    var SPEAKER_OFF_ICON = [
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"',
+      ' stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">',
+      '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z"></path>',
+      '<path d="M11 6.3l3.6 3.6M14.6 6.3L11 9.9" stroke-linecap="round"></path>',
+      '</svg>',
     ].join('')
 
     /** 预览窗右上那颗关闭: 两笔交叉, 与 dsh 的 `IconCloseOutlineMedium` 同一分寸 */
@@ -635,15 +754,21 @@ window.__ModuleLoader__.load({
       '@keyframes lwp-pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.42)}',
       '50%{box-shadow:0 0 0 5px rgba(245,158,11,0)}}',
       '@media (prefers-reduced-motion:reduce){#lwp-busy[data-state="busy"]{animation:none}}',
-      // 右边那一颗: 更多 (`⋯`)。**「历史」那颗已撤** (2026-11-19: 入口并进左边那颗头像)。
+      // 右边那一簇: 语音 / 终端 / 更多。**「历史」那颗已撤** (2026-11-19: 入口并进左边那颗头像)。
       // 类名而不是 `#lwp-head > button` —— 后者特异性比 `#lwp-brand` 高,
       // 会把头像也套进"圆角描边小按钮"那一套里 (2026-11-08 预览里就是一颗白胶囊)
       '#lwp-head .lwp-tab{appearance:none;border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
       'background:transparent;color:inherit;border-radius:999px;padding:4px 10px;font:inherit;font-size:12px;',
       'line-height:1.5;flex:none}',
       '#lwp-head .lwp-tab[data-on="on"]{background:var(--dsw-alias-button-info-fill,#3b82f6);color:#fff;border-color:transparent}',
-      // `⋯` 那顆比文字按钮宽一点, 点起来才不憋; `margin-left:auto` 把它顶到最右 (中间那段名字不再占满)
-      '#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px;margin-left:auto}',
+      // 三颗装成一簇 (2026-11-20 主人: "都要放在靠近更多按钮的位置, 向右对齐"): `margin-left:auto`
+      // 挂在簇上, 昵称那一段因此只占左边剩下的宽度
+      '#lwp-tabs{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}',
+      // `⋯` 那顆比文字按钮宽一点, 点起来才不憋
+      '#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px}',
+      // 语音那颗只有图标 (官方那枚麦克风): 30x28 的圆钮, 字形跟 `+` / 表情同一档
+      '#lwp-head .lwp-tab.lwp-tab-icon{display:grid;place-items:center;width:30px;height:28px;padding:0}',
+      '#lwp-head .lwp-tab-icon svg{display:block}',
 
       /* ── 历史记录窗 (2026-11-10 主人: "左边再加上历史记录 … 弹窗显示, 上方显示搜索框") ────
        *
@@ -954,6 +1079,26 @@ window.__ModuleLoader__.load({
       'font-family:var(--dsw-font-family);font-size:inherit;line-height:inherit;',
       'color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary)}',
       '#lwp-input::placeholder{color:var(--dsw-alias-label-caption)}',
+      // ── 长按说话那块蓝色录音面板 (2026-11-20 主人给的第 3 张官方截图) ──
+      // 从底部升起来盖住下半屏: 上沿圆角 + 一道从透明到蓝的过渡当"柔边", 中间一排竖条是波形,
+      // 上面一句提示。**不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上,
+      // 抬手与上滑都得照旧落在它那一侧
+      '#lwp-rec{position:absolute;left:0;right:0;bottom:0;z-index:7;box-sizing:border-box;',
+      'height:46vh;padding:16px 26px 40px;display:flex;flex-direction:column;align-items:center;',
+      'justify-content:center;gap:22px;pointer-events:none;border-radius:28px 28px 0 0;',
+      'background:linear-gradient(180deg,#5b7cff 0%,#3f6bff 52%,#2f5cff 100%);',
+      'opacity:0;transform:translateY(28px);',
+      'transition:opacity .18s ease,transform .22s cubic-bezier(.22,.61,.36,1)}',
+      '#lwp-rec[data-on="on"]{opacity:1;transform:translateY(0)}',
+      // 上滑到"松开取消"那一档: 整块压暗一点, 提示也换了字
+      '#lwp-rec[data-cancel="on"]{filter:saturate(.7) brightness(.86)}',
+      '#lwp-rec::before{content:"";position:absolute;left:0;right:0;top:-26px;height:26px;',
+      'background:linear-gradient(180deg,rgba(91,124,255,0),rgba(91,124,255,.55));pointer-events:none}',
+      '#lwp-rec[data-busy="on"] .lwp-rec-wave{opacity:0}',
+      '.lwp-rec-hint{font-size:14px;line-height:20px;color:rgba(255,255,255,.96);letter-spacing:.02em}',
+      '.lwp-rec-wave{display:block;width:100%;height:56px;margin-top:6px}',
+      '.lwp-rec-time{position:absolute;left:0;right:0;bottom:14px;text-align:center;',
+      'font-size:11px;line-height:16px;color:rgba(255,255,255,.72);font-variant-numeric:tabular-nums}',
       '#lwp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 8px 6px;',
       'min-width:0}',
       '#lwp-tools{display:flex;align-items:center;gap:8px;flex:1;min-width:0}',
@@ -4266,6 +4411,514 @@ window.__ModuleLoader__.load({
       }
 
 
+      // ── 语音 (2026-11-20 主人给的三张官方手机端截图) ─────────────────────────────
+      //
+      // 两件互不相干的事挤在这一段里, 别混着改:
+      //
+      // 1. **语音输出** = 自动朗读开关 —— 就是 设置 → 说话 → 「朗读回答」那一格
+      //    (`SpeakSettings.readAloud`), 一处状态两处界面; 喇叭两副图标与两句 Toast 照图 1 / 图 2
+      // 2. **语音输入** = 长按空输入框**当场开录** (没有中间态), 松手转写进草稿, 上滑取消;
+      //    录音面板是那块蓝色渐变 + 一排随声音跳动的竖条 (照图 3)
+
+      /** 自动朗读现在开着没有 (头栏那颗喇叭的图标形状与亮灯都看它) */
+      var speakOn = false
+
+      /** 头栏那颗喇叭: 两副图标 / 亮灯 / 无障碍名字一起换 */
+      function applySpeakStatus(status) {
+        if (!els.speakButton) return
+        speakOn = !!(status && status.readAloud === true)
+        els.speakButton.innerHTML = speakOn ? SPEAKER_ON_ICON : SPEAKER_OFF_ICON
+        els.speakButton.setAttribute('data-on', speakOn ? 'on' : 'off')
+        els.speakButton.setAttribute('aria-pressed', speakOn ? 'true' : 'false')
+        var label = speakOn ? '已开启自动朗读' : '已关闭自动朗读'
+        els.speakButton.title = label
+        els.speakButton.setAttribute('aria-label', label)
+      }
+
+      /** 挂上来 / 从设置页回来时对一次表 (设置页那一格与这颗是同一个开关) */
+      function refreshSpeak() {
+        applySpeakStatus(call('portalSpeak', JSON.stringify({ op: 'status' })))
+      }
+
+      /**
+       * 点一下那颗喇叭: 翻的是 设置 → 说话 里那同一个开关
+       *
+       * 宿主每轮念之前都会问一次 `speak op=status`, 所以**不用重启 host**, 下一轮就按新值走
+       */
+      function toggleSpeak() {
+        var answer = call('portalSpeak', JSON.stringify({ op: 'toggle' }))
+        if (answer === null || answer.ok !== true) {
+          toast('这一版宿主还不支持', true)
+          return
+        }
+        applySpeakStatus(answer)
+        // 这两句与官方手机端图上那两句逐字相同
+        toast(speakOn ? '已开启自动朗读' : '已关闭自动朗读')
+      }
+
+      // ── 语音输入 (长按当场开录) ───────────────────────────────────────────────
+      /** `idle` / `press` / `recording` / `working` */
+      var voiceState = 'idle'
+      /** 这一趟的编号: 原生回推时用它认人, 换一趟就抬一格, 过期的那份直接丢 */
+      var voiceId = 0
+      var voiceStartedAt = 0
+      var voiceTimer = null
+      var voiceTicker = null
+      var voiceWatch = null
+      var voiceStream = null
+      var voiceStreamAsk = null
+      var voiceContext = null
+      var voiceProcessor = null
+      var voiceChunks = null
+      var voiceSourceRate = 0
+      /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
+      var pressTimer = null
+      /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
+      var pressStartX = 0
+      var pressStartY = 0
+      /** 手指还按着: 要到麦克风是异步的, 抬手可能发生在流回来之前 */
+      var voiceHeld = false
+      /** 这一趟已经上滑到"松开就取消" */
+      var recCancel = false
+      /** 起手那一点的 Y: 上滑量按它算 */
+      var recStartY = 0
+      /** 波形那一帧的号与这一拍的电平 */
+      var recFrame = 0
+      var recLevel = 0
+      /** 波形的历史电平 (新的从右边进来, 一共 60 根) */
+      var recBars = []
+      /** 面板上那两句提示 (图 3 的「松手发送，上滑取消」; 这一层松手是"进草稿", 所以照实写) */
+      var REC_HINT = '松手转写，上滑取消'
+      var REC_HINT_CANCEL = '松开取消'
+      var REC_HINT_BUSY = '正在转写…'
+      /** 上滑多少像素算取消 */
+      var REC_CANCEL_PX = 56
+
+      /** 蓝色录音面板升起来 (长按 450 ms 那一刻) */
+      function showRecPanel() {
+        recCancel = false
+        recLevel = 0
+        recBars = []
+        if (els.rec) {
+          els.rec.setAttribute('data-on', 'on')
+          els.rec.setAttribute('data-cancel', 'off')
+          els.rec.setAttribute('data-busy', 'off')
+        }
+        if (root) root.setAttribute('data-rec', 'on')
+        if (els.recHint) els.recHint.textContent = REC_HINT
+        paintRecTime()
+        paintRecWave()
+        if (recFrame !== 0) return
+        var pump = function () {
+          recFrame = 0
+          if (voiceState !== 'recording') return
+          pushRecBar(recLevel)
+          paintRecWave()
+          paintRecTime()
+          recFrame = requestAnimationFrame(pump)
+        }
+        recFrame = requestAnimationFrame(pump)
+      }
+
+      /** 面板落下去, 波形停 */
+      function hideRecPanel() {
+        recCancel = false
+        recLevel = 0
+        recBars = []
+        if (recFrame !== 0) {
+          try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
+          recFrame = 0
+        }
+        if (els.rec) {
+          els.rec.setAttribute('data-on', 'off')
+          els.rec.setAttribute('data-cancel', 'off')
+          els.rec.setAttribute('data-busy', 'off')
+        }
+        if (root) root.setAttribute('data-rec', 'off')
+        // 长按那一下关掉过的 `touch-action` 要还回去 (选区与滚动靠它)
+        if (els.input) els.input.style.touchAction = ''
+        clearRecWave()
+      }
+
+      /** 这一拍的电平进历史 (不够 60 根就先垫上, 免得第一帧只有一根柱子) */
+      function pushRecBar(level) {
+        recBars.push(Math.max(0.04, Math.min(1, level)))
+        while (recBars.length > 60) recBars.shift()
+        while (recBars.length < 60) recBars.unshift(0.04)
+      }
+
+      /** 右下角那一行 `0:03 / 1:00` */
+      function paintRecTime() {
+        if (!els.recTime) return
+        var seconds = voiceStartedAt === 0 ? 0 : Math.floor((Date.now() - voiceStartedAt) / 1000)
+        if (seconds < 0) seconds = 0
+        var whole = Math.floor(VOICE_MAX_MS / 1000)
+        var mm = String(Math.floor(whole / 60))
+        var ss = whole % 60
+        els.recTime.textContent = '0:' + (seconds < 10 ? '0' : '') + String(seconds)
+          + ' / ' + mm + ':' + (ss < 10 ? '0' : '') + String(ss)
+      }
+
+      /** 一排竖条: 中间高两边低的包络, 高度看这一根的电平 */
+      function paintRecWave() {
+        var canvas = els.recWave
+        if (!canvas || typeof canvas.getContext !== 'function') return
+        var ctx2d = canvas.getContext('2d')
+        if (!ctx2d) return
+        var dpr = window.devicePixelRatio || 1
+        var width = canvas.clientWidth || 320
+        var height = canvas.clientHeight || 56
+        var pxWidth = Math.max(1, Math.round(width * dpr))
+        var pxHeight = Math.max(1, Math.round(height * dpr))
+        if (canvas.width !== pxWidth || canvas.height !== pxHeight) {
+          canvas.width = pxWidth
+          canvas.height = pxHeight
+        }
+        ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx2d.clearRect(0, 0, width, height)
+        var count = recBars.length === 0 ? 60 : recBars.length
+        var gap = 3
+        var barWidth = Math.max(2, (width - gap * (count - 1)) / count)
+        var mid = height / 2
+        ctx2d.fillStyle = 'rgba(255,255,255,.92)'
+        for (var i = 0; i < count; i += 1) {
+          var level = recBars[i] === undefined ? 0.04 : recBars[i]
+          // 中间高两边低: 那排条子看起来像一段声波, 不是一排等高的柱子
+          var envelope = count < 2 ? 1 : 0.5 + 0.5 * Math.sin((Math.PI * i) / (count - 1))
+          var barHeight = Math.max(3, (height - 8) * level * envelope)
+          ctx2d.fillRect(i * (barWidth + gap), mid - barHeight / 2, barWidth, barHeight)
+        }
+      }
+
+      /** 把波形擦干净 (面板收起 / 正在转写时) */
+      function clearRecWave() {
+        var canvas = els.recWave
+        if (!canvas || typeof canvas.getContext !== 'function') return
+        var ctx2d = canvas.getContext('2d')
+        if (!ctx2d) return
+        ctx2d.setTransform(1, 0, 0, 1, 0, 0)
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height)
+      }
+
+      /**
+       * 长按 450 ms 到点: **当场开录**
+       *
+       * 面板从底部升起来 + 挂抬手 / 上滑那两个监听 —— 手指还压在原来的输入框上, 所以面板
+       * `pointer-events:none`, 事件照旧落在输入框那一侧 (换 DOM 会把抬手事件吞掉)
+       */
+      function beginHoldRecording() {
+        if (voiceState === 'recording' || voiceState === 'working') return
+        if (els.input) {
+          try { els.input.blur() } catch (_noBlur) { /* 没收键盘也不算错 */ }
+        }
+        closeMenu()
+        closeStickerPanel()
+        closeFileMenu()
+        recStartY = 0
+        voiceHeld = true
+        showRecPanel()
+        window.addEventListener('pointermove', onRecMove, { passive: true })
+        // 手指那一路要 `touchmove` 再挡一次: `pointerdown` 里改 `touch-action` 对**这一趟手势**
+        // 已经晚了 (Chromium 在 touchstart 那一刻就定了这一趟是不是 pan), 只有现场
+        // `preventDefault()` 才拦得住"上滑被当成滚动, 然后丢一发 pointercancel"
+        window.addEventListener('touchmove', onRecTouch, { passive: false })
+        window.addEventListener('pointerup', onRecRelease, { once: true })
+        window.addEventListener('pointercancel', onRecRelease, { once: true })
+        window.addEventListener('touchend', onRecRelease, { once: true })
+        startRecording()
+      }
+
+      /** 手指那一路的上滑量: 拦下滚动 + 同一套阈值 */
+      function onRecTouch(event) {
+        if (voiceState !== 'recording') return
+        if (event && event.cancelable) event.preventDefault()
+        var touch = event && event.touches && event.touches[0]
+        var y = touch ? Number(touch.clientY) : NaN
+        if (!isFinite(y)) return
+        applyRecDrag(y)
+      }
+
+      /** 手指往上挪过阈值 = 这一趟不要了 (提示换成「松开取消」, 面板压暗一点) */
+      function onRecMove(event) {
+        if (voiceState !== 'recording') return
+        var y = Number(event && event.clientY)
+        if (!isFinite(y)) return
+        applyRecDrag(y)
+      }
+
+      /** 上滑量的那一处算术 (手与笔两路共用) */
+      function applyRecDrag(y) {
+        if (recStartY === 0) recStartY = y
+        var over = (y - recStartY) <= -REC_CANCEL_PX
+        if (over === recCancel) return
+        recCancel = over
+        if (els.recHint) els.recHint.textContent = over ? REC_HINT_CANCEL : REC_HINT
+        if (els.rec) els.rec.setAttribute('data-cancel', over ? 'on' : 'off')
+      }
+
+      /** 抬手 (或系统把这一趟收走): 按上滑量决定转写还是丢掉 */
+      function onRecRelease() {
+        dropRecListeners()
+        if (voiceState === 'recording') {
+          stopRecording(recCancel)
+          return
+        }
+        // 还在等麦克风时抬手: 这一趟从没开始, 面板收起就行
+        if (voiceState === 'press') {
+          voiceHeld = false
+          voiceState = 'idle'
+          hideRecPanel()
+        }
+      }
+
+      /** 抬手 / 上滑那几个监听一次性的, 收尾时全部摘掉 */
+      function dropRecListeners() {
+        window.removeEventListener('pointermove', onRecMove)
+        window.removeEventListener('touchmove', onRecTouch)
+        window.removeEventListener('pointerup', onRecRelease)
+        window.removeEventListener('pointercancel', onRecRelease)
+        window.removeEventListener('touchend', onRecRelease)
+      }
+
+      /** 按住那一刻要麦克风: 到手就留着这一趟用, 松手时由 [releaseVoiceCapture] 还回去 */
+      function openVoiceStream() {
+        if (voiceStream !== null || voiceStreamAsk !== null) return
+        var media = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
+        if (!media || typeof media.getUserMedia !== 'function') {
+          toast('这一版 WebView 拿不到麦克风', true)
+          return
+        }
+        voiceStreamAsk = media.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        }).then(function (stream) {
+          voiceStreamAsk = null
+          if (!voiceHeld) {
+            stream.getTracks().forEach(function (track) { track.stop() })
+            return null
+          }
+          voiceStream = stream
+          return stream
+        }).catch(function (error) {
+          voiceStreamAsk = null
+          var name = error && error.name ? String(error.name) : ''
+          toast(name === 'NotAllowedError' ? '麦克风权限没给: 去设置 → 权限里打开' : '麦克风起不来: ' + name, true)
+          return null
+        })
+      }
+
+      /** 把录音那几件 (处理器 / 上下文 / 流) 全部放掉 */
+      function releaseVoiceCapture() {
+        if (voiceProcessor !== null) {
+          try { voiceProcessor.disconnect() } catch (_noDisc) { /* 已经断了 */ }
+          try { voiceProcessor.onaudioprocess = null } catch (_noHandler) { /* 老 WebView */ }
+          voiceProcessor = null
+        }
+        if (voiceContext !== null) {
+          try { voiceContext.close() } catch (_noClose) { /* 已经关了 */ }
+          voiceContext = null
+        }
+        if (voiceStream !== null) {
+          try {
+            voiceStream.getTracks().forEach(function (track) { track.stop() })
+          } catch (_noTracks) { /* 流已经被系统收了 */ }
+          voiceStream = null
+        }
+        voiceStreamAsk = null
+        voiceChunks = null
+        voiceSourceRate = 0
+        if (voiceTicker !== null) clearInterval(voiceTicker)
+        voiceTicker = null
+      }
+
+      /** 要麦克风 + 开录: 从这一刻起音频就在往 `voiceChunks` 里走 */
+      function startRecording() {
+        if (voiceState === 'recording' || voiceState === 'working') return
+        voiceState = 'press'
+        var begin = function (stream) {
+          if (!stream) {
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          // 抬手发生在流回来之前: 那时候**不开始录** —— 否则这一趟会一直录到 60 s
+          if (!voiceHeld) {
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          var Ctor = window.AudioContext || window.webkitAudioContext
+          if (typeof Ctor !== 'function') {
+            toast('这一版 WebView 录不了音', true)
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          try {
+            voiceContext = new Ctor()
+          } catch (_noContext) {
+            voiceContext = null
+          }
+          if (voiceContext === null || typeof voiceContext.createScriptProcessor !== 'function') {
+            toast('录音起不来', true)
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          voiceSourceRate = voiceContext.sampleRate
+          voiceChunks = []
+          recLevel = 0
+          voiceProcessor = voiceContext.createScriptProcessor(4096, 1, 1)
+          voiceProcessor.onaudioprocess = function (event) {
+            if (voiceChunks === null) return
+            var channel = event.inputBuffer.getChannelData(0)
+            voiceChunks.push(new Float32Array(channel))
+            // 波形只要"这一拍有多响": 这 4096 个采样算个 RMS 就够
+            var sum = 0
+            for (var i = 0; i < channel.length; i += 1) sum += channel[i] * channel[i]
+            recLevel = Math.sqrt(sum / channel.length) * 4
+            if (recLevel > 1) recLevel = 1
+          }
+          var source = voiceContext.createMediaStreamSource(stream)
+          source.connect(voiceProcessor)
+          // 不接到目的地就收不到回调 (Chromium 的老规矩); 那头没有被写, 所以不出声
+          voiceProcessor.connect(voiceContext.destination)
+          voiceStartedAt = Date.now()
+          voiceState = 'recording'
+          if (voiceTimer !== null) clearTimeout(voiceTimer)
+          voiceTimer = setTimeout(function () { voiceTimer = null; stopRecording(false) }, VOICE_MAX_MS)
+          if (voiceTicker !== null) clearInterval(voiceTicker)
+          voiceTicker = setInterval(paintRecTime, 200)
+        }
+        if (voiceStream !== null) {
+          begin(voiceStream)
+          return
+        }
+        openVoiceStream()
+        if (voiceStreamAsk === null) {
+          voiceState = 'idle'
+          hideRecPanel()
+          return
+        }
+        voiceStreamAsk.then(begin)
+      }
+
+      /**
+       * 松手: 收尾并送转写
+       * @param cancelled true = 上滑取消了 (这一趟丢掉)
+       */
+      function stopRecording(cancelled) {
+        if (voiceState !== 'recording') return
+        var elapsed = Date.now() - voiceStartedAt
+        voiceHeld = false
+        if (voiceTimer !== null) clearTimeout(voiceTimer)
+        voiceTimer = null
+        var chunks = voiceChunks || []
+        var rate = voiceSourceRate
+        releaseVoiceCapture()
+        voiceStartedAt = 0
+        voiceState = 'idle'
+        if (cancelled) {
+          voiceId += 1
+          call('portalVoice', JSON.stringify({ op: 'cancel' }))
+          hideRecPanel()
+          toast('已取消', false)
+          return
+        }
+        if (elapsed < VOICE_MIN_MS) {
+          hideRecPanel()
+          toast('太短了, 再说一句', false)
+          return
+        }
+        var wav = wavOf(chunks, rate)
+        if (wav.byteLength <= 44) {
+          hideRecPanel()
+          toast('没有录到声音', true)
+          return
+        }
+        voiceId += 1
+        var id = voiceId
+        voiceState = 'working'
+        // 转写这一段：面板留着但换成「正在转写…」，波形擦掉 —— 不然松手后屏上什么都没有
+        clearRecWave()
+        if (els.recHint) els.recHint.textContent = REC_HINT_BUSY
+        if (els.rec) els.rec.setAttribute('data-busy', 'on')
+        var answer = call('portalVoice', JSON.stringify({
+          op: 'transcribe',
+          id: id,
+          data: base64Of(wav),
+          language: 'auto',
+        }))
+        if (answer === null || answer.ok !== true) {
+          voiceState = 'idle'
+          hideRecPanel()
+          toast('这一版宿主还不支持语音输入', true)
+          return
+        }
+        // 原生那边在别的线程认, 认完经 `__LUWI_PORTAL__.voice({id, ok, text})` 回推
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = setTimeout(function () {
+          voiceWatch = null
+          if (voiceState !== 'working') return
+          voiceState = 'idle'
+          hideRecPanel()
+          toast('这一句还没回来: 再按一次试试', true)
+        }, VOICE_WATCH_MS)
+      }
+
+      /** 把认出来的那一句接进草稿 (有字就空一格, 光标停在末尾) */
+      function insertDraft(text) {
+        if (!els.input) return
+        var current = String(els.input.value || '')
+        var next = current === '' ? text : current.replace(/\s+$/u, '') + ' ' + text
+        els.input.value = next
+        try {
+          els.input.dispatchEvent(new Event('input', { bubbles: true }))
+        } catch (_noEvent) {
+          updateSendGate()
+        }
+        try { els.input.setSelectionRange(next.length, next.length) } catch (_noSelection) { /* 老 WebView */ }
+        updateSendGate()
+      }
+
+      /**
+       * 原生回推的那一份 (`window.__LUWI_PORTAL__.voice`)
+       *
+       * 两种: `kind:'permission'` 是权限那一问的回执 (只改一句提示), 其余是转写结果 ——
+       * 编号对不上的直接丢掉 (上滑取消过 / 又按了一次之后, 旧的那趟不该再动草稿)
+       * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+       */
+      function voiceAnswer(payload) {
+        if (!payload || typeof payload !== 'object') return
+        if (payload.kind === 'permission') {
+          if (payload.mic === true) {
+            toast('麦克风给好了, 再长按一次', false)
+          } else {
+            toast('麦克风权限没给: 去设置 → 权限里打开', true)
+          }
+          return
+        }
+        if (typeof payload.id === 'number' && payload.id !== voiceId) return
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = null
+        if (payload.ok !== true) {
+          voiceState = 'idle'
+          hideRecPanel()
+          toast(payload.error ? String(payload.error) : '这一句没认出来', true)
+          return
+        }
+        var said = String(payload.text === undefined || payload.text === null ? '' : payload.text).trim()
+        voiceState = 'idle'
+        hideRecPanel()
+        if (said === '') {
+          toast('没有识别到内容', true)
+          return
+        }
+        insertDraft(said)
+        if (els.input) {
+          try { els.input.focus() } catch (_noFocus) { /* 页还没上屏时 focus 会抛, 忽略 */ }
+        }
+      }
+
       /** 发送钮的两副面孔 (空草稿时是四成透明的那颗, 与 dsh 的 `.primary` 同一个读数) */
       function setSendBusy(busy) {
         if (!els.send) return
@@ -4319,8 +4972,15 @@ window.__ModuleLoader__.load({
         var menu = call('portalMenu')
         if (Array.isArray(menu) && menu.length > 0) {
           els.drawer.appendChild(h('div', 'lwp-menu-sep'))
-          for (var i = 0; i < menu.length; i += 1) portalRow(menu[i])
+          for (var i = 0; i < menu.length; i += 1) {
+            // 「终端」2026-11-20 上移到头栏 (夹在语音与 `⋯` 之间), 抽屉不再画它; 原生那份清单
+            // 一个字节没改 —— 后台球菜单仍是原生下拉, 那一行还在那儿 (改名对它生效)
+            if (menu[i] && menu[i].id === 'sync') continue
+            portalRow(menu[i])
+          }
         }
+        // 头栏那颗「终端」的文案与开关态跟着这份清单走 (每次开抽屉顺手对齐一次)
+        applySyncState(menu)
         drawerRow('收起', '', '', false, true, function () { openDrawer('') })
       }
 
@@ -4368,6 +5028,56 @@ window.__ModuleLoader__.load({
           // 开关那一拍要等主线程执行完: 隔一会儿再画一次, 状态就对上了
           setTimeout(function () { if (drawer !== '') renderDrawer() }, 160)
         })
+      }
+
+      /**
+       * 原生清单里 `sync` 那一项 (现在的名字是「终端」)
+       *
+       * 拿不到就回 null —— 老宿主没有这一项时按钮退回常量文案, 点了也只会说一句"还不支持"
+       * @param menu `portalMenu()` 交回来的那一份 (或 `portalMenuPick` 的回执)
+       * @returns 那一项, 没有就 null
+       */
+      function syncItemOf(menu) {
+        if (!Array.isArray(menu)) return null
+        for (var i = 0; i < menu.length; i += 1) {
+          if (menu[i] && menu[i].id === 'sync') return menu[i]
+        }
+        return null
+      }
+
+      /**
+       * 头栏那颗「终端」的文案 / 已打开态 / 无障碍名字全从原生清单来
+       *
+       * 文案与状态只有一处实现 (`PortalMenu.items()` 读 `menu_sync` 那两句), 页不抄第二份 ——
+       * 于是设置里改名、开与关的 summary 变化, 这颗钮自己就跟上了
+       * @param menu 一份新的清单
+       */
+      function applySyncState(menu) {
+        if (!els.syncButton) return
+        var item = syncItemOf(menu)
+        var title = item && typeof item.title === 'string' && item.title !== '' ? item.title : SYNC_TITLE
+        var summary = item && typeof item.summary === 'string' ? item.summary : ''
+        els.syncButton.textContent = title
+        els.syncButton.title = summary
+        els.syncButton.setAttribute('aria-label', summary === '' ? title : title + ': ' + summary)
+        els.syncButton.setAttribute('data-on', item && item.on === true ? 'on' : 'off')
+      }
+
+      /**
+       * 头栏那颗「终端」(2026-11-20 从 `⋯` 抽屉里搬上来)
+       *
+       * 动作与抽屉里原来那一行**逐条相同**: `portalMenuPick('sync')` → 原生 `toggleSync` (翻开关 +
+       * 自己弹一句 Toast + 重启 host)。回执是一份新清单, 拿它把按钮刷新一遍; 160 ms 后再拉一次,
+       * 因为开关写的是主线程上的 Compose 状态, 回执那一下可能还差一拍
+       */
+      function pickSync() {
+        var menu = call('portalMenuPick', 'sync')
+        if (menu === null) {
+          showNote('这一版宿主还不支持', true)
+          return
+        }
+        applySyncState(menu)
+        setTimeout(function () { applySyncState(call('portalMenu')) }, 160)
       }
 
       /** 「虚拟屏」那一层: 屏列表 / 暂停接受控制 / 释放 / 显示隐藏窗口 */
@@ -4680,6 +5390,10 @@ window.__ModuleLoader__.load({
         status = call('portalStatus')
         renderDrawer()
         renderMeta()
+        // 设置页里翻过「终端」那一开关之后回到前台, 头栏那颗的字与亮灯要跟着对上
+        applySyncState(call('portalMenu'))
+        // 设置 → 说话 里翻过「朗读回答」也一样: 那颗喇叭的两副图标与亮灯跟着换
+        refreshSpeak()
         if (mounted) renderFlow()
         return status
       }
@@ -5515,13 +6229,40 @@ window.__ModuleLoader__.load({
         els.meta = h('span', 'lwp-meta', '')
         brandText.appendChild(els.meta)
         head.appendChild(brandText)
-        // 右边只剩 `⋯`: 「历史」那颗胶囊 2026-11-19 撤了 (入口并进头像)
+        // 右边三颗 (2026-11-20 主人: "顶栏应该是语音输出，是喇叭形状" / "都要放在靠近更多按钮的位置,
+        // 向右对齐"): **自动朗读 → 终端 → ⋯** 装进 `#lwp-tabs` 这一簇, `margin-left:auto` 挂在
+        // 那一簇上 —— 三颗一起贴最右, 不再跟着昵称走
+        var tabs = h('div')
+        tabs.id = 'lwp-tabs'
+        els.tabs = tabs
+        els.speakButton = h('button', 'lwp-tab lwp-tab-icon')
+        els.speakButton.id = 'lwp-speak-btn'
+        els.speakButton.type = 'button'
+        els.speakButton.setAttribute('aria-pressed', 'false')
+        els.speakButton.setAttribute('data-on', 'off')
+        els.speakButton.setAttribute('aria-label', '已关闭自动朗读')
+        els.speakButton.title = '已关闭自动朗读'
+        // 两副图标照官方手机端那两张: 关 = 喇叭 + 斜杠, 开 = 喇叭 + 两道声波 (见 [applySpeakStatus])
+        els.speakButton.innerHTML = SPEAKER_OFF_ICON
+        els.speakButton.onclick = function () { toggleSpeak() }
+        tabs.appendChild(els.speakButton)
+        // 「同步」搬出抽屉并改名「终端」(2026-11-20): 动作仍走原生清单那一条
+        // (`portalMenuPick('sync')` → `toggleSync`: 翻开关 + Toast + 重启 host), 文案与开关态也从
+        // `portalMenu()` 来 —— 页不另写死字, 一处 rename 两处跟着变
+        els.syncButton = h('button', 'lwp-tab', SYNC_TITLE)
+        els.syncButton.id = 'lwp-sync-btn'
+        els.syncButton.type = 'button'
+        els.syncButton.setAttribute('data-on', 'off')
+        els.syncButton.setAttribute('aria-label', SYNC_TITLE)
+        els.syncButton.onclick = function () { pickSync() }
+        tabs.appendChild(els.syncButton)
         els.moreButton = h('button', 'lwp-tab lwp-more', '⋯')
         els.moreButton.id = 'lwp-more-btn'
         els.moreButton.type = 'button'
         els.moreButton.setAttribute('aria-label', '更多')
         els.moreButton.onclick = function () { openDrawer(drawer === '' ? 'menu' : '') }
-        head.appendChild(els.moreButton)
+        tabs.appendChild(els.moreButton)
+        head.appendChild(tabs)
         root.appendChild(head)
 
         // 「已开新对话」: **浮在头栏下面的一层** (absolute, 不占排版), 8 秒后自己收
@@ -5532,6 +6273,25 @@ window.__ModuleLoader__.load({
         els.undo.setAttribute('aria-live', 'polite')
         els.undo.appendChild(h('span', null, '已开新对话'))
         root.appendChild(els.undo)
+
+        /* ── 长按说话那块蓝色面板 (2026-11-20 主人给的第 3 张官方截图) ──────────────
+         *
+         * 从底部升起来盖住下半屏: 一句提示 → 一排随声音跳动的竖条 → 右下角计时。
+         * **不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上, 抬手与上滑都得照旧
+         * 落在它那一侧 —— 长按那一刻把 DOM 换掉, 抬手事件会被一起吞掉
+         */
+        els.rec = h('div')
+        els.rec.id = 'lwp-rec'
+        els.rec.setAttribute('data-on', 'off')
+        els.rec.setAttribute('aria-hidden', 'true')
+        els.recHint = h('div', 'lwp-rec-hint', REC_HINT)
+        els.rec.appendChild(els.recHint)
+        els.recWave = document.createElement('canvas')
+        els.recWave.className = 'lwp-rec-wave'
+        els.rec.appendChild(els.recWave)
+        els.recTime = h('div', 'lwp-rec-time', '0:00 / 1:00')
+        els.rec.appendChild(els.recTime)
+        root.appendChild(els.rec)
 
         els.flow = h('div')
         els.flow.id = 'lwp-flow'
@@ -5579,9 +6339,12 @@ window.__ModuleLoader__.load({
 
         els.input = h('textarea')
         els.input.id = 'lwp-input'
-        els.input.placeholder = '说点什么'
+        els.input.placeholder = VOICE_HINT
         els.input.rows = 1
         els.input.addEventListener('keydown', function (event) {
+          // 敲键盘就是"我要打字": 那颗长按计时器当场作废
+          if (pressTimer !== null) clearTimeout(pressTimer)
+          pressTimer = null
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
             send('queue')
@@ -5592,6 +6355,59 @@ window.__ModuleLoader__.load({
           // 高度跟着内容长, 上限那一档写在 CSS 的 max-height 里 (14 行)
           els.input.style.height = 'auto'
           els.input.style.height = String(els.input.scrollHeight) + 'px'
+        })
+        /* ── 长按空输入框 = 当场开录 (2026-11-20 主人: "长按不是显示语音输入，而是直接开始录音") ──
+         *
+         * **只在草稿为空时接管**: 有字时长按仍是系统的选中 / 粘贴那一套 (浏览器自己办), 否则输入框里
+         * 就没法选字了。计时器在抬手 / 手指一动 / 落键 / 失焦时都撤掉 —— 早撤晚撤都是"这一下不是长按"
+         *
+         * `contextmenu` 是 WebView 里长按真正会来的那一下 (系统的选中菜单): 空草稿时吃掉它, 免得
+         * 菜单盖在面板上; 有字时留着 (粘贴要用)
+         */
+        /**
+         * 长按那 450 ms 里把输入的 `touch-action` 关掉 (2026-11-20 真机)
+         *
+         * 不关的话, 按住再往上划会被 Chromium 判成页面滚动, 于是先来一发 `pointercancel` ——
+         * 长按的计时器被撤掉、上滑取消那一路也永远走不到。收手时立刻还原, 免得影响正常的选区与滚动
+         */
+        var releaseTouchAction = function () {
+          if (els.input) els.input.style.touchAction = ''
+        }
+        var cancelPress = function () {
+          if (pressTimer === null) return
+          clearTimeout(pressTimer)
+          pressTimer = null
+          releaseTouchAction()
+        }
+        els.input.addEventListener('pointerdown', function (event) {
+          if (voiceState === 'recording' || voiceState === 'working') return
+          if (String(els.input.value || '').trim() !== '') return
+          cancelPress()
+          // 起手那一点记下来: 上滑取消按它算, 而"手指抖一下"不算取消了长按
+          if (els.input) els.input.style.touchAction = 'none'
+          var y = Number(event && event.clientY)
+          recStartY = isFinite(y) ? y : 0
+          pressStartX = Number(event && event.clientX) || 0
+          pressStartY = recStartY
+          pressTimer = setTimeout(function () {
+            pressTimer = null
+            beginHoldRecording()
+          }, VOICE_LONG_PRESS_MS)
+        })
+        els.input.addEventListener('pointerup', cancelPress)
+        els.input.addEventListener('pointercancel', cancelPress)
+        els.input.addEventListener('pointermove', function (event) {
+          if (pressTimer === null) return
+          // 手指挪过 40 px 才当"这不是长按": 真机按住不动也会抖, 40 px 也不会误伤"轻轻一划" ——
+          // 宁可多认一次长按 (抬手就能取消录音), 也不要让长按在这台机器上十次里八次不响
+          var dx = (Number(event && event.clientX) || 0) - pressStartX
+          var dy = (Number(event && event.clientY) || 0) - pressStartY
+          if (Math.sqrt(dx * dx + dy * dy) > 40) cancelPress()
+        })
+        els.input.addEventListener('blur', cancelPress)
+        els.input.addEventListener('contextmenu', function (event) {
+          if (String(els.input.value || '').trim() !== '') return
+          event.preventDefault()
         })
         // 待发附件那一行 **在文本区上面** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框
         // 上方显示, 像 dsh 原生那样") —— dsh 的 `InputBar` 里 `conversation.input.attachments` slot
@@ -6056,6 +6872,18 @@ window.__ModuleLoader__.load({
         closeFileMenu()
         closePreview()
         closeHistory()
+        // 录音这一层整块收掉 (2026-11-20): 录音 / 麦克风流 / 计时器 / 面板都不许跨挂载留着 ——
+        // 挂着一条开着的流, 退出门户之后麦克风还在被占, 那是主人一眼看得见的错
+        if (voiceState === 'recording') stopRecording(true)
+        dropRecListeners()
+        releaseVoiceCapture()
+        hideRecPanel()
+        if (pressTimer !== null) clearTimeout(pressTimer)
+        pressTimer = null
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = null
+        voiceHeld = false
+        voiceState = 'idle'
         // 下一次挂载是新的 DOM: 落进工作区那条腿若正等着, 让它自然超时 (不跨挂载落地);
         // 那条 15 s 的补试也一起撤掉 —— 重挂之后 autoStart 会再走一遍
         entering = false
@@ -6287,6 +7115,14 @@ window.__ModuleLoader__.load({
          * `onSettingsClosed`, 这里把 `portalStatus()` 再拉一遍 —— 面板上那几行读数才是刚改过的数
          */
         refresh: refresh,
+        /**
+         * 语音那一路的回推 (2026-11-20): 原生认完一句就调它
+         *
+         * 落点只有两件: `kind:'permission'` 改一句提示, 其余把文字接进草稿并退出语音态 ——
+         * 具体的判断与"编号对不对得上"都在 [voiceAnswer] 里
+         * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+         */
+        voice: function (payload) { voiceAnswer(payload) },
       }
     }
 
@@ -6352,6 +7188,15 @@ window.__ModuleLoader__.load({
          * @param payload `key` 那一档是 `{key}`
          */
         account: function (action, payload) { portal.account(action, payload) },
+        /**
+         * 语音那一路的回推 (2026-11-20): 转写结果与"权限给没给"都从这一条进来
+         *
+         * 与 `account` 同一条分寸: **白名单少一行, 原生那句 `evaluateJavascript` 就一声不响地
+         * 什么都不做** —— 页面上于是永远停在"正在识别…" (原生写的是
+         * `window.__LUWI_PORTAL__.voice(...)`)
+         * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+         */
+        voice: function (payload) { portal.voice(payload) },
       }
     }
 

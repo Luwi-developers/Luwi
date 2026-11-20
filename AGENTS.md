@@ -160,18 +160,38 @@
   `--dsw-menu-backdrop-filter` / `--dsw-elevation-panel`); **待发附件行在文本区上面** (图/表情 64px 缩略 + `×`,
   非图 chip), **点表情只进待发栏** (`stageSticker`); 顶条不显示会话标题
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
-- **门户头栏**: 左 **头像 (28px, 热区就是头像, 点 = 历史窗)** + 昵称 (只是标识, 点不动), 右只有 **`⋯` 更多**
-  (判断 / 探索 进抽屉 `menu` 态, 顶上一行「‹ 返回」); 那颗「历史」胶囊 2026-11-19 已撤 (入口并进头像),
-  新对话走历史窗底部「开始新的对话」与首启自动那一场; **「已开新对话」是浮层**
+- **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
+  **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,
+  屏上从底部升起那块 **蓝色录音面板** (`#lwp-rec`, 46vh / 圆角 28 / 蓝渐变) —— 一句
+  **「松手转写，上滑取消」** + 一排按 RMS 跳动的白色竖条 (canvas) + 右下角 `0:03 / 1:00`;
+  **上滑过 56 px 进"松开取消"态** (提示换字、面板压暗), 松手丢弃并说一句「已取消」; 松手默认走转写,
+  文字接进草稿 (有字时前留一个空格, 光标到末尾)。面板 `pointer-events:none`, 抬手/上滑挂在 `window` 上
+  —— 手指还压在原来的输入框上, 换 DOM 会把抬手事件吞掉。录音在**页面** (`getUserMedia` + `ScriptProcessor`,
+  封 16 kHz 单声道 PCM16 wav, 上限 **60 s**), 转写在**应用** (`ui/PortalVoice.kt` → `LwSpeech.dispatch`,
+  引擎跟 `lw/voice-source.json`), 结果走 `PortalState.run` 回推 `__LUWI_PORTAL__.voice`; 桥是
+  `portalVoice` (status / ask / transcribe / cancel), **只答应不干活** (JavaBridge 线程上同步等一句话就是整页卡住);
+  麦克风授权那一问经 `PortalAsk.Target.MIC` 由 `HostScreen` 弹; 判据 `check-luwi-portal` 第二十四节 + `PortalVoiceTest`
+- **门户头栏**: 左 **头像 (28px, 热区就是头像, 点 = 历史窗)** + 昵称 (只是标识, 点不动), 右三颗装进
+  **`#lwp-tabs` 一簇、整簇 `margin-left:auto` 贴最右**: **自动朗读 (喇叭, 30x28 圆钮) → 终端 → `⋯`**
+  (2026-11-20: 原来「历史」的位置先给过麦克风, 按主人给的官方截图改成 **语音输出** —— 两颗图标两副形状:
+  **关 = 喇叭 + 斜杠**, **开 = 喇叭 + 两道声波**; 点一下翻的就是 设置 → 说话 → 「朗读回答」那一格
+  (`SpeakSettings.readAloud`, 一处状态两处界面), Toast 与图上逐字相同 **「已开启自动朗读」/「已关闭自动朗读」**,
+  宿主每轮念之前自己问 `speak op=status`, 所以**不必重启 host**; 桥是 `portalSpeak` (status / toggle)。
+  「同步」从抽屉搬上来并改名「终端」, 动作仍是 `portalMenuPick('sync')`, 文案与亮灯从原生清单来;
+  三颗从"跟着昵称走"改成"靠 ⋯"是对齐口径那次改的);
+  **`⋯` 抽屉里不再画「终端」那一行** (球菜单那一份仍是原生下拉, 那一行还在 —— 两份菜单从这一天起差一行,
+  是有意的) (判断 / 探索 进抽屉 `menu` 态, 顶上一行「‹ 返回」); 那颗「历史」胶囊 2026-11-19 已撤
+  (入口并进头像), 新对话走历史窗底部「开始新的对话」与首启自动那一场; **「已开新对话」是浮层**
   (`#lwp-undo` = `position:absolute` + `z-index:2` + `pointer-events:none`, `top` 按头栏高度写) ——
   出现与收起都不占排版, 中间的图文不往下移再弹回来; 状态点是**头像右下角那颗** (`#lwp-busy`)
   三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做** (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`)
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
-- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 开发 / 触摸控制 / 同步 /
+- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 开发 / 触摸控制 / 终端 /
   酒馆 / 回到后台 / 反馈 / 设置) 由宿主 `ui/PortalMenu.kt` 出清单 (`portalMenu` / `portalMenuPick` 两条桥),
-  门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`); **回到 dsh 后台浮球自己回来**
+  门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`) —— **唯一的例外是「终端」**: 它 2026-11-20
+  从抽屉上移到头栏, `PortalMenu.json` 里那一行照旧留着给球菜单, 抽屉跳过它; **回到 dsh 后台浮球自己回来**
   (`PortalState.open` 为假时画) —— 后台没有门户头栏, 那时球是唯一的门; **球菜单没有撤**, 两份语义逐条对齐
   (判据 `check-luwi-portal` 第十一节); 跨到界面的三件 (设置 / 酒馆 / 反馈) 走 `PortalAsk.pending` 由 `HostScreen` 消费;
   **`__LUWI_PORTAL__.show()` 里不再问 `portal.isOpen()`** —— 那个方法从没暴露在对象上, 一按就是 TypeError,
@@ -360,6 +380,12 @@
   `POST https://api.deepseek.com/v1/tools/asr` (官方上限 **8 MiB / 120 s**, **没有语种参数**), 回来的那句话过
   `TranscriptClean` 再进收件箱; **令牌仍然只在宿主**, 设置页「唤醒」段两行可换 (本地 / 官方), 判据
   `tools/check-voice-asr.mjs` + `LwDeepseekAsrTest`
+- **账号令牌走 `x-dsh-auth-token`, 手填 Key 才走 `Authorization: Bearer`** (2026-11-20 真机定位): `/v1/tools/asr`
+  与 `/v1/tools/tts` 两条原先都写 `Authorization: Bearer`, 于是**登录着也一直 401**
+  (`Authentication Fails, Your api key: ****xxxx is invalid` —— 那串只是令牌尾 4 位, 与账号有效性无关);
+  上游 `llm-deepseek-account` 发给 `/anthropic` 的是 `x-dsh-auth-token` (`TOKEN_HEADER`), 同一枚令牌换这个头
+  TTS 直接 200 audio/wav、ASR 只剩请求体边界的 400。分档写在宿主一处 (`lwToolsAuthHeader`), 两条路由共用;
+  判据 `check-voice-asr.mjs` / `check-speak-engine.mjs` 各钉一侧 (账号那条**不许**再带 `Authorization`)
 - 慢的根因是 30 秒静音垫: 改上游处只有 `LW_ASR_PAD_SECONDS` (缺省 4 s); **mel 长度按 8 帧对齐**; **GLM 必须 `-O3`**
   (`-O0` 慢四十倍), 补在 `native/CMakeLists.txt`
 - 无障碍: `LwAccessibility` → `ui`/`tapText`, **取树没有 binder**; `getWindowsOnAllDisplays()`; 匹配从窄到宽, 去重后

@@ -921,17 +921,17 @@
     <string name="settings_linux_remove_dialog_summary">删掉整个 rootfs 与里面装的包, 没有回收站; 再装只有随包那一份</string>
     <string name="settings_linux_remove_dialog_ok">删掉</string>
 
-    <string name="settings_section_sync">同步</string>
+    <string name="settings_section_sync">终端</string>
     <string name="settings_section_sync_summary">电脑面板扫码配对, 会话在两台机之间走</string>
-<string name="settings_sync_note">同步首次拉取耗时较长, 需在电脑上安装同步插件, 扫码即可配对</string>
+<string name="settings_sync_note">终端首次拉取耗时较长, 需在电脑上安装同步插件, 扫码即可配对</string>
 <string name="settings_sync_plugin">电脑上的同步插件</string>
 <string name="settings_sync_plugin_summary">在电脑 dsh 里装它再扫码</string>
-    <string name="settings_sync_master">同步</string>
+    <string name="settings_sync_master">终端</string>
     <string name="settings_sync_master_on">开着: 会话按 git 在两台机器之间走</string>
     <string name="settings_sync_master_off">关着: 不拉不推, 后台一趟都不跑 (默认)</string>
     <string name="settings_sync_master_need_pair">先在 PC 面板生成二维码, 再点下面扫码配对</string>
-    <string name="settings_sync_switched_on">同步已打开, 正在重启 DSH host…</string>
-    <string name="settings_sync_switched_off">同步已关闭, 正在重启 DSH host…</string>
+    <string name="settings_sync_switched_on">终端已打开, 正在重启 DSH host…</string>
+    <string name="settings_sync_switched_off">终端已关闭, 正在重启 DSH host…</string>
     <string name="settings_sync_pair">扫码配对</string>
     <string name="settings_sync_pair_unpaired">未配对</string>
     <string name="settings_sync_pair_paired">已配对：%1$s</string>
@@ -1093,18 +1093,18 @@
     <string name="settings_tavern_plan_action">去签到</string>
     <string name="settings_tavern_notice">酒馆需要登录并有有效的服务时长, 在官网酒馆页签到或购买。\n\n酒馆只提供框架, 不提供免费模型, 模型要自己配; 本弹窗仅出现这一次</string>
     <string name="settings_tavern_notice_once">不再提醒</string>
-    <string name="menu_sync">同步</string>
+    <string name="menu_sync">终端</string>
     <string name="menu_sync_on">已打开</string>
     <string name="menu_sync_off">已关闭</string>
     <string name="menu_sync_need_remote">未配对</string>
-    <string name="menu_sync_switched_on">同步已打开, 正在重启 DSH host…</string>
-    <string name="menu_sync_switched_off">同步已关闭, 正在重启 DSH host…</string>
+    <string name="menu_sync_switched_on">终端已打开, 正在重启 DSH host…</string>
+    <string name="menu_sync_switched_off">终端已关闭, 正在重启 DSH host…</string>
     <string name="settings_sync_interval">周期拉取</string>
     <string name="settings_sync_interval_summary">%1$d 分钟一次; 0 = 关</string>
     <string name="settings_sync_interval_dialog">0 - 60 分钟 (0 = 关)</string>
-    <string name="settings_sync_status_off">同步现在关着: 用上面那个开关打开, 关着的时候一个字节都不动</string>
+    <string name="settings_sync_status_off">终端现在关着: 用上面那个开关打开, 关着的时候一个字节都不动</string>
     <string name="settings_sync_status_paired">已配对：%1$s · 仓库 %2$s · 分支 %3$s · 每 %4$d 分钟拉一次</string>
-    <string name="settings_sync_status_unpaired">还没配对: 配对之后再打开同步, 没配对时仓库地址是空的</string>
+    <string name="settings_sync_status_unpaired">还没配对: 配对之后再打开终端, 没配对时仓库地址是空的</string>
     <string name="settings_sync_show">看当前配置</string>
     <string name="settings_sync_show_summary">只读看一眼 session-sync.json</string>
     <string name="settings_sync_show_dialog">这一段写的那份文件 (口令已打码)</string>

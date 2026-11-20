@@ -1864,12 +1864,12 @@ expect('后台「开发」仍由掷标开原生面板', portalMenu, 'PortalAsk.T
 expect('球菜单有开发那一行', hostScreen, 'text = "开发"')
 expect('开发面板复用同一份 DevItems', hostScreen, 'DevPanelDialog(')
 expect('释放仍带 byUser', portalMenu, 'VirtualScreen.release(it, byUser = true)')
-expect('同步仍是那一个开关', portalMenu, 'SyncSetting.setSyncOn(context, wanted)')
-expect('同步改完顺手重启 host', portalMenu, 'DshHost.restart(context)')
+expect('终端仍是那一个开关', portalMenu, 'SyncSetting.setSyncOn(context, wanted)')
+expect('终端改完顺手重启 host', portalMenu, 'DshHost.restart(context)')
 expect('回到后台走页面那条入口', portalMenu, 'window.__LUWI_PORTAL__')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenu(): String')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenuPick(id: String): String')
-expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT }')
+expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC }')
 expect('PortalAsk.kt', portalAsk, 'val pending = mutableStateOf<Target?>(null)')
 expect('前台浮球让位', hostScreen, 'if (!PortalState.open) {')
 expect('小窗那一格挪到进程里', hostScreen, 'ScreenWindow.hidden')
@@ -2599,6 +2599,198 @@ if (!client.includes("'#lwp-undo{align-self:center")) {
   notes.push('ok   「已开新对话」不再占流里的高度 (出现/收起都不顶动中间的图文)')
 } else {
   failures.push('client.js: 提示还是流里的一块 —— 一出现中间那张脸就被顶下去')
+}
+
+// ── 二十四、语音输入 + 「终端」那一颗上移 (2026-11-20) ─────────────────────────
+//
+// 主人四条: "输入框灰字提示改成「发消息或长按说话」" / "长按输入框进入语音输入" /
+// "原来「历史」的位置加上语音开关" / "将同步由更多内移动到更多按钮左边, 语音开关右边, 在两者之间。
+// 并将「同步」改名为「终端」, 设置里的字样也同步改动"
+//
+// 这一段钉四件事: ① 灰字就是那一句 ② 头栏三颗的顺序与身份 ③ 录音那一套两侧的接线与同一个上限
+// ④ 「终端」的字样在两份 strings 里都换了, 而技术提法 (同步插件 / session-sync.json) 没被误伤
+
+/** 从 client.js 里取一个 4 空格缩进的模块级函数源 (顶层那几个纯函数) */
+function takeModuleFunction(name) {
+  const found = new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n    \\}`, 'u').exec(client)
+  return found === null ? '' : found[0]
+}
+
+// ① 输入框灰字
+expect('client.js', client, "var VOICE_HINT = '发消息或长按说话'")
+expect('client.js', client, 'els.input.placeholder = VOICE_HINT')
+if (!client.includes("'说点什么'")) notes.push('ok   输入框灰字整句换成「发消息或长按说话」')
+else failures.push('client.js: 输入框灰字还留着「说点什么」')
+
+// ② 头栏: 自动朗读(喇叭) → 终端 → ⋯ 装成一簇贴最右; 喇叭那颗是**图标钮**, 两副图标按状态换
+expect('client.js', client, "els.speakButton = h('button', 'lwp-tab lwp-tab-icon')")
+expect('client.js', client, "els.speakButton.id = 'lwp-speak-btn'")
+expect('client.js', client, 'els.speakButton.innerHTML = SPEAKER_OFF_ICON')
+expect('client.js', client, 'var SPEAKER_ON_ICON = [')
+expect('client.js', client, 'var SPEAKER_OFF_ICON = [')
+// 两副形状: 开 = 喇叭 + 两道声波; 关 = 喇叭 + 一道斜杠 (照官方手机端那两张图)
+expect('client.js', client, '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z">')
+expect('client.js', client, 'M10.7 5.6C11.75 6.3 12.35 7.1 12.35 8s-.6 1.7-1.65 2.4')
+expect('client.js', client, 'M11 6.3l3.6 3.6M14.6 6.3L11 9.9')
+// 点一下翻的是 设置 → 说话 那一格; 两句 Toast 与官方图上逐字相同
+expect('client.js', client, "call('portalSpeak'")
+expect('client.js', client, "'已开启自动朗读'")
+expect('client.js', client, "'已关闭自动朗读'")
+expect('client.js', client, 'function applySpeakStatus')
+expect('client.js', client, "els.speakButton.innerHTML = speakOn ? SPEAKER_ON_ICON : SPEAKER_OFF_ICON")
+expect('client.js', client, "els.syncButton = h('button', 'lwp-tab', SYNC_TITLE)")
+expect('client.js', client, "els.syncButton.id = 'lwp-sync-btn'")
+expectOrder('头栏: 喇叭在终端左边', client, "els.speakButton.id = 'lwp-speak-btn'", "els.syncButton.id = 'lwp-sync-btn'")
+expectOrder('头栏: 终端在 ⋯ 左边', client, "els.syncButton.id = 'lwp-sync-btn'", "els.moreButton.id = 'lwp-more-btn'")
+// 三颗装进 `#lwp-tabs` 这一簇: 向右对齐挂在这一簇上, 不再挂在 `⋯` 上
+expect('client.js', client, "tabs.id = 'lwp-tabs'")
+expect('client.js', client, 'tabs.appendChild(els.speakButton)')
+expect('client.js', client, 'tabs.appendChild(els.syncButton)')
+expect('client.js', client, 'tabs.appendChild(els.moreButton)')
+expect('client.js', client, 'head.appendChild(tabs)')
+expect('样式: 一簇靠右', client, "'#lwp-tabs{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}'")
+expect('样式: 图标钮 30x28', client, "'#lwp-head .lwp-tab.lwp-tab-icon{display:grid;place-items:center;width:30px;height:28px;padding:0}'")
+if (!client.includes("'#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px;margin-left:auto}'")) {
+  notes.push('ok   `⋯` 不再自己顶右 (顶右交给那一簇)')
+} else {
+  failures.push('client.js: `⋯` 还挂着 margin-left:auto —— 另两颗会被晾在昵称旁边')
+}
+// 反向: 麦克风那套与"语音态"整块不许再回来
+for (const gone of ['MIC_ICON', 'KEYBOARD_ICON', "'lwp-voice-btn'", "'#lwp-voice'", 'els.voiceHold',
+  'toggleVoice', 'enterVoice', 'leaveVoice', 'voiceOn']) {
+  if (!client.includes(gone)) notes.push(`ok   麦克风/语音态那一套已经撤干净 (${gone})`)
+  else failures.push(`client.js: 还留着 ${JSON.stringify(gone)} —— 顶栏现在是喇叭(语音输出), 输入走长按即录`)
+}
+// 「终端」那一颗的文案 / 亮灯 / 无障碍名字只有一处来源 (原生清单), 页不抄第二份
+expect('client.js', client, 'function applySyncState')
+expect('client.js', client, "els.syncButton.setAttribute('data-on'")
+expect('client.js', client, "call('portalMenuPick', 'sync')")
+// 抽屉不再画那一行 (球菜单那一份仍是原生下拉: `PortalMenu.kt` 一个字节没改)
+expect('client.js', client, "if (menu[i] && menu[i].id === 'sync') continue")
+expect('PortalMenu.kt 仍带 sync 那一行', portalMenu, 'id = "sync"')
+
+// ③ 语音输入那一套: 长按当场开录 → 桥 → LwSpeech → 回推
+expect('client.js', client, "call('portalVoice'")
+expect('client.js', client, 'voice: function (payload) { portal.voice(payload) }')
+expect('client.js', client, 'releaseVoiceCapture()')
+expect('client.js', client, "els.input.addEventListener('pointerdown'")
+expect('client.js', client, 'var VOICE_LONG_PRESS_MS = 450')
+// 长按到点就开录: 中间没有"语音态"那一步
+expect('client.js', client, 'beginHoldRecording()')
+expect('client.js', client, 'function beginHoldRecording')
+expect('client.js', client, 'showRecPanel()')
+expect('client.js', client, "window.addEventListener('pointermove', onRecMove")
+expect('client.js', client, "window.addEventListener('pointerup', onRecRelease")
+// 蓝色录音面板: 一句话 + 波形画布 + 计时, 与官方那张图同一套元素
+expect('client.js', client, "els.rec.id = 'lwp-rec'")
+expect('client.js', client, "els.recHint = h('div', 'lwp-rec-hint', REC_HINT)")
+expect('client.js', client, "els.recWave.className = 'lwp-rec-wave'")
+expect('client.js', client, "els.recTime = h('div', 'lwp-rec-time'")
+expect('client.js', client, "var REC_HINT = '松手转写，上滑取消'")
+expect('client.js', client, "var REC_HINT_CANCEL = '松开取消'")
+expect('client.js', client, "'#lwp-rec{position:absolute;left:0;right:0;bottom:0;z-index:7;")
+expect('client.js', client, 'pointer-events:none')
+expect('client.js', client, 'function paintRecWave')
+const portalVoice = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalVoice.kt')
+expect(
+  'PortalVoice.kt 收一段录音并回推',
+  portalVoice,
+  'fun transcribe(context: Context, id: Int, data: String, language: String, done: (JSONObject) -> Unit): JSONObject',
+)
+expect('PortalVoice.kt 转写走 LwSpeech', portalVoice, 'LwSpeech.dispatch(')
+expect('PortalVoice.kt 作废在途那一趟', portalVoice, 'fun cancel()')
+expect('PortalBridge.kt 那座桥', portalBridge, 'fun portalVoice(payload: String): String')
+expect('PortalBridge.kt 交给 PortalVoice', portalBridge, 'PortalVoice.transcribe(')
+expect('PortalBridge.kt 回推页面的那一句', portalBridge, 'window.__LUWI_PORTAL__.voice(')
+expect('HostScreen 弹麦克风授权窗', hostScreen, 'ActivityResultContracts.RequestPermission()')
+expect('HostScreen 弹的是 RECORD_AUDIO', hostScreen, 'micPermission.launch(Manifest.permission.RECORD_AUDIO)')
+// 语音输出那颗喇叭: 翻的是 设置 → 说话 里同一个开关 (一处状态两处界面)
+expect('PortalBridge.kt 那座喇叭桥', portalBridge, 'fun portalSpeak(payload: String): String')
+expect('PortalBridge.kt 翻的是朗读开关', portalBridge, 'SpeakSettings.setReadAloud(context, !SpeakSettings.readAloud)')
+expect('PortalBridge.kt 回执带 readAloud', portalBridge, 'put("readAloud", SpeakSettings.readAloud)')
+
+// 同一个上限: 页面的 60 s 与宿主的 `MAX_SECONDS`
+const jsVoiceMax = /var VOICE_MAX_MS = (\d+) \* 1000/u.exec(client)?.[1] ?? ''
+const hostVoiceMax = /const val MAX_SECONDS = (\d+)/u.exec(portalVoice)?.[1] ?? ''
+if (jsVoiceMax !== '' && jsVoiceMax === hostVoiceMax) {
+  notes.push(`ok   语音上限两侧同一个数 (${hostVoiceMax} s)`)
+} else {
+  failures.push(`语音上限对不上: 页面=${jsVoiceMax || '?'}s 宿主=${hostVoiceMax || '?'}s`)
+}
+
+// wavOf 真跑: 头 44 字节 / 16 kHz / 单声道 / 16 位, 采样数与重采样都对
+const wavOfSource = takeModuleFunction('wavOf')
+if (wavOfSource === '') {
+  failures.push('client.js: 抽不出 wavOf (名字或缩进改过?)')
+} else {
+  const wavOf = new Function(`${wavOfSource}\nreturn wavOf`)()
+  const view = (bytes) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const empty = wavOf([], 16000)
+  if (empty.length === 44) notes.push('ok   wavOf: 没有采样时只有 44 字节头')
+  else failures.push(`wavOf: 空输入应当只有头 (拿到 ${String(empty.length)} 字节)`)
+
+  const samples = new Float32Array(1600)
+  samples[0] = 2
+  samples[1] = -2
+  const one = wavOf([samples], 16000)
+  const head = (offset, length) => Array.from(one.slice(offset, offset + length))
+    .map((byte) => String.fromCharCode(byte)).join('')
+  const headView = view(one)
+  if (one.length === 44 + 1600 * 2 && head(0, 4) === 'RIFF' && head(8, 4) === 'WAVE' && head(36, 4) === 'data') {
+    notes.push('ok   wavOf: RIFF/WAVE/data 三处头对得上, 采样数 = 输入长度')
+  } else {
+    failures.push('wavOf: 头或者长度不对 (16 kHz 单声道 PCM16 应当是 44 + 2 × 采样数)')
+  }
+  if (headView.getUint32(24, true) === 16000 && headView.getUint16(22, true) === 1
+    && headView.getUint16(34, true) === 16 && headView.getUint32(40, true) === 1600 * 2) {
+    notes.push('ok   wavOf: 采样率 16 kHz / 单声道 / 16 位 / data 长度都对')
+  } else {
+    failures.push('wavOf: 采样率 / 声道 / 位深 / data 长度有一处不对')
+  }
+  // 超范围的两端要夹到 16 位整数里 (2 → 32767, -2 → -32767)
+  if (headView.getInt16(44, true) === 32767 && headView.getInt16(46, true) === -32767) {
+    notes.push('ok   wavOf: 超范围的采样被夹在 16 位整数里')
+  } else {
+    failures.push(`wavOf: 削顶没做 (${String(headView.getInt16(44, true))} / ${String(headView.getInt16(46, true))})`)
+  }
+  // 48 kHz 的流要降到 16 kHz: 48000 个采样 → 16000 个
+  const wide = new Float32Array(48000)
+  const narrowed = wavOf([wide], 48000)
+  if (narrowed.length === 44 + 16000 * 2) notes.push('ok   wavOf: 48 kHz 降到 16 kHz (样本数三等分)')
+  else failures.push(`wavOf: 48 kHz 那一路没降采样 (${String(narrowed.length)} 字节)`)
+}
+
+// 面板上那两句提示: 默认与上滑后各一句 (图里是"松手发送", 这一层松手是进草稿, 所以照实写)
+//
+// 上一版这里跑的是"按住 说话"那颗大钮的三态文案 (`voiceLabel`); 长按改成当场开录之后那颗钮没有了,
+// 判据跟着搬到这里 —— 钉的是同一件事: 面板上永远有一句说清"现在松手会怎样"
+const recHints = /var REC_HINT = '([^']+)'[\s\S]*?var REC_HINT_CANCEL = '([^']+)'/u.exec(client)
+if (recHints !== null && recHints[1] === '松手转写，上滑取消' && recHints[2] === '松开取消') {
+  notes.push('ok   录音面板的两句提示: 默认「松手转写, 上滑取消」/ 上滑后「松开取消」')
+} else {
+  failures.push(`录音面板的提示不对: ${JSON.stringify(recHints?.slice(1) ?? null)}`)
+}
+
+// ④ 「同步」→「终端」: 两份 strings 里两个字面量都换了, 技术提法没被误伤
+// (stringsZh / stringsEn 在本文件前面就读过了: 一份文件只读一次)
+const zhMenu = /<string name="menu_sync">([^<]*)<\/string>/u.exec(stringsZh)?.[1] ?? ''
+const enMenu = /<string name="menu_sync">([^<]*)<\/string>/u.exec(stringsEn)?.[1] ?? ''
+const zhSection = /<string name="settings_section_sync">([^<]*)<\/string>/u.exec(stringsZh)?.[1] ?? ''
+const enSection = /<string name="settings_section_sync">([^<]*)<\/string>/u.exec(stringsEn)?.[1] ?? ''
+if (zhMenu === '终端' && zhSection === '终端') notes.push('ok   zh: 球菜单那一行与设置段名都叫「终端」')
+else failures.push(`zh 里还叫「${zhMenu}」/「${zhSection}」(应当是「终端」)`)
+if (enMenu === 'Terminal' && enSection === 'Terminal') notes.push('ok   en: 同一个名字是 Terminal')
+else failures.push(`en 里还叫「${enMenu}」/「${enSection}」`)
+// 电脑上那个插件与那份基线仍按技术名叫「同步」—— 改名不误伤它们
+if (stringsZh.includes('<string name="settings_sync_plugin">电脑上的同步插件</string>')) {
+  notes.push('ok   「电脑上的同步插件」保留原名 (那是插件本身, 不是这个入口)')
+} else {
+  failures.push('zh: 「电脑上的同步插件」被一起改了名 —— 那说的是插件, 不是入口')
+}
+if (stringsZh.includes('session-sync.json') && stringsZh.includes('luwi-sync://')) {
+  notes.push('ok   文件名与配对前缀一个字没动')
+} else {
+  failures.push('zh: session-sync.json / luwi-sync:// 被改掉了 (那是磁盘与协议上的名字)')
 }
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.SimSetting
+import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.workspace.Workspace
 import org.json.JSONArray
@@ -622,6 +623,90 @@ internal class PortalBridge(private val context: Context) {
             put("running", false)
             put("seq", seq ?: 0L)
             put("task", task)
+        }.toString()
+    }
+
+    /**
+     * 门户那颗「按住 说话」(2026-11-20 主人: "长按输入框使用语音输入")
+     *
+     * 四个动作挤在一条方法上 (桥上"一个方法一段 JSON"的规矩):
+     *
+     * - `status`: 麦克风给没给 / 语音走哪一档 / 那一档现在能不能出字, 页面据此决定要不要先要素权限、
+     *   以及输入卡那行小字写什么
+     * - `ask`: 请宿主弹系统的麦克风授权窗 (页面自己弹不出来 —— 桥拿的是 applicationContext) ——
+     *   落一个掷标由 [HostScreen] 消费
+     * - `transcribe`: **只答应不干活**: 当场回 `{ok:true, id}`, 认完之后由 [PortalVoice] 经
+     *   `window.__LUWI_PORTAL__.voice({ok, id, text})` 回推。**不能同步等** —— 桥回调在 WebView 的
+     *   JavaBridge 线程上, 一句话要认几秒, 同步等就是整页卡住
+     * - `cancel`: 作废在途那一趟 (退出语音态 / 又按了一次)
+     *
+     * @param payload `{op:"status"|"ask"|"transcribe"|"cancel", id?, data?, language?}`
+     * @return 一段 JSON (status 的读数 / 答应或拒绝那一句)
+     */
+    @JavascriptInterface
+    fun portalVoice(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        return when (val op = body.optString("op", "").trim()) {
+            "status" -> PortalVoice.status(context).toString()
+            "ask" -> {
+                PortalAsk.ask(PortalAsk.Target.MIC)
+                JSONObject().put("ok", true).toString()
+            }
+            "cancel" -> {
+                PortalVoice.cancel()
+                JSONObject().put("ok", true).toString()
+            }
+            "transcribe" -> PortalVoice.transcribe(
+                context = context,
+                id = body.optInt("id", 0),
+                data = body.optString("data", ""),
+                language = body.optString("language", "auto"),
+            ) { answer -> pushVoice(answer) }.toString()
+            else -> JSONObject().put("ok", false).put("error", "op has to be status, ask, transcribe or cancel, not \"$op\"").toString()
+        }
+    }
+
+    /** 转写那一路的回推: 必须在主线程 `evaluateJavascript` (WebView 只认那一条) */
+    private fun pushVoice(answer: JSONObject) {
+        val script = "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.voice(" + answer.toString() + ")"
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            PortalState.run?.invoke(script)
+            return
+        }
+        Handler(Looper.getMainLooper()).post { PortalState.run?.invoke(script) }
+    }
+
+    /**
+     * 门户头栏那颗喇叭 = **语音输出（自动朗读）开关** (2026-11-20 主人)
+     *
+     * 它翻的就是 设置 → 说话 → 「朗读回答」那一格 (`SpeakSettings.readAloud`): 一处状态两处界面,
+     * 页面上不做第二份开关。宿主每轮念之前都会问一次 `speak op=status` (`host-plugin` 的
+     * `lwSpeakLine` / `startReadAloud`), 所以这里**不用重启 host**, 下一轮就按新值走
+     *
+     * 两个动作:
+     * - `status` → `{ok, readAloud, engine}`: 页面据此换喇叭的两副图标 (关 = 带斜杠, 开 = 带声波)
+     * - `toggle` → 翻一次并回新的那一份 (页面拿回执直接画, 不必再问一趟)
+     *
+     * @param payload `{op:"status"|"toggle"}`
+     * @return 一段 JSON (新状态)
+     */
+    @JavascriptInterface
+    fun portalSpeak(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        val op = body.optString("op", "").trim()
+        if (op == "toggle") {
+            runCatching { SpeakSettings.setReadAloud(context, !SpeakSettings.readAloud) }
+                .onFailure { Log.w(LOOK_TAG, "the read-aloud switch could not be written: ${it.message}") }
+        } else if (op != "status") {
+            return JSONObject().put("ok", false)
+                .put("error", "op has to be status or toggle, not \"$op\"").toString()
+        }
+        return JSONObject().apply {
+            put("ok", true)
+            put("readAloud", SpeakSettings.readAloud)
+            put("engine", SpeakSettings.engine.name.lowercase())
         }.toString()
     }
 

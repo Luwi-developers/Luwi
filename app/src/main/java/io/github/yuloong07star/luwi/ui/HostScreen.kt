@@ -1,5 +1,6 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.Manifest
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
@@ -7,6 +8,7 @@ import android.content.ClipData
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Insets
 import android.net.Uri
 import android.os.Environment
@@ -264,6 +266,13 @@ fun HostScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // 门户那颗「按住 说话」要的那一问 (2026-11-20): 系统授权窗只有 Activity 弹得出来, 而门户那座桥
+    // 拿的是 applicationContext —— 页面落一个 [PortalAsk.Target.MIC] 掷标, 这里接住并弹窗; 结果
+    // 再经 `PortalVoice.reportPermission` 回推页面 (页面据此说"给好了"或"去设置里开")
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        PortalVoice.reportPermission(granted)
+    }
+
     // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
     // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
     val askTarget = PortalAsk.pending.value
@@ -273,6 +282,15 @@ fun HostScreen(modifier: Modifier = Modifier) {
             PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
             PortalAsk.Target.FEEDBACK -> feedbackOpen = true
             PortalAsk.Target.DEV -> devOpen = true
+            // 已经给过就直接回推一句 (页面不必再等一个弹窗); 没给才弹系统窗
+            PortalAsk.Target.MIC -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) PortalVoice.reportPermission(true)
+                else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
             PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
                 if (name != null) {
                     scope.launch {

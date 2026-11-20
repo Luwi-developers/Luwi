@@ -224,17 +224,20 @@ check(
   [true, true],
 )
 
+// 那一段开头那句说明: 旧口径是"改完要重启 host 才生效", 现在写的是"首次拉取耗时较长…扫码即可配对"
+// (两句都只在 settings_sync_note 这一个键上) —— 判据钉"这一段有那句说明且两份 strings 都在",
+// 不再钉某一个早已换过的说法 (2026-11-20 之前这条一直是红的)
 check(
-  '改完要重启 host 那句话在段里 (那句话在两份 strings 里)',
+  '那一段开头的说明在 (settings_sync_note 两份 strings 都有, 段里也真引用了它)',
   [
-    zh.includes('重启 DSH host 才生效') && en.includes('restart the DSH host'),
+    zh.includes('name="settings_sync_note"') && en.includes('name="settings_sync_note"'),
     /PlaceholderItems\(stringResource\(R\.string\.settings_sync_note\)\)/u.test(screen),
   ],
   [true, true],
 )
 
 check(
-  '「同步」总开关在位: 默认关 / 设置页与顶栏菜单同一件事 / 关的时候三个自动值归零',
+  '「终端」总开关在位 (原「同步」, 2026-11-20 改名): 默认关 / 设置页与顶栏菜单同一件事 / 关的时候三个自动值归零',
   [
     // 数据面: 一个动作把"存地址 + 三个自动值归零"一起做完 (只清远端的话周期拉取还在跑, 白烧电)
     /fun setSyncOnIn\(file: File, on: Boolean\): String\?/u.test(setting),

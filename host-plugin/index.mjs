@@ -8930,6 +8930,22 @@ const LW_ASR_BODY_MAX = 8 * 1024 * 1024
 const LW_ASR_TIMEOUT_MS = 120_000
 
 /**
+ * 官方那两条工具接口 (`/v1/tools/asr` 与 `/v1/tools/tts`) 该带哪个认证头
+ *
+ * **账号那条令牌只认 dsh 自己的头**: 上游 `llm-deepseek-account` 发给 `/anthropic` 的正是
+ * `x-dsh-auth-token` (`packages/llm/llm-deepseek-account/src/index.ts` 的 `TOKEN_HEADER`), 而这里
+ * 原先两条都写成 `Authorization: Bearer` —— 于是**登录着也一直 401** (`Authentication Fails, Your
+ * api key: ****xxxx is invalid`, 那串只是令牌尾 4 位; 2026-11-20 真机用同一枚令牌换这个头, TTS 直接
+ * 回 200 audio/wav, ASR 只剩请求体边界的 400)。手填的 `sk-` Key 仍走公开 API 那条 `Bearer`
+ * @param token 这一趟的令牌
+ * @param from 它来自哪一条 (`account` = 登录账号 / `key` = 手填 Key, 见 [lwAsrToken] / [lwTtsToken])
+ * @returns 该带的那一个头 (调用方再并上自己的 `Content-Type`)
+ */
+function lwToolsAuthHeader(token, from) {
+  return from === 'account' ? { 'x-dsh-auth-token': token } : { Authorization: `Bearer ${token}` }
+}
+
+/**
  * 这一趟用哪枚令牌
  *
  * 与 TTS 那条同一个顺序 (**账号优先, 没登录退 API Key**)。这里独立一份而不是把 TTS 那个挪上来共用:
@@ -9057,7 +9073,7 @@ function serveLwAsr(ctx) {
       upstream = await fetch(LW_ASR_ENDPOINT, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token}`,
+          ...lwToolsAuthHeader(token, from),
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
         },
         body: lwAsrMultipart(audio, boundary),
@@ -9240,7 +9256,7 @@ function serveLwTts(ctx) {
     try {
       upstream = await fetch(LW_TTS_ENDPOINT, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { ...lwToolsAuthHeader(token, from), 'Content-Type': 'application/json' },
         // 与 `LwDeepseekSpeech.requestBody` 同一份字段: 官方那条认 text / voice_id / format /
         // filter_markdown, **没有语速参数** (它自己定节奏)
         body: JSON.stringify({ text, voice_id: voice, format: 'wav', filter_markdown: true }),
