@@ -115,7 +115,7 @@ internal object PortalState {
  * 2. **动作只走已有入口**: 唤醒 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时唤醒投的是同一行),
  *    开探索 = 投一行 `source:"explore"`, 开关 = `RouterTick.setEnabled` —— 不新增第二条判断链路
  * 3. **写账与宿主同格式**: `voice/session.json` 是 `{id, at, origin, cwd}`, 宿主 `voiceCurrentSession()`
- *    只在 `cwd` 落在 `dsh-ball` 底下时认它 ([VOICE_SESSION_MS] 那 10 分钟也在那边), 所以这里写的是
+ *    只在 `cwd` 落在浮标那条工作区 (`Luwi`) 底下时认它 ([VOICE_SESSION_MS] 那 30 分钟也在那边), 所以这里写的是
  *    同一个形状、同一个 cwd
  */
 internal class PortalBridge(private val context: Context) {
@@ -272,7 +272,7 @@ internal class PortalBridge(private val context: Context) {
      * 球那一场: 账本原文 + 它还算不算数 + 还剩多久
      *
      * `usable` 的判法是宿主 `voiceCurrentSession()` 的同一条: id 在、没超 [VOICE_SESSION_MS]、
-     * cwd 落在 `dsh-ball` 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
+     * cwd 落在浮标那条工作区 (`Luwi`) 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
      */
     @JavascriptInterface
     fun portalSession(): String {
@@ -463,8 +463,12 @@ internal class PortalBridge(private val context: Context) {
     /**
      * 把这一场记成"球的那一场"
      *
-     * 门户里发的第一句之后调一次: 于是球接下来 10 分钟内说的话接的也是这一场, 两边看到同一个流
-     * (宿主的 `voiceSessionBump` 只对球自己那一句记账, 门户这一侧没有别的路能写这本账)
+     * **门户里每发一句都调一次** (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"): 于是球接下来
+     * 30 分钟内说的话接的也是这一场, 两边看到同一个流; 只在第一句写的话, 门户里聊久了回浮标就换场了
+     * (宿主的 `voiceSessionBump` 只认球自己那一句与回复框接着回的那一句, 门户这一侧没有别的路能写这本账)
+     *
+     * `origin` 仍写 `"ball"`: 这本账的身份是"浮标那一场", 写者是谁不进契约 (宿主只按 `cwd` 与新
+     * 鲜度判它, 见 `voiceCurrentSession`)
      */
     @JavascriptInterface
     fun portalBind(id: String): String {
@@ -1041,7 +1045,7 @@ internal class PortalBridge(private val context: Context) {
 
     private fun lwFile(name: String): File = homeFile("lw/$name")
 
-    /** 球那一场所在的工作区 (`dsh-ball`), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
+    /** 球那一场所在的工作区 (`Luwi`, 2026-11-20 起与探索那条同一个目录), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
     private fun ballWorkspace(): File = File(Workspace.resolve(context).directory, BALL_WORKSPACE)
 
     /** 「Luwi」那条通道工作区 (探索 / 主动场那条, 与宿主 `EXPLORE_WORKSPACE_NAME` 同一个名字) */
@@ -1069,13 +1073,13 @@ internal class PortalBridge(private val context: Context) {
 
     private companion object {
         /** 工作区名: 宿主那一侧是 `BALL_WORKSPACE_NAME`, 判据脚本会比对这两个量 */
-        const val BALL_WORKSPACE = "dsh-ball"
+        const val BALL_WORKSPACE = "Luwi"
 
         /** 「Luwi」那条通道工作区: 宿主那一侧是 `EXPLORE_WORKSPACE_NAME`, 两处同一个字面量 */
         const val CHANNEL_WORKSPACE = "Luwi"
 
-        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (10 分钟) */
-        const val VOICE_SESSION_MS = 10 * 60 * 1000L
+        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (2026-11-20 起 30 分钟) */
+        const val VOICE_SESSION_MS = 30 * 60 * 1000L
 
         /** 会话 id 的长度上限 (与 [WakeBridge] 那一处同一个数) */
         const val SESSION_ID_MAX = 128

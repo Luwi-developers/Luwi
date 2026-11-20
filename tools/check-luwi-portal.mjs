@@ -255,6 +255,14 @@ if (landBlock !== null && landBlock[0].includes('portalBind')) {
 } else {
   failures.push('client.js: newConversation 的 land() 里没有 portalBind —— 会被账本拽回旧场')
 }
+// **每发一句都要续一次账本** (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"): 只在第一句写的
+// 话, 门户里聊久了回浮标就换场了。判据钉两件 —— send 里那次 portalBind 还在, 而且不再有 `bound` 那道闸
+if (client.includes("call('portalBind', sessionId)")
+  && !client.includes('bound !== sessionId') && !client.includes('var bound')) {
+  notes.push('ok   门户每发一句都 portalBind 续账本 (没有 bound 那道闸)')
+} else {
+  failures.push('client.js: send() 里缺 portalBind, 或者还被 `bound !== sessionId` 挡着 —— 门户聊久了回浮标会换场')
+}
 // 记忆只该有一条写入口: 写进 localStorage 的那一句在 rememberSession 里
 if (client.includes('function rememberSession') && client.includes('SESSION_KEY')) {
   notes.push('ok   client.js 记住了上次那一场')
@@ -298,8 +306,15 @@ else failures.push(`工作区名对不上: host-plugin ${String(hostBall)} / Por
 
 const hostWindow = grab(hostPlugin, /const VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)/)
 const kotlinWindow = grab(portalBridge, /const val VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)L/)
-if (hostWindow !== null && hostWindow === kotlinWindow) notes.push(`ok   账本窗口 ${hostWindow} 秒 = 10 分钟`)
-else failures.push(`账本窗口对不上: host-plugin ${String(hostWindow)} / PortalBridge ${String(kotlinWindow)}`)
+const windowTriple = /const VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)/.exec(hostPlugin)
+const windowMinutes = windowTriple === null
+  ? null
+  : (Number(windowTriple[1]) * Number(windowTriple[2]) * Number(windowTriple[3])) / 60000
+if (hostWindow !== null && hostWindow === kotlinWindow) {
+  notes.push(`ok   账本窗口 ${windowMinutes} 分钟 (两边逐字相同)`)
+} else {
+  failures.push(`账本窗口对不上: host-plugin ${String(hostWindow)} / PortalBridge ${String(kotlinWindow)}`)
+}
 
 const routerSource = grab(hostPlugin, /const val SOURCE_ROUTER = "([^"]+)"/) ??
   grab(hostPlugin, /const SOURCE_ROUTER = "([^"]+)"/)

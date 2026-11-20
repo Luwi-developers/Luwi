@@ -235,6 +235,15 @@
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
   **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 零轮询; **会话钩子必须带 `{ global: true }`**
+- **浮标那一场按"接着上一场"选, 换场是例外** (2026-11-20, 2.8.1 #35): **浮标那些话落在 `Luwi` 工作区** (`BALL_WORKSPACE_NAME` 从 `dsh-ball` 改成 `Luwi`, 与探索 / 主动场同一个目录; 老的 `dsh-ball` 目录留着不删, 只是不再往里投; 老账写着 `dsh-ball` 一律当没有)。窗口 `VOICE_SESSION_MS` **30 分钟**
+  (原 10 分钟), 而且窗口只有普通一句话受它管 —— **含 `这个` / `刚才` / `改成` 那类指代的话, 过了窗口也接着
+  上一场**, 上限 `VOICE_REFER_BACK_MS` 一天 (词表 `REFER_BACK_WORDS`; `refersBack` 子串命中)。账本
+  (`voice/session.json`) 的写法也改了: 不再只看"谁发的", 而是 **`origin === 'ball'` 一定写; `replyBox` 只在
+  "投的就是账本指的那一场"或"落点在浮标工作区 (`Luwi`) 底下"时写** —— 回复框里接着回的那一句要续期, 而框里挂着别
+  的 GUI 场时一个字节都不许动 (2.7.8 根因二仍在)。**门户每一句都 `portalBind`** (`client.js` 的 `send`,
+  `bound` 那道闸已拆): 只在第一句写的话, 门户里聊久了回浮标就换场。判据 `check-voice-inbox` 第 10/11/11c/15
+  节 + `check-luwi-portal` (窗口两边一致、`send` 里没有 `bound` 闸) + `check-auto-shot` 第五节;
+  方案 `docs/Luwi-浮标接着上一场-方案-2026-11-20.md`
 - **她说的话也由文件说了算** (方案 `docs/Luwi-对话层-最终方案-2026-11-08.md`): `lw_say` 唯一发言工具, 只写
   `$DSH_HOME/lw/out/<sessionId>.jsonl` (宿主单写者: `seq` 起时 tail 取 max / `at` 单调 / `gapMs` 按 `sim.json` 的
   `send` 段抽); 门户走 `PortalBridge.portalOut(id, next)` 两段水位, 浮球走 `tool/OutFile.kt` 读同一份 ——

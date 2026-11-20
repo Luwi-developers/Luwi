@@ -4873,12 +4873,15 @@ const TOOLS = [
       + 'when getting started picked that one - `lw_speech op=status` says which), and drops it '
       + 'into a queue the host sends into the '
       + 'conversation as a `voice`-sourced message. Where a line lands is fixed: **the ball has a '
-      + 'conversation of its own, in the `dsh-ball` folder of the workspace**, and every line either '
+      + 'conversation of its own, in the `Luwi` folder of the workspace**, and every line either '
       + 'continues that one (steering into it while its turn runs) or opens a new one there - it is '
       + 'never spliced into whatever conversation the person happens to have open in the GUI. One '
       + 'exception: **the ball\'s reply box can name its own conversation** - a reply carries the '
       + 'session it came from, and anything typed or spoken back while that box is up is delivered '
-      + 'there (`to`), so answering the box keeps answering that same window even after an hour. A line '
+      + 'there (`to`), so answering the box keeps answering that same window even after an hour. '
+      + 'A line that points back at what came before (`这个`, `刚才`, `改成` and the like) keeps the '
+      + 'ball conversation even past the 30-minute window - up to a day - because what it refers to '
+      + 'lives in that conversation. A line '
       + 'that matches a command sentence is different: '
       + 'it is executed here and never delivered (for example 打开视频模式, 回到手机模式 - see '
       + 'VOICE_COMMANDS; the app itself writes 打断当前回答 when the ball is double-tapped while it '
@@ -4949,7 +4952,7 @@ const TOOLS = [
         if (!state.inbox) return 'the voice inbox has no place to live: DSH_HOME is not set'
         const lines = state.queued.slice(-MAX_VOICE_LINES)
         // 2.7.8 批次 2 的三项读数 (根因一 / 根因二的现场): 这一场属于哪个工作区 / 它的 cwd /
-        // `dsh-ball` 那条工作区注册没注册 —— 以及那本账现在能不能用
+        // `Luwi` 那条工作区注册没注册 —— 以及那本账现在能不能用
         const ledger = await voiceLedgerSnapshot()
         const readings = await voiceWorkspaceReadings(hostCtx, ledger.id || voiceDelivery.sessionId || '')
         return withJson(
@@ -10858,17 +10861,23 @@ function voiceInboxPath() {
 }
 
 /**
- * 浮标那一路的**专用工作区**: 由通道问出来的对话都落在这个目录里
+ * 浮标那一路**落在哪**: 由通道问出来的对话都落在这个工作区里
  *
  * 主人 2026-10-06: "给浮标上的对话通道建一个专门的工作区, 对话都放在这个工作区中"。宿主进程的
  * cwd 与 `HOME` 都是工作区根 (见 app 的 DshHost.spawn), 所以这里只取根下一个固定的子目录 ——
  * 会按需创建, 但**不建在别处**: 主人要的是"对话们有个自己的家", 而它的文件也该由主人的文件管理器
  * 看得见 (工作区本来就在共享存储里)
  *
- * 名字是中英混合的一处取舍: 目录名要能在文件管理器里一眼认出是什么, 所以用 `dsh-ball`, 而不是
- * 一串没有意义的 hash —— 中文目录名在少数工具链里会踩编码, 这一条不值得赌
+ * **2026-11-20 主人改口径**: "ball 对话也投到 luwi 工作区, 不再投到 dsh-ball 了" —— 所以这个名字
+ * 现在就是 `Luwi` (与探索 / 主动场同一个工作区), 老机器上那个 `dsh-ball` 目录**留着不删**: 里面的
+ * 历史会话还归那条工作区, 只是不再往里投新话。这一改的副作用写在 [voiceLedgerUsable] 那段: 账本
+ * 的 `cwd` 判据跟着变成 `Luwi`, 于是老账 (写着 `dsh-ball`) 一律当没有, 浮标的下一条自然在 `Luwi`
+ * 开一场新的
+ *
+ * **为什么留成常量**: `tools/check-luwi-portal.mjs` 拿它与 Kotlin 的 `BALL_WORKSPACE` 逐字比对 ——
+ * 两边必须一起改
  */
-const BALL_WORKSPACE_NAME = 'dsh-ball'
+const BALL_WORKSPACE_NAME = 'Luwi'
 
 /**
  * 一条通道工作区的目录: 宿主进程的 cwd 与 `HOME` 都是工作区根 (见 app 的 DshHost.spawn), 所以
@@ -10884,7 +10893,7 @@ function ballWorkspace() {
 }
 
 /**
- * `dsh-ball` 那条工作区注册没注册 —— 上一次 [ensureBallWorkspace] 的读数
+ * 浮标那条工作区 (`Luwi`, 2026-11-20 之前是 `dsh-ball`) 注册没注册 —— 上一次 [ensureBallWorkspace] 的读数
  *
  * `registered` 三态: `true` / `false` (试过, 不通) / `null` (这个 profile 没有那项服务, 问不出来)
  */
@@ -10903,7 +10912,7 @@ const ballWorkspaceState = { path: null, id: null, registered: null, why: null }
  * 时才 `attachSession` (`packages/api/session-controller/src/commands.ts:105-141`), 只给 `cwd` 的话
  * 会话建出来但不入账 —— 界面上那条工作区在、里面一场都没有 (2026-10-17 模拟器上量到的)
  *
- * @param name 目录名 (`dsh-ball` / `Luwi`)
+ * @param name 目录名 (`Luwi` —— 浮标与探索 2026-11-20 起同一个)
  * @param state 这条通道自己的那份读数 (见 [ballWorkspaceState] / [exploreWorkspaceState])
  */
 async function ensureChannelWorkspace(ctx, name, state) {
@@ -10945,7 +10954,7 @@ async function ensureChannelWorkspace(ctx, name, state) {
  * 首启该发生的是把 `<工作区根>/Luwi` 建好并注册上, 而不是把"没有工作区"这件事实留给界面去问人 */
 
 
-/** 浮标那条: 目录 `dsh-ball`, 读数记在 [ballWorkspaceState] 上 (判据钉着这个函数名) */
+/** 浮标那条: 目录跟 [BALL_WORKSPACE_NAME] (`Luwi`), 读数记在 [ballWorkspaceState] 上 (判据钉着这个函数名) */
 async function ensureBallWorkspace(ctx) {
   return ensureChannelWorkspace(ctx, BALL_WORKSPACE_NAME, ballWorkspaceState)
 }
@@ -11098,7 +11107,7 @@ async function voiceReadNew(inbox) {
     if (!said && !image) continue
     // `wake` 是"这一句是唤醒之后的头一句"那个记号 (应用那侧只有头一句带它, 见 VoiceInbox.append) ——
     // **2026-10-06 起它只是记号, 不再是"另开一场"的判据**: 选哪一场由 [voiceCurrentSession] 那一笔
-    // 账 (2026-10-07 起 20 分钟, 2026-10-11 起 10 分钟) 定, 见 [voiceTargetCandidates]。老版本写的行没有这个键, 读起来与
+    // 账 (2026-10-07 起 20 分钟, 2026-10-11 起 10 分钟, 2026-11-20 起 30 分钟) 定, 见 [voiceTargetCandidates]。老版本写的行没有这个键, 读起来与
     // false 是一回事
     //
     // `to` 是**回复框点名的那一场** (2026-10-06 加): 框在屏上时, 框里发出去的那句话投给"发出那条
@@ -11234,7 +11243,7 @@ async function voiceInboxState() {
 /**
  * "当前对话"那一笔账: 一个会话 id 加它是什么时候拿到的
  *
- * **为什么落盘**: 宿主重启之后"10 分钟内那一场对话"还该是同一场 —— 记在内存里的话, 重启一次主人
+ * **为什么落盘**: 宿主重启之后"窗口之内那一场对话"还该是同一场 —— 记在内存里的话, 重启一次主人
  * 刚才说的话就接不上了 (而重启在这台设备上是常事: 装一次包、改一次设置都要重来)
  *
  * 可变部分全在 [voiceSession.state] 这一个对象上: 换掉它就等于"什么都没记住", 而那正是
@@ -11262,8 +11271,44 @@ function voiceSessionReset() {
  *
  * **2026-10-11 又缩到 10 分钟** (主人: "连续ball的对话从20min缩短到10min") —— 20 分钟那一档
  * 主人用下来觉得"隔了十几分钟还接着上一场"太粘, 所以缩到 10 分钟
+ *
+ * **2026-11-20 放到 30 分钟** (主人: "10min改为30min"): 10 分钟那档在真机上量到的效果是
+ * `opened: 2/3` —— 两句话隔了近两小时, 各开一场, 上一句的上下文 (还有那张屏) 全丢了。窗口是
+ * **滑动**的: 每一句成功投递都从那一刻重算, 见 [voiceSessionBump]
  */
-const VOICE_SESSION_MS = 10 * 60 * 1000
+const VOICE_SESSION_MS = 30 * 60 * 1000
+
+/**
+ * 「指着上一句说」的那一类话: 过了 [VOICE_SESSION_MS] 那一档也接着上一场, 上限一天
+ *
+ * 判据只有一条: `这个` / `刚才` / `改成` 这种话, 说的**一定是刚才那一场里的东西** ——
+ * 这时候换场等于把被指的东西扔掉 (2026-11-20 主人: "在浮标发送有带『这个』之类的词时…应该
+ * 回复上一次会话, 而不是重新开新会话")。一天之外不再接: 隔天的"这个"已经没有指代对象了
+ */
+const VOICE_REFER_BACK_MS = 24 * 60 * 60 * 1000
+
+/**
+ * 指着上一句说的那几个说法 (子串命中)
+ *
+ * **与 [SCREEN_REF_WORDS] 有重叠是有意的**: 那张表管"要不要附一张屏", 这张表管"要不要接着上一场"。
+ * 两边都必须有的是"指的是上一句里的那个东西"那四条 (`这个` / `这张` / `这个图` / `这张图`) ——
+ * `屏幕上` / `照片里` / `这份` 指那块屏, 带一张图就够, 不必把上一场接回来。判据
+ * (`check-auto-shot.mjs` 第五节) 钉着这一条, 不许漂成"图带上了而场换了"
+ *
+ * **不收 `这样`**: 它说的是做法, 不是上一句; 也不是 `再` 这种半个词 —— 认错人的代价是接着一场旧话,
+ * 所以只收明确的指代
+ */
+const REFER_BACK_WORDS = [
+  '这个', '这张', '这个图', '这张图', '那个', '那张',
+  '刚才', '刚刚', '你刚', '你说', '继续', '接着', '再改', '改成', '换成',
+]
+
+/** 这一句是不是"指着上一句在说" (纯函数: 没有设备也能量) */
+function refersBack(text) {
+  const said = String(text ?? '')
+  if (!said.trim()) return false
+  return REFER_BACK_WORDS.some((word) => said.includes(word))
+}
 
 /** 会话 id 是无符号 64 位, **别进整数**: 与虚拟屏那块屏的 id 同一个坑 */
 function voiceSessionPath() {
@@ -11299,18 +11344,18 @@ async function voiceSessionLoad() {
 }
 
 /**
- * 这本账指向的那一场**是不是真的落在 `dsh-ball` 里** (2.7.8 批次 2 根因二)
+ * 这本账指向的那一场**是不是真的落在浮标那个工作区里** (2.7.8 批次 2 根因二; 2026-11-20 起那个工作区是 `Luwi`)
  *
  * 判据只看账上记下的 `cwd`: 2026-10-17 之前写的账没有这个字段 (那时**每次投递都无条件写**, 于是
  * 主人"在 GUI 那场里问一句 -> 在框里答一句"就能把它改写成那场 GUI 会话) —— 那种账**一律当没有**,
  * 不做数据搬家, 下一次投递自然写一份新的。有 cwd 但不在浮标那个目录底下, 同样当没有
  *
  * 抽成纯字符串判据是为了让 `tools/check-voice-inbox.mjs` 直接量它 (两边都先去尾斜杠, 于是
- * `/x/dsh-ball/` 与 `/x/dsh-ball` 是同一个地方)
+ * `/x/Luwi/` 与 `/x/Luwi` 是同一个地方)
  *
  * @param record - `voice/session.json` 读出来的那一份 (`{ id, at, origin, cwd }`)
  * @param directory - 浮标那个工作区目录
- * @returns 能不能拿它当"10 分钟内可复用的那一场"
+ * @returns 能不能拿它当"窗口之内可复用的那一场"
  */
 function voiceLedgerUsable(record, directory) {
   return voicePathUnder(record?.cwd, directory) && voicePathUnder(directory, directory)
@@ -11329,12 +11374,36 @@ function voicePathNorm(value) {
   return String(value ?? '').replace(/\\/gu, '/').replace(/\/+$/u, '')
 }
 
+/**
+ * 账本现在指着谁, **不判新鲜** (没有就是 null)
+ *
+ * 两处要用它: ① 「这一句是不是投给账本指的那一场」(见 [voiceDeliver] 的续期判据 —— 门户 `portalBind`
+ * 过来的合流场真实 cwd 可能不在浮标那个工作区, 判"落在哪"那一支认不出来, 只能比 id); ② 读数
+ */
+async function voiceLedgerId() {
+  await voiceSessionLoad()
+  const id = voiceSession.state.current.id
+  return id ? String(id) : null
+}
+
 /** 现在那一场"当前对话"的 id, 没有 (或者过了 [VOICE_SESSION_MS]) 就是 null */
 async function voiceCurrentSession() {
+  return voiceLastBallSession(VOICE_SESSION_MS)
+}
+
+/**
+ * 账本指着的那一场, **在 `within` 之内**就是它 (否则 null)
+ *
+ * 判据三条, 缺一条都当没有: 有 id / 在这段时间之内 / cwd 落在浮标那个工作区 (见 [voiceLedgerUsable])。
+ * 两个窗口共用这一段: 普通一句 30 分钟 ([VOICE_SESSION_MS]), 指代上一句那种 24 小时 ([VOICE_REFER_BACK_MS])
+ *
+ * @param within - 多久之内算数 (毫秒)
+ */
+async function voiceLastBallSession(within = VOICE_REFER_BACK_MS) {
   await voiceSessionLoad()
   const current = voiceSession.state.current
   if (!current.id) return null
-  if (Date.now() - current.at > VOICE_SESSION_MS) return null
+  if (Date.now() - current.at > within) return null
   // 这一场得真的是浮标开出来的: 那本账被 GUI 会话改写过 / 是 2026-10-17 之前的老账, 都当没有
   const directory = await canonicalVoicePath(ballWorkspace())
   if (!voiceLedgerUsable(current, directory)) {
@@ -11352,10 +11421,11 @@ async function voiceCurrentSession() {
 }
 
 /**
- * 一句话投出去之后的记账: **每次发送都重算这一笔账**, 所以"10 分钟内可复用"是从最后一句起算
+ * 一句话投出去之后的记账: **每次发送都重算这一笔账**, 所以"30 分钟内可复用"是从最后一句起算
  *
- * **不是每一次投递都该记** (2.7.8 批次 2 根因二): 只有球自己那一句 (`origin === 'ball'`) 才改这本账,
- * 见 [voiceDeliver] 那一处调用 —— 回复框点名与自动指令各有各的落点
+ * **不是每一次投递都该记** (2.7.8 批次 2 根因二): 记与不记由 [voiceDeliver] 那一处判 —— 球自己那一句
+ * 一定记; 回复框点名的那一句, 只有在"投的就是账本指的那一场"或"落点在浮标工作区 (`Luwi`) 底下"时才记
+ * (2026-11-20 主人: 框里接着回的那一句要续期); 自动指令每次新开一场, 从不记
  *
  * @param sessionId - 投给哪一场
  * @param extra - `{ origin, cwd }`: 这一句是谁发的、那一场的 cwd (cwd 先过 realpath, 见
@@ -11388,8 +11458,9 @@ async function canonicalVoicePath(value) {
 /**
  * 那本账现在长什么样 (给 `lw_voice op=inbox` 与那份读数文件看)
  *
- * `usable` 是**能不能拿它当"10 分钟内可复用的那一场"**: 有 id、在 10 分钟以内、而且 cwd 落在
- * `dsh-ball` 底下 ([voiceLedgerUsable])。`why` 在不 usable 时说清是哪一条不成立
+ * `usable` 是**能不能拿它当"30 分钟内可复用的那一场"**: 有 id、在 30 分钟以内、而且 cwd 落在
+ * 浮标那个工作区 (`Luwi`) 底下 ([voiceLedgerUsable])。`why` 在不 usable 时说清是哪一条不成立; `ageMs` 是这笔账
+ * 记了多久 (0 = 还没有), 指代那一档要能看"它到底老到什么程度"
  */
 async function voiceLedgerSnapshot() {
   await voiceSessionLoad()
@@ -11410,13 +11481,14 @@ async function voiceLedgerSnapshot() {
     at: record.at ?? 0,
     origin: record.origin ?? '',
     cwd: record.cwd ?? '',
+    ageMs: exists && record.at > 0 ? Date.now() - record.at : 0,
     usable,
     why,
   }
 }
 
 /**
- * 三项读数 (2.7.8 批次 2 第一步): **这一场属于哪个工作区 / 它的 cwd / `dsh-ball` 注册没注册**
+ * 三项读数 (2.7.8 批次 2 第一步): **这一场属于哪个工作区 / 它的 cwd / 浮标那条工作区注册没注册**
  *
  * 只读, 而且一律 try —— 读数不许把 `op=inbox` 弄挂。cwd 从会话存储里拿 (`ctx.sessions.get` 是便宜
  * 的那一条, 不为了读数去 `resolveAgent` 把一场冷会话复活)
@@ -11522,13 +11594,14 @@ async function voiceReadingsWrite(ctx) {
  *
  * 三条判据 (前两条是主人 2026-10-06 的口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在同一场
  * 对话" + 当天那条例外 "有回复框时, 框里进的输入走发出回复那个窗口"; **2026-10-07 那个"1 小时"
- * 改成 20 分钟, 2026-10-11 又缩到 10 分钟**):
+ * 改成 20 分钟, 2026-10-11 又缩到 10 分钟, 2026-11-20 放到 30 分钟**):
  *
  * - **回复框点名的 `to`** ([voiceReadNew] 那一行读出来的): 它还在、还是根会话就投它 —— 框里
  *   发出的键盘与语音都从这条路进来, 于是"接着回答那个窗口"不会因为那笔账过了就换场
- * - 10 分钟内那一场 ([voiceCurrentSession], 需求点名的那个数): 复用它 —— 它本来就是浮标开出来的,
+ * - 窗口内那一场 ([voiceCurrentSession], 2026-11-20 起 30 分钟): 复用它 —— 它本来就是浮标开出来的,
  *   唤醒词命中之后的头一句也一样接上去 (**`fresh` 不再另开一场**, 2026-10-05 那版"喊一声就是换
  *   一件事说"作废)
+ * - 一句指着上一句说的话 (`这个` / `刚才` …): 窗口过了也接着上一场 (上限一天, 见 [refersBack])
  * - 那笔账过了 / 那一场不在了 / 从来没有过: 开一场新的 —— 而新对话落在浮标那个工作区里 (见
  *   [ensureBallWorkspace])
  *
@@ -11536,23 +11609,33 @@ async function voiceReadingsWrite(ctx) {
  *
  * **改过什么, 为什么改**: 原来是四条, 还多两条 —— "有正在跑的那一轮就 `steer` 插进去"与"都没有就
  * 投给会话列表里最近动过的那个根会话"。那两条会把一句浮标里说的话落进**主人此刻正在界面里用的那一场**
- * (它的 cwd 是 `/sdcard/DSH` 之类, 不是 `dsh-ball`), 于是"浮标的对话都在 dsh-ball 里"这件事就不成立
+ * (它的 cwd 是 `/sdcard/DSH` 之类, 不是浮标那个工作区), 于是"浮标的对话都在自己那条工作区里"这件事就不成立
  * 了 —— 主人报的正是这一条。现在 [voiceDeliver] 只问这一个函数, 而它只认浮标自己那一场: 那一场正在跑
  * 就 `steer`, 没在跑就 `followup`, 两种都落在浮标工作区
  */
 /**
- * 这一句话该试哪些会话, **按优先级排**: 点名的那一场 → 浮标那一笔账 (10 分钟); 空表就是"开一场新的"
+ * 这一句话该试哪些会话, **按优先级排**: 点名的那一场 → 浮标那一笔账 (30 分钟) → 指代那一档 (24 小时);
+ * 空表就是"开一场新的"
  *
  * (前两条是主人 2026-10-06 的口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在同一场对话" +
  * 当天那条例外 "有回复框时, 框里进的输入走发出回复那个窗口"; 那个 1 小时 2026-10-07 改成 20 分钟,
- * 2026-10-11 又缩到 10 分钟。`fresh` 只是记号, 不决定开不开新场)
+ * 2026-10-11 又缩到 10 分钟, **2026-11-20 放到 30 分钟**。`fresh` 只是记号, 不决定开不开新场)
+ *
+ * **第三条是 2026-11-20 主人点名加的** ("在浮标发送有带『这个』之类的词时…应该回复上一次会话, 而不是
+ * 重新开新会话"): 一句指着上一句说的话 ([refersBack]), 过了 30 分钟那一档也接着上一场 —— 它说的本来
+ * 就是那一场里的东西, 换场等于把被指的东西 (连同那张屏截图) 扔掉。上限 [VOICE_REFER_BACK_MS]
+ *
+ * 顺序上它排在最后: 框点名的场最准, 30 分钟内的账本最近, 指代只是"都过期了但话里明摆着在接着说"
  *
  * **这里一次会话表都不扫** (2026-10-15 真机上量到 `controller.list` 要 **11~12.8 秒** —— 投递总耗时
  * 的 99%, 因为它要读全部会话头与投影缓存, 而这台机器 38 个工作区里堆了上千场): 目标本来就有 id,
- * 那两场真的不在了 (被删 / 换过工作区), 由投递时 `resolveAgent` 的失败来发现 —— 调用方按这个顺序
+ * 那几场真的不在了 (被删 / 换过工作区), 由投递时 `resolveAgent` 的失败来发现 —— 调用方按这个顺序
  * 逐个试, 全试不出去才开新的一场 ([voiceDeliver] 里那个 for)
+ *
+ * @param to - 回复框点名的那一场 (`line.to`, 没点名是空串)
+ * @param text - 这一句的正文 (只有"要不要接着上一场"看它, 不看它就等于老行为)
  */
-async function voiceTargetCandidates(to) {
+async function voiceTargetCandidates(to, text) {
   const candidates = []
   const asked = String(to ?? '').trim()
   if (asked !== '') {
@@ -11560,7 +11643,17 @@ async function voiceTargetCandidates(to) {
   }
   const current = await voiceCurrentSession()
   if (current !== null && current !== asked) {
-    candidates.push({ sessionId: current, why: 'the ball conversation, reused' })
+    candidates.push({ sessionId: current, reused: true, why: 'the ball conversation, reused' })
+  }
+  if (refersBack(text)) {
+    const kept = current ?? await voiceLastBallSession()
+    if (kept !== null && !candidates.some((one) => one.sessionId === kept)) {
+      candidates.push({
+        sessionId: kept,
+        reused: true,
+        why: 'the line points back at what came before, so the ball conversation was kept',
+      })
+    }
   }
   return candidates
 }
@@ -12000,7 +12093,7 @@ async function runVoiceCommand(command, line) {
 const voiceDelivery = {
   lines: 0,
   sessionId: null,
-  /** 现在那一场"当前对话" (10 分钟内可复用的那个) */
+  /** 现在那一场"当前对话" (30 分钟内可复用的那个) */
   current: null,
   /** 这里面有几条是**复用**了当前对话 (而不是新开一场 / 投给最近动过的) */
   reused: 0,
@@ -12080,7 +12173,8 @@ async function createVoiceMessage(text, images = [], via = 'voice') {
  *
  * **`line.wake` 不再改写目标** (主人 2026-10-06 改口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在
  * 同一场对话"): 它只是"这一句是唤醒之后的头一句"那个记号, 选哪一场由 [voiceTargetCandidates] 按那一
- * 时间定 —— 10 分钟内一律复用浮标那一场 (正在跑就 steer), 那笔账过了才新开一场。界面**不会跟着切过去**:
+ * 时间定 —— 30 分钟内一律复用浮标那一场 (正在跑就 steer), 那笔账过了才新开一场 (指着上一句说的
+ * 那种话再宽到一天, 见 [refersBack])。界面**不会跟着切过去**:
  * 会话是这里建的, 而"在看哪一个"是浏览器自己的路由状态, 应用那侧没有一条让页面切会话的路 —— 所以
  * 新对话真的在跑、回答也会念出来, 但人可能正看着另一个会话。这是主人选的"改动最小"那一档
  *
@@ -12121,7 +12215,7 @@ async function voiceDeliver(ctx, line) {
     return routerWakeNow(ctx)
   }
   // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
-  // 不查浮标那本 10 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
+  // 不查浮标那本 30 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
   if (line.source === 'proactive') {
     return startProactive(ctx, { text: line.text, via: 'inbox' })
   }
@@ -12174,9 +12268,9 @@ async function voiceDeliver(ctx, line) {
     timing[key] = Date.now() - clock.mark
     clock.mark = Date.now()
   }
-  // **自动指令每次新开一场** (主人 2026-10-08 定): 不接回复框点名, 也不复用浮标那 10 分钟的一场 ——
+  // **自动指令每次新开一场** (主人 2026-10-08 定): 不接回复框点名, 也不复用浮标那一场 ——
   // "到点了提醒我"不是接着刚才那件事说, 而一次性提醒也不该把上下文带进主人的聊天里
-  const candidates = automated ? [] : await voiceTargetCandidates(line.to)
+  const candidates = automated ? [] : await voiceTargetCandidates(line.to, line.text)
   // 这一句是谁发的 (2.7.8 批次 2 的读数与判据): 自动指令 / 回复框点名 / 球自己
   const asked = String(line.to ?? '').trim()
   const origin = automated ? 'automation' : asked !== '' ? 'replyBox' : 'ball'
@@ -12230,24 +12324,33 @@ async function voiceDeliver(ctx, line) {
     outcome = await deliverToBall(ctx, controller, sessionId, line, auto)
   }
   beat('agent')
-  // 投出去了才记"当前对话": 这一笔是从**这一句**起算的 10 分钟 (需求: 每次发送完成后 10 分钟内)
+  // 投出去了才记"当前对话": 这一笔是从**这一句**起算的 30 分钟 (需求: 每次发送完成后, 窗口之内接着一场)
   //
-  // **只有球自己那一句才改这本账** (2.7.8 批次 2 根因二): 从前是"投成功就无条件写", 于是主人
-  // "在 GUI 那场里问一句 -> 在浮标框里答一句"就把账改写成了那场 GUI 会话 —— 之后 10 分钟的点球 /
-  // 语音全都投进那场 GUI 会话, 它当然不在 `dsh-ball` 分组里。回复框点名的那一句只对那一场生效,
-  // 自动指令每次新开一场, 两者都不该动这本账
-  if (origin === 'ball') {
+  // **记与不记按"落在哪 / 投给谁"判, 不再只看谁发的** (2.7.8 批次 2 根因二的修订, 2026-11-20):
+  // - 球自己那一句 (`origin === 'ball'`): 一定记
+  // - 回复框点名的那一句 (`origin === 'replyBox'`): 只要它 **① 投的就是账本现在指的那一场**, 或者
+  //   **② 落点在浮标那个工作区 (`Luwi`) 底下**, 就记 —— 主人 2026-11-20: "框开着、里面已经有她推来的一条回复,
+  //   你在下面回" 这个要续期; ①那一支是给门户 `portalBind` 过来的合流场 (真实 cwd 在 `Luwi`,
+  //   按落点认不出来, 只能比 id)
+  // - 其余 (框里挂着别的 GUI 场 / 自动指令): **一个字节都不动** —— 那正是 2.7.8 根因二:
+  //   "在 GUI 那场里问一句 -> 在浮标框里答一句"把账改写成了那场 GUI 会话
+  const pointed = await voiceLedgerId()
+  const landed = await canonicalVoicePath(outcome.cwd ?? '')
+  const inBall = voicePathUnder(landed, await canonicalVoicePath(ballWorkspace()))
+  const keepsLedger = origin === 'ball'
+    || (origin === 'replyBox' && (String(sessionId) === pointed || inBall))
+  if (keepsLedger) {
     await voiceSessionBump(sessionId, { origin, cwd: outcome.cwd ?? workspace?.path ?? '' })
   }
   voiceDelivery.origin = origin
   voiceDelivery.lines += 1
   voiceDelivery.sessionId = String(sessionId)
-  voiceDelivery.reused = (voiceDelivery.reused ?? 0) + (used?.why === 'the ball conversation, reused' ? 1 : 0)
+  voiceDelivery.reused = (voiceDelivery.reused ?? 0) + (used?.reused === true ? 1 : 0)
   voiceDelivery.current = String(sessionId)
   voiceDelivery.why = used?.why
     ?? (failure === null
       ? fresh
-        ? 'the hour was up, so the wake word opened a new conversation'
+        ? 'the window was up, so the wake word opened a new conversation'
         : 'the ball had no conversation, so this opened one'
       : `the conversation we knew was gone (${failure?.message ?? failure}), so this opened one`)
   if (opened) voiceDelivery.opened += 1
@@ -12259,7 +12362,7 @@ async function voiceDeliver(ctx, line) {
     sessionId: String(sessionId),
     steered: outcome.running,
     newConversation: opened,
-    reused: used?.why === 'the ball conversation, reused',
+    reused: used?.reused === true,
     source: line.source ?? 'voice',
     screenshot: outcome.screenshot === true,
     // 新开一场时用的是哪个预设 (复用那一场时不记: 那是它自己的事, 见 [chooseVoicePreset])
@@ -13744,7 +13847,7 @@ function startBallPhase(ctx) {
  *
  * 三件事的边界:
  *  - **固定新开** (B4-a ⑤): 每一行 `source:"proactive"` 都走 `controller.create`, 不查浮标那本
- *    10 分钟的账, 也不接主人此刻正看着的那一场
+ *    30 分钟的账, 也不接主人此刻正看着的那一场
  *  - **主动场能做什么是三档硬闸** (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`):
  *    [proactiveGate] 拿三张表 (A 屏 / B 写动 / C 命令) 与 `sim.json` 的 `proactive.acting` 对, 缺省
  *    `remind` 全拒. 这一层不再靠提示词 —— 与 QQ 桥接把群会话的唤醒条件钳死是同一个做法.
@@ -14743,7 +14846,7 @@ const exploreWorkspaceState = { path: null, id: null, registered: null, why: nul
 /**
  * 探索那条: 目录 `Luwi`, 读数记在 [exploreWorkspaceState] 上
  *
- * 主人 2026-10-18 拍板 (D10 改口径): 探索会话落在 `Luwi`, 与 `dsh-ball` 那条各记各的账 —— 注册路
+ * 主人 2026-10-18 拍板 (D10 改口径): 探索会话落在 `Luwi`, 与浮标那条各记各的账 (2026-11-20 起两条是同一个目录, 账还各记各的) —— 注册路
  * 共用 [ensureChannelWorkspace], 一条会话该带 `workspaceId` 的那件事与浮标那条完全相同
  */
 async function ensureExploreWorkspace(ctx) {
@@ -15726,7 +15829,7 @@ function startExploreClock(ctx) {
     })
     .catch((error) => warn(ctx, `the explore state could not be read: ${error?.message ?? error}`))
     .finally(() => {
-      // 宿主起来就把探索那条工作区注册上 (2.7.9 T5, 与 dsh-ball 同一条幂等注册路): 于是「Luwi」
+      // 宿主起来就把探索那条工作区注册上 (2.7.9 T5, 与浮标同一条幂等注册路): 于是「Luwi」
       // 不必等第一次探索成功才出现在会话列表里; 顺带把 status 那四项写进读数文件, 设置页才有得看。
       // **放在 restore 之后**: 这一步的写会覆盖 `run`, 抢在 restore 前面就把"上一场"抹掉了
       //

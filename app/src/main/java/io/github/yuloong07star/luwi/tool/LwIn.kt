@@ -52,7 +52,7 @@ internal object LwIn {
         val ok: Boolean get() = pick != null
     }
 
-    /** 这个工作区里的 `lw-in/` (调用方给根: 门户给 `DSH`, 球给 `dsh-ball`) */
+    /** 这个工作区里的 `lw-in/` (调用方给根: 门户与球 2026-11-20 起都给同一个工作区) */
     fun dir(root: File): File = File(root, DIRECTORY)
 
     /** 这张图/这份文件认不认 (扩展名那一档) */

@@ -23,14 +23,14 @@
 | `check-overlay-yaml.mjs` | 把 app 会写出来的那两份 YAML (命令行覆盖层 + profile patch 里 `PluginRows` 补的那一行) 解析一遍 (拼错了的代价是整台 host 起不来, 而 profile patch 里那一行的 `name:` 写成裸路径的代价是**设置面板永远存不进去**) |
 | `check-read-aloud.mjs` | 念之前那次清洗: 直接拿 `host-plugin/index.mjs` 里的源码跑, 不复制一份出来 |
 | `check-voice-commands.mjs` | 命令句词表的**两份实现不许漂开** (宿主插件那张表 vs `voice/VoiceCommands.kt`) |
-| `check-auto-shot.mjs` | 自动识屏那一张图的判据表: 词表 (正例 / 反例) + 视频模式与设置那两道闸 + 图要进用户消息 |
+| `check-auto-shot.mjs` | 自动识屏那一张图的判据表: 词表 (正例 / 反例) + 视频模式与设置那两道闸 + 图要进用户消息 + **两张词表不许漂 ("上一句里的东西"那四条两边都要有)** |
 | `check-lock-steps.mjs` | 锁屏那一条的判据表: 坐标一律比例 / 密码与图案不落明文也不进日志 / 失败三次停 / 点亮三条路都在 / 插件与应用的 op 名单一致 / **脚本动词表与 `docs/lock-script.md` 不许漂** |
 | `check-quick-commands.mjs` | 快捷指令与技能那一条的判据表: `lw_calendar` / `lw_quick` 的 op 名单两侧一致 (删除只在桥上有) / 四份技能与两条样例都在 / 技能 frontmatter 合规 / `build.gradle.kts` 那张随包表与仓库里的文件对得上 |
 | `check-image-edit.mjs` | p 图那一条的判据表: `lw_image` 的两个 op 与 `.mjs` / 桥两侧对得上 (ref 那条链与 `edit_image` 的 `source_image` 同一份形状) / 生图插件与 `photo-edit` 技能都在随包表里 / 那两处清单与 `PluginOverlay` 那一行三边一致 / 面板要能改的那一行不在覆盖层两张表里, 而且盘上写的是 `file://` 形态 |
 | `check-automations.mjs` | 自动指令那一条的判据表: `lw_automation` 的 op 名单两侧一致 (删除只在桥上有) / 六个 `when.kind` 与两种 `then.kind` 在插件说明里逐个念到 / 冷却与上限那两个默认值两侧一致 / 两个来源记号 (`automation` 与 `automation-setup`) 都在且插件对前一个有那两处特别处理 / 设置页引用的字符串键两份 `strings.xml` 都有而且顺序一致 |
 | `check-wake-words.mjs` | 唤醒词表算法的两份实现不许漂开 (`WakeWordWords.kt` vs 插件里的 `wakeWordLine`) |
 | `check-model-files.mjs` | 两个模型的下载表不许漂开 (2026-10-28): 唤醒词 4 个文件 / 语音 2 个文件 + VAD 的 name·bytes·sha256 与镜像地址逐项对 `host-plugin/index.mjs`; 每次冷启动提醒一次、最多 3 次 (到数后不再检测)、下载编排、`AppNav` 与设置页入口、两份文案都在 |
-| `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话 |
+| `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话; 外加选场那三档 (点名 → 30 分钟账本 → **指代那一档 24 小时**) 与写账的"按落点还是按谁发的" |
 | `check-voice-asr.mjs` | 语音输入第三档 (2.8.1 #6) 的判据表: 端点与 `/lw-asr` 两处逐字相同 / 宿主那条路由真跑 (只收 POST、只认回环、≤8 MiB、RIFF 门、401 `signedIn=false`、multipart 的 `file` 字段与边界、上游错误把令牌抹掉) / 常驻链与页面麦克风都按 `lw/voice-source.json` 分岔 (`engine=deepseek` 不再要那 240 MB) / 设置页两行与两份 strings / `privacy.md` 出站表 / 接口文档 |
 | `check-speak-engine.mjs` | 语音输出那两件 (2.8.1 #5): 自动念缺省关 / 第五引擎 DeepSeek 官方 TTS 的端点与 `/lw-tts` 两处逐字相同, 且那条路由抽出来真跑 (未登录 401 / 令牌打官方 / 音色白名单 / 上游 500 抹令牌) |
 | `check-shot-params.mjs` | 取景与截图那几个数字的**唯一口径** (`docs/shot-params.md`) 与插件 / Kotlin / 提示词 / 技能 / 预置五处逐项对照 |

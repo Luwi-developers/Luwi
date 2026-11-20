@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
 
     /** 开关: `on` / `off`; 关掉之后右下角留一个小圆点可以再打开 */
     var SWITCH = 'dsh.luwi.portal'
-    /** 账本轮询间隔: 球的 10 分钟窗口一过就会换场, 门户要跟过去 */
+    /** 账本轮询间隔: 球的 30 分钟窗口一过就会换场, 门户要跟过去 */
     var LEDGER_POLL = 3000
     /** 重绘节流: 流式期间快照会连着变 */
     var RENDER_MS = 120
@@ -69,8 +69,8 @@ window.__ModuleLoader__.load({
     /**
      * 打开门户这一刻, 主动场那一场多久之内还算"最新的消息" (2026-11-12 #38)
      *
-     * 与球那本账同一个 10 分钟 (`voice/session.json` 的复用窗口): 刚醒过来说完话就打开应用,
-     * 落的应该是那一句; 更早的就是上一次开机的事, 门户照旧落回"上次画的那一场"
+     * **与球那本账不是同一个数**: 那本账 2026-11-20 起是 30 分钟 (复用窗口), 这里问的是"刚才那一下
+     * 说完没", 10 分钟够; 更长会把上一次开机的话也拽进来
      */
     var RECENT_PROACTIVE_MS = 10 * 60 * 1000
     /**
@@ -1363,7 +1363,6 @@ window.__ModuleLoader__.load({
       // 「虚拟屏」那一项的二级项: 原生清单里的一项带 children 时暂存在这里, 抽屉切进 `screen` 态再画
       var screenItems = []
       var sending = false
-      var bound = ''
       /**
        * 键盘那一格 (px): 宿主推过来的高度, 只在门户盖着时才有值 (2026-11-09)
        *
@@ -2207,7 +2206,6 @@ window.__ModuleLoader__.load({
           var same = prev !== null && prev === id
           // 三件套的第二件: 让 dsh 的 mainView 也搬到这一场 (source 'new' 自带 align)
           switchTo(id, 'new')
-          bound = id
           call('portalBind', id)
           ledgerHoldUntil = Date.now() + 15000
           renderMeta()
@@ -3468,7 +3466,6 @@ window.__ModuleLoader__.load({
           entering = false
           // 自动落位这一条也要让 dsh 的 mainView 一起过去 (source 'new' 自带 align)
           switchTo(id, 'new')
-          bound = id
           call('portalBind', id)
           ledgerHoldUntil = Date.now() + 15000
           renderMeta()
@@ -6333,11 +6330,9 @@ window.__ModuleLoader__.load({
         sending = true
         setSendBusy(true)
         els.input.value = ''
-        // 第一句之后把这一场写进账本: 球接下来 10 分钟接的就是这一场
-        if (bound !== sessionId) {
-          bound = sessionId
-          call('portalBind', sessionId)
-        }
+        // 每发一句都把这一场写进账本 (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"):
+        // 只在第一句写的话, 门户里聊久了回浮标就换场了 —— 窗口是滑动的, 每一句都重算
+        call('portalBind', sessionId)
         // 附件: 图片编成 prompt 里的 `image` 块 (与 dsh 的 encodeImage 同一个形状), 落盘的文件把路径
         // 写进正文 —— 她拿 fs 工具直接读那几条
         var full = text + attachLines()
@@ -6400,7 +6395,7 @@ window.__ModuleLoader__.load({
           renderMeta()
           return
         }
-        // 账本过期 (她 10 分钟没说话) 时也跟随一次: 打开应用是想看刚聊过的那一场, 不是想落在一张空 draft 上
+        // 账本过期 (她 30 分钟没说话) 时也跟随一次: 打开应用是想看刚聊过的那一场, 不是想落在一张空 draft 上
         // **跟成功才落记号** (2026-11-08 23:4x 真机: 落早了就只跟一次, 那一次正好赶上工作区还没开 → 永远空态)
         if (ledger && typeof ledger.id === 'string' && ledger.id !== '' && ledger.usable !== true && !staleFollowed) {
           // 先把它所在的工作区打开 —— dsh 只加载当前工作区, 别的工作区的场次连 binding 都拿不到,
