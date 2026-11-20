@@ -2681,16 +2681,109 @@ expect('client.js', client, 'function beginHoldRecording')
 expect('client.js', client, 'showRecPanel()')
 expect('client.js', client, "window.addEventListener('pointermove', onRecMove")
 expect('client.js', client, "window.addEventListener('pointerup', onRecRelease")
-// 蓝色录音面板: 一句话 + 波形画布 + 计时, 与官方那张图同一套元素
+// 录音条: 第一行「提示 + 计时」, 第二行波形 (2026-11-20 三次改口径: 面积 = 输入框 1.5 倍)
 expect('client.js', client, "els.rec.id = 'lwp-rec'")
-expect('client.js', client, "els.recHint = h('div', 'lwp-rec-hint', REC_HINT)")
+expect('client.js', client, "els.rec = h('div')")
+expect('client.js', client, "els.recRow.id = 'lwp-rec-row'")
+expect('client.js', client, "els.recDot = h('i', 'lwp-rec-dot')")
+expect('client.js', client, "els.recArrow.className = 'lwp-rec-arrow'")
 expect('client.js', client, "els.recWave.className = 'lwp-rec-wave'")
+expect('client.js', client, "els.recDots = h('div', 'lwp-rec-dots')")
 expect('client.js', client, "els.recTime = h('div', 'lwp-rec-time'")
+expect('client.js', client, "els.recText.setAttribute('aria-live', 'polite')")
 expect('client.js', client, "var REC_HINT = '松手转写，上滑取消'")
 expect('client.js', client, "var REC_HINT_CANCEL = '松开取消'")
-expect('client.js', client, "'#lwp-rec{position:absolute;left:0;right:0;bottom:0;z-index:7;")
+// 位置: 与 `#lwp-dock` 的 `0 12px 12px` 对齐, 正好压住输入卡那一块
+expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;")
 expect('client.js', client, 'pointer-events:none')
 expect('client.js', client, 'function paintRecWave')
+// 高度: 量输入卡 × 1.5 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
+expect('client.js', client, 'var REC_PANEL_RATIO = 1.5')
+expect('client.js', client, 'var REC_PANEL_FALLBACK = 148')
+expect('client.js', client, 'var REC_PANEL_MAX = 210')
+expect('client.js', client, 'function fitRecPanel')
+expect('client.js', client, 'els.card.getBoundingClientRect()')
+expect('client.js', client, 'els.rec.style.height = String(wanted)')
+// 边缘渐变: 面板上沿 22px 淡出 + 波形左右两端各 9% 淡出
+expect('client.js', client, "'-webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);'")
+expect('client.js', client, "'-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);'")
+// 材质: 上沿内高光 / 顶部径向柔光 / 噪点 (mask 会裁掉外投影, 所以不再写外发光)
+expect('client.js', client, 'box-shadow:inset 0 1px 0 rgba(255,255,255,.24);')
+expect('client.js', client, "'#lwp-rec::before{content:\"\";position:absolute;left:-10%;right:-10%;top:-40%;height:86%;'")
+expect('client.js', client, 'radial-gradient(62% 52% at 50% 40%,rgba(255,255,255,.14)')
+expect('client.js', client, "'#lwp-rec::after{content:\"\";position:absolute;inset:0;pointer-events:none;opacity:.035;'")
+// 转写中三点接管波形那一行的空间 (`flex:1` 只在 busy 时给, 平时不占位)
+expect('client.js', client, "'#lwp-rec[data-busy=\"on\"] .lwp-rec-dots{flex:1;height:auto;opacity:1}'")
+// 三态各自像"那一件事": 取消下沉变中性色 / 转写三点 / 录制呼吸点
+expect('client.js', client, "'#lwp-rec[data-cancel=\"on\"]{transform:translateY(8px) scale(.988);'")
+expect('client.js', client, 'background:linear-gradient(180deg,#8b93a3 0%,#6f7686 54%,#5d6472 100%)')
+expect('client.js', client, "@keyframes lwp-rec-breath{0%,100%{opacity:.55;box-shadow:0 0 0 3px rgba(255,93,93,.16)}")
+expect('client.js', client, "@keyframes lwp-rec-bounce{0%,80%,100%{transform:translateY(0);opacity:.5}")
+expect('client.js', client, "'@media (prefers-reduced-motion:reduce){'")
+// 计时是胶囊, 现在跟提示同一行 (矮条里没有第二个绝对定位的地方)
+expect('client.js', client, "'.lwp-rec-time{flex:none;padding:2px 9px;border-radius:999px;")
+// 帧循环的起手位置 (2026-11-20 真因): 必须排在 `voiceState = 'recording'` 之后, 且 `showRecPanel` 里不许起帧
+expect('client.js', client, 'function startRecPump')
+expectOrder('录音帧循环在 recording 之后才起', client, "voiceState = 'recording'", '\n          startRecPump()')
+if (!client.includes('46vh')) notes.push('ok   录音条不再是 46vh 的大面板')
+else failures.push('client.js: 录音条还写着 46vh —— 面积应当是输入框的 1.5 倍')
+
+// 反向: 上一版那套"假波形"与发灰的取消态不许回来
+for (const gone of ['Math.sin((Math.PI * i)', 'filter:saturate(.7)', 'recBars', 'pushRecBar']) {
+  if (!client.includes(gone)) notes.push(`ok   旧的粗糙做法已经撤掉 (${gone})`)
+  else failures.push(`client.js: 还留着 ${JSON.stringify(gone)} —— 波形是走带 + 归一化了, 不再用固定正弦包络`)
+}
+
+// 真跑四个波形纯函数: 几何 / 归一化 / 峰值保持 / 雷达压缩
+const recConstNames = ['REC_BAR_W', 'REC_BAR_GAP', 'REC_BAR_R', 'REC_BAR_MIN', 'REC_SILENT', 'REC_HOLD_DECAY']
+const recConsts = recConstNames
+  .map((name) => new RegExp(`var ${name} = ([-0-9.]+)`, 'u').exec(client))
+  .map((hit, index) => (hit ? `var ${recConstNames[index]} = ${hit[1]};` : ''))
+  .join('\n')
+const recFns = ['recLevelOf', 'recNextHold', 'recNormalise', 'recWaveRects'].map(takeModuleFunction)
+if (recFns.some((source) => source === '')) {
+  failures.push('client.js: 抽不出波形那四个纯函数 (名字或缩进改过?)')
+} else {
+  const wave = new Function(`${recConsts}\n${recFns.join('\n')}
+return { recLevelOf, recNextHold, recNormalise, recWaveRects }`)()
+  if (Math.abs(wave.recLevelOf(0.01) - 0.06) < 1e-9 && wave.recLevelOf(0.9) === 1) {
+    notes.push('ok   recLevelOf: 对数感压缩且夹到 1')
+  } else {
+    failures.push('recLevelOf: 压缩曲线不对')
+  }
+  const quiet = wave.recNormalise(0.05, 0.5)
+  if (wave.recNormalise(0.005, 0.5) === 0 && wave.recNormalise(0.5, 0.5) === 1 && quiet > 0.2) {
+    notes.push(`ok   recNormalise: 静音归零, 满幅到 1, 小声 (0.05/0.5) 也有 ${quiet.toFixed(3)}`)
+  } else {
+    failures.push(`recNormalise: 归一化不对 (quiet=${String(quiet)})`)
+  }
+  const decayed = wave.recNextHold(0.4, 0.2)
+  const raised = wave.recNextHold(0.2, 0.9)
+  if (decayed < 0.4 && decayed > 0.39 && raised === 0.9) {
+    notes.push('ok   recNextHold: 新的高就抬, 否则按 0.995 落')
+  } else {
+    failures.push(`recNextHold: 峰值保持不对 (${String(decayed)} / ${String(raised)})`)
+  }
+  const flat = wave.recWaveRects([], 100, 96)
+  const bars = wave.recNormalise ? wave.recWaveRects([0, 0.5, 1], 100, 96) : []
+  const tail = bars[bars.length - 1]
+  const middle = bars[bars.length - 2]
+  if (flat.length === 33 && flat.every((rect) => rect.h === 2)
+    && tail.h === 88 && tail.x === 97 && Math.abs((tail.y + tail.h / 2) - 48) < 1e-9
+    && middle.h === 44) {
+    notes.push('ok   recWaveRects: 走带右对齐 / 2px 点 / 镜像中线 / 高按电平')
+  } else {
+    failures.push(`recWaveRects: 几何不对 (${JSON.stringify({ n: flat.length, tail, middle })})`)
+  }
+  // 走带: 历史超过窗宽时, 左边最先被丢掉 (新的贴右)
+  const long = new Array(40).fill(0).map((_, index) => (index === 0 ? 1 : 0.2))
+  const scrolled = wave.recWaveRects(long, 100, 96)
+  if (scrolled[0].h === wave.recWaveRects(long.slice(7), 100, 96)[0].h) {
+    notes.push('ok   recWaveRects: 超过窗宽从左边丢 (走带语义)')
+  } else {
+    failures.push('recWaveRects: 走带没有从左边丢')
+  }
+}
 const portalVoice = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalVoice.kt')
 expect(
   'PortalVoice.kt 收一段录音并回推',

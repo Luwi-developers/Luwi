@@ -162,11 +162,26 @@
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
 - **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
   **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,
-  屏上从底部升起那块 **蓝色录音面板** (`#lwp-rec`, 46vh / 圆角 28 / 蓝渐变) —— 一句
-  **「松手转写，上滑取消」** + 一排按 RMS 跳动的白色竖条 (canvas) + 右下角 `0:03 / 1:00`;
-  **上滑过 56 px 进"松开取消"态** (提示换字、面板压暗), 松手丢弃并说一句「已取消」; 松手默认走转写,
-  文字接进草稿 (有字时前留一个空格, 光标到末尾)。面板 `pointer-events:none`, 抬手/上滑挂在 `window` 上
-  —— 手指还压在原来的输入框上, 换 DOM 会把抬手事件吞掉。录音在**页面** (`getUserMedia` + `ScriptProcessor`,
+  屏上升起那条 **录音条** (`#lwp-rec`) —— **不是盖住半屏的大面板**: 它压住输入卡那一块再高出半截
+  (`left/right/bottom: 12px`, 高度 = `#lwp-card` 实测高 × **1.5**, `REC_PANEL_MAX 210` 封顶), 圆角 28;
+  第一行左「红点呼吸 + 松手转写，上滑取消」右「计时胶囊」, 第二行是走带波形;
+  **边缘是渐变不是硬边**: 面板上沿 `-webkit-mask-image` 22px 淡出, 波形左右两端各 9% 淡出
+  (mask 会裁掉外投影, 所以只留上沿 1px 内高光 + 顶部径向柔光 + 3.5% 噪点);
+  **帧循环必须起在 `voiceState = 'recording'` 之后** (`startRecPump()`, 2026-11-20 踩到的真因:
+  早起一帧时状态还是 `press`, pump 第一行就 `return` 且不再排帧 —— 症状正是"条不动");
+  **波形是走带式的, 不是一排等高柱子** (2026-11-20 重做, 读法照 wavesurfer 的 `scrollingWaveform`):
+  每 **40 ms** 折一列 `REC_SAMPLE_MS`, 窗口 **80 列**; 峰值 → `recNextHold` (保持 + 0.995 衰减) →
+  `recNormalise` (`ratio ** 0.6`, 低于 **0.02** 当静音) → **快起 0.6 / 慢落 0.12** → 入历史; 几何全在
+  `recWaveRects` (走带右对齐 / 条宽 **2** + 缝 **1** + 圆角帽 **1** + 最小高 **2**, 上下镜像于中线);
+  上色是缓存的一条竖直渐变 + 旧的往左淡出 + 右端柔光点, `roundRect` 没有就退 `fillRect`;
+  **上滑过 56 px 进"松开取消"态** (条下沉 8px + 退成中性灰 + 出现向下箭头 + 提示换「松开取消」),
+  松手丢弃并说一句「已取消」; 松手默认走转写 (条上换 **「正在转写…」+ 三个跳动点**), 文字接进草稿
+  (有字时前留一个空格, 光标到末尾)。条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
+  —— 手指还压在原来的输入框上, 换 DOM 会把抬手事件吞掉。**上滑要挡两次手**: ① 长按那 450 ms 里给输入框
+  写 `touch-action:none` (收手还原); ② 面板升起时挂 `touchmove` (`passive:false`) 现场 `preventDefault()`
+  —— 只做①不够: Chromium 在 `touchstart` 那一刻就定了这一趟是不是 pan, 后写的 `touch-action` 对当前手势无效,
+  症状是"按住再往上划 → 丢一发 `pointercancel` → 录音当场结束", 上滑取消那一路永远走不到。录音在**页面**
+  (`getUserMedia` + `ScriptProcessor`,
   封 16 kHz 单声道 PCM16 wav, 上限 **60 s**), 转写在**应用** (`ui/PortalVoice.kt` → `LwSpeech.dispatch`,
   引擎跟 `lw/voice-source.json`), 结果走 `PortalState.run` 回推 `__LUWI_PORTAL__.voice`; 桥是
   `portalVoice` (status / ask / transcribe / cancel), **只答应不干活** (JavaBridge 线程上同步等一句话就是整页卡住);
@@ -515,7 +530,11 @@
 - 改 Kotlin 先 `:app:compileDebugKotlin`; 它**不跑 manifest merger**, 改依赖或 sdk 版本要 `assembleDebug`
 - **装机只走 `tools/lw-install.ps1`**: 流式 → 失败退"推上去 + `pm install -i`" → 回写无障碍与通知 → 等 `dsh web:` 就绪
 - **Luwi 在前台时 MIUI 拒装**: 先 `KEYCODE_HOME` 放后台再 `adb install -r -t -i com.miui.packageinstaller`, 不行连着重试
-  (第 3 次过)
+  (第 3 次过); **带 `-i` 反而更容易被 `INSTALL_FAILED_USER_RESTRICTED` 挡** —— 2026-11-20 起实测
+  **不带 `-i` 的 `adb install -r -t <apk>` 一次就过** (连试三次里必有一次), 两条路都失败才去开发者选项开「USB 安装」
+- **`packHostTree` 的 npm 走 npmjs, 不走 npmmirror** (2026-11-20): 用户 `~/.npmrc` 指着 npmmirror, 而镜像上
+  `@earendil-works/pi-schema` 只同步到 1.5.x, `pi-ai` 被解析到 1.6.0 后就要 1.6.0 的 schema → `ETARGET` 整树挂;
+  构建前先 `$env:npm_config_registry='https://registry.npmjs.org'` (同一台机器 npmjs 那条通, 只是慢)
 - 迭代: submodule 里提交 (同一步改 `third_party/deepseek-harness/patch.md`) → `pack-host.mjs` → `push-host.mjs` → 重启 app
 - 判据: `DshHost: dsh web:` = 树起来; `DshWebView: shell` 的 `rootChildren` 非 0 = 渲染; `LwMain: resumed with host Running`
   = 没重载

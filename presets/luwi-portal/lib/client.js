@@ -175,6 +175,97 @@ window.__ModuleLoader__.load({
       return btoa(text)
     }
 
+    /* ── 录音波形那四个纯函数 (判据真跑, 2026-11-20 重做) ──────────────────────
+     *
+     * 做法照业界那套 (wavesurfer 的 `scrollingWaveform`): **走带窗口 + 峰值保持 + 归一化**。
+     * 上一版是 `rms × 4` 配一条写死的正弦包络, 那是"假波形" —— 小声是一条直线, 大声糊顶,
+     * 且永远中间高两边低, 一眼假
+     */
+
+    /** 条宽 / 间距 / 圆角帽 / 最小高 (px): wavesurfer 的 `barWidth 2 / barGap 1 / barRadius 2`,
+     *  tapbeats 那份文档给的也是 2 / 1 / 1 */
+    var REC_BAR_W = 2
+    var REC_BAR_GAP = 1
+    var REC_BAR_R = 1
+    var REC_BAR_MIN = 2
+    /** 每多少毫秒折一列, 一共留多少列 (3.2 s 的窗口) */
+    var REC_SAMPLE_MS = 40
+    var REC_COLS = 80
+    /** 峰值保持的衰减 (每列一次) */
+    var REC_HOLD_DECAY = 0.995
+    /** 低于这个峰值就当静音: 一排点, 不是一条噪声 */
+    var REC_SILENT = 0.02
+
+    /**
+     * 这一拍的电平 (RMS → 0~1): 对数感压缩, 说话与收音距离的差别不至于一条平线
+     * @param rms `onaudioprocess` 算出来的均方根 (0~1)
+     */
+    function recLevelOf(rms) {
+      var value = typeof rms === 'number' && isFinite(rms) ? Math.abs(rms) : 0
+      var scaled = value * 6
+      return scaled > 1 ? 1 : scaled
+    }
+
+    /** 峰值保持: 新的高就抬上去, 否则慢慢落 (安静时 hold 不塌成 0, 否则下一句会被放大成糊) */
+    function recNextHold(hold, peak) {
+      var kept = typeof hold === 'number' && isFinite(hold) ? hold : 0
+      var next = typeof peak === 'number' && isFinite(peak) ? Math.abs(peak) : 0
+      var decayed = kept * REC_HOLD_DECAY
+      return next > decayed ? next : decayed
+    }
+
+    /**
+     * 归一化: 峰值 / 保持值, 再开 0.6 次方 —— 小声 (峰值只有保持值的一成) 也能到三成高度
+     * @param peak 这一列的峰值
+     * @param hold 窗口内的峰值保持
+     */
+    function recNormalise(peak, hold) {
+      var top = typeof hold === 'number' && isFinite(hold) ? hold : 0
+      var value = typeof peak === 'number' && isFinite(peak) ? Math.abs(peak) : 0
+      if (top < REC_SILENT || value < REC_SILENT) return 0
+      var ratio = value / top
+      if (ratio > 1) ratio = 1
+      if (ratio < 0) ratio = 0
+      return Math.pow(ratio, 0.6)
+    }
+
+    /**
+     * 一排竖条的几何 (纯函数, 判据真跑): 走带式 —— 最新的那一列贴右边, 旧的往左排,
+     * 装不下的从左边丢; 上下镜像于中线, 静音留 `REC_BAR_MIN` 的点
+     * @param levels 从旧到新的电平 (0~1)
+     * @param width 画布宽 (CSS px)
+     * @param height 画布高 (CSS px)
+     * @returns `[{x, y, w, h, r}]`
+     */
+    function recWaveRects(levels, width, height) {
+      var list = Array.isArray(levels) ? levels : []
+      var boxWidth = typeof width === 'number' && width > 0 ? width : 1
+      var boxHeight = typeof height === 'number' && height > 0 ? height : 1
+      var step = REC_BAR_W + REC_BAR_GAP
+      var fit = Math.max(1, Math.floor((boxWidth + REC_BAR_GAP) / step))
+      var shown = list.length > fit ? list.slice(list.length - fit) : list
+      var pad = list.length > fit ? 0 : fit - shown.length
+      var mid = boxHeight / 2
+      var tallest = Math.max(REC_BAR_MIN, boxHeight - 8)
+      var out = []
+      for (var i = 0; i < fit; i += 1) {
+        // 前 `pad` 格是"还没录到"的空档: 也画最小高的点, 整排因此从头就是一条基线
+        var level = i < pad ? 0 : shown[i - pad]
+        var value = typeof level === 'number' && isFinite(level) ? level : 0
+        if (value < 0) value = 0
+        if (value > 1) value = 1
+        var barHeight = value <= 0 ? REC_BAR_MIN : Math.max(REC_BAR_MIN, tallest * value)
+        out.push({
+          x: boxWidth - (fit - i) * step,
+          y: mid - barHeight / 2,
+          w: REC_BAR_W,
+          h: barHeight,
+          r: REC_BAR_R,
+        })
+      }
+      return out
+    }
+
     /**
      * `+` 上那个加号: dsh 的 `IconPlusOutlineMedium` 就这两笔 —— 与 `presets/ui-fix` 同一条分寸
      * (只借形状, 不复制组件)
@@ -189,6 +280,13 @@ window.__ModuleLoader__.load({
       ' stroke-width="1.5" aria-hidden="true">',
       '<path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6"',
       ' stroke="currentColor"></path></svg>',
+    ].join('')
+
+    /** 录音面板上滑取消时那枚向下的箭头 (2026-11-20): 两笔, 与 `⋯` / `＋` 同一档粗细 */
+    var ARROW_DOWN_ICON = [
+      '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">',
+      '<path d="M8 3.2v9.4M4.2 8.8L8 12.6l3.8-3.8" stroke="currentColor" stroke-width="1.5"',
+      ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
     ].join('')
 
     /** 发送钮的两副面孔: 箭头与转圈 (dsh 的 `.primary` 用的就是这两条 path) */
@@ -1079,26 +1177,76 @@ window.__ModuleLoader__.load({
       'font-family:var(--dsw-font-family);font-size:inherit;line-height:inherit;',
       'color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary)}',
       '#lwp-input::placeholder{color:var(--dsw-alias-label-caption)}',
-      // ── 长按说话那块蓝色录音面板 (2026-11-20 主人给的第 3 张官方截图) ──
-      // 从底部升起来盖住下半屏: 上沿圆角 + 一道从透明到蓝的过渡当"柔边", 中间一排竖条是波形,
-      // 上面一句提示。**不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上,
-      // 抬手与上滑都得照旧落在它那一侧
-      '#lwp-rec{position:absolute;left:0;right:0;bottom:0;z-index:7;box-sizing:border-box;',
-      'height:46vh;padding:16px 26px 40px;display:flex;flex-direction:column;align-items:center;',
-      'justify-content:center;gap:22px;pointer-events:none;border-radius:28px 28px 0 0;',
-      'background:linear-gradient(180deg,#5b7cff 0%,#3f6bff 52%,#2f5cff 100%);',
-      'opacity:0;transform:translateY(28px);',
-      'transition:opacity .18s ease,transform .22s cubic-bezier(.22,.61,.36,1)}',
-      '#lwp-rec[data-on="on"]{opacity:1;transform:translateY(0)}',
-      // 上滑到"松开取消"那一档: 整块压暗一点, 提示也换了字
-      '#lwp-rec[data-cancel="on"]{filter:saturate(.7) brightness(.86)}',
-      '#lwp-rec::before{content:"";position:absolute;left:0;right:0;top:-26px;height:26px;',
-      'background:linear-gradient(180deg,rgba(91,124,255,0),rgba(91,124,255,.55));pointer-events:none}',
-      '#lwp-rec[data-busy="on"] .lwp-rec-wave{opacity:0}',
-      '.lwp-rec-hint{font-size:14px;line-height:20px;color:rgba(255,255,255,.96);letter-spacing:.02em}',
-      '.lwp-rec-wave{display:block;width:100%;height:56px;margin-top:6px}',
-      '.lwp-rec-time{position:absolute;left:0;right:0;bottom:14px;text-align:center;',
-      'font-size:11px;line-height:16px;color:rgba(255,255,255,.72);font-variant-numeric:tabular-nums}',
+      // ── 长按说话那条录音条 (2026-11-20 三次改口径: 面积 = 输入框 1.5 倍, 边缘渐变) ──
+      //
+      // 不再是盖住半屏的大面板: 它就是**输入卡那一块地 + 半个卡高** —— 左右各 12px、底 12px
+      // (与 `#lwp-dock` 的 `0 12px 12px` 对齐), 高度由 JS 按 `#lwp-card` 实测 × 1.5 写进 style。
+      // **不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上, 抬手与上滑都得照旧落在它那一侧。
+      // 材质: 蓝渐变 + 顶部径向柔光 + 上沿 1px 内高光 + 3.5% 噪点; **上沿 22px 用 mask 淡出** ——
+      // 与页面之间没有硬接缝 (真渐变), 代价是外投影一起被裁掉, 所以只留内高光
+      '#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;box-sizing:border-box;',
+      'height:148px;padding:16px 18px 14px;display:flex;flex-direction:column;gap:10px;',
+      'pointer-events:none;overflow:hidden;border-radius:28px;',
+      'background:linear-gradient(180deg,#5b7cff 0%,#3f6bff 54%,#2f5cff 100%);',
+      'box-shadow:inset 0 1px 0 rgba(255,255,255,.24);',
+      '-webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);',
+      'mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);',
+      'opacity:0;transform:translateY(14px) scale(.99);',
+      'transition:opacity .16s ease,transform .24s cubic-bezier(.32,.72,0,1),background .18s ease}',
+      '#lwp-rec[data-on="on"]{opacity:1;transform:translateY(0) scale(1)}',
+      // 上滑到"松开取消"那一档: 整块往下沉一点、颜色退成中性灰 —— 读起来是"这块要丢掉", 不是"变暗了"
+      '#lwp-rec[data-cancel="on"]{transform:translateY(8px) scale(.988);',
+      'background:linear-gradient(180deg,#8b93a3 0%,#6f7686 54%,#5d6472 100%)}',
+      // 顶部柔光: 一块很轻的径向光, 不是一条色带
+      '#lwp-rec::before{content:"";position:absolute;left:-10%;right:-10%;top:-40%;height:86%;',
+      'pointer-events:none;background:radial-gradient(62% 52% at 50% 40%,rgba(255,255,255,.14),rgba(255,255,255,0) 72%)}',
+      // 噪点: 2x2 的一张, 摆着不动 (只画一次, 不占每帧)
+      '#lwp-rec::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.035;',
+      'background-image:url("data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'2\' height=\'2\'><rect width=\'1\' height=\'1\' fill=\'white\'/><rect x=\'1\' y=\'1\' width=\'1\' height=\'1\' fill=\'white\'/></svg>")}',
+      // 第一行: 左提示, 右计时胶囊 (矮条里它们必须同一行)
+      '#lwp-rec-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;',
+      'height:20px}',
+      '#lwp-rec[data-busy="on"] .lwp-rec-wave{opacity:0;height:0;flex:none}',
+      // 红点归动画管 (`animation` 会盖住普通的 `opacity`), 所以要连 animation 一起停
+      '#lwp-rec[data-busy="on"] .lwp-rec-dot{animation:none;opacity:0}',
+      // 一行提示: 录制中点一颗会呼吸的红点, 上滑后浮出一枚向下箭头
+      '.lwp-rec-hint{display:flex;align-items:center;gap:6px;min-width:0;font-size:12.5px;line-height:18px;',
+      'font-weight:500;letter-spacing:.02em;color:rgba(255,255,255,.94);',
+      'transition:opacity .16s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.lwp-rec-dot{width:6px;height:6px;border-radius:999px;flex:none;background:#ff5d5d;',
+      'box-shadow:0 0 0 3px rgba(255,93,93,.22);animation:lwp-rec-breath 1.6s ease-in-out infinite;',
+      'transition:opacity .16s ease}',
+      '@keyframes lwp-rec-breath{0%,100%{opacity:.55;box-shadow:0 0 0 3px rgba(255,93,93,.16)}',
+      '50%{opacity:1;box-shadow:0 0 0 5px rgba(255,93,93,.28)}}',
+      '.lwp-rec-arrow{width:13px;height:13px;flex:none;opacity:0;transform:translateY(-4px);',
+      'transition:opacity .18s ease,transform .18s cubic-bezier(.23,1,.32,1)}',
+      '#lwp-rec[data-cancel="on"] .lwp-rec-arrow{opacity:1;transform:translateY(0)}',
+      // 波形: 走带 (新的从右边进); **左右两端各自 9% 淡出** —— 条子进出声都不硬切
+      '.lwp-rec-wave{display:block;width:100%;flex:1;min-height:0;',
+      '-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
+      'mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
+      'transition:opacity .18s ease;opacity:1}',
+      // 转写中的三个点: 只动 transform; 平时不占位, 转写时接管波形那一行的空间
+      '.lwp-rec-dots{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;',
+      'min-height:0;height:0;opacity:0;transition:opacity .18s ease}',
+      '#lwp-rec[data-busy="on"] .lwp-rec-dots{flex:1;height:auto;opacity:1}',
+      '.lwp-rec-dots i{width:5px;height:5px;border-radius:999px;background:rgba(255,255,255,.92);',
+      'animation:lwp-rec-bounce 1.1s ease-in-out infinite}',
+      '.lwp-rec-dots i:nth-child(2){animation-delay:.12s}',
+      '.lwp-rec-dots i:nth-child(3){animation-delay:.24s}',
+      '@keyframes lwp-rec-bounce{0%,80%,100%{transform:translateY(0);opacity:.5}',
+      '40%{transform:translateY(-4px);opacity:1}}',
+      // 计时胶囊: 在第一行右边, 不再绝对定位贴底
+      '.lwp-rec-time{flex:none;padding:2px 9px;border-radius:999px;background:rgba(255,255,255,.16);',
+      'box-shadow:inset 0 1px 0 rgba(255,255,255,.28);',
+      'font-size:10.5px;line-height:15px;letter-spacing:.04em;color:rgba(255,255,255,.88);',
+      'font-variant-numeric:tabular-nums}',
+      // 动效敏感的人: 只留淡入, 位移与呼吸全关
+      '@media (prefers-reduced-motion:reduce){',
+      '#lwp-rec{transform:none;transition:opacity .12s linear}',
+      '#lwp-rec[data-on="on"],#lwp-rec[data-cancel="on"]{transform:none}',
+      '.lwp-rec-dot,.lwp-rec-dots i{animation:none}',
+      '.lwp-rec-arrow{transform:none}}',
       '#lwp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 8px 6px;',
       'min-width:0}',
       '#lwp-tools{display:flex;align-items:center;gap:8px;flex:1;min-width:0}',
@@ -4482,37 +4630,83 @@ window.__ModuleLoader__.load({
       var recCancel = false
       /** 起手那一点的 Y: 上滑量按它算 */
       var recStartY = 0
-      /** 波形那一帧的号与这一拍的电平 */
+      /** 波形那一帧的号与"这一列攒到哪儿了" */
       var recFrame = 0
-      var recLevel = 0
-      /** 波形的历史电平 (新的从右边进来, 一共 60 根) */
-      var recBars = []
+      var recLastSample = 0
+      /** 这一列里见过的最大峰值 (`onaudioprocess` 每拍更新) */
+      var recPeak = 0
+      /** 窗口内的峰值保持 (归一化的分母) */
+      var recHold = 0
+      /** 起落平滑后的这一列电平 (快起慢落) */
+      var recShown = 0
+      /** 走带历史: 从旧到新, 最多 `REC_COLS` 列 */
+      var recHist = []
+      /** 缓存的竖直渐变 (尺寸变了才重建) */
+      var recGradient = null
+      var recGradientHeight = 0
       /** 面板上那两句提示 (图 3 的「松手发送，上滑取消」; 这一层松手是"进草稿", 所以照实写) */
       var REC_HINT = '松手转写，上滑取消'
       var REC_HINT_CANCEL = '松开取消'
       var REC_HINT_BUSY = '正在转写…'
       /** 上滑多少像素算取消 */
       var REC_CANCEL_PX = 56
+      /** 录音条的高度 = 输入卡实测高 × 这个倍数 (主人 2026-11-20: "比输入框高1.5倍即可") */
+      var REC_PANEL_RATIO = 1.5
+      var REC_PANEL_FALLBACK = 148
+      var REC_PANEL_MIN = 120
+      var REC_PANEL_MAX = 210
 
       /** 蓝色录音面板升起来 (长按 450 ms 那一刻) */
       function showRecPanel() {
         recCancel = false
-        recLevel = 0
-        recBars = []
+        recPeak = 0
+        recHold = 0
+        recShown = 0
+        recHist = []
+        recLastSample = 0
+        recGradient = null
+        fitRecPanel()
         if (els.rec) {
           els.rec.setAttribute('data-on', 'on')
           els.rec.setAttribute('data-cancel', 'off')
           els.rec.setAttribute('data-busy', 'off')
         }
         if (root) root.setAttribute('data-rec', 'on')
-        if (els.recHint) els.recHint.textContent = REC_HINT
+        setRecHint(REC_HINT)
         paintRecTime()
         paintRecWave()
+        // **不在这里起帧**: 这一刻 `voiceState` 还是 `press` (麦克风还没到手), 起帧会第一帧就退出、
+        // 之后再也没人重画 —— 那条就这么"不动"了 (2026-11-20 主人: "那个条没有波动")
+      }
+
+      /**
+       * 量一下输入卡, 把这条的高度定成它的 1.5 倍 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
+       *
+       * 卡片里带附件行时会更高: 一样按 1.5 倍跟, 但封顶 `REC_PANEL_MAX`, 免得表情九宫格把条顶上天
+       */
+      function fitRecPanel() {
+        if (!els.rec) return
+        var cardHeight = 0
+        if (els.card && typeof els.card.getBoundingClientRect === 'function') {
+          var box = els.card.getBoundingClientRect()
+          cardHeight = box && isFinite(box.height) ? box.height : 0
+        }
+        var wanted = cardHeight > 0 ? Math.round(cardHeight * REC_PANEL_RATIO) : REC_PANEL_FALLBACK
+        if (wanted > REC_PANEL_MAX) wanted = REC_PANEL_MAX
+        if (wanted < REC_PANEL_MIN) wanted = REC_PANEL_MIN
+        els.rec.style.height = String(wanted) + 'px'
+        recGradient = null
+        // 一行读数: 卡多高、条多高 (真机验收要的就是这个比例, 也方便日后查"条怎么又高了")
+        console.log('[luwi-portal] rec bar ' + wanted + 'px (card ' + Math.round(cardHeight) + 'px)')
+      }
+
+      /** 帧循环: 只在真的在录的时候跑 (由 `startRecording` 的 `begin()` 拉起来) */
+      function startRecPump() {
         if (recFrame !== 0) return
         var pump = function () {
           recFrame = 0
           if (voiceState !== 'recording') return
-          pushRecBar(recLevel)
+          sampleRecColumn(false)
           paintRecWave()
           paintRecTime()
           recFrame = requestAnimationFrame(pump)
@@ -4523,8 +4717,11 @@ window.__ModuleLoader__.load({
       /** 面板落下去, 波形停 */
       function hideRecPanel() {
         recCancel = false
-        recLevel = 0
-        recBars = []
+        recPeak = 0
+        recHold = 0
+        recShown = 0
+        recHist = []
+        recLastSample = 0
         if (recFrame !== 0) {
           try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
           recFrame = 0
@@ -4540,11 +4737,24 @@ window.__ModuleLoader__.load({
         clearRecWave()
       }
 
-      /** 这一拍的电平进历史 (不够 60 根就先垫上, 免得第一帧只有一根柱子) */
-      function pushRecBar(level) {
-        recBars.push(Math.max(0.04, Math.min(1, level)))
-        while (recBars.length > 60) recBars.shift()
-        while (recBars.length < 60) recBars.unshift(0.04)
+      /**
+       * 折一列进走带历史 (每 `REC_SAMPLE_MS` 一次)
+       *
+       * 顺序是: 峰值保持 → 归一化 → 快起慢落 → 入历史; `force` 用来在开录 / 收尾时补一列空的
+       * @param force true = 不等节拍, 立刻记一列
+       */
+      function sampleRecColumn(force) {
+        var now = Date.now()
+        if (!force && recLastSample !== 0 && now - recLastSample < REC_SAMPLE_MS) return
+        if (force && recLastSample !== 0 && now - recLastSample < REC_SAMPLE_MS) return
+        recLastSample = now
+        recHold = recNextHold(recHold, recPeak)
+        var target = recNormalise(recPeak, recHold)
+        // 快起 (0.6) 慢落 (0.12): 说话时立刻抬起来, 停顿时慢慢落, 不是一根根跳
+        recShown = target > recShown ? target * 0.6 + recShown * 0.4 : target * 0.12 + recShown * 0.88
+        recPeak = 0
+        recHist.push(recShown)
+        while (recHist.length > REC_COLS) recHist.shift()
       }
 
       /** 右下角那一行 `0:03 / 1:00` */
@@ -4559,7 +4769,13 @@ window.__ModuleLoader__.load({
           + ' / ' + mm + ':' + (ss < 10 ? '0' : '') + String(ss)
       }
 
-      /** 一排竖条: 中间高两边低的包络, 高度看这一根的电平 */
+      /**
+       * 画那一排竖条 (2026-11-20 重做)
+       *
+       * 几何全在 `recWaveRects` 里 (纯函数, 判据真跑): 走带右对齐 / 2 px 条 + 1 px 缝 + 1 px 圆角帽 /
+       * 静音留 2 px 的点。这里只负责上色:
+       * 一条竖直渐变 (上白下淡) + **旧的往左淡出** + 右端一枚柔光点当"录音笔头"
+       */
       function paintRecWave() {
         var canvas = els.recWave
         if (!canvas || typeof canvas.getContext !== 'function') return
@@ -4567,26 +4783,47 @@ window.__ModuleLoader__.load({
         if (!ctx2d) return
         var dpr = window.devicePixelRatio || 1
         var width = canvas.clientWidth || 320
-        var height = canvas.clientHeight || 56
+        var height = canvas.clientHeight || 96
         var pxWidth = Math.max(1, Math.round(width * dpr))
         var pxHeight = Math.max(1, Math.round(height * dpr))
         if (canvas.width !== pxWidth || canvas.height !== pxHeight) {
           canvas.width = pxWidth
           canvas.height = pxHeight
+          recGradient = null
         }
         ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx2d.clearRect(0, 0, width, height)
-        var count = recBars.length === 0 ? 60 : recBars.length
-        var gap = 3
-        var barWidth = Math.max(2, (width - gap * (count - 1)) / count)
-        var mid = height / 2
-        ctx2d.fillStyle = 'rgba(255,255,255,.92)'
-        for (var i = 0; i < count; i += 1) {
-          var level = recBars[i] === undefined ? 0.04 : recBars[i]
-          // 中间高两边低: 那排条子看起来像一段声波, 不是一排等高的柱子
-          var envelope = count < 2 ? 1 : 0.5 + 0.5 * Math.sin((Math.PI * i) / (count - 1))
-          var barHeight = Math.max(3, (height - 8) * level * envelope)
-          ctx2d.fillRect(i * (barWidth + gap), mid - barHeight / 2, barWidth, barHeight)
+        if (recGradient === null || recGradientHeight !== height) {
+          recGradient = ctx2d.createLinearGradient(0, 0, 0, height)
+          recGradient.addColorStop(0, 'rgba(255,255,255,.98)')
+          recGradient.addColorStop(0.55, 'rgba(255,255,255,.9)')
+          recGradient.addColorStop(1, 'rgba(255,255,255,.62)')
+          recGradientHeight = height
+        }
+        var rects = recWaveRects(recHist, width, height)
+        ctx2d.fillStyle = recGradient
+        var rounded = typeof ctx2d.roundRect === 'function'
+        for (var i = 0; i < rects.length; i += 1) {
+          var rect = rects[i]
+          // 旧的往左淡出: 越靠左越淡, 读起来像"声音从右边流进来"
+          var t = rects.length < 2 ? 1 : i / (rects.length - 1)
+          ctx2d.globalAlpha = 0.35 + 0.65 * t
+          if (rounded) {
+            ctx2d.beginPath()
+            ctx2d.roundRect(rect.x, rect.y, rect.w, rect.h, rect.r)
+            ctx2d.fill()
+          } else {
+            ctx2d.fillRect(rect.x, rect.y, rect.w, rect.h)
+          }
+        }
+        ctx2d.globalAlpha = 1
+        // 右端那枚柔光点: 只在真的有声音时露头
+        if (recHold >= REC_SILENT) {
+          var glow = ctx2d.createRadialGradient(width - 2, height / 2, 0, width - 2, height / 2, 16)
+          glow.addColorStop(0, 'rgba(255,255,255,.55)')
+          glow.addColorStop(1, 'rgba(255,255,255,0)')
+          ctx2d.fillStyle = glow
+          ctx2d.fillRect(width - 18, height / 2 - 16, 18, 32)
         }
       }
 
@@ -4652,8 +4889,15 @@ window.__ModuleLoader__.load({
         var over = (y - recStartY) <= -REC_CANCEL_PX
         if (over === recCancel) return
         recCancel = over
-        if (els.recHint) els.recHint.textContent = over ? REC_HINT_CANCEL : REC_HINT
+        setRecHint(over ? REC_HINT_CANCEL : REC_HINT)
         if (els.rec) els.rec.setAttribute('data-cancel', over ? 'on' : 'off')
+      }
+
+      /** 面板上那行字 (点 / 箭头 / 文本是一行里的三样, 文字换在 span 上) */
+      function setRecHint(text) {
+        if (!els.recText) return
+        if (els.recText.textContent === text) return
+        els.recText.textContent = text
       }
 
       /** 抬手 (或系统把这一趟收走): 按上滑量决定转写还是丢掉 */
@@ -4766,17 +5010,25 @@ window.__ModuleLoader__.load({
           }
           voiceSourceRate = voiceContext.sampleRate
           voiceChunks = []
-          recLevel = 0
+          recPeak = 0
+          recHold = 0
+          recShown = 0
+          recHist = []
+          recLastSample = 0
           voiceProcessor = voiceContext.createScriptProcessor(4096, 1, 1)
           voiceProcessor.onaudioprocess = function (event) {
             if (voiceChunks === null) return
             var channel = event.inputBuffer.getChannelData(0)
             voiceChunks.push(new Float32Array(channel))
-            // 波形只要"这一拍有多响": 这 4096 个采样算个 RMS 就够
-            var sum = 0
-            for (var i = 0; i < channel.length; i += 1) sum += channel[i] * channel[i]
-            recLevel = Math.sqrt(sum / channel.length) * 4
-            if (recLevel > 1) recLevel = 1
+            // 波形要的是"这一块里最响的那一下": 峰值比 RMS 更贴耳朵, 也不会把一串辅音抹平
+            // (归一化与起落平滑在 [sampleRecColumn] 里, 这里只记原始峰值)
+            var peak = 0
+            for (var i = 0; i < channel.length; i += 1) {
+              var amplitude = channel[i] < 0 ? -channel[i] : channel[i]
+              if (amplitude > peak) peak = amplitude
+            }
+            var levelled = recLevelOf(peak)
+            if (levelled > recPeak) recPeak = levelled
           }
           var source = voiceContext.createMediaStreamSource(stream)
           source.connect(voiceProcessor)
@@ -4784,6 +5036,8 @@ window.__ModuleLoader__.load({
           voiceProcessor.connect(voiceContext.destination)
           voiceStartedAt = Date.now()
           voiceState = 'recording'
+          // 帧循环从**这一刻**才开始: 上面那句之前 `voiceState` 还是 `press`, 早起的帧会立刻退出
+          startRecPump()
           if (voiceTimer !== null) clearTimeout(voiceTimer)
           voiceTimer = setTimeout(function () { voiceTimer = null; stopRecording(false) }, VOICE_MAX_MS)
           if (voiceTicker !== null) clearInterval(voiceTicker)
@@ -4838,9 +5092,9 @@ window.__ModuleLoader__.load({
         voiceId += 1
         var id = voiceId
         voiceState = 'working'
-        // 转写这一段：面板留着但换成「正在转写…」，波形擦掉 —— 不然松手后屏上什么都没有
+        // 转写这一段：面板留着但换成「正在转写…」+ 三个点，波形擦掉 —— 不然松手后屏上什么都没有
         clearRecWave()
-        if (els.recHint) els.recHint.textContent = REC_HINT_BUSY
+        setRecHint(REC_HINT_BUSY)
         if (els.rec) els.rec.setAttribute('data-busy', 'on')
         var answer = call('portalVoice', JSON.stringify({
           op: 'transcribe',
@@ -6274,23 +6528,46 @@ window.__ModuleLoader__.load({
         els.undo.appendChild(h('span', null, '已开新对话'))
         root.appendChild(els.undo)
 
-        /* ── 长按说话那块蓝色面板 (2026-11-20 主人给的第 3 张官方截图) ──────────────
+        /* ── 长按说话那条录音条 (2026-11-20 三次改口径) ─────────────────────────────
          *
-         * 从底部升起来盖住下半屏: 一句提示 → 一排随声音跳动的竖条 → 右下角计时。
-         * **不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上, 抬手与上滑都得照旧
-         * 落在它那一侧 —— 长按那一刻把 DOM 换掉, 抬手事件会被一起吞掉
+         * 行序: 第一行「红点 + 提示 + 上滑时那枚向下箭头」和「计时胶囊」分居左右; 第二行是波形;
+         * 转写中把波形那一行换成三个点。**不吃事件** (`pointer-events:none`): 手指还压在原来的
+         * 输入框上, 抬手与上滑都得照旧落在它那一侧 —— 长按那一刻把 DOM 换掉, 抬手事件会被一起吞掉
          */
         els.rec = h('div')
         els.rec.id = 'lwp-rec'
         els.rec.setAttribute('data-on', 'off')
-        els.rec.setAttribute('aria-hidden', 'true')
-        els.recHint = h('div', 'lwp-rec-hint', REC_HINT)
-        els.rec.appendChild(els.recHint)
+        els.rec.setAttribute('role', 'status')
+        els.recRow = h('div')
+        els.recRow.id = 'lwp-rec-row'
+        els.recHint = h('div', 'lwp-rec-hint')
+        els.recDot = h('i', 'lwp-rec-dot')
+        els.recHint.appendChild(els.recDot)
+        els.recHint.appendChild(h('span'))
+        els.recArrow = h('i')
+        els.recArrow.className = 'lwp-rec-arrow'
+        els.recArrow.innerHTML = ARROW_DOWN_ICON
+        els.recHint.appendChild(els.recArrow)
+        els.recRow.appendChild(els.recHint)
+        els.recText = els.recHint.querySelector('span')
+        if (els.recText) {
+          els.recText.className = 'lwp-rec-text'
+          els.recText.setAttribute('aria-live', 'polite')
+          els.recText.textContent = REC_HINT
+        }
+        els.recTime = h('div', 'lwp-rec-time', '0:00 / 1:00')
+        els.recRow.appendChild(els.recTime)
+        els.rec.appendChild(els.recRow)
         els.recWave = document.createElement('canvas')
         els.recWave.className = 'lwp-rec-wave'
+        els.recWave.setAttribute('aria-hidden', 'true')
         els.rec.appendChild(els.recWave)
-        els.recTime = h('div', 'lwp-rec-time', '0:00 / 1:00')
-        els.rec.appendChild(els.recTime)
+        els.recDots = h('div', 'lwp-rec-dots')
+        els.recDots.appendChild(h('i'))
+        els.recDots.appendChild(h('i'))
+        els.recDots.appendChild(h('i'))
+        els.recDots.setAttribute('aria-hidden', 'true')
+        els.rec.appendChild(els.recDots)
         root.appendChild(els.rec)
 
         els.flow = h('div')
