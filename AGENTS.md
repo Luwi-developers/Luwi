@@ -159,6 +159,13 @@
   首次写 `permission.defaultPreset`); 气泡与浮层**只引 dsh 玻璃 token** (`--dsw-menu-surface-fill` /
   `--dsw-menu-backdrop-filter` / `--dsw-elevation-panel`); **待发附件行在文本区上面** (图/表情 64px 缩略 + `×`,
   非图 chip), **点表情只进待发栏** (`stageSticker`); 顶条不显示会话标题
+- **门户里换的模型 = 新会话的模型, 后台 dsh 发的图也画真图** (2026-11-20): 前者靠 dsh 那条
+  `selectModel` 把选择同时落成宿主默认 (`commands.ts` 改成 `await`, 2 s 上限) + 客户端 `select()` 成功后
+  `catalog.refresh()`; 门户自己再补一手 —— 落到**空白场**上时问一次 `remote.session.modelCatalog()`,
+  与 `modelState.current` 比过不一致就 `select(默认)` (纯函数 `blankModelNeedsDefault`), **非空白场永远
+  不拨**。后者: 浮球 / 原生界面发的图不过门户 `lw-in` stash, 落盘只剩 `attachment.attachmentId`,
+  门户走 `ctx.uiConversation.peekImageUrl / imageUrl` 取 blob URL 画, 取不到写「图没取到」, 单条最多
+  4 张 + 「+N 张图」; 判据 `check-luwi-portal` 第二十五 / 二十六节
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
 - **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
   **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,

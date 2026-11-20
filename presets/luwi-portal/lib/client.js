@@ -1609,6 +1609,11 @@ window.__ModuleLoader__.load({
       /** 表情那个方框的边长 (px): 与 CSS `.lwp-sticker img` 里的 120 是同一个数, 改一处就得改另一处 */
       var STICKER_BOX = 120
       /**
+       * 一条消息里最多画几张 dsh 附件图 (2026-11-20): 多出来的只写「+N 张图」——
+       * 一次贴十几张时, 解码与滚动都不该被后半截拖住
+       */
+      var MAX_DURABLE_IMAGES = 4
+      /**
        * 自动开新对话试过没有 (2026-11-09 主人: "不需要用户手动点击开一场")
        *
        * 一次挂载只试一次: 失败时 `newConversation()` 自己会留一句说明, 反复重试只会把提示刷掉
@@ -1667,6 +1672,9 @@ window.__ModuleLoader__.load({
         rememberSession(id)
         if (!same) {
           streamKey = ''
+          // 换场就把"这一档问过没有"作废 (2026-11-20): 默认值可能在别处改过, 而这一场
+          // 上一次落在这里时记下的那一档已经旧了 —— 不清就永远不会再问一次
+          modelDefaultChecked = ''
           // 她说的话: 换会话就**重取全量** (一次画完、不排队), 上一场没上屏的条一条都不带过来
           clearOut('the conversation changed')
           // 草稿里那张图也不带过去 (它挂在上一场的会话 id 上)
@@ -2531,6 +2539,40 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 一条消息里的**耐久图引用** (2026-11-20 主人: "这个在后台dsh内发送的图要求也要在门户上显示")
+       *
+       * 后台 dsh 那边 (浮球 / 原生会话界面) 发的图不经门户 `lw-in` stash 那一条路, 落盘后只剩
+       * `{type:'image', attachment:{attachmentId, mediaType, width, height, bytes, name}}` —— 字节在
+       * dsh 的附件仓里, 由 `ctx.uiConversation.imageUrl()` 取回 (见 [durableImageBubble])
+       * 这里只挑"真能拿回来"的那些: 没有 `attachmentId` 的块交给 [hasImageBlock] 那条「（图）」兜底
+       * @param {object[]} blocks user/message 的 content
+       * @returns {object[]} `{attachmentId, mediaType, width, height, bytes, name}`
+       */
+      function imageAttachmentsOf(blocks) {
+        var out = []
+        if (!Array.isArray(blocks)) return out
+        for (var i = 0; i < blocks.length; i += 1) {
+          var block = blocks[i]
+          if (!block || typeof block !== 'object') continue
+          var kind = typeof block.type === 'string' ? block.type : block.kind
+          if (kind !== 'image') continue
+          var attachment = block.attachment
+          if (!attachment || typeof attachment !== 'object') continue
+          var id = typeof attachment.attachmentId === 'string' ? attachment.attachmentId : ''
+          if (id === '') continue
+          out.push({
+            attachmentId: id,
+            mediaType: typeof attachment.mediaType === 'string' ? attachment.mediaType : '',
+            width: Number(attachment.width) || 0,
+            height: Number(attachment.height) || 0,
+            bytes: Number(attachment.bytes) || 0,
+            name: typeof attachment.name === 'string' ? attachment.name : '',
+          })
+        }
+        return out
+      }
+
+      /**
        * 当前这一场的消息: user 节点 + 她说的话那份 jsonl, **按轮**合并 (2026-11-10)
        *
        * 两路流只按墙上时钟合并不够 (缺时间 / 同毫秒 / 宿主补句晚写都会把两条排反) —— 这里先把它们
@@ -2627,6 +2669,8 @@ window.__ModuleLoader__.load({
               text: split.main,
               attach: split.names,
               hasImage: hasImageBlock(node.content),
+              // dsh 那边发的图 (见 [imageAttachmentsOf]): 有引用就画真图, 不再只剩「（图）」
+              images: imageAttachmentsOf(node.content),
             })
             fingerprint.push(node.seq)
             userSeqs.push(node.seq)
@@ -3018,6 +3062,88 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 会话里那张耐久图怎么拿回来 (2026-11-20)
+       *
+       * `ctx.uiConversation.imageUrl(sessionId, attachment)` 读 `session.readAttachment` 生成同一份
+       * blob URL 并按会话缓存 (`peekImageUrl` 命中就不必等); 会话绑定释放时会回收 —— 于是取不到时
+       * 这一格照实说一句, 不静默. 门户自己没有这条路时 (老宿主) 回 null / reject, 交给「（图）」兜底
+       */
+      function conversationFace() {
+        try {
+          return ctx.uiConversation && typeof ctx.uiConversation.imageUrl === 'function' ? ctx.uiConversation : null
+        } catch (_noFace) {
+          return null
+        }
+      }
+
+      /** 已经缓存好的那张 URL (同步; 没有就 undefined) */
+      function peekDurableImage(ref) {
+        var face = conversationFace()
+        if (face === null || typeof face.peekImageUrl !== 'function' || sessionId === null) return undefined
+        try {
+          return face.peekImageUrl(sessionId, ref)
+        } catch (_noPeek) {
+          return undefined
+        }
+      }
+
+      /** 取回那一张 (异步; 失败 reject) */
+      function loadDurableImage(ref) {
+        var face = conversationFace()
+        if (face === null || sessionId === null) return Promise.reject(new Error('no conversation face'))
+        return face.imageUrl(sessionId, ref)
+      }
+
+      /**
+       * 一张 dsh 附件图: 先画出来再看字节, 取不到就「图没取到」
+       *
+       * 尺寸能从 `attachment.width/height` 拿到就先钉住比例 (解码前就有高度, 下面那条不会被顶一下);
+       * 点一下 = 预览窗 (与 `/lw-out` 那条同一扇窗, 这一档直接给 blob URL, 见 [openPreview])
+       * @param {object} ref `imageAttachmentsOf` 的一项
+       */
+      function durableImageBubble(ref) {
+        var wrap = h('div', 'lwp-image')
+        wrap.setAttribute('data-source', 'attachment')
+        var img = document.createElement('img')
+        img.alt = ''
+        if (ref.width > 0 && ref.height > 0) {
+          img.width = ref.width
+          img.height = ref.height
+          img.style.aspectRatio = String(ref.width) + ' / ' + String(ref.height)
+        }
+        if ('decoding' in img) img.decoding = 'async'
+        /** 画上这张 src; 之前说过「没取到」就把那句话换掉 */
+        var paint = function (url) {
+          if (typeof url !== 'string' || url === '') return false
+          if (!wrap.contains(img)) {
+            wrap.textContent = ''
+            wrap.appendChild(img)
+          }
+          wrap.removeAttribute('data-broken')
+          img.src = url
+          settleDecode(img)
+          var leaf = ref.name === '' ? '图片' : ref.name
+          wrap.onclick = function () {
+            openPreview({ src: url, name: leaf })
+          }
+          return true
+        }
+        var broke = function () {
+          wrap.setAttribute('data-broken', 'on')
+          wrap.textContent = '图没取到'
+          wrap.onclick = null
+        }
+        img.onerror = function () { broke() }
+        wrap.appendChild(img)
+        var cached = peekDurableImage(ref)
+        if (cached !== undefined) paint(cached)
+        settle(function () { return loadDurableImage(ref) }).then(function (url) {
+          if (!paint(url)) broke()
+        }).catch(function () { broke() })
+        return wrap
+      }
+
+      /**
        * 一份文件: **只写文件名** (2026-11-09 主人: "只显示文件名, 能打开的文件名都是蓝色的可以点击")
        *
        * `file.rel` 是 `/lw-out/` 后面那一段 (`assets/…` 是她递来的, `in/…` 是自己发上去的);
@@ -3057,13 +3183,25 @@ window.__ModuleLoader__.load({
       function openPreview(file) {
         if (!els.preview) return
         var rel = String(file && file.rel ? file.rel : '')
-        var name = String(file && file.name ? file.name : '文件')
+        // `src` 那一档 (2026-11-20): dsh 附件图是会话绑定的 blob URL, 不走 `/lw-out` 那条路由
+        var src = String(file && file.src ? file.src : '')
+        var name = String(file && file.name ? file.name : (src === '' ? '文件' : '图片'))
         var bytes = Number(file && file.bytes ? file.bytes : 0)
         els.previewName.textContent = name
         els.previewBody.textContent = ''
         // 上一份可能是 Office (那一档会改内边距); 换一档就把它摘掉
         els.previewBody.removeAttribute('data-kind')
-        if (rel === '') {
+        if (src !== '') {
+          var shown = document.createElement('img')
+          shown.alt = ''
+          shown.src = src
+          shown.onerror = function () {
+            els.previewBody.textContent = ''
+            els.previewBody.appendChild(h('div', 'lwp-preview-note', '这张图现在取不到'))
+          }
+          els.previewBody.appendChild(shown)
+          els.previewBody.setAttribute('data-kind', 'image')
+        } else if (rel === '') {
           els.previewBody.appendChild(h('div', 'lwp-preview-note', '这一份没有留下路径, 打不开'))
         } else if (isImageName(name)) {
           var img = document.createElement('img')
@@ -3945,6 +4083,10 @@ window.__ModuleLoader__.load({
           item.image || '', item.sticker || '',
           item.file ? String(item.file.name) + '|' + String(item.file.rel) : '',
           item.attach ? item.attach.join(',') : '',
+          // dsh 那边发的图 (2026-11-20): 身份里带 attachmentId, 图块补上那一拍这一行才会重建
+          item.images && item.images.length > 0
+            ? item.images.map(function (one) { return String(one.attachmentId || '') }).join(',')
+            : '',
           item.hasImage ? '1' : '', item.fallback ? '1' : '',
           // 有四行诊断才画「复制诊断」, 这一位也进身份: 少了它, 诊断补上那一拍不会重建那一行
           item.diag ? '1' : '',
@@ -3962,27 +4104,33 @@ window.__ModuleLoader__.load({
         row.setAttribute('data-who', item.who)
         // 一句气泡从哪条信号来的 (2.8.1 #31): 值就是 `meta.topicSource`, 老行没有这一格就不写
         if (item.meta && item.meta.topicSource) row.setAttribute('data-topic', item.meta.topicSource)
-        if (item.who === 'user' && item.hasImage && !(item.attach && item.attach.length > 0)) {
-          // 有图块却没有落盘那份 (stash 失败 / 旧消息): 补一行「（图）」, 不假装贴过也不整条丢掉
-          var lostOnly = h('div', 'lwp-image', '（图）')
-          lostOnly.setAttribute('data-broken', 'on')
-          row.appendChild(lostOnly)
-          if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
-        } else if (item.attach && item.attach.length > 0) {
-          // 自己发过的图与文件 (2026-11-09): 字节落在工作区 `lw-in/`, 名字在正文那一段里。
-          // **话在上、附件在下** (与她那侧同一条): 先说的话, 再是图与文件
+        if (item.who === 'user') {
+          // user 那一侧: 话在上, 附件在下 (2026-11-09 的口径不变); 附件两路并存 ——
+          // ① 门户 `+` 发的图与文件 (字节落在工作区 `lw-in/`, 名字在正文那一段里)
+          // ② 后台 dsh 那边发的图 (落盘只剩 attachmentId, 走 [durableImageBubble] 取真图) (2026-11-20)
           if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
           var drew = false
-          for (var a = 0; a < item.attach.length; a += 1) {
-            var attached = item.attach[a]
+          var listed = Array.isArray(item.attach) ? item.attach : []
+          for (var a = 0; a < listed.length; a += 1) {
+            var attached = listed[a]
             if (isImageName(attached)) {
               row.appendChild(imageBubble({ image: 'in/' + encodeURIComponent(attached) }))
-              drew = true
             } else {
               row.appendChild(fileChip({ rel: 'in/' + encodeURIComponent(attached), name: attached }, 'in'))
             }
+            drew = true
           }
-          // 有图块却没有落盘那份 (旧消息 / 存不下): 补一行「（图）」, 不假装贴过
+          var refs = Array.isArray(item.images) ? item.images : []
+          var shownRefs = 0
+          for (var r = 0; r < refs.length && shownRefs < MAX_DURABLE_IMAGES; r += 1) {
+            row.appendChild(durableImageBubble(refs[r]))
+            shownRefs += 1
+            drew = true
+          }
+          if (refs.length > shownRefs) {
+            row.appendChild(h('div', 'lwp-bubble', '+' + String(refs.length - shownRefs) + ' 张图'))
+          }
+          // 有图块却一条引用都没有 (旧消息 / stash 失败): 补一行「（图）」, 不假装贴过也不整条丢掉
           if (!drew && item.hasImage) {
             var lost = h('div', 'lwp-image', '（图）')
             lost.setAttribute('data-broken', 'on')
@@ -4367,6 +4515,13 @@ window.__ModuleLoader__.load({
 
       var modelDirectory = null
       var modelState = null
+      /** 正在把哪一场的模型拨回宿主默认 (避开同一场连着叫几遍, 见 [followDefaultModel]) */
+      var modelDefaultPending = null
+      /** 上一次已经问过宿主默认的那一档 (id + provider/model/effort), 同一档不再问第二遍 */
+      var modelDefaultChecked = ''
+      /** 目录订阅: 目录一响 chip 就跟着改 (见 [watchModelDirectory]) */
+      var modelDirSource = null
+      var modelDirUnsub = null
       /** 已经拨过完全权限的那几场 (每场只拨一次, 之后主人自己选的档不被改回来) */
       var permsEnsured = {}
       var menuKind = ''
@@ -4426,10 +4581,37 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * 目录一响就跟着改 (2026-11-20): 门户原来只在 `loadModel` 那一拍取一次快照, 于是这一场里
+       * 别处换了模型 (原生界面 / 拨默认) 之后 chip 会停在旧名字 —— 现在挂在目录的 store 上,
+       * 它一变就重画, 并再判一次"空白场要不要跟默认"
+       * @param {string|null} id 订阅所属的那一场 (换场之后旧订阅一律不再动手)
+       */
+      function watchModelDirectory(id) {
+        if (modelDirSource === modelDirectory) return
+        if (modelDirUnsub !== null) {
+          try { modelDirUnsub() } catch (_noUnsub) { /* 订阅已经不在了, 无所谓 */ }
+          modelDirUnsub = null
+        }
+        modelDirSource = modelDirectory
+        if (modelDirectory === null || typeof modelDirectory.store.subscribe !== 'function') return
+        try {
+          modelDirUnsub = modelDirectory.store.subscribe(function () {
+            if (sessionId !== id || modelDirectory === null) return
+            modelState = modelDirectory.store.getSnapshot()
+            renderModel()
+            followDefaultModel()
+          })
+        } catch (_noSubscribe) {
+          modelDirUnsub = null
+        }
+      }
+
       function loadModel() {
         if (sessionId === null) {
           modelDirectory = null
           modelState = null
+          watchModelDirectory(null)
           renderModel()
           return
         }
@@ -4437,6 +4619,7 @@ window.__ModuleLoader__.load({
         if (!service || typeof service.directoryFor !== 'function') {
           modelDirectory = null
           modelState = null
+          watchModelDirectory(null)
           renderModel()
           return
         }
@@ -4445,6 +4628,7 @@ window.__ModuleLoader__.load({
         } catch (_noDirectory) {
           modelDirectory = null
         }
+        watchModelDirectory(sessionId)
         if (modelDirectory === null) {
           modelState = null
           renderModel()
@@ -4453,10 +4637,92 @@ window.__ModuleLoader__.load({
         settle(function () { return modelDirectory.load() }).then(function (state) {
           modelState = state
           renderModel()
+          // 空白场跟宿主默认 (2026-11-20): 换场 / 新建 / 投影后到都会走到这里
+          followDefaultModel()
         }).catch(function () {
           modelState = null
           renderModel()
         })
+      }
+
+      /**
+       * 空白场要不要把模型拨回宿主默认 (2026-11-20 主人: "我在门户里改的模型要作为默认模型,
+       * 新开会话都要用门户中设置的模型")
+       *
+       * 只回答"拨不拨": 非空白场**永远不拨** (那一场自己选过的模型归它自己); 两边缺一个都不拨;
+       * 已经一致也不拨. 纯函数, 判据 `check-luwi-portal.mjs` 抽出来真跑
+       * @param {object|null} current 这一场现在那份 `{provider, model, reasoningEffort?}`
+       * @param {object|null} hostDefault 宿主 `modelCatalog().default`
+       * @param {boolean} blank 这一场是不是还没发过话
+       * @returns {boolean} true = 把默认拨给这一场
+       */
+      function blankModelNeedsDefault(current, hostDefault, blank) {
+        if (blank !== true) return false
+        if (current === null || current === undefined) return false
+        if (hostDefault === null || hostDefault === undefined) return false
+        if (typeof hostDefault.provider !== 'string' || typeof hostDefault.model !== 'string') return false
+        if (typeof current.provider !== 'string' || typeof current.model !== 'string') return false
+        if (current.provider !== hostDefault.provider) return true
+        if (current.model !== hostDefault.model) return true
+        var was = current.reasoningEffort === undefined ? '' : String(current.reasoningEffort)
+        var want = hostDefault.reasoningEffort === undefined ? '' : String(hostDefault.reasoningEffort)
+        return was !== want
+      }
+
+      /**
+       * 空白场把模型拨回宿主默认 (见 [blankModelNeedsDefault])
+       *
+       * **只对空白场做**, 同一场一次只跑一趟 (`modelDefaultPending` 就是那道闸, 换场 / 投影后到 /
+       * 拨完再 load 会连着叫几遍); 拿不到默认、拨不动都安静收手 —— chip 维持现状, 不编造
+       */
+      function followDefaultModel() {
+        var id = sessionId
+        if (id === null || modelState === null || modelDirectory === null) return
+        if (modelDefaultPending === id) return
+        var summary = summaryOf(id)
+        if (!summary || summary.blank !== true) return
+        var current = modelState.current
+        var key = id + '\u0001' + (current
+          ? String(current.provider) + '/' + String(current.model) + '/'
+            + (current.reasoningEffort === undefined ? '' : String(current.reasoningEffort))
+          : '')
+        // 这一档已经问过一遍了 (拨回之后 current 会变, key 也就变了, 于是只多问那一次)
+        if (modelDefaultChecked === key) return
+        var remote = remoteOf()
+        if (remote === null) return
+        modelDefaultChecked = key
+        modelDefaultPending = id
+        settle(function () { return remote.session.modelCatalog() }).then(function (result) {
+          if (modelDefaultPending === id) modelDefaultPending = null
+          if (id !== sessionId) return
+          if (!result || result.ok === false || !result.value) {
+            // **不静默**: 拿不到宿主默认就说明白, 否则"新会话还是老模型"只能靠猜
+            var why = result && result.error ? String(result.error.message || result.error.code) : 'no catalog'
+            console.log('[luwi-portal] model default unavailable: ' + why)
+            return
+          }
+          if (!blankModelNeedsDefault(modelState && modelState.current, result.value.default, true)) return
+          return settle(function () { return modelDirectory.select(result.value.default) }).then(function (picked) {
+            if (picked && picked.ok === false) {
+              var refused = picked.error && picked.error.message ? picked.error.message : 'select refused'
+              console.log('[luwi-portal] model default not applied: ' + String(refused))
+              return
+            }
+            loadModel()
+          })
+        }).catch(function (error) {
+          if (modelDefaultPending === id) modelDefaultPending = null
+          console.log('[luwi-portal] model default check failed: ' + String(error && error.message ? error.message : error))
+        })
+      }
+
+      /** dsh 的 remote 面 (取宿主默认模型用; 没有就 null) */
+      function remoteOf() {
+        try {
+          return ctx.remote && ctx.remote.session ? ctx.remote : null
+        } catch (_noRemote) {
+          return null
+        }
       }
 
       /** chip 上那个名字: 目录里查得到就用它的名字, 查不到就用模型 id */
@@ -7144,6 +7410,14 @@ window.__ModuleLoader__.load({
         closeFileMenu()
         closePreview()
         closeHistory()
+        // 模型目录那条订阅跟着门户走 (2026-11-20): 收起就摘, 重挂时 loadModel 自己再挂
+        if (modelDirUnsub !== null) {
+          try { modelDirUnsub() } catch (_noUnsub) { /* 订阅已经不在了, 无所谓 */ }
+          modelDirUnsub = null
+        }
+        modelDirSource = null
+        modelDefaultPending = null
+        modelDefaultChecked = ''
         // 录音这一层整块收掉 (2026-11-20): 录音 / 麦克风流 / 计时器 / 面板都不许跨挂载留着 ——
         // 挂着一条开着的流, 退出门户之后麦克风还在被占, 那是主人一眼看得见的错
         if (voiceState === 'recording') stopRecording(true)
@@ -7287,6 +7561,8 @@ window.__ModuleLoader__.load({
               renderModel()
               // 投影可能是后到的: 每一帧都再问一次「拨过没」, 拨过就什么都不做
               ensureFullAccess()
+              // 空白场跟默认那一条同理 (2026-11-20): 摘要 / 投影后到时补判一次, 同一档只问一次
+              followDefaultModel()
             }
           })
         } catch (_noList) {

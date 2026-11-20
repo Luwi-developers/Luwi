@@ -116,7 +116,19 @@ nextTask + router 的 checks) 摆在同一屏上
   并且**首次**把宿主 settings 的 `permission.defaultPreset` 也写成它 (以后新开会话天生完全权限;
   只写一次, 主人之后改的档不会被改回来)
 - **模型 chip**: 与 dsh 那颗共用 `ctx.modelDirectories` 的同一份目录 (`directoryFor(sessionId)`),
-  显示当前模型的名字, 换模型走 `directory.select({provider, model})`
+  显示当前模型的名字, 换模型走 `directory.select({provider, model})`; 目录的 store 挂了订阅, 别处
+  换了模型 chip 当场跟着改
+- **门户里换的模型 = 新会话的模型** (2026-11-20): dsh 那条 `selectModel` 会把这次选择同时落成宿主
+  默认, 而**新对话复用的是工作区里那张空白场** —— 它早先记过的 `model/selection` 会把新会话按老模型
+  发出去。所以落到一张**空白场**上时, 门户自己问一次 `remote.session.modelCatalog()`, 与
+  `modelState.current` 比 (`blankModelNeedsDefault`, 纯函数): 不一致就 `select(默认)` 拨回去, 一致或
+  拿不到就什么都不做。**非空白场永远不拨** (那一场自己选过的模型归它自己); 同一档只问一次
+- **后台 dsh 发的图也画真图** (2026-11-20 主人: "这个在后台dsh内发送的图要求也要在门户上显示"):
+  浮球 / 原生会话界面发出去的图不经门户 `lw-in` stash, 落盘只剩
+  `{type:'image', attachment:{attachmentId, mediaType, width, height, bytes, name}}` ——
+  门户走 `ctx.uiConversation.peekImageUrl / imageUrl(sessionId, attachment)` 取那张 (blob URL, 按会话
+  缓存), 先钉 `width/height` 再解码, 取不到就写「图没取到」; 点一下仍进预览窗 (给 `src` 那一档)。
+  单条最多画 4 张, 多出来的写「+N 张图」; 一条引用都没有的旧消息才回落到「（图）」
 - **背景与浓淡**: 设置 → 外观 落 `$DSH_HOME/lw/face.json` (`{alpha, wall}`) 与一张
   `$DSH_HOME/lw/face/<名字>.jpg` (`tool/PortalFace.kt` 是唯一写者, 换图只留一张)。页面拿
   `--lwp-wall-alpha` 与 `#lwp-wall` 的 `background-image` 上屏, 图按 `ver` 缓存在 localStorage

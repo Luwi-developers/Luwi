@@ -2901,6 +2901,149 @@ if (stringsZh.includes('session-sync.json') && stringsZh.includes('luwi-sync://'
   failures.push('zh: session-sync.json / luwi-sync:// 被改掉了 (那是磁盘与协议上的名字)')
 }
 
+// ── 二十五、门户换的模型 = 新会话的模型 (2026-11-20) ──────────────────────────
+//
+// 主人: "我在门户里改的模型要作为默认模型, 新开会话都要用门户中设置的模型"。dsh 那条 `selectModel`
+// 会把选择同时落成宿主默认, 但新对话复用的是**工作区里那张空白场**, 它早先记过的 `model/selection`
+// 会把新会话按老模型发出去 —— 而且门户 chip 取的 `projected.next ?? catalog.default` 也停在旧值。
+// 这里钉三件: ① 那条判定的纯函数真跑 ② `loadModel` 落地之后真的会去问宿主默认 ③ 非空白场一次都不拨
+
+const blankModelSource = takeFunction('blankModelNeedsDefault')
+const modelFollowSource = takeFunction('followDefaultModel')
+if (blankModelSource === '' || modelFollowSource === '') {
+  failures.push('client.js: 抽不出 blankModelNeedsDefault / followDefaultModel (空白场跟默认那条链断了)')
+} else {
+  const needs = new Function(`${blankModelSource}\nreturn blankModelNeedsDefault`)()
+  const selected = { provider: 'tokenhub', model: 'hy4-flash', reasoningEffort: 'high' }
+  const other = { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'low' }
+  const cases = [
+    ['空白场 + 默认不同 → 拨', needs(selected, other, true), true],
+    ['空白场 + 默认相同 → 不拨', needs(selected, { ...selected }, true), false],
+    ['非空白场 + 默认不同 → 不拨', needs(selected, other, false), false],
+    ['空白场 + 这一场没有选择 → 不拨', needs(null, other, true), false],
+    ['空白场 + 拿不到默认 → 不拨', needs(selected, null, true), false],
+    ['空白场 + 只差推理档 → 拨', needs({ ...selected, reasoningEffort: 'low' }, selected, true), true],
+    ['空白场 + 默认没有推理档 → 拨', needs(selected, { provider: 'tokenhub', model: 'hy4-flash' }, true), true],
+    ['空白场 + blank 不是 true → 不拨', needs(selected, other, undefined), false],
+  ]
+  for (const [label, got, want] of cases) {
+    if (got === want) notes.push(`ok   blankModelNeedsDefault: ${label}`)
+    else failures.push(`blankModelNeedsDefault: ${label} —— 得到 ${String(got)}`)
+  }
+
+  if (modelFollowSource.includes('modelCatalog') && modelFollowSource.includes('.select(')) {
+    notes.push('ok   空白场那条链: 问 remote.session.modelCatalog() 拿默认, 与这一场的 current 比过再 select')
+  } else {
+    failures.push('client.js: followDefaultModel 里没有"问 modelCatalog + select"那条链')
+  }
+  if (modelFollowSource.includes('summary.blank !== true) return')) {
+    notes.push('ok   非空白场在那条链的第一道闸就被挡下 (那一场自己的选择不动)')
+  } else {
+    failures.push('client.js: followDefaultModel 没有按 blank 挡下非空白场')
+  }
+  const modelLoadSource = takeFunction('loadModel')
+  if (modelLoadSource.includes('followDefaultModel()')) {
+    notes.push('ok   loadModel 落地之后会判一次"空白场要不要跟默认" (换场 / 新建都走到)')
+  } else {
+    failures.push('client.js: loadModel 没有接 followDefaultModel (换场之后不会拨默认)')
+  }
+  const modelPickSource = takeFunction('pickModel')
+  if (modelPickSource.includes('modelDirectory.select') && modelLoadSource.includes('watchModelDirectory')) {
+    notes.push('ok   模型 chip: 换模型走 directory.select, chip 名字跟目录的 store 走')
+  } else {
+    failures.push('client.js: 模型 chip 那两条 (select / 目录订阅) 少了一条')
+  }
+  // 换场必须把"这一档问过没有"作废: 否则默认在别处改过之后, 再回到这张空白场永远不会再问一次
+  const adoptSource = takeFunction('adopt')
+  if (adoptSource.includes("modelDefaultChecked = ''")) {
+    notes.push('ok   换场会把"这一档问过没有"作废 (默认在别处改过还会再问一次)')
+  } else {
+    failures.push('client.js: 换场没清 modelDefaultChecked —— 默认改了也不会再问')
+  }
+  if (modelFollowSource.includes("[luwi-portal] model default unavailable")) {
+    notes.push('ok   拿不到宿主默认时留一句日志 (不静默)')
+  } else {
+    failures.push('client.js: 拿不到宿主默认那条路静默收手了 (日志里查不到原因)')
+  }
+}
+
+// ── 二十六、后台 dsh 发的图在门户上也画真图 (2026-11-20) ──────────────────────
+//
+// 主人: "这个在后台dsh内发送的图要求也要在门户上显示"。后台发的图不经门户 `lw-in` 那条 stash,
+// 落盘只剩 `{type:'image', attachment:{attachmentId,…}}`; 门户要拿 `uiConversation.imageUrl` 取回
+// 那张 blob URL 再画, 取不到才留「图没取到」/「（图）」—— 不许静默, 也不许假装贴过
+
+const refsSource = takeFunction('imageAttachmentsOf')
+const bubbleSource = takeFunction('durableImageBubble')
+if (refsSource === '' || bubbleSource === '') {
+  failures.push('client.js: 抽不出 imageAttachmentsOf / durableImageBubble (附件图那条链断了)')
+} else {
+  const refsOf = new Function(`${refsSource}\nreturn imageAttachmentsOf`)()
+  const real = refsOf([
+    { type: 'image', attachment: { attachmentId: 'sha256:aa', mediaType: 'image/png', width: 10, height: 20, bytes: 99, name: 'a.png' } },
+    { type: 'text', text: '看图' },
+  ])
+  const unnamed = refsOf([{ type: 'image', attachment: { attachmentId: 'sha256:bb' } }])
+  const refsCases = [
+    ['图块 → 一条引用 (宽高/名字都带上)', real.length === 1 && real[0].attachmentId === 'sha256:aa'
+      && real[0].width === 10 && real[0].height === 20 && real[0].name === 'a.png'],
+    ['没有 attachmentId 的图块 → 不认 (交给「（图）」兜底)', refsOf([{ type: 'image' }]).length === 0],
+    ['只有 attachmentId → 也认 (宽高缺就是 0)', unnamed.length === 1 && unnamed[0].width === 0 && unnamed[0].name === ''],
+    ['文本块 → 不算图', refsOf([{ type: 'text', text: 'x' }]).length === 0],
+    ['不是数组 → 空表', refsOf(null).length === 0],
+  ]
+  for (const [label, ok] of refsCases) {
+    if (ok) notes.push(`ok   imageAttachmentsOf: ${label}`)
+    else failures.push(`imageAttachmentsOf: ${label} 不成立`)
+  }
+
+  for (const [label, needle] of [
+    ['尺寸从 attachment.width/height 钉住比例', 'aspectRatio'],
+    ['取不到写「图没取到」', "'图没取到'"],
+    ['有一档 blob URL 的预览 (点一下进预览窗)', 'openPreview({ src: url'],
+  ]) {
+    if (bubbleSource.includes(needle)) notes.push(`ok   durableImageBubble: ${label}`)
+    else failures.push(`durableImageBubble: ${label} 那一段没了 (找 ${needle})`)
+  }
+  // 取图那两条各自在 helper 里: `imageUrl` 读字节生成 blob URL, `peekImageUrl` 命中就不必等
+  const peekSource = takeFunction('peekDurableImage')
+  const loadImageSource = takeFunction('loadDurableImage')
+  if (peekSource.includes('peekImageUrl(sessionId, ref)') && loadImageSource.includes('imageUrl(sessionId, ref)')) {
+    notes.push('ok   durableImageBubble: 先问 peekImageUrl, 再走 uiConversation.imageUrl')
+  } else {
+    failures.push('client.js: 附件图没有先问 peekImageUrl / 没走 uiConversation.imageUrl')
+  }
+
+  const rowSource = takeFunction('buildRow')
+  if (rowSource.includes('durableImageBubble(') && rowSource.includes('item.images')) {
+    notes.push('ok   buildRow: user 那一行有图引用就画真图')
+  } else {
+    failures.push('client.js: buildRow 的 user 分支没有接 durableImageBubble')
+  }
+  if (rowSource.includes('MAX_DURABLE_IMAGES') && rowSource.includes("'+' + String(refs.length - shownRefs)")) {
+    notes.push('ok   一条消息里最多画 4 张, 多出来的写「+N 张图」')
+  } else {
+    failures.push('client.js: 单条多图那道上限 / 「+N 张图」没了')
+  }
+  if (rowSource.includes('!drew && item.hasImage')) {
+    notes.push('ok   「（图）」只在一条引用都没有的旧消息上留 (有引用就不该再画占位)')
+  } else {
+    failures.push('client.js: 「（图）」兜底那条闸不见了 / 改成无条件画了')
+  }
+  const keySource = takeFunction('itemKey')
+  if (keySource.includes('item.images')) {
+    notes.push('ok   itemKey: attachmentId 进了身份 (图块补上那一拍这一行才重建)')
+  } else {
+    failures.push('client.js: itemKey 没带图引用 —— 图补上时那一行不会重建')
+  }
+  const previewSource = takeFunction('openPreview')
+  if (previewSource.includes('file.src')) {
+    notes.push('ok   openPreview: 多一档 `src` (附件图那张 blob URL 直接进预览窗)')
+  } else {
+    failures.push('client.js: openPreview 没有 `src` 那一档 (点附件图打不开)')
+  }
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
