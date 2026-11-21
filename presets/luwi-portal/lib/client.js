@@ -113,6 +113,14 @@ window.__ModuleLoader__.load({
     var TERMINAL_POLL_MS = 5000
     /** 电脑那几场会话的 cwd 的根 (`$DSH_HOME/lw/peer-workspaces`), 由原生报上来 */
     var TERMINAL_ROOT_KEY = 'shadowRoot'
+    /**
+     * 进终端时"最近那一场"的窗口 = 1 小时 (2026-11-21 主人: "进入终端时打开1h内最近终端对话, 没有要新建")
+     *
+     * 只决定**自动**落哪一场: 窗口外的那几场仍在终端历史里, 点一下照样接着聊
+     */
+    var TERMINAL_RECENT_MS = 60 * 60 * 1000
+    /** 自动进终端那一趟之间至少隔这么久 (建不出来时别每个探测拍都重试一趟, 新建那条一等就是 10 秒) */
+    var TERMINAL_ENTER_COOLDOWN_MS = 20 * 1000
 
     /**
      * 把页面收到的采样封成 16 kHz 单声道 PCM16 WAV (纯函数, 判据真跑)
@@ -1455,8 +1463,13 @@ window.__ModuleLoader__.load({
       var terminalProbe = { at: 0, ok: false, busy: false, why: '' }
       /** 弹窗现在为什么开着: '' 关着 | 'unpaired' | 'off' | 'offline' */
       var terminalGate = ''
-      /** 进终端之前那一场 (退出时回去), `{id, workspace}` */
+      /** 进终端之前那一场 (`{id}`), 退出回它; 也写进 `TERMINAL_KEY` 的 `back`, 页面重载之后回得去 */
       var terminalReturn = null
+      /** 上一次自动进终端 (挑场或新建) 的时刻: 冷却用, 见 [TERMINAL_ENTER_COOLDOWN_MS] */
+      var terminalAutoAt = 0
+      /** 上一句"终端里出了什么事"是什么时候 / 说的是哪一句: 同一句一分钟最多说一次, 换一句就当场说 */
+      var terminalNotedAt = 0
+      var terminalNotedKey = ''
       /** 终端里正在等的那个探测计时器 */
       var terminalProbeTimer = null
       var noteTimer = null
@@ -1746,7 +1759,9 @@ window.__ModuleLoader__.load({
         chatTarget = null
         sessionId = id
         // 画到哪一场就记住哪一场: 下次挂载先回到这里, 而不是落在 dsh 顺手开的那张空白
-        rememberSession(id)
+        // **电脑那几场不记** (2026-11-21): 记了之后重载 / 退出门户再进来, 门户自己会停在电脑那一场 ——
+        // 那是终端里头的事, 没进终端的门户不该看见它
+        if (!isTerminalSession(id)) rememberSession(id)
         if (!same) {
           streamKey = ''
           // 换场就把"这一档问过没有"作废 (2026-11-20): 默认值可能在别处改过, 而这一场
@@ -1916,7 +1931,13 @@ window.__ModuleLoader__.load({
         workspaceTry.id = owner
         workspaceTry.at = Date.now()
         try {
-          ctx.uiWorkspace.openWorkspace(owner)
+          var opening = ctx.uiWorkspace.openWorkspace(owner)
+          // 这是一条"顺手"的路 (给 [follow] 的 catch 兜底): 返回值没人等, 但也别留 unhandled rejection
+          if (opening && typeof opening.catch === 'function') {
+            opening.catch(function (reason) {
+              console.log('[luwi-portal] openWorkspace failed: ' + describeError(reason))
+            })
+          }
         } catch (_cannotOpen) {
           console.log('[luwi-portal] openWorkspace failed: ' + describeError(_cannotOpen))
         }
@@ -3634,7 +3655,7 @@ window.__ModuleLoader__.load({
        *
        * 首启 / 这一场落不下去时唯一的入口: 备好 -> 落进去, **全程不弹任何窗**。没成只留一句提示,
        * 并排一次 15 s 的补试 (只一次; 之后由账本 / 会话表推着走)
-       * @param {string} from 谁触发的 (start / retry / again, 只进日志)
+       * @param {string} from 谁触发的 (start / retry / again / back, 只进日志)
        */
       function landInDefaultWorkspace(from) {
         if (entering) return
@@ -6861,6 +6882,101 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 1 小时以内最近的那一场 (纯函数, 判据 `check-luwi-portal` 抽出来真跑)
+       *
+       * 2026-11-21 主人: "进入终端时打开1h内最近终端对话" —— 于是"最近"是三个条件一起: 有
+       * `updatedAt` (没时间的沉底, 不当"最近"), 落在窗口里 (恰好 1 小时算在里面), 取时间**最大**那个
+       * (不认数组顺序: [terminalRows] 那一列按"当前置顶"排过)
+       * @param {{id: string, at: number}[]} rows 电脑那几场 (`terminalRows` 的输出)
+       * @param {number} now 现在 (ms)
+       * @param {number} windowMs 窗口多宽 (无效 = 没有"最近"这一档, 一律 null)
+       * @returns {object|null} 挑中的那一行, 一场都没有就是 null (调用方据它去新建)
+       */
+      function terminalRecentRow(rows, now, windowMs) {
+        var at = Number(now)
+        var window = Number(windowMs)
+        if (!isFinite(at) || at <= 0) return null
+        if (!isFinite(window) || window <= 0) return null
+        var list = Array.isArray(rows) ? rows : []
+        var best = null
+        var bestAt = -1
+        for (var i = 0; i < list.length; i += 1) {
+          var row = list[i]
+          if (!row || typeof row !== 'object') continue
+          var when = Number(row.at) || 0
+          if (when <= 0) continue
+          if (at - when > window) continue
+          if (when <= bestAt) continue
+          best = row
+          bestAt = when
+        }
+        return best
+      }
+
+      /**
+       * 上次记下的"退出终端回哪儿"还认不认 (纯函数, 判据 `check-luwi-portal` 抽出来真跑)
+       *
+       * 页面重载 / 配对重启 host 之后 `TERMINAL_KEY` 里还留着上一次那个返回点, 但那一场可能已经不在了,
+       * 也可能本身就是电脑那一场 (老版本只记当前场, 在终端里重载就会记成电脑场) —— 后者不认, 否则
+       * "返回"等于没退
+       * @param {object|null} stored `readStored(TERMINAL_KEY)` 那一份 (`{on, back:{id}}`)
+       * @param {object|null} snapshot `ctx.sessions.list.getSnapshot()`
+       * @param {string} root 影子根
+       * @returns {{id: string}|null} 认就打这一场, 不认回 null (由调用方记当前这一场)
+       */
+      function terminalReturnOf(stored, snapshot, root) {
+        // 只有"终端还开着"那一份记录才带返回点 (退出时写的是 `{on: false}`, 整条被换掉)
+        if (!stored || typeof stored !== 'object' || stored.on !== true) return null
+        var back = stored.back
+        var id = back && typeof back === 'object' && typeof back.id === 'string' ? back.id : ''
+        if (id === '') return null
+        var byId = snapshot && typeof snapshot === 'object' && snapshot.byId ? snapshot.byId : {}
+        var summary = Object.prototype.hasOwnProperty.call(byId, id) ? byId[id] : null
+        // 快照里没有这一场时**信任**它 (与 [restore] 同一套宽松口径: 列表可能还在加载);
+        // 但认得出是电脑那一场就一定不认
+        if (summary && typeof summary === 'object' && underShadow(summary.cwd, root)) return null
+        return { id: id }
+      }
+
+      /**
+       * 进终端那一拍该记哪个返回点 (纯函数, 判据抽出来真跑)
+       *
+       * 三档: 屏上本来就不是电脑那一场 → 就记它; 屏上就是电脑那一场 (老记录没带 `back` / 在终端里重载
+       * 过来的) → 记门户自己记忆里那一场 (`SESSION_KEY`, 2026-11-21 起它不会记电脑那几场); 两样都没有 →
+       * 记空串, 由 [terminalRestore] 回门户那个默认工作区 —— **绝不能把电脑那一场本身记成返回点**
+       * @param {string|null} currentId 屏上这一场
+       * @param {string} remember `SESSION_KEY` 里那一场 (读不到就空串)
+       * @param {boolean} onPeer 屏上这一场是不是电脑那一场
+       * @param {boolean} rememberOnPeer `remember` 那场是不是电脑那一场
+       * @returns {{id: string}} 要记的返回点
+       */
+      function terminalReturnFor(currentId, remember, onPeer, rememberOnPeer) {
+        if (onPeer !== true && typeof currentId === 'string' && currentId !== '') return { id: currentId }
+        if (rememberOnPeer !== true && typeof remember === 'string' && remember !== '' && remember !== currentId) {
+          return { id: remember }
+        }
+        return { id: '' }
+      }
+
+      /**
+       * 返回门户那一场"到位了没有" (纯函数, 判据抽出来真跑)
+       *
+       * 光看 `switchTo` 的返回值不够: 它是"画得上" (`chatTarget` 建起来了), 而 `openSession` 抛
+       * `unknown session` 时 dsh 的 mainView 还留在电脑那一场 —— 那一拍会话表再推一版就会把门户拽回去。
+       * 所以判据是"画上了 **且** mainView 不再是电脑那一场" (main 读不到时按真算, 没有更好的读数)
+       * @param {boolean} drawn `switchTo` 的返回
+       * @param {string|null} mainId dsh mainView 那一场 (`currentSessionId()`)
+       * @param {string} wantId 要落地的那一场
+       * @param {boolean} mainOnPeer mainView 那一场是不是电脑那一场
+       * @returns {boolean} 到位了就 true
+       */
+      function terminalLanded(drawn, mainId, wantId, mainOnPeer) {
+        if (drawn !== true) return false
+        if (mainId === wantId) return true
+        return mainOnPeer !== true
+      }
+
+      /**
        * 终端那扇弹窗现在该说哪一句 (纯函数)
        *
        * 四档: 没配对 / 终端关着 / 配对码缺连接口令或通道没开 / 电脑没连上 (探测通了就不弹, 不看配置缺不缺地址); `online` 时**不弹**
@@ -6972,14 +7088,28 @@ window.__ModuleLoader__.load({
        *
        * 三件: 记下"进来之前是哪一场" (退出要回去)、穿皮、探一次电脑。**没连上也进** ——
        * 主人要的是"点终端就全变黑", 弹窗盖在黑底上
+       *
+       * 返回点也落盘 (2026-11-21): 配对要把 host 重启一次, 页面重载之后这一句还认得出该回哪儿;
+       * 上一份记录里那个点要是电脑那一场 (老版本在终端里重载时会记成它) 就不认, 重新记当前这一场
        */
       function openTerminal() {
         if (!mounted) mount()
         terminalInfo = fetchTerminalInfo()
         if (!terminalMode) {
-          terminalReturn = { id: sessionId, workspace: currentWorkspaceId() }
+          var kept = terminalReturnOf(readStored(TERMINAL_KEY), sessionsSnapshot(), terminalRoot())
+          // 记不上"不是电脑那一场"时退门户自己记忆里那一场 —— 屏上本来就是电脑那一场 (老记录没有 `back`)
+          // 也绝不能把它记成返回点, 否则"返回"等于没退
+          terminalReturn = kept !== null
+            ? kept
+            : terminalReturnFor(
+              sessionId,
+              recallSession(),
+              isTerminalSession(sessionId),
+              isTerminalSession(recallSession()),
+            )
           terminalMode = true
-          writeStored(TERMINAL_KEY, { on: true })
+          terminalAutoAt = 0
+          writeStored(TERMINAL_KEY, { on: true, back: terminalReturn })
         }
         applyTerminalMode()
         call('portalTerminalVisible', true)
@@ -6988,7 +7118,7 @@ window.__ModuleLoader__.load({
         renderTerminalGate()
       }
 
-      /** 退出终端: 收起那扇窗, 回进终端之前那一场 */
+      /** 退出终端: 收起那扇窗, 回进终端之前那一场 (见 [terminalRestore]) */
       function closeTerminal() {
         if (!terminalMode) return
         terminalMode = false
@@ -7004,9 +7134,75 @@ window.__ModuleLoader__.load({
         call('portalTerminalVisible', false)
         var back = terminalReturn
         terminalReturn = null
-        if (back && typeof back.id === 'string' && back.id !== '' && back.id !== sessionId) {
-          switchTo(back.id, 'history')
+        terminalAutoAt = 0
+        terminalRestore(back)
+      }
+
+      /**
+       * 退出终端之后把屏换回"进终端之前那一场" (2026-11-21)
+       *
+       * 两件事:
+       * ① 进终端之前门户还没落到任何一场 (`back.id` 空, 冷启动途中点的终端) —— 回门户那个默认工作区,
+       *    **不能把人留在电脑那一场**; 屏上本来就不是电脑场时什么都不做
+       * ② 有那一场就换回去, 而且**换到真的挂上为止**: 终端把 dsh 的 mainView 带去了影子工作区,
+       *    `openSession` 第一下会抛 `unknown session` (那句 `openBallWorkspace` 是异步的), 只试一次
+       *    就停会让门户一直停在电脑那一场
+       * 真换了场才 15 秒不跟账本 (与「开新对话」同一套): 这中间球那边说了话也不许把界面再拽走
+       * @param {{id: string}|null} back `terminalReturn`
+       */
+      function terminalRestore(back) {
+        var id = back && typeof back === 'object' && typeof back.id === 'string' ? back.id : ''
+        if (id === '') {
+          // 没记返回点: 屏上 (画的那一场 / mainView 那一场) 只要还在电脑那儿就回门户那个默认工作区
+          if (isTerminalSession(sessionId) || isTerminalSession(currentSessionId())) {
+            landInDefaultWorkspace('back')
+          }
+          return
         }
+        // 根本没换过场 (还没落场就退出来 / 一直没连上电脑): 屏上就是那一场, 一个字节都不用动 ——
+        // 白走一趟 `switchTo` 会把门户记录顺手清掉 (那是给"真换了场"准备的)
+        if (sessionId === id && chatTarget !== null && currentSessionId() === id) return
+        var before = sessionId
+        var tries = 0
+        function look() {
+          // 这中间又点进终端了: 别再抢回来 (那是人的选择)
+          if (terminalMode) return
+          var drawn = switchTo(id, 'history')
+          var main = currentSessionId()
+          // 判据不能只看 `switchTo` 的返回值 (那只是"画得上"): mainView 还留在电脑那一场时
+          // 会话表再推一版就会把门户拽回去, 所以继续补拍
+          if (terminalLanded(drawn, main, id, isTerminalSession(main))) {
+            if (before !== id) ledgerHoldUntil = Date.now() + 15000
+            return
+          }
+          tries += 1
+          // 5 秒 (250 ms × 20): 这条路一定跨工作区 —— 要等 `openBallWorkspace` 那趟 RPC 回来才落得下,
+          // 慢机上 2 秒就点人一句"没打开"太急了 (与 [enterWorkspace] 的 24 拍同一个量级)
+          if (tries >= 20) {
+            showNote('刚才那一场没打开, 在历史里点一下它', true)
+            return
+          }
+          setTimeout(look, 250)
+        }
+        look()
+      }
+
+      /**
+       * 终端里出的事说一句 (同一句一分钟最多一句)
+       *
+       * 自动那趟 (探针每 5/15 秒一拍) 不能每拍都弹一次提示, 可也不能一声不响地把人留在黑底上 ——
+       * 所以静默那条路改走这一颗: 该知道的还是会知道, 只是同一句不刷屏。换了一句 (另一种原因)
+       * 就当场说, 不压在上一句的窗口里
+       * @param {string} text 要说的话
+       */
+      function terminalNoteOnce(text) {
+        var key = String(text === undefined || text === null ? '' : text)
+        if (key === '') return
+        var now = Date.now()
+        if (key === terminalNotedKey && now - terminalNotedAt < 60000) return
+        terminalNotedKey = key
+        terminalNotedAt = now
+        showNote(key, true)
       }
 
       /**
@@ -7111,11 +7307,15 @@ window.__ModuleLoader__.load({
        * 认不出是哪个工作区, 那几句话在电脑上就落到"最近那个工作区"去了。所以这一层只等插件把影子
        * 工作区同步出来 (对端在线时几秒就有), 没有就明说 —— 不假装开了一场
        * @param {(id: string) => void} done 空串 = 现在还没有
+       * @param {boolean} [quiet] 自动那趟 (`terminalEnter`) 传真: 等不到只说给日志, 不刷屏
        */
-      function ensureTerminalWorkspace(done) {
+      function ensureTerminalWorkspace(done, quiet) {
         var base = terminalRoot()
         if (base === '') {
-          showNote('终端读数还没取到, 稍后再试', true)
+          if (quiet) {
+            console.log('[luwi-portal] terminal auto-enter: no shadow root yet')
+            terminalNoteOnce('终端读数还没取到, 稍后再试')
+          } else showNote('终端读数还没取到, 稍后再试', true)
           done('')
           return
         }
@@ -7128,7 +7328,10 @@ window.__ModuleLoader__.load({
           }
           tries += 1
           if (tries >= 40) {
-            showNote('电脑那边还没有对话同步过来: 等它连上再开', true)
+            if (quiet) {
+              console.log('[luwi-portal] terminal auto-enter: no shadow workspace yet')
+              terminalNoteOnce('电脑那边还没有对话同步过来: 等它连上再开')
+            } else showNote('电脑那边还没有对话同步过来: 等它连上再开', true)
             done('')
             return
           }
@@ -7155,20 +7358,28 @@ window.__ModuleLoader__.load({
        *
        * 落到影子工作区里的一场新会话 —— 第一句话由插件的 `agent/pre-step` 闸按 `target:{kind:'new'}`
        * 转给电脑, 电脑那边新开一场, 回答再折回这一场 (这就是"手机开新对话发送到 pc")
+       * @param {{quiet: boolean}} [options] 自动进终端那一趟不带提示 (窗口 1 小时内没有电脑对话时它会走到这里)
        */
-      function terminalNew() {
+      function terminalNew(options) {
         if (navigating) return
         if (!terminalMode) return
+        var quiet = !!(options && options.quiet === true)
         var before = sessionId
         ensureTerminalWorkspace(function (workspaceId) {
           if (workspaceId === '') return
+          // 等这 10 秒的中间可能已经退出终端了: 那就别再开影子工作区, 否则 dsh 的 mainView
+          // 会被人留在电脑那一场上 (那句"返回就回门户那一场"就白说了)
+          if (!terminalMode) return
           navigating = true
           var opening = null
           try {
             opening = ctx.uiWorkspace.openWorkspace(workspaceId)
           } catch (error) {
             navigating = false
-            showNote('电脑那个工作区打不开: ' + describeError(error), true)
+            if (quiet) {
+              console.log('[luwi-portal] terminal auto-new: openWorkspace threw: ' + describeError(error))
+              terminalNoteOnce('电脑那个工作区打不开: ' + describeError(error))
+            } else showNote('电脑那个工作区打不开: ' + describeError(error), true)
             return
           }
           if (opening && typeof opening.catch === 'function') {
@@ -7178,6 +7389,11 @@ window.__ModuleLoader__.load({
           }
           var tries = 0
           function look() {
+            // 这一趟等出来的新场不许把人从门户那一场拽走 (退出终端之后这场就不算数了)
+            if (!terminalMode) {
+              navigating = false
+              return
+            }
             tries += 1
             var id = currentSessionId()
             if (id !== null && bindingOf(id) !== undefined) {
@@ -7186,7 +7402,10 @@ window.__ModuleLoader__.load({
             }
             if (tries >= 24) {
               navigating = false
-              showNote('电脑那边没开出来, 稍后再试', true)
+              if (quiet) {
+                console.log('[luwi-portal] terminal auto-new: no session appeared')
+                terminalNoteOnce('电脑那边没开出来, 稍后再试')
+              } else showNote('电脑那边没开出来, 稍后再试', true)
               return
             }
             setTimeout(look, 150)
@@ -7197,19 +7416,32 @@ window.__ModuleLoader__.load({
             ledgerHoldUntil = Date.now() + 15000
             renderMeta()
             renderFlow()
-            if (id === before) showNote('已经是新对话了')
+            if (!quiet && id === before) showNote('已经是新对话了')
           }
           setTimeout(look, 150)
-        })
+        }, quiet)
       }
 
-      /** 进终端之后落到哪一场: 已经在电脑那几场里就不动, 否则跟最近那一场, 一场都没有才新建 */
+      /**
+       * 进终端之后落到哪一场 (2026-11-21 主人的口径)
+       *
+       * - 已经在电脑那几场里: **不动** —— 人可能刚从终端历史里挑了更早的一场, 重探一拍不许把它拽走
+       * - 否则看 1 小时内最近那一场 ([terminalRecentRow]) → 换过去
+       * - 1 小时内一场都没有 → **新建一场与电脑连的对话** ([terminalNew]), 这一趟静默
+       * 自动那趟 20 秒最多一次 ([TERMINAL_ENTER_COOLDOWN_MS]): 建不出来时别每个探测拍都重来一遍
+       */
       function terminalEnter() {
         if (!terminalMode) return
         if (isTerminalSession(sessionId)) return
-        var rows = terminalRows(sessionsSnapshot(), '', sessionId, terminalRoot(), TERMINAL_HISTORY_MAX)
-        if (rows.length === 0) {
-          terminalNew()
+        if (Date.now() - terminalAutoAt < TERMINAL_ENTER_COOLDOWN_MS) return
+        terminalAutoAt = Date.now()
+        var recent = terminalRecentRow(
+          terminalRows(sessionsSnapshot(), '', sessionId, terminalRoot(), TERMINAL_HISTORY_MAX),
+          Date.now(),
+          TERMINAL_RECENT_MS,
+        )
+        if (recent === null) {
+          terminalNew({ quiet: true })
           return
         }
         // 那一场所在的影子工作区可能还没打开 (`follow` 里 `openSession` 会抛, 之后要等一轮) ——
@@ -7218,10 +7450,12 @@ window.__ModuleLoader__.load({
         function look() {
           if (!terminalMode) return
           if (isTerminalSession(sessionId)) return
-          if (switchTo(rows[0].id, 'history')) return
+          if (switchTo(recent.id, 'history')) return
           tries += 1
           if (tries >= 8) {
-            showNote('电脑那一场现在打不开, 稍后再试', true)
+            // 自动那趟一分钟最多说一句 (人没点任何东西, 但黑底上也不能一声不响), 下一拍过了冷却再试
+            console.log('[luwi-portal] terminal auto-enter: could not open ' + recent.id)
+            terminalNoteOnce('电脑那一场现在打不开, 稍后再试')
             return
           }
           setTimeout(look, 250)
@@ -7258,13 +7492,15 @@ window.__ModuleLoader__.load({
       /**
        * 原生那两句 (`terminal(true/false)`) 的落点: 幂等
        *
-       * 已经在终端里时只重探一次 (页面重载 / 配完对回来那一拍), 不重复记 `terminalReturn`
+       * 已经在终端里时只重探一次 (页面重载 / 配完对回来那一拍), 不重复记 `terminalReturn`;
+       * 顺手把自动那趟的冷却清掉 —— 这一句是**人点进来的** (头栏 / 球菜单), 刚失败过再点一次就该当场再试
        */
       function setTerminal(open) {
         var want = open !== false
         if (want) {
           if (terminalMode) {
             terminalInfo = fetchTerminalInfo()
+            terminalAutoAt = 0
             probeTerminal()
             renderTerminalGate()
             return
@@ -8018,7 +8254,32 @@ window.__ModuleLoader__.load({
           terminalGate = ''
           writeStored(TERMINAL_KEY, { on: false })
           call('portalTerminalVisible', false)
+          // 后面那层 dsh 也别停在电脑那一场 (没有门户这层皮, 那一场看着就是"我的对话")
+          // **只切工作区**: 退出终端时 mainView 在影子工作区, 那儿的场 `openSession` 一个都留不住
+          // (`sessions.retain` 只认当前工作区), 而 `hide()` 刚在那儿开的空场也会跟着被换掉;
+          // 换不过去就算了, 下次进终端 / 挂载会重新落 (尽力而为, 不给卸挂添一条会抛的路)
+          if (isTerminalSession(currentSessionId())) {
+            var home = currentWorkspaceId()
+            if (home !== '') {
+              try {
+                var leaving = ctx.uiWorkspace.openWorkspace(home)
+                if (leaving && typeof leaving.catch === 'function') {
+                  leaving.catch(function (reason) {
+                    console.log('[luwi-portal] could not leave the peer workspace: ' + describeError(reason))
+                  })
+                }
+              } catch (_cannotLeave) {
+                console.log('[luwi-portal] could not leave the peer workspace: ' + describeError(_cannotLeave))
+              }
+            }
+          }
         }
+        // 门户关了就不再记返回点 (DOM 与那一场的关系断了; 下次挂载按 `SESSION_KEY` 落回门户那一场),
+        // 冷却与"一句话一分钟"的记号也一起清 —— 重开这一页要能当场判一次该落哪一场
+        terminalReturn = null
+        terminalAutoAt = 0
+        terminalNotedAt = 0
+        terminalNotedKey = ''
         if (terminalProbeTimer !== null) {
           clearTimeout(terminalProbeTimer)
           terminalProbeTimer = null
@@ -8196,7 +8457,11 @@ window.__ModuleLoader__.load({
         try {
           listUnsub = ctx.sessions.list.subscribe(function () {
             var id = currentSessionId()
-            if (id !== sessionId) switchTo(id, 'list')
+            // 两扇门互不串 (2026-11-21): dsh 的 mainView 换到"另一种场"时不跟 —— 终端里只跟电脑那几场
+            // (否则 mainView 还在手机那一场时会把终端甩出来), 普通门户也不跟电脑那几场 (否则返回门户
+            // 会被再拽回电脑那一场, 那层界面已经没了, 人没有出口)
+            var sameKind = isTerminalSession(id) === terminalMode
+            if (id !== sessionId && sameKind) switchTo(id, 'list')
             else {
               renderModel()
               // 投影可能是后到的: 每一帧都再问一次「拨过没」, 拨过就什么都不做

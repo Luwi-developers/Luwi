@@ -214,6 +214,14 @@
   `luwi终端` (`applyIdentity` 那一段覆盖, 外观里的昵称与自拍都不进终端); 历史窗在终端里只列**电脑那几场**、普通历史里把那些
   **排除掉** (`underShadow(cwd, shadowRoot)` + `historyRows(..., {mode})`), 两扇门互不串; 「新建」只在影子工作区
   里开一场 (**只复用插件同步出来的影子工作区, 不自建** —— 页面拿不到对端 deviceId, 自建的目录会让归属方闸认不出工作区), 第一句话由插件的归属方闸按 `target:{kind:new}` 转给电脑
+  **进终端落哪一场 / 退出回哪一场** (2026-11-21 主人: "进入终端时打开1h内最近终端对话，没有要新建终端对话，返回时恢复门户对话"): `terminalEnter` 先看
+  是不是已经在电脑那几场里 (是就不动 —— 人可能刚从终端历史挑了更早的一场), 否则 `terminalRecentRow(rows, now, TERMINAL_RECENT_MS)` 取 **1 小时内 `updatedAt`
+  最大**那一场, **一场都没有才 `terminalNew({quiet:true})`** 新建 (静默那趟出的事走 `terminalNoteOnce`: 一分钟最多一句; 自动那趟 20 秒冷却, 人再点一次「终端」由 `setTerminal` 清 0);
+  窗口只决定自动落哪一场, 更早的仍在终端历史里; 退出走 `terminalRestore`: 返回点由 `terminalReturnFor` 定 (**屏上就是电脑那一场时绝不把那一场记成返回点**), 同时写进 `TERMINAL_KEY.back`,
+  页面重载 / 配对重启 host 之后由 `terminalReturnOf` 认回来 (**记成电脑那一场的老记录不认**); 落地判据是 `terminalLanded` ("画上了 且 mainView 不在电脑那一场", `switchTo` 的返回值只是"画得上"),
+  **补拍 250 ms × 20 (5 秒)**, 真换了场才 15 秒不跟账本; 进终端前门户还没落场时回 `landInDefaultWorkspace('back')`, 那 10 秒等不到的影子工作区在退出终端之后一律作废 (`terminalNew` 里两道 `!terminalMode` 的闸)。
+  **会话表那条跟随也两扇门互不串** (`listUnsub` 的 `sameKind`): 普通门户不跟电脑那几场, 终端里也不跟回手机那一场;
+  **`adopt` 不再把电脑那几场写进 `SESSION_KEY`** —— 记了之后重载 / 退出门户再进来门户会停在电脑那一场 (在终端里退出门户时, 只有 mainView 真在电脑那一场才切一次工作区: 影子场 `openSession` 留不住, 只切门)
   **插件侧只有一个方向**: 手机 (扫码那台, `role:"phone"`) 写 `peer.listen=false` / `peer.acceptSend=false` / `workspace.enabled=false`; 电脑由面板写 `role:"pc"` — **别拿 `pairing` 判角色**, 电脑生成码时也写它
   电脑不能再读也不能下发指令 (队列那条路同闸: `receive()` 也看 `acceptSend`); 手机的控制面 (`panel/op` · `panel/term` · `/luwi-sync/send` · `/peer-live`) 只认**回环 + 回环 Host 头** (`lib/loopback.mjs` 的 `isLocalRequest`, 挡 DNS rebinding 与同机反代)
   判据 `check-luwi-portal` 第二十七节 + `check-terminal` 回环那几节 + `check-sync-setting` 第六节,

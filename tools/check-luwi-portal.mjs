@@ -1718,6 +1718,59 @@ function expectOrder(label, source, before, after) {
   }
 }
 
+/**
+ * 某一行 trim 之后逐字等于这一句 —— 用来钉"这一行不许再往后追加东西"
+ *
+ * `expect(...)` 是子串命中, 于是 `var sameKind = a === b` 加个 `|| c` 照样绿; 关键的一行要按整行钉
+ * @param label - 读数里那条说明
+ * @param source - 被查的源码
+ * @param text - 应当逐字等于的那一行 (前后空白不算)
+ */
+function expectExactLine(label, source, text) {
+  const lines = String(source).split('\n').map((line) => line.trim())
+  if (lines.includes(String(text).trim())) notes.push(`ok   ${label}`)
+  else failures.push(`${label}: 没有逐字等于 ${JSON.stringify(text)} 的那一行`)
+}
+
+/**
+ * 取一处调用的实参列表 (按顶层逗号切、压空白) —— 用来钉实参次序, 子串命中管不了这个
+ *
+ * 括号深度按字符数, 字符串里的括号会算歪: 这里只用来查纯表达式调用 (`Date.now()` / `foo(x)`),
+ * 别拿它解带引号的长串
+ * @param source - 被查的源码
+ * @param callee - 函数名 (不带括号)
+ * @returns {string[]|null} 实参数组; 找不到 / 括号不配回 null
+ */
+function callArgs(source, callee) {
+  const at = String(source).indexOf(`${callee}(`)
+  if (at < 0) return null
+  let depth = 1
+  let current = ''
+  const args = []
+  for (let i = at + callee.length + 1; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '(') depth += 1
+    if (ch === ')') {
+      depth -= 1
+      if (depth === 0) {
+        args.push(current)
+        break
+      }
+    }
+    if (ch === ',' && depth === 1) {
+      args.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (depth !== 0) return null
+  const cleaned = args.map((arg) => arg.replace(/\s+/gu, ' ').trim())
+  // 尾随逗号 (`foo(a, b,)`) 会多出一个空串, 那不是实参
+  while (cleaned.length > 0 && cleaned[cleaned.length - 1] === '') cleaned.pop()
+  return cleaned
+}
+
 if (routerDrawerSource === '') failures.push('client.js: 抽不出 renderRouterDrawer')
 else {
   expectOrder('判断面板: 设置 在打开/关掉唤醒 的右侧', routerDrawerSource, 'actions.appendChild(toggle)', "settingsButton('router')")
@@ -3068,6 +3121,20 @@ if (refsSource === '' || bubbleSource === '') {
     'normalizeCwdPath',
     `${takeFunction('terminalRows')}\nreturn terminalRows`,
   )(historyRows, 20, normalizeCwdPath)
+  // 2026-11-21 补: 进终端落「1h 内最近那一场」, 没有就新建; 退出回进门户那一场
+  const terminalRecentRow = new Function(
+    `${takeFunction('terminalRecentRow')}\nreturn terminalRecentRow`,
+  )()
+  const terminalReturnOf = new Function(
+    'underShadow',
+    `${takeFunction('terminalReturnOf')}\nreturn terminalReturnOf`,
+  )(underShadow)
+  const terminalReturnFor = new Function(
+    `${takeFunction('terminalReturnFor')}\nreturn terminalReturnFor`,
+  )()
+  const terminalLanded = new Function(
+    `${takeFunction('terminalLanded')}\nreturn terminalLanded`,
+  )()
   const terminalGateState = new Function(
     `${takeFunction('terminalGateState')}\nreturn terminalGateState`,
   )()
@@ -3144,6 +3211,126 @@ if (refsSource === '' || bubbleSource === '') {
     fail('terminalGateState: 那一句人话没给 / 原因没带出来')
   }
 
+  // ①b 进终端落哪一场 (2026-11-21): 1 小时窗口真跑一遍真值表
+  const nowAt = 1_700_000_000_000
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const recentRowOf = (list, window = hour) => terminalRecentRow(list, nowAt, window)
+  const fresh = recentRowOf([{ id: 'fresh', at: nowAt - 59 * minute }])
+  const stale = recentRowOf([{ id: 'stale', at: nowAt - 61 * minute }])
+  if (fresh && fresh.id === 'fresh') {
+    note('terminalRecentRow: 59 分钟前那一场算"最近"')
+  } else {
+    fail('terminalRecentRow: 窗口里的那一场没被选中')
+  }
+  if (stale === null) {
+    note('terminalRecentRow: 61 分钟前的不算 (过了 1 小时就新建)')
+  } else {
+    fail('terminalRecentRow: 窗口外的那一场还是被拉起来了')
+  }
+  const mixed = recentRowOf([
+    { id: 'oldest', at: nowAt - 61 * minute },
+    { id: 'middle', at: nowAt - 50 * minute },
+    { id: 'newest', at: nowAt - 30 * minute },
+  ])
+  // 反过来再排一次: 只认"时间最大"的实现两趟都过, "取第一条 / 取最后一条"各会在其中一趟翻车
+  const mixedFlipped = recentRowOf([
+    { id: 'oldest', at: nowAt - 61 * minute },
+    { id: 'newest', at: nowAt - 30 * minute },
+    { id: 'middle', at: nowAt - 50 * minute },
+  ])
+  if (mixed && mixed.id === 'newest' && mixedFlipped && mixedFlipped.id === 'newest') {
+    note('terminalRecentRow: 混排时取时间最大的那个 (两种排法都不认数组顺序)')
+  } else {
+    fail(`terminalRecentRow: 没取到最近那一场 (认数组顺序了: ${JSON.stringify([mixed && mixed.id, mixedFlipped && mixedFlipped.id])})`)
+  }
+  const exact = recentRowOf([{ id: 'exact', at: nowAt - hour }])
+  const oneMsLate = recentRowOf([{ id: 'late', at: nowAt - hour - 1 }])
+  if (exact && exact.id === 'exact' && oneMsLate === null) {
+    note('terminalRecentRow: 恰好 1 小时算在里面, 多 1 ms 就不算')
+  } else {
+    fail('terminalRecentRow: 1 小时那条边界不对')
+  }
+  if (recentRowOf([{ id: 'unknown', at: 0 }]) === null
+    && recentRowOf([]) === null
+    && recentRowOf(null) === null
+    && terminalRecentRow([{ id: 'x', at: nowAt }], nowAt, 0) === null
+    && terminalRecentRow([{ id: 'x', at: nowAt }], nowAt, Number.NaN) === null
+    && terminalRecentRow([{ id: 'x', at: nowAt }], 0, hour) === null) {
+    note('terminalRecentRow: 没时间 / 空表 / 窗口无效 / 现在读不到, 一律不当"最近"')
+  } else {
+    fail('terminalRecentRow: 空表或无效参数那一档没兜住')
+  }
+
+  const returnSnapshot = {
+    byId: {
+      s_local: { id: 's_local', cwd: '/sdcard/DSH/Luwi' },
+      s_pc1: { id: 's_pc1', cwd: `${shadowRoot}/PC/DSH` },
+    },
+  }
+  const keptLocal = terminalReturnOf({ on: true, back: { id: 's_local' } }, returnSnapshot, shadowRoot)
+  const keptPeer = terminalReturnOf({ on: true, back: { id: 's_pc1' } }, returnSnapshot, shadowRoot)
+  const keptGone = terminalReturnOf({ on: true, back: { id: 's_gone' } }, returnSnapshot, shadowRoot)
+  if (keptLocal !== null && keptLocal.id === 's_local') {
+    note('terminalReturnOf: 门户那一场照认 (重载之后还回得去)')
+  } else {
+    fail('terminalReturnOf: 门户那一场没认出来')
+  }
+  if (keptPeer === null) {
+    note('terminalReturnOf: 记成电脑那一场的不认 (老记录里可能就是这个)')
+  } else {
+    fail('terminalReturnOf: 电脑那一场被当成返回点了')
+  }
+  if (keptGone !== null && keptGone.id === 's_gone') {
+    note('terminalReturnOf: 快照里还没加载到的那一场先信任 (与 restore 同一套宽松口径)')
+  } else {
+    fail('terminalReturnOf: 快照里没有就不认了 —— 重载那一拍会把返回点丢掉')
+  }
+  if (terminalReturnOf({ on: true }, returnSnapshot, shadowRoot) === null
+    && terminalReturnOf({ on: false, back: { id: 's_local' } }, returnSnapshot, shadowRoot) === null
+    && terminalReturnOf(null, returnSnapshot, shadowRoot) === null
+    && terminalReturnOf({ on: true, back: { id: '' } }, returnSnapshot, shadowRoot) === null) {
+    note('terminalReturnOf: 没记过 / 终端已关 / 空 id 都不认 (老记录是 `{on:true}` 也照样退回当前这一场)')
+  } else {
+    fail('terminalReturnOf: 没记过或空 id 那一档不对')
+  }
+
+  // 记返回点那一侧: **电脑那一场永远不许被记成返回点** (记上了"返回"就等于没退)
+  const returnLocal = terminalReturnFor('s_local', '', false, false)
+  const returnPeer = terminalReturnFor('s_pc1', 's_local', true, false)
+  const returnPeerOnly = terminalReturnFor('s_pc1', 's_pc1', true, true)
+  const returnNull = terminalReturnFor(null, '', false, false)
+  if (returnLocal.id === 's_local') {
+    note('terminalReturnFor: 屏上不是电脑那一场就记它')
+  } else {
+    fail(`terminalReturnFor: 门户那一场没记上 (${JSON.stringify(returnLocal)})`)
+  }
+  if (returnPeer.id === 's_local') {
+    note('terminalReturnFor: 屏上就是电脑那一场时退门户自己记着的那一场')
+  } else {
+    fail(`terminalReturnFor: 屏上是电脑那一场还是记了错的返回点 (${JSON.stringify(returnPeer)})`)
+  }
+  if (returnPeerOnly.id === '') {
+    note('terminalReturnFor: 记忆里也是电脑那一场 / 什么都没记 → 空串 (由 terminalRestore 回默认工作区)')
+  } else {
+    fail(`terminalReturnFor: 两边都是电脑场时没退回空串 (${JSON.stringify(returnPeerOnly)})`)
+  }
+  if (returnNull.id === '') {
+    note('terminalReturnFor: 屏上还没有任何一场时记空串 (不是 null)')
+  } else {
+    fail(`terminalReturnFor: 空屏没退货 ${JSON.stringify(returnNull)}`)
+  }
+
+  // 落地判据: 只看 `switchTo` 的返回值不够 (那只是"画得上", mainView 可能还在电脑那一场)
+  if (terminalLanded(true, 's_local', 's_local', false) === true
+    && terminalLanded(true, 's_pc1', 's_local', true) === false
+    && terminalLanded(false, 's_local', 's_local', false) === false
+    && terminalLanded(true, null, 's_local', false) === true) {
+    note('terminalLanded: 要"画上了 且 mainView 不在电脑那一场" (main 读不到时按真算)')
+  } else {
+    fail('terminalLanded: 判据不对 —— 光看"画得上"会让门户停在电脑那一场')
+  }
+
   // ② 页面: 皮肤 / 两扇历史 / 身份 / 新建 / 发送闸
   expect('client.js', client, '#lwp-root[data-mode="terminal"]{background:#000}')
   expect('client.js', client, "els.termGate.id = 'lwp-term-gate'")
@@ -3174,6 +3361,122 @@ if (refsSource === '' || bubbleSource === '') {
   expect('client.js', client, 'function pickSync')
   // 那一颗现在打开终端页, 不再翻开关
   expect('client.js', client, 'openTerminal()\n        // 顺手把原生清单的文案对齐一次')
+
+  // ②b 进终端落哪一场 / 退出回哪一场的接线 (2026-11-21)
+  expect('client.js', client, 'var TERMINAL_RECENT_MS = 60 * 60 * 1000')
+  expect('client.js', client, 'var TERMINAL_ENTER_COOLDOWN_MS = 20 * 1000')
+  expect('client.js', client, 'if (!isTerminalSession(id)) rememberSession(id)')
+  expect('client.js', client, 'writeStored(TERMINAL_KEY, { on: true, back: terminalReturn })')
+  expect('client.js', client, 'terminalRestore(back)')
+  expect('client.js', client, 'terminal auto-enter: no shadow workspace yet')
+  const enterSource = takeFunction('terminalEnter')
+  if (enterSource === '') fail('client.js: 抽不出 terminalEnter')
+  else {
+    expectOrder('terminalEnter: 已经在电脑那几场里就不动', enterSource, 'if (isTerminalSession(sessionId)) return', 'terminalRecentRow(')
+    expectOrder('terminalEnter: 自动那趟的冷却在挑场之前', enterSource, 'TERMINAL_ENTER_COOLDOWN_MS) return', 'terminalRecentRow(')
+    expect('client.js', enterSource, 'terminalAutoAt = Date.now()')
+    expectOrder('terminalEnter: 1h 内一场都没有 → 新建一场与电脑连的', enterSource, 'recent === null', 'terminalNew({ quiet: true })')
+    // 窗口得真的传下去: 只在注释里留个 `TERMINAL_RECENT_MS` 不算
+    const recentArgs = callArgs(enterSource, 'terminalRecentRow')
+    if (recentArgs !== null && recentArgs.length === 3
+      && recentArgs[0].startsWith('terminalRows(')
+      && recentArgs[1] === 'Date.now()'
+      && recentArgs[2] === 'TERMINAL_RECENT_MS') {
+      note('terminalEnter: 挑场用的是 1 小时那个窗口 (terminalRecentRow 三个实参对得上)')
+    } else {
+      fail(`client.js: terminalEnter 没把 1 小时窗口传下去 (${JSON.stringify(recentArgs)})`)
+    }
+  }
+  const newSource = takeFunction('terminalNew')
+  if (newSource === '') fail('client.js: 抽不出 terminalNew')
+  else {
+    expect('client.js', newSource, 'options.quiet === true')
+    expect('client.js', newSource, '}, quiet)')
+    // 退出终端之后这一趟作废 (等影子工作区要 10 秒, 中间人可能已经按了返回) —— 缩进不进锚点, 数道数
+    expectOrder('terminalNew: 等出工作区的中间退出了终端就不开', newSource, "if (workspaceId === '') return", '等这 10 秒的中间可能已经退出终端了')
+    const guardCount = newSource.split('if (!terminalMode) return').length - 1
+    if (guardCount === 2) {
+      note('terminalNew: 两道 `!terminalMode` 的 return 闸 (函数口 + 等出工作区之后)')
+    } else {
+      fail(`client.js: terminalNew 的 \`!terminalMode\` return 闸是 ${String(guardCount)} 道, 应该 2 道`)
+    }
+    expectOrder('terminalNew: 等出来的新场在退出终端之后不许上屏', newSource, "if (workspaceId === '') return", 'if (!terminalMode) {')
+    // 静默那趟也得让人知道出了什么事 (一分钟最多一句)
+    expect('client.js', newSource, 'terminalNoteOnce(')
+  }
+  const restoreSource = takeFunction('terminalRestore')
+  if (restoreSource === '') fail('client.js: 抽不出 terminalRestore')
+  else {
+    expectOrder('terminalRestore: 没记返回点就回门户那个默认工作区', restoreSource, "if (id === '')", "landInDefaultWorkspace('back')")
+    expectOrder('terminalRestore: 有返回点就换回那一场', restoreSource, "landInDefaultWorkspace('back')", "switchTo(id, 'history')")
+    if (restoreSource.includes('ledgerHoldUntil = Date.now() + 15000')) {
+      note('terminalRestore: 真换了场才 15 s 不跟账本 (球那边说话也不把人拽走)')
+    } else {
+      fail('client.js: terminalRestore 没有那 15 s 的账本闸')
+    }
+    if (restoreSource.includes('if (terminalMode) return')) note('terminalRestore: 这中间又点进终端就不再抢回来')
+    else fail('client.js: terminalRestore 不看终端是否又开着')
+    // 成功判据不能只看 `switchTo` 的返回值 (那只是"画得上", mainView 可能还在电脑那一场)
+    // **实参次序也要钉**: 第 3 个是"要落地的那一场", 第 4 个必须是 mainView 那一场 (写成 sessionId 就白改)
+    const landedArgs = callArgs(restoreSource, 'terminalLanded')
+    if (JSON.stringify(landedArgs) === JSON.stringify(['drawn', 'main', 'id', 'isTerminalSession(main)'])) {
+      note('terminalRestore: terminalLanded(drawn, main, id, isTerminalSession(main)) —— 看的是 mainView 那一场')
+    } else {
+      fail(`client.js: terminalLanded 的实参不对 (${JSON.stringify(landedArgs)}) —— 第 4 个必须是 mainView 那一场`)
+    }
+    if (restoreSource.includes('tries >= 20')) {
+      note('terminalRestore: 补拍到 5 秒 (跨工作区那趟 RPC 慢机上也等得起)')
+    } else {
+      fail('client.js: terminalRestore 的补拍预算不到 20 拍 —— 慢机上返回点会点不开')
+    }
+  }
+  const openSource = takeFunction('openTerminal')
+  if (openSource === '') fail('client.js: 抽不出 openTerminal')
+  else {
+    // 记返回点那一侧: 屏上本来就是电脑那一场时不许把它记成返回点 (实参次序也钉住)
+    const returnForArgs = callArgs(openSource, 'terminalReturnFor')
+    const wantReturnFor = ['sessionId', 'recallSession()', 'isTerminalSession(sessionId)', 'isTerminalSession(recallSession())']
+    if (JSON.stringify(returnForArgs) === JSON.stringify(wantReturnFor)) {
+      note('openTerminal: terminalReturnFor(当前场, SESSION_KEY, 当前场是不是电脑场, 记忆那次是不是电脑场)')
+    } else {
+      fail(`client.js: terminalReturnFor 的实参不对 (${JSON.stringify(returnForArgs)}) —— 三个/四个实参换位就把电脑场记成返回点了`)
+    }
+  }
+  const closeSource = takeFunction('closeTerminal')
+  if (closeSource === '') fail('client.js: 抽不出 closeTerminal')
+  else {
+    expectOrder('closeTerminal: 先把返回点取出来再清 (顺序写反 = 点返回什么都不发生)', closeSource, 'var back = terminalReturn', 'terminalReturn = null')
+    expect('client.js', closeSource, 'terminalRestore(back)')
+  }
+  const setTerminalSource = takeFunction('setTerminal')
+  if (setTerminalSource === '') fail('client.js: 抽不出 setTerminal')
+  else if (setTerminalSource.includes('terminalAutoAt = 0')) {
+    note('setTerminal: 人再点一次「终端」就清冷却 (失败了当场能再试)')
+  } else {
+    fail('client.js: setTerminal 不清冷却 —— 失败后 20 秒内再点「终端」什么都不发生')
+  }
+  // 会话表那条跟随也要两扇门互不串 (mainView 落在电脑那一场时不许把普通门户拽过去)
+  expectExactLine('listUnsub: 两扇门互不串只用同一个判据 (不许再追加 `|| terminalMode`)', client, 'var sameKind = isTerminalSession(id) === terminalMode')
+  // 静默那趟的两处 (读数 / 影子工作区) 都要能说一句, 删掉一处就退回"黑底上不吭声"
+  const ensureSource = takeFunction('ensureTerminalWorkspace')
+  if (ensureSource === '') fail('client.js: 抽不出 ensureTerminalWorkspace')
+  else {
+    const quietNotes = ensureSource.split('terminalNoteOnce(').length - 1
+    if (quietNotes === 2) note('ensureTerminalWorkspace: 两处静默分支都留了 terminalNoteOnce')
+    else fail(`client.js: ensureTerminalWorkspace 里 terminalNoteOnce 是 ${String(quietNotes)} 处, 应该 2 处`)
+  }
+  // 卸挂那段只许切工作区: 影子工作区里的场 `openSession` 一个都留不住
+  const unmountSource = takeFunction('unmount')
+  if (unmountSource === '') fail('client.js: 抽不出 unmount')
+  else {
+    if (unmountSource.includes('openSession(') || unmountSource.includes('openBallWorkspace(')) {
+      fail('client.js: unmount 又去 openSession / openBallWorkspace —— 影子工作区里那两下都落不回门户那一场')
+    } else {
+      note('unmount: 退出终端时只切工作区 (不碰 openSession / openBallWorkspace)')
+    }
+    expectOrder('unmount: 只有 mainView 真在电脑那一场才换', unmountSource, 'isTerminalSession(currentSessionId())', 'currentWorkspaceId()')
+    expect('client.js', unmountSource, 'openWorkspace(home)')
+  }
 
   // ③ 原生那一半
   const portalTerminalKt = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalTerminal.kt')
