@@ -201,7 +201,7 @@ internal object ExploreSchedule {
                 tmp.delete()
             }
         }.onFailure { Log.w(TAG, "the explore schedule was not written", it) }
-        arm(context)
+        // 2026-11-21: 探索不再按时间排闹钟 (改由判断层挑时机开) —— 保存只落配置, 不 arm
     }
 
     /**

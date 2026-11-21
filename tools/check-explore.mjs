@@ -533,22 +533,18 @@ check('投出去之后按会话锁 (熄屏 CPU 不 suspend, 那一场才跑得�
   /current\.minutes \* 60_000L \+ LwSessionLock\.SLACK_MS/.test(schedule),
 ], [true, true, true, true, true])
 
-check('心跳里自愈 + 收尾放锁 (闹钟丢了自己补排, 一场跑完就放手)', [
-  /fun ensureIfStale\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
-  /if \(armedAt == next\) return/.test(schedule),
+// 2026-11-21: 探索不再按时间自愈/补跑闹钟 (改由判断层挑时机), 心跳只留会话锁收尾
+check('心跳只收尾会话锁, 不再自愈/补排探索闹钟', [
   /ExploreSchedule\.ensureIfStale\(context, now\)/.test(engine),
-  /LwSessionLock\.reconcile\(/.test(engine),
-], [true, true, true, true])
-
-check('错过那一场能补跑 (八小时窗口, last 之后没跑过才算漏)', [
-  /const val CATCH_UP_WINDOW_MS = 8 \* 60 \* 60_000L/.test(schedule),
-  /fun catchUpLateMs\(/.test(schedule),
-  /if \(lastAt >= dueAt\) return null/.test(schedule),
-  /lateMs\?\.let \{ "补跑/.test(schedule),
-  // 补跑挂在心跳上: 漏掉的那一次不会再有闹钟来叫 (只写在 fire 里等于永远轮不到)
-  /fun ensureCatchUp\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
   /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
-], [true, true, true, true, true, true])
+  /LwSessionLock\.reconcile\(/.test(engine),
+], [false, false, true])
+
+// 2026-11-21: 补跑那套纯函数留着不删 (死代码无害), 但不再挂心跳 —— 没有闹钟要补了
+check('错过那一场不再补跑 (探索改由判断层触发, 没有固定闹钟)', [
+  /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
+  /ExploreSchedule\.ensure\(this\)/.test(engine),
+], [false, false])
 
 check('宿主停掉时把会话锁放掉 (onTaskRemoved 顺手校一遍两个闹钟)', [
   /LwSessionLock\.releaseAll\(\)/.test(service),
@@ -559,22 +555,25 @@ check('接收器在清单里且 exported=false', [
   /<receiver\s+android:name="\.tool\.ExploreAlarmReceiver"\s+android:exported="false" \/>/u.test(manifest),
 ], [true])
 
-check('宿主起来时两个 ensure 都调', [
+// 2026-11-21: 探索不再按时间排闹钟 —— 宿主起来只 ensure 任务卡, 不再 ensure 探索闹钟
+check('宿主起来只 ensure 探索任务卡, 不再排探索/主动对话闹钟', [
   /ExploreTask\.ensure\(this\)/.test(service),
   /ExploreSchedule\.ensure\(this\)/.test(service),
-], [true, true])
+  /ProactiveSchedule\.ensure\(this\)/.test(service),
+], [true, false, false])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限 (2026-11-07 起这一段并进「活动」)', [
+check('设置页那段: 开关 / 卡 / 读数, 不再有时刻 / 分钟 / 手动开始 (2026-11-21 改由判断层触发)', [
   /settingsSection\(\s*key = "activity"/u.test(screen),
   screen.includes('R.string.settings_explore_toggle'),
-  screen.includes('R.string.settings_explore_at'),
+  screen.includes('R.string.settings_explore_by_router'),
   screen.includes('R.string.settings_explore_card'),
   screen.includes('ExploreSchedule.save('),
   screen.includes('ExploreTask.write('),
+  !screen.includes('R.string.settings_explore_at'),
+  !screen.includes('R.string.settings_explore_minutes'),
   !screen.includes('settings_explore_start'),
-  !screen.includes('settings_explore_said_title'),
   !screen.includes('saidLimit'),
-], [true, true, true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true, true, true])
 
 check('构建把初始卡拷进 assets', (await read('app/build.gradle.kts')).includes('projectDirectory.file("explore-card.md")'), true)
 
@@ -639,18 +638,22 @@ check('老行没有这两个键时仍落 30 / 60', [
 
 const exploreItems = screen.slice(
   screen.indexOf('fun ExploreItems()'),
-  screen.indexOf('private fun ExploreTimeDialog'),
+  screen.indexOf('private fun ExploreCardDialog'),
 )
-check('设置页那两条在 (分钟用滑块 / 步数用档位), 仍然没有手动开始', [
-  exploreItems.includes('R.string.settings_explore_minutes'),
+// 2026-11-21: 预算只留步数 (时间那一路撤了), 没有时刻 / 分钟 / 手动开始
+check('设置页只剩步数那一条 (分钟/时刻已撤), 仍然没有手动开始', [
+  !exploreItems.includes('R.string.settings_explore_minutes'),
   exploreItems.includes('R.string.settings_explore_steps'),
   exploreItems.includes('ArrowSlider('),
   exploreItems.includes('ExploreSchedule.clamp('),
-  exploreItems.includes('plan.copy(minutes ='),
   exploreItems.includes('plan.copy(steps ='),
+  !exploreItems.includes('plan.copy(minutes ='),
   !exploreItems.includes('settings_explore_start'),
 ], [true, true, true, true, true, true, true])
-check('段首那句读数带上预算 (分 / 步)', screen.includes('R.string.settings_explore_budget'), true)
+check('段首那句读数改成判断层触发, 不再带分/步预算那句', [
+  screen.includes('R.string.settings_explore_by_router'),
+  !screen.includes('R.string.settings_explore_budget'),
+], [true, true])
 
 /* ── 十四、工作区与读数 (2.7.9 T5) ─────────────────────────────────────── */
 

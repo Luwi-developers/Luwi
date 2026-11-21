@@ -656,9 +656,10 @@
     <string name="settings_sim_sticker_note">她自己攒的表情 (lw_sticker op=fetch) 与你在门户里加的都按这两条; 超过的单张, 或者多出来的那一张, 都会被拒</string>
     <string name="settings_explore_off">还没开</string>
     <string name="settings_explore_next">下一次 %1$s</string>
+    <string name="settings_explore_by_router">由她自己挑时机开</string>
     <string name="settings_explore_running">现在在跑 (到 %1$s 结束)</string>
-    <string name="settings_explore_toggle">按时间自己探索</string>
-    <string name="settings_explore_toggle_summary">到点自己开一场, 不用手动点</string>
+    <string name="settings_explore_toggle">允许她自己探索</string>
+    <string name="settings_explore_toggle_summary">她挑时机自己开一场, 不用手动点</string>
     <string name="settings_explore_at">每天几点开始</string>
     <string name="settings_explore_at_summary">每天 %1$s</string>
     <string name="settings_explore_at_dialog_summary">一天一次, 填 HH:mm (例如 03:00)</string>
@@ -739,7 +740,7 @@
     <string name="settings_proactive_rule_off">关着</string>
     <string name="settings_proactive_rules_blocked">最近被拦 (自动指令): %1$s · %2$s</string>
     <string name="settings_proactive_explore">下一次探索 %1$s · 上一次 %2$s</string>
-    <string name="settings_proactive_note">排期在 proactive-schedule.json, 改完立刻重排; 规则的正文在「自动指令」那一段改</string>
+    <string name="settings_proactive_note">主动开口由判断层挑时机, 不再按排期; 规则的正文在「自动指令」那一段改</string>
 
     <string name="settings_section_automation">自动指令</string>
     <string name="settings_section_automation_summary">满足条件就做一件事</string>

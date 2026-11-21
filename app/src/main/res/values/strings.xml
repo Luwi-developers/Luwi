@@ -657,9 +657,10 @@
     <string name="settings_sim_sticker_note">Both what she saves herself (lw_sticker op=fetch) and the ones you add here follow these two limits; anything bigger, or one sticker too many, is refused</string>
     <string name="settings_explore_off">Not scheduled yet</string>
     <string name="settings_explore_next">next %1$s</string>
+    <string name="settings_explore_by_router">She picks her own moment to start</string>
     <string name="settings_explore_running">running now (until %1$s)</string>
-    <string name="settings_explore_toggle">Explore on a schedule</string>
-    <string name="settings_explore_toggle_summary">It starts one by itself at that time; no tap needed</string>
+    <string name="settings_explore_toggle">Let her explore on her own</string>
+    <string name="settings_explore_toggle_summary">She starts one when she picks a moment; no tap needed</string>
     <string name="settings_explore_at">Start time</string>
     <string name="settings_explore_at_summary">Every day at %1$s</string>
     <string name="settings_explore_at_dialog_summary">Once a day, fill in HH:mm (e.g. 03:00)</string>
@@ -740,7 +741,7 @@
     <string name="settings_proactive_rule_off">off</string>
     <string name="settings_proactive_rules_blocked">Latest automatic block: %1$s · %2$s</string>
     <string name="settings_proactive_explore">Next exploration %1$s · last %2$s</string>
-    <string name="settings_proactive_note">The schedule lives in proactive-schedule.json and re-arms as soon as it changes; rule wording is edited under Automatic commands</string>
+    <string name="settings_proactive_note">She picks the moment to speak up now, no fixed schedule; rule wording is edited under Automatic commands</string>
 
     <string name="settings_section_automation">Automatic commands</string>
     <string name="settings_section_automation_summary">When something happens, do one thing</string>

@@ -144,7 +144,8 @@ check('精确档拿不到时退 setAndAllowWhileIdle (与另外两个闹钟同�
   /setExactAndAllowWhileIdle/u.test(schedule),
   /setAndAllowWhileIdle/u.test(schedule),
 ], [true, true])
-check('宿主服务起来就排上 (关着就撤)', /ProactiveSchedule\.ensure\(this\)/u.test(service), true)
+// 2026-11-21: 按时间的排期场已撤 —— 宿主服务起来不再排那个闹钟, 主动开口改由判断层挑时机
+check('排期闹钟不再注册 (主动开口改由判断层挑时机)', /ProactiveSchedule\.ensure\(this\)/u.test(service), false)
 check('清单里那个接收器 exported=false', new RegExp(
   '<receiver\\s+android:name="\\.tool\\.ProactiveAlarmReceiver"\\s+android:exported="false"\\s*/>',
 ).test(manifest), true)
@@ -215,7 +216,38 @@ check('收件箱那条 `source:proactive` 支排在命令表之前', [
   host.indexOf("line.source === 'proactive'") > 0,
   host.indexOf("line.source === 'proactive'") < host.indexOf('const automated = line.source'),
 ], [true, true])
-check('那一条支走 startProactive, 不碰命令表', /if \(line\.source === 'proactive'\) \{\s*return startProactive\(ctx, \{ text: line\.text, via: 'inbox' \}\)/u.test(host), true)
+// 2026-11-21: 排期场撤了 —— 老 `source:proactive` 行只是丢掉, 不再 startProactive
+check('那条支只丢弃老行, 不再走 startProactive', [
+  /if \(line\.source === 'proactive'\) \{\s*return \{ skipped: true/u.test(host),
+  /if \(line\.source === 'proactive'\) \{\s*return startProactive/u.test(host),
+], [true, false])
+
+/* ── 二·五、2026-11-21: 判断层开口双发 + 探索收尾顺带说 ───────────────── */
+
+const routerTickBody = host.slice(
+  host.indexOf('async function routerTick(ctx)'),
+  host.indexOf('/* ── 点「唤醒一下」那一下'),
+)
+check('判断层开口在场写 lw/out (门户+浮标同一份), 不再只发球的 reportSay', [
+  /if \(inBall\) \{[\s\S]{0,300}lwOutAppend\(voiceDelivery\.current, \{ kind: 'text', text: line \}\)/u.test(routerTickBody),
+  /reportSay\(line\)/u.test(routerTickBody),
+], [true, false])
+check('球不在场时开一场只按步数的探索, 收尾顺带说那句', [
+  /await startExplore\(ctx, \{ via: 'router', speakOnFinish: line \|\| opening \}\)/u.test(routerTickBody),
+], [true])
+const finishBody = host.slice(
+  host.indexOf('async function finishExplore('),
+  host.indexOf('/** 这一档现在什么样 (给 `lw_explore op=status`) */'),
+)
+check('探索收尾把判断层挑的那句写进本场 lw/out', [
+  /const speak = exploreRun\.speakOnFinish/u.test(finishBody),
+  /lwOutAppend\(finishing, \{ kind: 'text', text: speak \}\)/u.test(finishBody),
+], [true, true])
+check('speakOnFinish 跟着 run 落盘 / 恢复 / 复位', [
+  /exploreRun\.speakOnFinish = typeof options\?\.speakOnFinish === 'string'/u.test(host),
+  /exploreRun\.speakOnFinish = typeof run\.speakOnFinish === 'string'/u.test(host),
+  /exploreRun\.speakOnFinish = ''/u.test(host),
+], [true, true, true])
 
 /* ── 三、主动场固定新开 ───────────────────────────────────────────────── */
 

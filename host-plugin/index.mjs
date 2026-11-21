@@ -12221,10 +12221,10 @@ async function voiceDeliver(ctx, line) {
   if (line.source === 'wake') {
     return routerWakeNow(ctx)
   }
-  // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
-  // 不查浮标那本 30 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
+  // 按时间的主动对话排期已撤 (2026-11-21): 主动开口改由判断层挑时机, 排期场那一路不再存在.
+  // 老版本遗留的 `source:"proactive"` 行直接丢掉, 不按普通一句话走 (那会误开一场对话或切模式).
   if (line.source === 'proactive') {
-    return startProactive(ctx, { text: line.text, via: 'inbox' })
+    return { skipped: true, why: 'the scheduled proactive conversation was retired' }
   }
   // 先看它是不是一句命令 (批次 4.5): 是的话走 applyMode, 不进会话 —— 所以这一句既不插正在跑的那
   // 一轮, 也不开新对话, 更不理会 `line.wake`。命令是"对这台手机说的", 不是"对助手说的一句话"
@@ -13348,20 +13348,20 @@ async function routerTick(ctx) {
   const quota = routerCheckQuota(inputs.send)
   const opening = routerStartLine(decision, inputs.checks, inputs.checksSaid, quota)
   const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
-  if (decision.to === 'ball') {
-    const line = routerLine(decision)
-    if (line) {
-      if (inBall) reportSay(line)
-      // 球那一场不在 (冷启动 / 宿主刚起来): 走一场主动对话, 否则这句话没有落脚处
-      else await startProactive(ctx, { text: opening, via: 'router' })
-    }
+  const line = routerLine(decision)
+  if (inBall) {
+    // 球那一场在场 (2026-11-21): 那句话写进当前场的 lw/out —— 门户与浮标从同一份读到,
+    // 取代只往球那块只读区冒一句的 reportSay. 一行一 seq, 两端不会各画一遍
+    if (line) await lwOutAppend(voiceDelivery.current, { kind: 'text', text: line })
   } else {
-    await startProactive(ctx, { text: opening, via: 'router' })
+    // 球那一场不在 (冷启动 / 宿主刚起来): 开一场只按步数跑的探索, 收尾时把挑好的那句顺带说出来.
+    // 按时间的排期场已撤, 主动开口这一档并进探索 (2026-11-21)
+    await startExplore(ctx, { via: 'router', speakOnFinish: line || opening })
   }
-  // 直推只有一句, 所以那一条路只记一条; 开成对话才按 `quota` 派单记账
+  // 直推只写了一句, 开成探索才按 `quota` 派单记账
   await routerMarkSaid(decision, inBall ? { checkMessages: 1 } : quota)
   console.log(`luwi-channel: the router spoke (${decision.kind}: ${decision.brief})`)
-  return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
+  return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'explore' }
 }
 
 /* ── 点「唤醒一下」那一下 (2.8.1 #8 / #31) ───────────────────────────────────
@@ -14897,6 +14897,8 @@ const exploreRun = {
   stepLimit: 0,
   reminded: false,
   over: false,
+  // 判断层在球不在场时开的这一场, 收尾要顺带说出去的那句 (2026-11-21); 空 = 普通探索不说
+  speakOnFinish: '',
 }
 
 /** status 里 `effects` 那一格留几条: 看的是"刚才连点的那十几下", 不是整场的审计 */
@@ -15369,6 +15371,7 @@ async function exploreStateRestore() {
   exploreRun.stepLimit = Number(run.stepLimit) || EXPLORE_STEPS_DEFAULT
   exploreRun.reminded = run.reminded === true
   exploreRun.over = false
+  exploreRun.speakOnFinish = typeof run.speakOnFinish === 'string' ? run.speakOnFinish : ''
   return true
 }
 
@@ -15383,6 +15386,7 @@ function exploreReset() {
   exploreRun.stepLimit = 0
   exploreRun.reminded = false
   exploreRun.over = false
+  exploreRun.speakOnFinish = ''
 }
 
 /** 最新那一份摘要的路径 (没有就是空串) —— pc=start 那一段要把它交给模型 (persona 第 17 条) */
@@ -15708,6 +15712,10 @@ async function startExplore(ctx, options = {}) {
   exploreRun.stepLimit = stepLimit
   exploreRun.reminded = false
   exploreRun.over = false
+  // 判断层在球不在场时开的这一场: 收尾顺带说出去的那句, 跟着 run 一起落盘 (重启也接得回来)
+  exploreRun.speakOnFinish = typeof options?.speakOnFinish === 'string'
+    ? options.speakOnFinish.trim()
+    : ''
   await exploreStateWrite()
   try {
     await exploreSay(ctx, exploreStartLine(options?.text, exploreRun, summaryPath))
@@ -15943,6 +15951,8 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
   }
   const ended = exploreRun.over === true ? 'deadline' : exploreRun.reminded === true ? 'steps' : 'finish'
   const finishing = exploreRun.session
+  // 判断层在球不在场时开的这一场, 收尾要顺带说的那句: exploreWriteSummary 会 reset, 先留一份
+  const speak = exploreRun.speakOnFinish
   try {
     const saved = await exploreWriteSummary({
       summary,
@@ -15963,7 +15973,22 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     const rules = await exploreRulesWrite(args?.rules)
     exploreState.finished += 1
     console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
-    return { saved: true, ...saved, nextTask: task, checks, ...(rules === null ? {} : { rules }) }
+    // 判断层开的这一场: 收尾顺带把挑好的那句说进本场的 lw/out —— 门户与浮标同一份读到 (2026-11-21)
+    let spoke = ''
+    if (speak !== '') {
+      try {
+        const row = await lwOutAppend(finishing, { kind: 'text', text: speak })
+        spoke = String(row?.seq ?? '')
+        console.log(`luwi-channel: the router's closing line went out on ${finishing} (seq ${spoke})`)
+      } catch (error) {
+        console.warn(`luwi-channel: the router's closing line was not written: ${error?.message ?? error}`)
+      }
+    }
+    return {
+      saved: true, ...saved, nextTask: task, checks,
+      ...(rules === null ? {} : { rules }),
+      ...(spoke === '' ? {} : { spoke }),
+    }
   } finally {
     // ⑥ finish 走 finally: 摘要 / 写卡哪一步失败都不许把屏留下, 归还自己的错也不许盖掉摘要的答案
     await exploreReleaseScreens(ended, finishing)
