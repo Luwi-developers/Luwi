@@ -37,6 +37,8 @@ import { liveDirectory, liveFileName, readLiveSnapshot, LIVE_SNAPSHOT_VERSION } 
 import { TRANSCRIPT_DIR, readTranscriptEntries, transcriptDir } from './luwi-transcript.mjs'
 import { maskSecret, peerHeaders, peerUrlState, sameSecret } from './luwi-peer.mjs'
 import { readJsonBody, sendJson } from './panel-routes.mjs'
+// 2026-11-21 终端口径: 本机控制面 (send / peer-live) 只认回环, 见 lib/loopback.mjs
+import { LOOPBACK_ONLY_ERROR, isLocalRequest } from './loopback.mjs'
 
 /** 对端在线判据: 最近一次成功调用在这么久之内 (超过就报 unreachable, 但错误面照旧保留) */
 const REACHABLE_WINDOW_MS = 60_000
@@ -301,6 +303,9 @@ export function createPeerRuntime(deps) {
    */
   async function consumeInbox() {
     const id = ownDeviceId()
+    // 2026-11-21 终端: 队列是"下发指令"的第二条路 (HTTP 403 之后 send() 会退到队列) ——
+    // 不收指令的那一台连队列都不该消费, 否则 403 只是把它推到没闸的那条路上
+    if (spec !== null && spec.acceptSend !== true) return { delivered: 0, failed: 0, acks: 0, broken: 0, skipped: 'commands-off' }
     if (id === '') return { delivered: 0, failed: 0, acks: 0, broken: 0 }
     const { messages, broken } = await readInbox(inboxDirectory(deps.repoDir, id))
     if (messages.length === 0) return { delivered: 0, failed: 0, acks: 0, broken }
@@ -338,6 +343,11 @@ export function createPeerRuntime(deps) {
    * @returns {Promise<{ok: boolean, sessionId?: string, running?: boolean, error?: string}>} 结果。
    */
   async function receive(message) {
+    // 2026-11-21 终端: `acceptSend` 是**唯一**那道"收不收对端指令"的闸 —— 路由与队列两条路都过它。
+    // 只挡路由的话, send() 在 HTTP 403 之后会无声退到仓库队列, 而这一边 pull 下来照样执行
+    if (spec !== null && spec.acceptSend !== true) {
+      return { ok: false, code: 'COMMANDS_OFF', error: 'this host does not accept cross-device commands' }
+    }
     const text = typeof message?.text === 'string' ? message.text.trim() : ''
     if (text === '') return { ok: false, code: 'EMPTY_MESSAGE', error: 'the peer sent an empty message' }
     let sessionId = ''
@@ -784,6 +794,13 @@ export function createPeerRuntime(deps) {
         handler: async (req, res) => {
           const gate = authorize(req)
           if (gate !== null) return sendJson(res, gate.status, gate.body)
+          // 2026-11-21 终端口径: 这一台只由手机来管电脑. 控制器 (手机) 侧 acceptSend 缺省关,
+          // 于是电脑那边发过来的"在我这跑一句话"一律 403 —— 收不收指令与读不读会话是两件事,
+          // 所以它单独一档, 不复用 listen
+          if (spec.acceptSend !== true) {
+            state.lastError = 'a peer call was refused: this host does not accept cross-device commands'
+            return sendJson(res, 403, { ok: false, error: 'this host does not accept cross-device commands' })
+          }
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'peer/send is POST-only' })
           let body
           try {
@@ -801,27 +818,13 @@ export function createPeerRuntime(deps) {
         handler: async (req, res) => {
           // 本机界面读对端进行中的回答: 同源那一路, 令牌留在宿主里
           if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: '/luwi-sync/peer-live is GET-only' })
+          // 2026-11-21: 这条读面带"探一次对端"的副作用, 所以只认回环 (method 那一条先判, 与老读数一致)
+          if (!isLocalRequest(req)) return sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
           try {
             sendJson(res, 200, await peerLive())
           } catch (error) {
             sendJson(res, 200, { ok: false, error: messageOf(error), live: [] })
           }
-        },
-      },
-      {
-        kind: 'exact',
-        path: '/luwi-sync/send',
-        handler: async (req, res) => {
-          // 本机面板发起的发送: 同源 (浏览器) 那一侧, 令牌不出宿主
-          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '/luwi-sync/send is POST-only' })
-          let body
-          try {
-            body = await readJsonBody(req, 8192)
-          } catch (error) {
-            return sendJson(res, 400, { ok: false, error: messageOf(error) })
-          }
-          const answer = await send(body)
-          sendJson(res, answer.ok ? 200 : 502, answer)
         },
       },
     ]

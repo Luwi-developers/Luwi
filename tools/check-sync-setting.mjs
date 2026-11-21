@@ -54,7 +54,9 @@ const pluginKeys = new Set(
 for (const name of ['workspace', 'peer', 'branch', 'exclude', 'maxFileBytes', 'enabled', 'remote', 'root', 'repoDir', 'trashDir']) {
   pluginKeys.add(name)
 }
-for (const name of ['token', 'url', 'sendTimeoutMs', 'pollSeconds', 'listen', 'proxy']) pluginKeys.add(name)
+for (const name of ['token', 'url', 'sendTimeoutMs', 'pollSeconds', 'listen', 'proxy', 'acceptSend']) pluginKeys.add(name)
+// 2026-11-21 终端: 角色是顶层键 (`role`), 两侧各写一个
+for (const name of ['role']) pluginKeys.add(name)
 for (const name of ['maxEntries', 'maxChars', 'keepMinutes']) pluginKeys.add(name)
 // 2026-10-20: 扫码配对段 / 会话基线窗口 / 新的工作区配置面 (插件那一侧认它们)
 for (const name of ['pairing', 'v', 'id', 'at', 'from', 'sessions', 'currentWindowMinutes', 'maxFiles', 'maxBytes', 'slug']) {
@@ -103,7 +105,8 @@ check('对端那一组写在 peer 段里', [
   expectedPair.PEER_URL,
   expectedPair.PEER_LISTEN,
   expectedPair.PEER_PROXY,
-], ['peer', 'token', 'url', 'listen', 'proxy'])
+  expectedPair.PEER_ACCEPT_SEND,
+], ['peer', 'token', 'url', 'listen', 'proxy', 'acceptSend'])
 check('工作区那一根写在 workspace 段里', [
   expectedPair.WORKSPACE,
   expectedPair.WORKSPACE_REMOTE,
@@ -142,16 +145,17 @@ check(
   '插件把 peer / live 两段与 workspace 一样并进三层合并',
   [
     /config\.peer !== undefined/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
-    /resolvePeerSpec\(merged\.peer\)/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
+    // 2026-11-21 终端: 角色 (手机 / 电脑) 由 pairing 派生, 解析时要一起递进去
+    /resolvePeerSpec\(merged\.peer, \{ controller \}\)/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
     /resolveLiveSpec\(merged\.live\)/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
   ],
   [true, true, true],
 )
 
 check(
-  'peer 段认的键与设置页一致 (token / url / listen / proxy)',
-  ['token', 'url', 'listen', 'proxy'].map((key) => peer.includes(`raw.${key}`)),
-  [true, true, true, true],
+  'peer 段认的键与设置页一致 (token / url / listen / acceptSend / proxy)',
+  ['token', 'url', 'listen', 'acceptSend', 'proxy'].map((key) => peer.includes(`raw.${key}`)),
+  [true, true, true, true, true],
 )
 
 check(
@@ -224,17 +228,20 @@ check(
   [true, true],
 )
 
+// 那一段开头那句说明: 旧口径是"改完要重启 host 才生效", 现在写的是"首次拉取耗时较长…扫码即可配对"
+// (两句都只在 settings_sync_note 这一个键上) —— 判据钉"这一段有那句说明且两份 strings 都在",
+// 不再钉某一个早已换过的说法 (2026-11-20 之前这条一直是红的)
 check(
-  '改完要重启 host 那句话在段里 (那句话在两份 strings 里)',
+  '那一段开头的说明在 (settings_sync_note 两份 strings 都有, 段里也真引用了它)',
   [
-    zh.includes('重启 DSH host 才生效') && en.includes('restart the DSH host'),
+    zh.includes('name="settings_sync_note"') && en.includes('name="settings_sync_note"'),
     /PlaceholderItems\(stringResource\(R\.string\.settings_sync_note\)\)/u.test(screen),
   ],
   [true, true],
 )
 
 check(
-  '「同步」总开关在位: 默认关 / 设置页与顶栏菜单同一件事 / 关的时候三个自动值归零',
+  '「终端」总开关在位 (原「同步」, 2026-11-20 改名): 默认关 / 设置页与顶栏菜单同一件事 / 关的时候三个自动值归零',
   [
     // 数据面: 一个动作把"存地址 + 三个自动值归零"一起做完 (只清远端的话周期拉取还在跑, 白烧电)
     /fun setSyncOnIn\(file: File, on: Boolean\): String\?/u.test(setting),
@@ -248,6 +255,66 @@ check(
     /R\.string\.menu_sync\b/u.test(hostScreen) && /DshHost\.restart\(context\)/u.test(hostScreen),
   ],
   [true, true, true, true, true, true, true],
+)
+
+/* ── 六、终端口径: 只由手机管电脑 (2026-11-21, 落实表 #48) ───────────── */
+
+check(
+  '配对写盘把"手机这一侧"四件钉死: 不听 / 不收指令 / 工作区镜像关 / 投影仍开, 并写 role=phone',
+  [
+    /peer\[PEER_LISTEN_KEY\] = JsonPrimitive\(false\)/u.test(setting),
+    /peer\[PEER_ACCEPT_SEND_KEY\] = JsonPrimitive\(false\)/u.test(setting),
+    /peer\[PEER_PROXY_KEY\] = JsonPrimitive\(true\)/u.test(setting),
+    /root\[WORKSPACE_KEY\] = workspaceOff\(root\[WORKSPACE_KEY\]\)/u.test(setting),
+    /section\[WORKSPACE_ENABLED_KEY\] = JsonPrimitive\(false\)/u.test(setting),
+    // 2026-11-21: 角色显式落盘 —— 只靠 pairing 段会把生成码的电脑也判成手机
+    /root\[ROLE_KEY\] = JsonPrimitive\(ROLE_PHONE\)/u.test(setting),
+  ],
+  [true, true, true, true, true, true],
+)
+
+check(
+  '打开终端也不会把工作区镜像带回来 (setSyncOn 两个方向都写 workspaceOff)',
+  [
+    /next\[WORKSPACE_KEY\] = workspaceOff\(next\[WORKSPACE_KEY\]\)/u.test(setting),
+    // 老配置 (没有 acceptSend 键) 按"已配对 = 手机"推: 不听、不收指令
+    /val paired = pairedId\.isNotBlank\(\)/u.test(setting),
+    /peerAcceptSend = peer\?\.let \{ flag\(it, PEER_ACCEPT_SEND_KEY\) \?: !paired \}/u.test(setting),
+    /peerListen = peer\?\.let \{ flag\(it, PEER_LISTEN_KEY\) \?: !paired \}/u.test(setting),
+  ],
+  [true, true, true, true],
+)
+
+check(
+  '插件那一侧有对应的闸: 角色按显式 role 派生 + 入站 send 按 acceptSend 拒',
+  [
+    (await read('host-plugins/luwi-dsh-sync/index.mjs')).includes('const role = resolveRole({ role: merged.role, paired: pairing !== null, peerUrl: legacyPeerUrl })'),
+    /export function resolveRole\(input = \{\}\)/u.test(await read('host-plugins/luwi-dsh-sync/lib/luwi-peer.mjs')),
+    // 顶层 role 必须真的并进 merged (否则显式角色是死代码)
+    /if \(config\.role !== undefined\) merged\.role = config\.role/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
+    // 电脑那一侧保存/重新配对时把 role 写成 pc (否则它也会被当成手机)
+    /if \(nextRemote !== '' && patch\.role === undefined\) patch\.role = 'pc'/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
+    /acceptSend: mode === 'queue'/u.test(peer),
+    /spec\.acceptSend !== true/u.test(await read('host-plugins/luwi-dsh-sync/lib/luwi-peer-runtime.mjs')),
+    // 队列那条路也要过同一道闸 (send() 在 403 之后会退到队列)
+    /if \(spec !== null && spec\.acceptSend !== true\) \{/u.test(await read('host-plugins/luwi-dsh-sync/lib/luwi-peer-runtime.mjs')),
+    // 工作区镜像在控制器上整根关掉 (源 + 物化 + 名片三处)
+    /workspaceSources = controller \? \[\] : resolvedSources\.sources/u.test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
+    /if \(controller\) return \{ workspaces: \[\], brought: 0, updated: 0, trashed: 0, failed: 0, skipped: 'controller' \}/u
+      .test(await read('host-plugins/luwi-dsh-sync/index.mjs')),
+  ],
+  [true, true, true, true, true, true, true, true, true],
+)
+
+check(
+  '控制面只认回环 (面板写面 / 终端 / 本机发送 / peer-live 四条)',
+  [
+    /export function isLoopbackRequest\(req\)/u.test(await read('host-plugins/luwi-dsh-sync/lib/loopback.mjs')),
+    /if \(!isLocalRequest\(req\)\) \{/u.test(await read('host-plugins/luwi-dsh-sync/lib/panel-routes.mjs')),
+    /export function isLoopbackHostHeader/u.test(await read('host-plugins/luwi-dsh-sync/lib/loopback.mjs')),
+    /LOOPBACK_ONLY_ERROR/u.test(await read('host-plugins/luwi-dsh-sync/lib/luwi-peer-runtime.mjs')),
+  ],
+  [true, true, true, true],
 )
 
 /* ── 结果 ─────────────────────────────────────────────────────────────── */

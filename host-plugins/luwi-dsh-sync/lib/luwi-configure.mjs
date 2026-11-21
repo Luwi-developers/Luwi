@@ -36,6 +36,10 @@ export const KEYS = Object.freeze({
   PAIRING: 'pairing',
   WORKSPACE: 'workspace',
   SESSIONS: 'sessions',
+  // Luwi 加 (2026-11-21 终端): 这一台是哪一侧 (`phone` = 手机/控制器, `pc` = 被管的电脑)
+  ROLE: 'role',
+  // 2026-11-21 晚: P2P 传输段 (面板那颗开关写的就是这里的 enabled)
+  P2P: 'p2p',
 })
 
 /** 配对段里的键 */
@@ -254,6 +258,36 @@ export async function applyConfigure(file, patch) {
     changed.push(patch.pairing === null ? 'pairing = (cleared)' : `pairing.id = ${patch.pairing.id}`)
   }
 
+  // 2026-11-21 终端: 这一台是哪一侧。面板保存/重新配对时写 `pc` —— 手机那一侧由 App 扫码时写 `phone`
+  // (不能拿 `pairing` 判: 电脑生成码时也写那份)
+  if (Object.prototype.hasOwnProperty.call(patch, 'role')) {
+    const value = String(patch.role ?? '').trim().toLowerCase()
+    if (value !== 'pc' && value !== 'phone') return { ok: false, changed, error: 'role must be "pc" or "phone"' }
+    tree[KEYS.ROLE] = value
+    changed.push(`role = ${value}`)
+  }
+
+  // 2026-11-21 晚: P2P 那段只让面板改两个键 —— enabled (开/关) 与 binaryPath (非常规安装)。
+  // 其余档位 (power / 心跳 / 超时) 仍走 JSON 手写, 面板不替人做主
+  if (Object.prototype.hasOwnProperty.call(patch, 'p2p')) {
+    const next = patch.p2p
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) return { ok: false, changed, error: 'p2p must be an object' }
+    const section = sectionOf(tree, KEYS.P2P)
+    if (Object.prototype.hasOwnProperty.call(next, 'enabled')) {
+      if (typeof next.enabled !== 'boolean') return { ok: false, changed, error: 'p2p.enabled must be true or false' }
+      section.enabled = next.enabled
+      changed.push(`p2p.enabled = ${next.enabled}`)
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'binaryPath')) {
+      const raw = typeof next.binaryPath === 'string' ? next.binaryPath.trim() : String(next.binaryPath ?? '')
+      if (raw.length > 1024) return { ok: false, changed, error: 'p2p.binaryPath is longer than 1024 characters' }
+      if (raw === '') delete section.binaryPath
+      else section.binaryPath = raw
+      changed.push(raw === '' ? 'p2p.binaryPath = (auto)' : `p2p.binaryPath = ${raw}`)
+    }
+    tree[KEYS.P2P] = section
+  }
+
   if (Object.prototype.hasOwnProperty.call(patch, 'on')) {
     const value = patch.on
     if (typeof value !== 'boolean') return { ok: false, changed, error: 'on must be true or false' }
@@ -263,7 +297,7 @@ export async function applyConfigure(file, patch) {
   }
 
   if (changed.length === 0) {
-    return { ok: false, changed, error: 'nothing to change: pass remote, branch, publicUrl, workspace, sessions, pairing, autoPullOnStart, autoPushOnTurnEnd, pullIntervalMinutes or on' }
+    return { ok: false, changed, error: 'nothing to change: pass remote, branch, publicUrl, workspace, sessions, pairing, p2p, autoPullOnStart, autoPushOnTurnEnd, pullIntervalMinutes or on' }
   }
 
   // 目录可能还不存在 (全新机器上 lw/ 还没建)

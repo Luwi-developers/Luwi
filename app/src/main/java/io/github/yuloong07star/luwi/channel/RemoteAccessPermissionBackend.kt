@@ -24,6 +24,18 @@ interface RemoteAccessPermissionBackend {
     /** Whether this route could exist on this device at all */
     fun isAvailable(): Boolean
 
+    /**
+     * Whether this route may ask for its permission right now
+     *
+     * 与 [isAvailable] 是两个问题 (2.8.1 #30): 那个问"这条路在不在", 这个问"现在允不允许去要授权".
+     * 分成两句之前 root 的"在不在"是拿"有没有授权"答的, 于是没试过之前这条路真的不存在 —— 首启
+     * 不弹 su 保住了, 但主人在设置里点过开关之后也没有第二条路可走
+     *
+     * 缺省 false: 没有人表态的通道不自己开口. Shizuku 自己覆盖成"在那才问" —— 它有系统对话框,
+     * 要授权本来就是它的正常用法, 但它不在的时候问也只会回 false
+     */
+    fun canPrompt(): Boolean = false
+
     /** Whether everything needed to use it is already in place */
     fun isGranted(): Boolean
 
@@ -44,6 +56,28 @@ interface RemoteAccessPermissionBackend {
     }
 }
 
+/** What a route should do next, out of the three facts its backend can answer */
+internal enum class AccessStep { USE, ASK, SKIP }
+
+/**
+ * 「这条路在不在」与「现在能不能要授权」合成的那一步 (2.8.1 #30)
+ *
+ * 三条按序判: 已经有权限就直接用; 两个判断任一为假就不问 (首启那一声不响就是这一条 —— 没表态的
+ * root 既不"在", 也不许问); 其余只有一种 —— 去问.
+ *
+ * 两个判断拆开写而不是合成一句 `!available && !canPrompt`, 是因为"在但不许问"也该跳过: 那张表只要
+ * 有一格为假, 开口就没有理由
+ *
+ * **这张表 `tools/check-channel.mjs` 是真跑它的**: 每行条件与 `available` / `canPrompt` / `granted`
+ * 三个布尔是同一种写法, 脚本从这份源码里抽出来穷举 8 种组合, 所以改这里不必改脚本
+ */
+internal fun accessStep(available: Boolean, canPrompt: Boolean, granted: Boolean): AccessStep = when {
+    granted -> AccessStep.USE
+    !available -> AccessStep.SKIP
+    !canPrompt -> AccessStep.SKIP
+    else -> AccessStep.ASK
+}
+
 /**
  * root
  *
@@ -60,13 +94,24 @@ object RootAccessBackend : RemoteAccessPermissionBackend {
     override val backend = RemoteBackend.ROOT
 
     /**
-     * Only when the root manager has already said yes
+     * 这一拍允不允许 root 被问一次 (2.8.1 #30; 2026-11-19 改成按钮驱动)
      *
-     * 以前这里恒为 true: 反正没 root 的设备试一下也就失败了. 代价是**首启会弹一个 su 授权**,
-     * 而报告里第一条就是这个 (2.8.0 首装, 还没给任何权限就先问 root). root 对这个应用是可选
-     * 的加分项, 不该在没有用户表态之前去要: 用户真要用 root, 在设置里授权一次, 这里就变 true
+     * 由 [ChannelSetting.reprobe] 在**点「刷新状态」那一趟**置真, 问完立刻收回 —— 不落盘, 也就没有
+     * "开关开着一直问"这一档. 平时是 false, 首启一声不响仍然成立
      */
-    override fun isAvailable(): Boolean = rootState() == true
+    @Volatile
+    var optedIn: Boolean = false
+
+    /**
+     * 这条路在不在: 已经授权, 或者主人表态过要去要一次
+     *
+     * 以前这句只有 `rootState() == true` 那一半, 而那是"有没有授权", 不是"这条路在不在" —— 于是
+     * 没试过的机器上 root 根本不进 [PrivilegedChannel.ensure] 的循环, 点了开关也没人问 su
+     */
+    override fun isAvailable(): Boolean = rootState() == true || optedIn
+
+    /** 现在能不能要授权: 只看这一拍有没有人点过「刷新状态」 */
+    override fun canPrompt(): Boolean = optedIn
 
     /** What the root manager last decided, which is unknown until something has been run */
     override fun isGranted(): Boolean = rootState() == true
@@ -113,6 +158,9 @@ object ShizukuAccessBackend : RemoteAccessPermissionBackend {
         runCatching { Shizuku.pingBinder() }
             .onFailure { Log.w(TAG, "could not reach the Shizuku binder", it) }
             .getOrDefault(false)
+
+    /** Shizuku 在那儿就谈得上问它要授权; 不在的时候 `requestPermission` 本来也只回 false */
+    override fun canPrompt(): Boolean = isAvailable()
 
     override fun isGranted(): Boolean {
         if (!isAvailable()) return false

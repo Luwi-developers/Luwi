@@ -7,8 +7,10 @@
 // 两条口径在这里定死:
 //   · **只要回答**: 只认 user/message 与 assistant/message 的 text 块。reasoning 与 tool 的
 //     东西没有入口 —— reasoning 不是一种事件, 它只是 AssistantMessage.content 里的一个块,
-//     所以这里按块过滤; tool/call 与 tool/result 是别的事件类型, 直接不看。**一条回答里没有
-//     text 块时它不是回答** (只有工具调用或只有图片的那种), 不进 entries 也不顶掉前面说过的话
+//     所以这里按块过滤; tool/call 与 tool/result 是别的事件类型, **工具名与参数一个字都不进**。
+//     2026-11-21 加一档: 一轮里只有工具、没有文本时, 用工具**次数**造一行占位; 计划
+//     (`exit_plan_mode` 的 `plan`) 则把正文当这一轮的回答折出来 —— 否则手机上整轮空白
+//     (主人报的"没有收到回复": 319 条 assistant 里只有 1 条带文本, 其余全是工具)
 //   · **草稿不进日志**: entries 只收"已经落定"的东西 (user 一律收, assistant 只收那一轮
 //     已经落定的), 正在流的那一段进 draft。对端把这些 entries 追加进自己的投影会话
 //     (幂等), 而 draft 只在界面上看 —— 否则投影会话会随每一次流式分片长出一堆事件
@@ -51,12 +53,57 @@ export const LIVE_SNAPSHOT_VERSION = 2
 /** 没有版本号的快照按 v1 读 (老对端写的东西就是这个形状) */
 export const LIVE_SNAPSHOT_VERSION_LEGACY = 1
 
+/** 一轮的工具调用上限 (只为了给个数量, 不是业务上限) */
+const MAX_TOOL_TURNS = 9999
+
+/** 计划正文折进投影时的前缀 (2026-11-21 主人: "把 exit_plan_mode 的计划正文当回答文本折进投影") */
+export const PLAN_ANSWER_PREFIX = '（这一轮在电脑上给出了计划）\n\n'
+
+/** 计划正文最多折多少字 (再长就截断: 手机端一条气泡装不下几万字) */
+export const MAX_PLAN_ANSWER_CHARS = 8000
+
+/**
+ * 一轮只有工具、没有文字时的那句占位 (主人原话的形状)。
+ * @param {number} count - 这一轮跑了多少次工具。
+ * @returns {string} 占位正文。
+ */
+export function toolOnlyAnswer(count) {
+  const times = Number.isFinite(count) ? Math.max(0, Math.min(MAX_TOOL_TURNS, Math.trunc(count))) : 0
+  return `（这一轮在电脑上跑了 ${times} 次工具，没有文字回复）`
+}
+
+/**
+ * 从 `tool/call` 的 arguments 里取计划正文 (JSON 字符串, 坏了解析不出就当没有)。
+ * @param {unknown} raw - `data.arguments`。
+ * @returns {string} 计划正文 (空串 = 这次调用没带计划)。
+ */
+export function planAnswerOf(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return ''
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return ''
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
+  const plan = /** @type {Record<string, unknown>} */ (parsed).plan
+  if (typeof plan !== 'string') return ''
+  const text = plan.trim()
+  if (text === '') return ''
+  if (text.length <= MAX_PLAN_ANSWER_CHARS) return text
+  return `${text.slice(0, MAX_PLAN_ANSWER_CHARS)}…`
+}
+
 /**
  * 把一场会话的事件折成"条目 + 草稿" —— **不截窗口**。
  *
  * live 快照只留最近 N 条 (滚动窗口), 而方案文档 §5.4 的 `conv/` 对话账要的是**全部**已落定的
  * 条目: 对端离线一轮再回来时, 窗口可能已经滑过它的游标, 中间那段只有这本能补。两条口径同一份
  * 代码折 (见 [condense]), 不各写一遍
+ *
+ * 2026-11-21: 一轮**没有文本回答**时也要有条目 —— 否则手机端整轮空白 (主人报的"没有收到回复")。
+ * 计划那一档 (`exit_plan_mode` 的 `plan`) 优先, 否则落一行「这一轮在电脑上跑了 N 次工具」。
+ * 工具名与参数依旧一个字都不进 entries
  * @param {Array<{seq?: number, time?: number, type?: string, data?: unknown}>} events - 日志顺序的事件。
  * @param {{running?: boolean}} [options] - "这一场此刻在不在跑" (在跑则最后那一轮的回答进草稿)。
  * @returns {{entries: Array<{seq: number, role: string, text: string, at: number}>, draft: {seq: number, text: string}|null}} 全部条目与草稿。
@@ -72,9 +119,10 @@ export function collectLiveEntries(events, options = {}) {
    *
    * 用**桶**而不是 turn 号: 主路载体里根本没有 turn/end, 而 turn 号只说明"这条消息属于哪一步",
    * 拿它当轮号会随宿主的号重新起算而错位; 桶由"用户那句话"划界, 与日志顺序一一对上
-   * @type {Array<{seq: number, text: string, at: number, ended: boolean}>}
+   * @type {Array<{seq: number, text: string, at: number, ended: boolean, tools: number, plan: string, planSeq: number, altSeq: number, altAt: number}>}
    */
   const turns = []
+  const openBucket = () => ({ seq: 0, text: '', at: 0, ended: false, tools: 0, plan: '', planSeq: 0, altSeq: 0, altAt: 0 })
   for (const event of list) {
     if (event === null || typeof event !== 'object') continue
     const type = typeof event.type === 'string' ? event.type : ''
@@ -94,7 +142,7 @@ export function collectLiveEntries(events, options = {}) {
       const text = textOfContent(data.content)
       if (text === '') continue
       items.push({ seq, role: 'user', text, at })
-      turns.push({ seq: 0, text: '', at: 0, ended: false })
+      turns.push(openBucket())
       continue
     }
     if (type === 'assistant/message') {
@@ -104,23 +152,56 @@ export function collectLiveEntries(events, options = {}) {
       if (!saysText(message.content)) continue
       const text = textOfContent(message.content)
       // 没有开着的那一轮 (回答在自家开一轮之前的也算): 补一个匿名桶, 别把这段回答丢掉
-      if (turns.length === 0) turns.push({ seq: 0, text: '', at: 0, ended: false })
+      if (turns.length === 0) turns.push(openBucket())
       const turn = turns[turns.length - 1]
       turn.seq = seq
       turn.text = text
       turn.at = at
       continue
     }
+    if (type === 'tool/call') {
+      // 2026-11-21: 只数次数、只取计划正文; 工具名与参数绝不出这一层
+      if (turns.length === 0) turns.push(openBucket())
+      const turn = turns[turns.length - 1]
+      turn.tools += 1
+      turn.altSeq = seq
+      if (turn.altAt === 0) turn.altAt = at
+      const name = typeof data.name === 'string' ? data.name : ''
+      if (name === 'exit_plan_mode') {
+        const plan = planAnswerOf(data.arguments)
+        if (plan !== '') {
+          turn.plan = plan
+          turn.planSeq = seq
+        }
+      }
+      continue
+    }
+  }
+  /**
+   * 这一轮要落成的那段回答 (文本优先, 其次计划, 最后工具占位)。
+   * @param {{seq: number, text: string, at: number, tools: number, plan: string, planSeq: number, altSeq: number, altAt: number}} turn - 桶。
+   * @returns {{seq: number, text: string, at: number}} 回答 (text 空 = 这一轮没东西可落)。
+   */
+  const answerOf = (turn) => {
+    if (turn.text !== '') return { seq: turn.seq, text: turn.text, at: turn.at }
+    if (turn.plan !== '') return { seq: turn.planSeq !== 0 ? turn.planSeq : turn.altSeq, text: `${PLAN_ANSWER_PREFIX}${turn.plan}`, at: turn.altAt }
+    if (turn.tools > 0) return { seq: turn.altSeq, text: toolOnlyAnswer(turn.tools), at: turn.altAt }
+    return { seq: 0, text: '', at: 0 }
   }
   // 落定: 桶被 turn/end 收过, 或者**它后面还有一条主人自己的用户消息**(下一轮开了这一轮就落了),
   // 最后那个桶由 running 说话 (在跑 = 还在流, 进 draft)
   const answers = []
   let draft = null
   for (const [index, turn] of turns.entries()) {
-    if (turn.text === '') continue
+    const answer = answerOf(turn)
+    if (answer.text === '') continue
     const settled = turn.ended || index !== turns.length - 1 || !running
-    if (settled) answers.push({ seq: turn.seq, role: 'assistant', text: turn.text, at: turn.at })
-    else draft = { seq: turn.seq, text: turn.text }
+    if (!settled) {
+      // 还在跑的那一轮只有**真文本**进 draft (工具占位要等落定, 否则每次分片都要改一次投影)
+      if (turn.text !== '') draft = { seq: turn.seq, text: turn.text }
+      continue
+    }
+    answers.push({ seq: answer.seq, role: 'assistant', text: answer.text, at: answer.at })
   }
   const entries = [...items, ...answers].sort((left, right) => left.seq - right.seq || left.role.localeCompare(right.role))
   return { entries, draft }

@@ -41,7 +41,11 @@ class SyncSettingTest {
         // 对端那三个缺省: 通道默认开 (缺省值跟 DEFAULTS)、listen 与 proxy 也开
         assertTrue(snapshot.peerListen)
         assertTrue(snapshot.peerProxy)
+        // 2026-11-21: 没有配对段 = 这一台不是"手机那一侧", acceptSend 按电脑那一档 (true);
+        // 真配对之后由 applyPairing 写 false, 见下面那条用例
+        assertTrue(snapshot.peerAcceptSend)
         assertFalse("没有口令时通道是关的", snapshot.peerReady)
+        assertFalse("没配对时终端连不上", snapshot.terminalReady)
     }
 
     @Test
@@ -283,7 +287,7 @@ class SyncSettingTest {
     )
 
     @Test
-    fun `扫码配对把该写的写全, lw 与 workspace 一个字节都不动`() {
+    fun `扫码配对把该写的写全, lw 段一个字都不动`() {
         val root = dir()
         val target = file(root)
         target.writeText(
@@ -306,10 +310,50 @@ class SyncSettingTest {
         assertTrue(snapshot.autoPush)
         assertEquals("原来没有拉取间隔, 配对时补 15 分钟", 15, snapshot.pullInterval)
         assertEquals("Luwi 手机", snapshot.deviceName)
+        // 2026-11-21 终端口径: 配对那一刻就把"手机这一侧"钉死 —— 不听、不收指令、工作区镜像关
+        assertFalse("手机不听电脑的调用", snapshot.peerListen)
+        assertFalse("手机不收电脑下发的指令", snapshot.peerAcceptSend)
+        assertFalse("工作区不再同步到电脑", snapshot.workspaceOn)
+        assertTrue("终端能连上 (配对 + 通道 + 口令)", snapshot.terminalReady)
+        // 2026-11-21: 角色必须显式落盘 —— 只靠 `pairing` 段会把生成码的电脑也判成手机
+        assertTrue(
+            "扫过码的这一台要写 role=phone",
+            target.readText().contains("\"role\": \"phone\"") || target.readText().contains("\"role\":\"phone\""),
+        )
         val text = target.readText()
         assertTrue("lw 段一个字都不动", text.contains("savedRemote"))
-        assertTrue("workspace 段一个字都不动", text.contains("git://ws.git"))
+        assertTrue("workspace 的远端地址留着 (只是不启用)", text.contains("git://ws.git"))
         assertTrue("未知键留着", text.contains("futureKey"))
+    }
+
+    @Test
+    fun `老配置 (只有配对段, 没写 listen 与 acceptSend) 按手机那一侧读`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"remote":"https://github.com/me/sessions.git","paired":true,""" +
+                """"pairing":{"v":1,"id":"pair-00000001","at":1760000000000,"from":"书房 电脑"},""" +
+                """"peer":{"token":"0123456789abcdef","url":"http://100.64.0.7:3080"}}""",
+        )
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertTrue(snapshot.paired)
+        assertFalse("没写就是不听 (失败关闭)", snapshot.peerListen)
+        assertFalse("没写就是不收指令", snapshot.peerAcceptSend)
+    }
+
+    @Test
+    fun `打开终端也不会把工作区镜像带回来`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"remote":"https://github.com/me/sessions.git",""" +
+                """"workspace":{"remote":"git://ws.git","enabled":true}}""",
+        )
+        assertNull(SyncSetting.setSyncOnIn(target, true))
+        assertFalse("开终端只同步对话, 不带工作区", SyncSetting.snapshotOf(target).workspaceOn)
+        assertTrue("远端地址还在", SyncSetting.snapshotOf(target).workspaceRemoteSet)
+        assertNull(SyncSetting.setSyncOnIn(target, false))
+        assertFalse("关的时候同样不把工作区打开", SyncSetting.snapshotOf(target).workspaceOn)
     }
 
     @Test
@@ -322,7 +366,10 @@ class SyncSettingTest {
         )
         assertNull(SyncSetting.applyPairingIn(target, paired(peerToken = ""), now = 1L))
         val snapshot = SyncSetting.snapshotOf(target)
-        assertFalse("listen 是别人写的键", snapshot.peerListen)
+        // 2026-11-21: 配对**就是**要把这两个压成 false (手机不听、不收指令) —— 这里钉的是"压成了",
+        // 保留行为由下面那两个真不被碰的键 (`sendTimeoutMs` / 间隔 / 设备名) 钉
+        assertFalse("配对把 listen 压成 false (手机不听)", snapshot.peerListen)
+        assertFalse("配对把 acceptSend 压成 false (手机不收指令)", snapshot.peerAcceptSend)
         assertTrue("间隔已经填过就不覆盖", snapshot.pullInterval == 30)
         assertEquals("设备名已经起过就不覆盖", "我的手机", snapshot.deviceName)
         assertTrue("口令留空就沿用原来那一份", snapshot.peerToken.isNotEmpty())

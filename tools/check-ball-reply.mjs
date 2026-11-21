@@ -140,7 +140,8 @@ check(
 check('这一轮说过话就不再推 op=reply (球上不再多一句)', [
   host.includes('const saidLines = turnOutCount.get(session.id) ?? 0'),
   host.includes('if (saidLines === 0) {'),
-  host.includes("lwOutAppend(session.id, { kind: 'text', text: replyChannelText(speakable) })"),
+  // 宿主那一行拆成了多行 (2026-11-10 加 `atHint` 之后), 所以按形状认, 不按单行字面量认
+  /lwOutAppend\(\s*session\.id,\s*\{ kind: 'text', text: replyChannelText\(speakable\) \}/.test(host),
   !/const speakable = policy\.text\s*\n\s*reportReply\(/u.test(host),
 ], [true, true, true, true])
 check('lw_say 落行记一笔, 新一轮清零', [
@@ -165,6 +166,48 @@ check('回复之间只换行、不留空白行 (kept 用单 \\n 合并)', [
   /kept\.joinToString\("\\n"\)/.test(boxView),
   !/kept\.joinToString\("\\n\\n"\)/.test(boxView),
 ], [true, true])
+
+/* ── 五、唤醒那一句进气泡之前先过台词闸 (2.8.1 #31) ──────────────────────────── */
+//
+// 「唤醒一下」那一句也落在 `lw/out` 里, 由球那块框画出来 —— 于是"不能是被动应声"在这里也守一道:
+// 抽宿主那一段纯函数真跑, 池子 / 句式 / 兜底三处挑出来的句子一句都不许判被动
+
+const wakeAt = host.indexOf('const ROUTER_WAKE_TOPICS')
+const wakeEnd = host.indexOf('async function routerWakeNow', wakeAt)
+const dayAt = host.indexOf('function routerDayKey(now) {')
+const dayEnd = dayAt < 0 ? -1 : host.indexOf('\n}\n', dayAt)
+if (wakeAt < 0 || wakeEnd < 0 || dayAt < 0 || dayEnd < 0) {
+  console.error('FAIL the wake block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const wakeDayKey = new Function(`${host.slice(dayAt, dayEnd + 3)}\nreturn routerDayKey`)()
+const { wakeTopicFor, isPassiveOpener, ROUTER_WAKE_TOPICS } = new Function(
+  'routerDayKey',
+  `${host.slice(wakeAt, wakeEnd)}\nreturn { wakeTopicFor, isPassiveOpener, ROUTER_WAKE_TOPICS }`,
+)(wakeDayKey)
+const wakeNow = Date.parse('2026-11-19T21:00:00+08:00')
+const wakeState = {
+  checks: [
+    { id: 'c1', what: '开会前提醒', when: { kind: 'event', beforeMinutes: 30 }, enabled: true },
+  ],
+  checksSaid: {},
+}
+const wakeLines = []
+let wakeCursor = 0
+for (let i = 0; i < 12; i += 1) {
+  const one = wakeTopicFor(wakeState, [], wakeNow, wakeCursor)
+  wakeLines.push(one.text)
+  wakeCursor = one.cursor
+}
+for (let i = 0; i < 6; i += 1) wakeLines.push(wakeTopicFor({}, [], wakeNow, i).text)
+check('唤醒开场十二拍 + 空判断层六拍里没有一句被动应声', wakeLines.filter((one) => isPassiveOpener(one)), [])
+check('被动台词本身照样拦得住 (怎么了 / 嗯? / 在吗 / 短问句)', [
+  isPassiveOpener('怎么了?'),
+  isPassiveOpener('嗯? 叫我?'),
+  isPassiveOpener('在吗'),
+  isPassiveOpener('今天怎么样?'),
+  ROUTER_WAKE_TOPICS.includes('怎么了?'),
+], [true, true, true, true, false])
 
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)

@@ -159,16 +159,114 @@
   首次写 `permission.defaultPreset`); 气泡与浮层**只引 dsh 玻璃 token** (`--dsw-menu-surface-fill` /
   `--dsw-menu-backdrop-filter` / `--dsw-elevation-panel`); **待发附件行在文本区上面** (图/表情 64px 缩略 + `×`,
   非图 chip), **点表情只进待发栏** (`stageSticker`); 顶条不显示会话标题
+- **门户里换的模型 = 新会话的模型, 后台 dsh 发的图也画真图** (2026-11-20): 前者靠 dsh 那条
+  `selectModel` 把选择同时落成宿主默认 (`commands.ts` 改成 `await`, 2 s 上限) + 客户端 `select()` 成功后
+  `catalog.refresh()`; 门户自己再补一手 —— 落到**空白场**上时问一次 `remote.session.modelCatalog()`,
+  与 `modelState.current` 比过不一致就 `select(默认)` (纯函数 `blankModelNeedsDefault`), **非空白场永远
+  不拨**。后者: 浮球 / 原生界面发的图不过门户 `lw-in` stash, 落盘只剩 `attachment.attachmentId`,
+  门户走 `ctx.uiConversation.peekImageUrl / imageUrl` 取 blob URL 画, 取不到写「图没取到」, 单条最多
+  4 张 + 「+N 张图」; 判据 `check-luwi-portal` 第二十五 / 二十六节
+- **点发送必须看得见结果** (2.8.1 #33): 投出去先在本机占一行 (半透明 `pendingEcho`, 落盘那条 user 节点一到就让位,
+  15 s 不认就撤); `prompt()` 回 `{ok:false}` / 抛错改成时间线上一行红字 (`sendFails`, 与图片失败同一档) +
+  输入卡一句提示, **草稿只在这一刻还回去**; 发送钮三个监听器走 `sendGesture` (轻点 queue / 按住 550 ms steer,
+  一次按下只投一次); 判据 `check-luwi-portal` 第二十八节
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
-- **门户头栏**: 左身份 (头像 + 昵称, 整块点 = 开新对话), 右 **历史** + **`⋯` 更多** (判断 / 探索 进抽屉 `menu` 态,
-  顶上一行「‹ 返回」); 状态点是**头像右下角那颗** (`#lwp-busy`) 三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做**
-  (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`)
+- **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
+  **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,
+  屏上升起那条 **录音条** (`#lwp-rec`) —— **不是盖住半屏的大面板**: 它压住输入卡那一块再高出半截
+  (`left/right/bottom: 12px`, 高度 = `#lwp-card` 实测高 × **1.5**, `REC_PANEL_MAX 210` 封顶), 圆角 28;
+  第一行左「红点呼吸 + 松手转写，上滑取消」右「计时胶囊」, 第二行是走带波形;
+  **边缘是渐变不是硬边**: 面板上沿 `-webkit-mask-image` 22px 淡出, 波形左右两端各 9% 淡出
+  (mask 会裁掉外投影, 所以只留上沿 1px 内高光 + 顶部径向柔光 + 3.5% 噪点);
+  **帧循环必须起在 `voiceState = 'recording'` 之后** (`startRecPump()`, 2026-11-20 踩到的真因:
+  早起一帧时状态还是 `press`, pump 第一行就 `return` 且不再排帧 —— 症状正是"条不动");
+  **波形是走带式的, 不是一排等高柱子** (2026-11-20 重做, 读法照 wavesurfer 的 `scrollingWaveform`):
+  每 **40 ms** 折一列 `REC_SAMPLE_MS`, 窗口 **80 列**; 峰值 → `recNextHold` (保持 + 0.995 衰减) →
+  `recNormalise` (`ratio ** 0.6`, 低于 **0.02** 当静音) → **快起 0.6 / 慢落 0.12** → 入历史; 几何全在
+  `recWaveRects` (走带右对齐 / 条宽 **2** + 缝 **1** + 圆角帽 **1** + 最小高 **2**, 上下镜像于中线);
+  上色是缓存的一条竖直渐变 + 旧的往左淡出 + 右端柔光点, `roundRect` 没有就退 `fillRect`;
+  **上滑过 56 px 进"松开取消"态** (条下沉 8px + 退成中性灰 + 出现向下箭头 + 提示换「松开取消」),
+  松手丢弃并说一句「已取消」; 松手默认走转写 (条上换 **「正在转写…」+ 三个跳动点**), 文字接进草稿
+  (有字时前留一个空格, 光标到末尾)。条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
+  —— 手指还压在原来的输入框上, 换 DOM 会把抬手事件吞掉。**上滑要挡两次手**: ① 长按那 450 ms 里给输入框
+  写 `touch-action:none` (收手还原); ② 面板升起时挂 `touchmove` (`passive:false`) 现场 `preventDefault()`
+  —— 只做①不够: Chromium 在 `touchstart` 那一刻就定了这一趟是不是 pan, 后写的 `touch-action` 对当前手势无效,
+  症状是"按住再往上划 → 丢一发 `pointercancel` → 录音当场结束", 上滑取消那一路永远走不到。录音在**页面**
+  (`getUserMedia` + `ScriptProcessor`,
+  封 16 kHz 单声道 PCM16 wav, 上限 **60 s**), 转写在**应用** (`ui/PortalVoice.kt` → `LwSpeech.dispatch`,
+  引擎跟 `lw/voice-source.json`), 结果走 `PortalState.run` 回推 `__LUWI_PORTAL__.voice`; 桥是
+  `portalVoice` (status / ask / transcribe / cancel), **只答应不干活** (JavaBridge 线程上同步等一句话就是整页卡住);
+  麦克风授权那一问经 `PortalAsk.Target.MIC` 由 `HostScreen` 弹; 判据 `check-luwi-portal` 第二十四节 + `PortalVoiceTest`
+- **门户头栏**: 左 **头像 (28px, 热区就是头像, 点 = 历史窗)** + 昵称 (只是标识, 点不动), 右三颗装进
+  **`#lwp-tabs` 一簇、整簇 `margin-left:auto` 贴最右**: **自动朗读 (喇叭, 30x28 圆钮) → 终端 → `⋯`**
+  (2026-11-20: 原来「历史」的位置先给过麦克风, 按主人给的官方截图改成 **语音输出** —— 两颗图标两副形状:
+  **关 = 喇叭 + 斜杠**, **开 = 喇叭 + 两道声波**; 点一下翻的就是 设置 → 说话 → 「朗读回答」那一格
+  (`SpeakSettings.readAloud`, 一处状态两处界面), Toast 与图上逐字相同 **「已开启自动朗读」/「已关闭自动朗读」**,
+  宿主每轮念之前自己问 `speak op=status`, 所以**不必重启 host**; 桥是 `portalSpeak` (status / toggle)。
+  「同步」从抽屉搬上来并改名「终端」, **2026-11-21 起点它打开终端那一页** (不再翻开关, 开关只在设置页那一段),
+   文案与亮灯仍从原生清单来;
+  三颗从"跟着昵称走"改成"靠 ⋯"是对齐口径那次改的);
+  **`⋯` 抽屉里不再画「终端」那一行** (球菜单那一份仍是原生下拉, 那一行还在 —— 两份菜单从这一天起差一行,
+  是有意的) (判断 / 探索 进抽屉 `menu` 态, 顶上一行「‹ 返回」); 那颗「历史」胶囊 2026-11-19 已撤
+  (入口并进头像), 新对话走历史窗底部「开始新的对话」与首启自动那一场; **「已开新对话」是浮层**
+  (`#lwp-undo` = `position:absolute` + `z-index:2` + `pointer-events:none`, `top` 按头栏高度写) ——
+  出现与收起都不占排版, 中间的图文不往下移再弹回来; 状态点是**头像右下角那颗** (`#lwp-busy`)
+  三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做** (`data-state`, 判据 `phaseThinking()` 与 `flowMode === 'hero'`)
+- **终端那一页 = 手机管电脑** (2026-11-21, 2.8.1 #48): 门户头栏那颗「终端」/ 球菜单那一行都不再翻开关, 只打开这一页
+  (`ui/PortalTerminal.kt`: `open` 铺黑底 + 收起虚拟屏小窗, `status` 交一份不含口令的读数); 页面侧 `#lwp-root[data-mode="terminal"]`
+  **整页变黑**, 没连上电脑时只有「扫码配对 / 返回」两颗钮 (`terminalGateState` 六档); 终端里头像与名字**强制** `luwi` /
+  `luwi终端` (`applyIdentity` 那一段覆盖, 外观里的昵称与自拍都不进终端); 历史窗在终端里只列**电脑那几场**、普通历史里把那些
+  **排除掉** (`underShadow(cwd, shadowRoot)` + `historyRows(..., {mode})`), 两扇门互不串; 「新建」只在影子工作区
+  里开一场 (**只复用插件同步出来的影子工作区, 不自建** —— 页面拿不到对端 deviceId, 自建的目录会让归属方闸认不出工作区), 第一句话由插件的归属方闸按 `target:{kind:new}` 转给电脑
+  **进终端落哪一场 / 退出回哪一场** (2026-11-21 主人: "进入终端时打开1h内最近终端对话，没有要新建终端对话，返回时恢复门户对话"): `terminalEnter` 先看
+  是不是已经在电脑那几场里 (是就不动 —— 人可能刚从终端历史挑了更早的一场), 否则 `terminalRecentRow(rows, now, TERMINAL_RECENT_MS)` 取 **1 小时内 `updatedAt`
+  最大**那一场, **一场都没有才 `terminalNew({quiet:true})`** 新建 (静默那趟出的事走 `terminalNoteOnce`: 一分钟最多一句; 自动那趟 20 秒冷却, 人再点一次「终端」由 `setTerminal` 清 0);
+  窗口只决定自动落哪一场, 更早的仍在终端历史里; 退出走 `terminalRestore`: 返回点由 `terminalReturnFor` 定 (**屏上就是电脑那一场时绝不把那一场记成返回点**), 同时写进 `TERMINAL_KEY.back`,
+  页面重载 / 配对重启 host 之后由 `terminalReturnOf` 认回来 (**记成电脑那一场的老记录不认**); 落地判据是 `terminalLanded` ("画上了 且 mainView 不在电脑那一场", `switchTo` 的返回值只是"画得上"),
+  **补拍 250 ms × 20 (5 秒)**, 真换了场才 15 秒不跟账本; 进终端前门户还没落场时回 `landInDefaultWorkspace('back')`, 那 10 秒等不到的影子工作区在退出终端之后一律作废 (`terminalNew` 里两道 `!terminalMode` 的闸)。
+  **会话表那条跟随也两扇门互不串** (`listUnsub` 的 `sameKind`): 普通门户不跟电脑那几场, 终端里也不跟回手机那一场;
+  **`adopt` 不再把电脑那几场写进 `SESSION_KEY`** —— 记了之后重载 / 退出门户再进来门户会停在电脑那一场 (在终端里退出门户时, 只有 mainView 真在电脑那一场才切一次工作区: 影子场 `openSession` 留不住, 只切门)
+  **插件侧只有一个方向**: 手机 (扫码那台, `role:"phone"`) 写 `peer.listen=false` / `peer.acceptSend=false` / `workspace.enabled=false`; 电脑由面板写 `role:"pc"` — **别拿 `pairing` 判角色**, 电脑生成码时也写它
+  电脑不能再读也不能下发指令 (队列那条路同闸: `receive()` 也看 `acceptSend`); 手机的控制面 (`panel/op` · `/luwi-sync/send` · `/peer-live`) 只认**回环 + 回环 Host 头** (`lib/loopback.mjs` 的 `isLocalRequest`, 挡 DNS rebinding 与同机反代)
+  **2026-11-21 修整 (主人四条)**: ① 插件在 DSH 侧边栏那一行显示名改成 **`luwi终端`** (原「同步」), 同一插件里那枚**沙盒终端面板**
+  (在手机的 Linux 沙盒里跑命令: `luwi-term` 入口 + `POST /luwi-sync/term` + `lib/term-channel.mjs`) 与同步无关, 整条下线;
+  ② 「正在找电脑」那张卡**只许首探说一次** (`terminalGateState` 的 `firstProbe = busy && !(at > 0)`, 后续每一拍重探按上一次结论画 ——
+  探针 5/15 秒一拍, 之前每拍都翻面, 症状就是"弹窗反复闪"); ③ **进终端不显示门户对话**: `renderFlow` 在
+  `terminalMode && !isTerminalSession(sessionId)` 时清空并记 `TERMINAL_HIDDEN_SIG`, 样式那条
+  `#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}` 兜第一帧 (`markTerminalSession` 由
+  `renderMeta` / `applyTerminalMode` 各对一次, 退出终端时 `closeTerminal` 作废签名再画回来); ④ 插件的**登录 Luwi 账号 / 权益**
+  (`lib/luwi-license.mjs`、`sync-license.json`、`login-*` / `logout` / `license-refresh` 四个 op、P2P 到期闸) 整条删除 —— 它只给
+  P2P 供读数而 P2P 缺省关、手机侧从不启用 (`p2p-service` 的 `requirePlan` 注入点留着, 缺省恒放行)
+  **2026-11-21 晚 (插件 0.4.1)**: ① **账本写不进去的真因在 storage 的 schema**: `lib/domain.mjs` 的
+  `lastPushHead` 钉着 sha 正则, 而 2026-10-21 真机把它写成一整段 git 输出 → 整条 `state` 记录每次
+  `open/get/put` 都抛 `invalid-record`, 插件的账 (投影游标 / 基线) 从此静默停写; 现在这一格只校验 `string ≤ 4000`
+  (它只作诊断); ② **投影账本必须落盘**: `persistProxyState()` 整段包 try, storage 写 4 s 超时,
+  **无论成败都写** `<DSH_HOME>/lw/peer-ledger.json` (原子 rename), 失败走 `logger.error` + `peer.ledger` (面板 / `/sync doctor` /
+  `peerRefresh()` 都读得到); 同一 `localId` 的 `lastSeq/snapshotV/turnCounter` 只许前进 (重做投影那一路两条异步收尾的先后
+  不保证, 曾把 `snapshotV` 写回 1 → 下一轮再重做一次 → 一场变两场); ③ **重挂接管旧的那一场**: `reconcileProjections` 在
+  建投影之前跑 —— 账上的 `localId` 归档了先 `unarchiveSession`, 不见了就按「标题 + 影子目录」挑本机现存那份 (**人正开着的
+  优先**), 接管后游标对齐到它已有的 `peer-<seq>`, 同名副本归档; 账上那一条还活着时也顺手归档同名**投影**副本
+  (`peer-<seq>` 事件 > 0 的才收, 人自己开的会话不动), 历史窗里不再两行同名; `applyTranscript` **先确认会话存在再折**
+  (接管不成一个字节都不折、游标不动); ④ **没文本的轮也要有东西**: `lib/luwi-live.mjs` 数 `tool/call` 次数,
+  `exit_plan_mode` 的 `plan` 正文当这一轮的回答, 否则落一行「这一轮在电脑上跑了 N 次工具，没有文字回复」;
+  工具名与参数一个字都不进, `LIVE_SNAPSHOT_VERSION` **仍是 2** (升版本会再触发一轮"重做投影")
+  **2026-11-21 深夜 (0.4.2)**: ① **单向**: 方向由角色定死 —— 电脑 (`role:pc`) 仍听 (手机要读它的快照) 仍收指令
+  (手机管电脑), 但 **`proxy` 恒 false** (不再为手机会话建影子/投影); 面板那条「发给对端」与
+  `POST /luwi-sync/send` 整条下线 (手机那一侧不动); ② **P2P 缺省开** (`P2P_DEFAULTS.enabled = true`, 显式
+  `p2p.enabled:false` 才关), 面板 P2P 卡那颗开关走 `configure` 写回 JSON, 电脑 `native/win32-x64/lwiroh.exe`
+  与手机 APK 里的 `lib/arm64-v8a/liblwiroh.so` 各自解析, 缺 sidecar 退 git 并在卡/doctor 说明;
+  ③ **侧边栏不许无声消失**: 左座位先装、先摘旧注册 (HMR 重复 apply 会 `duplicate id`)、身体失败回滚图标,
+  失败 `console.warn`; 宿主写 `$DSH_HOME/lw/plugin-mount.json` (`mounted/disabledReason/routes/seats/peer/p2p`),
+  `withWebServer()` 拿不到服务时 `logger.error`, `/sync doctor` 打路由条数
+  判据 `check-luwi-portal` 第二十七节 + `check-terminal` (回环 / 角色 / 沙盒终端已下线 / 侧边栏显示名与左座位) + `check-sync-setting` 第六节,
+  方案 `docs/Luwi-终端-手机管电脑-方案-2026-11-21.md`
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
-- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 开发 / 触摸控制 / 同步 /
+- **前台不画浮球** (2026-11-14): 门户盖着时 `FloatingBall` 整个不画, 球菜单那几件 (虚拟屏 / 开发 / 触摸控制 / 终端 /
   酒馆 / 回到后台 / 反馈 / 设置) 由宿主 `ui/PortalMenu.kt` 出清单 (`portalMenu` / `portalMenuPick` 两条桥),
-  门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`); **回到 dsh 后台浮球自己回来**
+  门户 `⋯` 抽屉只负责画 (`renderMenuDrawer` / `renderScreenDrawer`) —— **唯一的例外是「终端」**: 它 2026-11-20
+  从抽屉上移到头栏, `PortalMenu.json` 里那一行照旧留着给球菜单, 抽屉跳过它; **回到 dsh 后台浮球自己回来**
   (`PortalState.open` 为假时画) —— 后台没有门户头栏, 那时球是唯一的门; **球菜单没有撤**, 两份语义逐条对齐
   (判据 `check-luwi-portal` 第十一节); 跨到界面的三件 (设置 / 酒馆 / 反馈) 走 `PortalAsk.pending` 由 `HostScreen` 消费;
   **`__LUWI_PORTAL__.show()` 里不再问 `portal.isOpen()`** —— 那个方法从没暴露在对象上, 一按就是 TypeError,
@@ -197,6 +295,15 @@
 - **返回键**: 后登记先赢, 由 `AppNav` 弹一层; 网页面板先问 `ui/PageBack.kt` (500 ms 没答就还给"再按一次退出");
   **别在 `HostScreen` 再登记 BackHandler**
 - **「正在想」由文件说了算**: `$DSH_HOME/lw/ball-phase.json` + `FileObserver`, 零轮询; **会话钩子必须带 `{ global: true }`**
+- **浮标那一场按"接着上一场"选, 换场是例外** (2026-11-20, 2.8.1 #35): **浮标那些话落在 `Luwi` 工作区** (`BALL_WORKSPACE_NAME` 从 `dsh-ball` 改成 `Luwi`, 与探索 / 主动场同一个目录; 老的 `dsh-ball` 目录留着不删, 只是不再往里投; 老账写着 `dsh-ball` 一律当没有)。窗口 `VOICE_SESSION_MS` **30 分钟**
+  (原 10 分钟), 而且窗口只有普通一句话受它管 —— **含 `这个` / `刚才` / `改成` 那类指代的话, 过了窗口也接着
+  上一场**, 上限 `VOICE_REFER_BACK_MS` 一天 (词表 `REFER_BACK_WORDS`; `refersBack` 子串命中)。账本
+  (`voice/session.json`) 的写法也改了: 不再只看"谁发的", 而是 **`origin === 'ball'` 一定写; `replyBox` 只在
+  "投的就是账本指的那一场"或"落点在浮标工作区 (`Luwi`) 底下"时写** —— 回复框里接着回的那一句要续期, 而框里挂着别
+  的 GUI 场时一个字节都不许动 (2.7.8 根因二仍在)。**门户每一句都 `portalBind`** (`client.js` 的 `send`,
+  `bound` 那道闸已拆): 只在第一句写的话, 门户里聊久了回浮标就换场。判据 `check-voice-inbox` 第 10/11/11c/15
+  节 + `check-luwi-portal` (窗口两边一致、`send` 里没有 `bound` 闸) + `check-auto-shot` 第五节;
+  方案 `docs/Luwi-浮标接着上一场-方案-2026-11-20.md`
 - **她说的话也由文件说了算** (方案 `docs/Luwi-对话层-最终方案-2026-11-08.md`): `lw_say` 唯一发言工具, 只写
   `$DSH_HOME/lw/out/<sessionId>.jsonl` (宿主单写者: `seq` 起时 tail 取 max / `at` 单调 / `gapMs` 按 `sim.json` 的
   `send` 段抽); 门户走 `PortalBridge.portalOut(id, next)` 两段水位, 浮球走 `tool/OutFile.kt` 读同一份 ——
@@ -211,9 +318,18 @@
   球换场先 `clearReplies`; **`BoxView.replies` 的 `inputType=TYPE_NULL` 会把换行压成空格, 必须 `setSingleLine(false)`**;
   回复之间**单换行**合并 (`kept.joinToString("\n")`)
 - **判断层的「唤醒一下」一点就说话** (2026-11-16, 2.8.1 #8): 那颗按钮投 `source:"wake"` (与闹钟那一拍 `router` 分开),
-  宿主那一支**一道判断闸都不看** (`routerWakeNow`); 先按 `ROUTER_WAKE_LINES` 轮转落一句应声进那一场的 `lw/out`
+  宿主那一支**一道判断闸都不看** (`routerWakeNow`); 先轮转落一句进那一场的 `lw/out`
   (3 s 内必见气泡, 连点不是同一句), 再开一场主动对话; 门户点完自己补 8 拍, 并照 `proactive.json` 的 `recent`
   把连点之间被 `run` 覆盖掉的那一场也补进来 (换场不清屏上已有的气泡); 判据 `check-luwi-portal` 第十七节
+- **那一句必须主动找话题, 不能是被动应声** (2026-11-18, 2.8.1 #31): 被动池 (`我在, 怎么啦?` / `嗯? 叫我?`)
+  整池撤掉, 换成 `wakeTopicFor` 从判断层里挑 —— `router.json` 的 `checks` (跳过 `enabled:false`, 今天说过的
+  `checksSaid` 沉底) 与 `wishes.json` 的未了的事依次排, 每件带 `source` (`usage` / `schedule` / `check` / `wish`),
+  挑中那件的原话带进 `「」` (`你之前提到的「开会前提醒」, 我还记着呢~`); 一件都没有才回 `ROUTER_WAKE_TOPICS`
+  那一池闲话 (`今天过得怎么样呀`, 不带问号); 轮转跨"话题 x 句式"两维; **台词闸** `isPassiveOpener` 拦下被动应答语
+  与光秃秃的短问句, 重选 3 次仍不合格才 `opener:"fallback"`; 开场正文 (`wakeStartLine`) 再把整张话题单子交给她并
+  点名不许回 `怎么了` / `嗯?`; 那一行落 `lw/out` 时带 `topicSource`, 门户透成气泡的 `meta.topicSource` /
+  `data-topic`; `router.json.wake` 记 `from` / `source` / `opener` / `what`; 判据 `check-luwi-portal` 第二十节
+  真跑那几段纯函数, `check-router` / `check-ball-reply` 各补一节
 - **时间线按轮排**: `orderTimeline` 把 user → 她的话 (按 seq) → error → 兜底 放同轮, 行按 `at` 归轮 (同毫秒算上一轮),
   缺时间的 user 沉底; 补句的 `at` 取 `event.time` (`lwOutAppend` 的 `atHint`); 判据 `tools/check-portal-order.mjs`
 - **余额两条触发**: ① 每轮结束覆盖缓存 (`seq: 0`, 只动 `balance.json` 不进框, 5 s 内不连刷); ② 点「看余额」: 上次那份
@@ -293,6 +409,34 @@
 
 - 全在 `host-plugin/index.mjs`, 现 74 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` /
   `lw_capabilities` / `lw_quickapp` / `lw_persona` …), 每个一次桥调用 (人格卡这类纯宿主读写不走桥)
+- **她自己的记忆是 `lw_memory`** (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`):
+  op = `add` / `list` / `profile` / `forget` / `boundary` / `mute` / `status`; 三层落 `$DSH_HOME/lw/memory/`
+  (`episodes.jsonl` 情节 / `profile.json` 画像 / `relation.json` 关系 —— 最后一份**宿主单写**, 她只能读),
+  他划的线落 `boundaries.json` (`hard: true` 的由 `lw_say` 硬拒, 所以 hard 那条至少 4 字, 免得把嘴堵上).
+  **写入前有一道隐私形状闸** (长数字串 / 金额 / 链接 / 验证码那类词一律拒收), 宿主从 `wishes.json` 自动补情节
+  也要过它; `forget` 会落墓碑 (`forgotten.json`), 否则下一轮宿主又把它补回来. 读那一面三档都放,
+  写那一面归写动 (`PROACTIVE_ACT_TABLE` 的 `['list', 'status']`)
+- **情感状态也是宿主算的** (`host-plugin/emotion/state.mjs`, 纯函数): 每轮 `turn/start` 落 `lw/memory/affect.json`,
+  对话场拼在 `{{lw_persona}}` 后面, 主动场走开场正文第 5 参; 四个维度 (valence / arousal / engagement / phase)
+  与共情策略都不调模型 —— 判据 `tools/check-emotion.mjs`
+- **「情绪与关系」那五格归门户判断面板** (2026-11-21, 2.8.1 #46, 方案 §9): `sim.json` 的 `affect` 段五键
+  `baseline` / `empathy` / `boundary` / `recall` / `honesty` (缺省 1 / 0 / 1 / 2 / 1), **只在判断面板多一组**
+  (`ACTIVITY_GROUPS` 收 `affect`, `SIM_GROUPS` 仍是四组 —— 设置页一个字节不改, 主人 2026-11-21 07:17 拍板 ③);
+  宿主 `affectSettingsOf(sim.affect)` 读同一套键, 三处生效: 缺省策略 (`empathy` 盖 `empathyPlanOf` 的 default 那支) /
+  召回预算 0·2·4·6 (`recall`) / 「今天的分寸」三句与边界条数 (`baseline` / `boundary`), 而 `honesty` 只在
+  **真的提到旧事时**附一句"这是记得的哪一句" —— 判据 `tools/check-sim.mjs` + `check-emotion.mjs` 第十一节.
+  两条界面口径 (主人 2026-11-21 定): **`recall = 0` (不提旧事) 时透明程度那一格置灰** (`MutedRow`, 摆灰字不给
+  下拉 —— 拨了不生效的格子比不摆更糟), **判断面板六组以上高度走 0.72 屏** (0.66 要滚两屏)
+- **她这一摊有离线审计** (2026-11-21, 2.8.1 #47): `node tools/lw-emotion-audit.mjs [--home DIR] [--since 7]
+  [--json] [--template]` 出六个数 (人格漂移 / 重复开场 / 追发率 / 透明引用率 / 策略分布 / 边界违规) 与
+  关系曲线, 只读文件不调模型; 策略分布读 `lw/memory/plans.jsonl` (宿主每**开成**一场主动对话补一行),
+  曲线读 `lw/memory/relation.jsonl` (**一天一行**: 换天补一行, 同一天只改写那一行), 两份都**只追加**、
+  同一条路径上的写入串行 (`host-plugin/emotion/ledger.mjs`), 写不动只 warn 不拖死这一场;
+  **读不到的读数是 `n/a` 不是 0** (`found` 那几个标记跟着 `--json` 出去), 追发只认主动开口那一侧、
+  他说的只认 `voice` / `keyboard` / `ball` 三种 source (门户正文不进那份账, 所以它是下界);
+  `--template` 打八维抽检骨架 (`--out <文件>` 才写盘, 缺省只打 stdout); **`--strict` 时有 `over` 就退 3**
+  (进发版闸用), 缺省恒 0 —— 它是量尺, 不替人拦 (主人 2026-11-21 定);
+  判据 `tools/check-emotion-audit.mjs` (夹具真跑)
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 白名单
@@ -348,6 +492,12 @@
   `POST https://api.deepseek.com/v1/tools/asr` (官方上限 **8 MiB / 120 s**, **没有语种参数**), 回来的那句话过
   `TranscriptClean` 再进收件箱; **令牌仍然只在宿主**, 设置页「唤醒」段两行可换 (本地 / 官方), 判据
   `tools/check-voice-asr.mjs` + `LwDeepseekAsrTest`
+- **账号令牌走 `x-dsh-auth-token`, 手填 Key 才走 `Authorization: Bearer`** (2026-11-20 真机定位): `/v1/tools/asr`
+  与 `/v1/tools/tts` 两条原先都写 `Authorization: Bearer`, 于是**登录着也一直 401**
+  (`Authentication Fails, Your api key: ****xxxx is invalid` —— 那串只是令牌尾 4 位, 与账号有效性无关);
+  上游 `llm-deepseek-account` 发给 `/anthropic` 的是 `x-dsh-auth-token` (`TOKEN_HEADER`), 同一枚令牌换这个头
+  TTS 直接 200 audio/wav、ASR 只剩请求体边界的 400。分档写在宿主一处 (`lwToolsAuthHeader`), 两条路由共用;
+  判据 `check-voice-asr.mjs` / `check-speak-engine.mjs` 各钉一侧 (账号那条**不许**再带 `Authorization`)
 - 慢的根因是 30 秒静音垫: 改上游处只有 `LW_ASR_PAD_SECONDS` (缺省 4 s); **mel 长度按 8 帧对齐**; **GLM 必须 `-O3`**
   (`-O0` 慢四十倍), 补在 `native/CMakeLists.txt`
 - 无障碍: `LwAccessibility` → `ui`/`tapText`, **取树没有 binder**; `getWindowsOnAllDisplays()`; 匹配从窄到宽, 去重后
@@ -389,8 +539,12 @@
 - 自动指令: 规则 `$DSH_HOME/automations/<名字>.json`; **没启用就不注册**; 事件驱动不回退 UsageStats 轮询; 「且/或」
   收 2~5 个叶子**不许嵌套**; 命中清新鲜标记 (**同一次只响一声**); 防骚扰: 静默 23:00-07:00 + 冷却 30 分钟 + 每天 5 次
 - **`task` 类直接执行** (总闸 `AutomationStore.Settings.allowActing` 与设置页那行已删, 旧 `settings.json` 里的键被忽略)
-- **探索没有手动开始**: 每天一个时刻 `AlarmManager` (requestCode 42) 投一句话, 卡由 `lw_explore op=finish` 的
-  `nextTask` 演进 (上限 8000 字); **省电不拦探索**; **宿主没跑就先 `startForegroundService` 拉起来再投**
+- **探索只由判断层触发, 没有开关也没有时刻** (2026-11-21 两次改口径): `judgeRouter` 判 `say=true` 且球不在场时,
+  宿主自己 `startExplore { via:'router' }`; 应用侧**没有**闹钟 / 自愈 / 补跑 / 总闸 (`ExploreAlarmReceiver` 已删,
+  `explore-schedule.json` 只剩 `steps` 与 `unlock` 两键)。**开场读卡**: 宿主 `readExploreTask` 每场读
+  `lw/explore-card.md` (卡由 `lw_explore op=finish` 的 `nextTask` 演进, 上限 8000 字) 当正文, 空卡才落"自由探索";
+  **预算只有步数**: 设置页那一格由宿主 `readExploreSchedule` 每场现读, 拨 10 步就只跑 10 步 (分钟只剩宿主内部
+  30 分钟看门狗); **省电不拦探索**; 屏锁着由探索自己在 `lw_lock op=unlock` 过「允许锁屏解锁」那道开关
 - **收尾写三样**: 摘要 / `nextTask` / `checks` —— `checks` 是"接下来盯什么", 最多 3 条 (**判法** `usage` / `time` /
   `event`), 宿主写进 `$DSH_HOME/lw/router.json`, 判断层当第三档候选 (分数 3); **默认要交**: 没有就在摘要
   `仍不确定的点` 写明为什么; 任务卡覆盖带尾注 `EXPLORE_CARD_TAIL`
@@ -492,12 +646,24 @@
 - 改 Kotlin 先 `:app:compileDebugKotlin`; 它**不跑 manifest merger**, 改依赖或 sdk 版本要 `assembleDebug`
 - **装机只走 `tools/lw-install.ps1`**: 流式 → 失败退"推上去 + `pm install -i`" → 回写无障碍与通知 → 等 `dsh web:` 就绪
 - **Luwi 在前台时 MIUI 拒装**: 先 `KEYCODE_HOME` 放后台再 `adb install -r -t -i com.miui.packageinstaller`, 不行连着重试
-  (第 3 次过)
+  (第 3 次过); **带 `-i` 反而更容易被 `INSTALL_FAILED_USER_RESTRICTED` 挡** —— 2026-11-20 起实测
+  **不带 `-i` 的 `adb install -r -t <apk>` 一次就过** (连试三次里必有一次), 两条路都失败才去开发者选项开「USB 安装」
+- **`packHostTree` 的 npm 走 npmjs, 不走 npmmirror** (2026-11-20): 用户 `~/.npmrc` 指着 npmmirror, 而镜像上
+  `@earendil-works/pi-schema` 只同步到 1.5.x, `pi-ai` 被解析到 1.6.0 后就要 1.6.0 的 schema → `ETARGET` 整树挂;
+  构建前先 `$env:npm_config_registry='https://registry.npmjs.org'` (同一台机器 npmjs 那条通, 只是慢)
 - 迭代: submodule 里提交 (同一步改 `third_party/deepseek-harness/patch.md`) → `pack-host.mjs` → `push-host.mjs` → 重启 app
 - 判据: `DshHost: dsh web:` = 树起来; `DshWebView: shell` 的 `rootChildren` 非 0 = 渲染; `LwMain: resumed with host Running`
   = 没重载
 - **出包前先删旧 APK**: `app/build/outputs/apk/<变体>/app-<变体>.apk` (发布包是 `release/app-release.apk`) ——
   打包任务会在旧包上原地改写留空洞
+- **新建的 git worktree 里 `jniLibs` 是空的** (2026-11-21 踩到): 24 个 `.so` (含 65 MB `libnode.so`) 是未跟踪的本地文件,
+  只存在于别的检出里; 不补这一目录, `:app:assembleDebug` 照样 BUILD SUCCESSFUL, 但 APK 里没有 `libnode.so`,
+  装机后 host 报 `node runtime is missing at …/lib/libnode.so`、整包起不来. 判据 `unzip -l <apk> | findstr libnode`
+- **工位里的 dsh 子模块与 `luwi-plugins` 要自己备** (2026-11-21): `git -c protocol.file.allow=always submodule update
+  --init third_party/deepseek-harness` (从别的检出 clone), 再在子模块里
+  `pnpm install --frozen-lockfile --config.registry=https://registry.npmjs.org --config.node-linker=hoisted`
+  (少了它会 `tsx` 找不到 `esbuild` / `tsc` 报 TS2554 退出); `copySeedAssets` 按「仓库根上级」找
+  `luwi-plugins/packages/*.lwp`, 工位不在 `D:\apk` 底下时用 `mklink /J` 补一个
 - **`packHostTree` 偶发原生崩溃**: `Client bundle` 那一步整个进程退 `3221226505` (`0xC0000409`), 那是原生
   bundler 一次从零打三百多个包时的偶发事 —— 同一棵树重跑就绿 (`run-gates` 10/10, 第二趟只补剩下的);
   `tools/pack-host.mjs` 只在原生崩溃码 / 信号上自动补跑一次, 脚本自己退的 1 不重试 (真红不许盖)

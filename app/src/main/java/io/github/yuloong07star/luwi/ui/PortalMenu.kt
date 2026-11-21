@@ -3,11 +3,9 @@ package io.github.yuloong07star.luwi.ui
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.widget.Toast
 import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.channel.PreviewControl
 import io.github.yuloong07star.luwi.channel.VirtualScreen
-import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.sync.SyncSetting
 import org.json.JSONArray
 import org.json.JSONObject
@@ -110,12 +108,13 @@ internal object PortalMenu {
             Item(
                 id = "sync",
                 title = context.getString(R.string.menu_sync),
-                summary = when {
-                    sync.syncOn -> context.getString(R.string.menu_sync_on)
-                    sync.resumableRemote.isNotBlank() -> context.getString(R.string.menu_sync_off)
-                    else -> context.getString(R.string.menu_sync_need_remote)
+                // 2026-11-21: 这一行不再翻开关, 点进去是**终端那一页** (手机管电脑); 开关仍归设置页
+                summary = if (sync.paired) {
+                    context.getString(R.string.menu_sync_paired, sync.pairedFrom.ifBlank { "PC" })
+                } else {
+                    context.getString(R.string.menu_sync_need_remote)
                 },
-                on = sync.syncOn,
+                on = false,
             ),
             // 公开构建 (LuwiTavern.enabled = false) 就没有这一行, 与球菜单同一个口径
             Item(
@@ -146,7 +145,7 @@ internal object PortalMenu {
             id == "touch" -> PreviewControl.set(context, !PreviewControl.allowed)
             // 页面那一行「开发」(排在探索下面) 走这里: 落一个掷标, 由 HostScreen 弹原生面板
             id == "dev" -> PortalAsk.ask(PortalAsk.Target.DEV)
-            id == "sync" -> toggleSync(context)
+            id == "sync" -> PortalTerminal.open(context)
             id == "tavern" -> PortalAsk.ask(PortalAsk.Target.TAVERN)
             // 与球菜单那一条同一句: 方向由页面报上来的 `PortalState.open` 决定
             id == "portal" -> PortalState.run?.invoke(
@@ -161,25 +160,8 @@ internal object PortalMenu {
         }
     }
 
-    /**
-     * 同步那一个开关: 与设置页那一段是同一件事 (`session-sync.json` 里配没配远端)
-     *
-     * 插件是**挂载时**读配置的, 所以这一下必须顺带重启 host; 没地址可填就把人送到设置页那一段去填
-     */
-    private fun toggleSync(context: Context) {
-        val wanted = !SyncSetting.snapshot(context).syncOn
-        val problem = SyncSetting.setSyncOn(context, wanted)
-        if (problem == null) {
-            val word = context.getString(
-                if (wanted) R.string.menu_sync_switched_on else R.string.menu_sync_switched_off,
-            )
-            Toast.makeText(context, word, Toast.LENGTH_LONG).show()
-            DshHost.restart(context)
-        } else {
-            Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
-            PortalAsk.ask(PortalAsk.Target.SETTINGS)
-        }
-    }
+    // 2026-11-21: 这里原来那个 `toggleSync` 撤了 —— 终端那一行改成"打开终端那一页",
+    // 开关本身只在设置页那一段翻 (改完仍要重启 host 才生效, 那一段自己会做)
 
     private fun encode(items: List<Item>): String {
         val array = JSONArray()

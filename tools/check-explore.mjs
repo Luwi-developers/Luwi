@@ -87,11 +87,19 @@ function hostSet(name) {
 
 const ROUTER_HOME_PACKAGES = hostSet('ROUTER_HOME_PACKAGES')
 
+/**
+ * 点按效果那几样也在那一段外面 (落实表 #32 / #37: 账与"连着几条算停"写在点按那一层), 同样手递
+ *
+ * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发".
+ * #37 起它数的是连着几条 `recover=giveup` (不再是 unchanged), 刹车那一档仍数 unchanged
+ */
+const TAP_EFFECT_STREAK = 2
+
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
-  'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES',
+  'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES', 'TAP_EFFECT_STREAK', 'tapEffectLog',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
-    + ' exploreCheckRow, EXPLORE_CARD_TAIL,'
+    + ' exploreCheckRow, exploreStepsFrom, exploreTaskText, EXPLORE_CARD_TAIL,'
     + ' exploreMemoryLimit, exploreMemoryText, exploreMemoryIntent, exploreMemoryOpen,'
     + ' exploreMemoryStep, exploreMemoryFor, exploreMemoryHint, exploreMemoryCounts,'
     + ' exploreMemoryStatus, exploreMemoryEffect, exploreMemoryTapText,'
@@ -106,10 +114,11 @@ const api = new Function(
     + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
     + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
-    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
+    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE,'
+    + ' EXPLORE_EFFECTS_KEPT, exploreEffectsFor, exploreEffectReason }',
 )(
   () => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {},
-  async () => {}, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES,
+  async () => {}, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES, TAP_EFFECT_STREAK, [],
 )
 
 check('event 缺省 15 分钟, 这一侧与宿主那一个数一致', [
@@ -346,7 +355,7 @@ check('工具说明里写清"宿主自己按排期开, 这条工具不开"', [
   toolFace.includes('never starts one') || toolFace.includes('never starts'),
   toolFace.includes('daily start time'),
 ], [true, true])
-check('工具数的下限抬到 66', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 66)
+check('工具数的下限抬到 67 (2.8.1 #45 加了 lw_memory)', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 67)
 
 /* ── 八、文件与键名 ───────────────────────────────────────────────────── */
 
@@ -463,6 +472,7 @@ const schedule = await read('app/src/main/java/io/github/yuloong07star/luwi/tool
 const manifest = await read('app/src/main/AndroidManifest.xml')
 const service = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
 const screen = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt')
+const portalBridge = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalBridge.kt')
 const initialCard = await read('explore-card.md')
 
 check('初始卡就是那一场画像探索 (主人 2026-10-17 点名)', [
@@ -489,22 +499,27 @@ check('卡是原子写 (tmp + rename, 单写者)', [
   /tmp\.renameTo\(target\)/.test(task),
 ], [true, true])
 
-check('排期: 每天一个时刻 / 缺省 03:00 / requestCode 42', [
-  /const val DEFAULT_AT = "03:00"/.test(schedule),
-  /private const val REQUEST = 42/.test(schedule),
-  /fun nextAt\(at: String, now: Long/.test(schedule),
-  /fun dueOf\(enabled: Boolean, hostRunning: Boolean, running: Boolean\): Due/.test(schedule),
-], [true, true, true, true])
+// 2026-11-21 二改: 探索只由判断层触发, 应用这一侧的排期整套 (时刻 / 42 号闹钟 / 自愈 / 补跑 / 清单登记)
+// 全部删掉 —— 留着任何一个都是"还有第二条路能把探索开起来"
+check('探索没有排期了 (无时刻 / 无 42 号闹钟 / 无自愈与补跑)', [
+  !/DEFAULT_AT/u.test(schedule),
+  !/REQUEST = 42/u.test(schedule),
+  !/fun nextAt\(/u.test(schedule),
+  !/fun dueOf\(/u.test(schedule),
+  !/fun arm\(/u.test(schedule),
+  !/fun ensure\(/u.test(schedule),
+  !/ensureIfStale|ensureCatchUp/u.test(schedule),
+  !/catchUpLateMs/u.test(schedule),
+  !/ExploreAlarmReceiver/u.test(schedule),
+], [true, true, true, true, true, true, true, true, true])
 
-check('宿主不在就叫醒它 (2.8.0 #9): 到点先拉宿主, 不再只记 skipped', [
-  /enum class Due \{/.test(schedule),
-  /WAKE_HOST,/.test(schedule),
-  // 2026-11-07: 签名多了 onStarted —— 服务**真的开始启动**之后广播才松手, 返回的也不再是裸 boolean
+check('叫醒宿主那一段还在 (判断层那一拍与门户「唤醒一下」共用它)', [
+  // 2026-11-07: 签名多了 onStarted —— 服务**真的开始启动**之后调用方才松手
   /fun wakeHost\(\s*context: Context,\s*timeoutMs: Long = HOST_WAIT_MS,\s*onStarted: \(\(\) -> Unit\)\? = null,\s*\): HostWake \{/u.test(schedule),
   /DshHostService\.start\(context\)/.test(schedule),
-  /if \(due == Due\.WAKE_HOST\) \{/.test(schedule),
   /const val HOST_WAIT_MS = 180_000L/.test(schedule),
-], [true, true, true, true, true, true])
+  !/Due\.WAKE_HOST/u.test(schedule),
+], [true, true, true, true])
 
 check('广播松手排在 startForegroundService 之后 (2026-11-07: 后台起 FGS 的豁免挂在广播上)', (() => {
   const start = schedule.indexOf('DshHostService.start(context)')
@@ -512,27 +527,21 @@ check('广播松手排在 startForegroundService 之后 (2026-11-07: 后台起 F
   return start >= 0 && lastHandOff > start
 })(), true)
 
-check('探索不再被省电拦: 跳过只剩宿主与上一场, 省电只进读数', [
-  !/fun dueOf\(enabled: Boolean, hostRunning: Boolean, powerSave: Boolean, running: Boolean\)/.test(schedule),
-  /val due = dueOf\(\s*enabled = true,\s*hostRunning = DshHost\.status is HostStatus\.Running,\s*running = ExploreTask\.running\(context, now\) != null,\s*\)/u.test(schedule),
-  /省电模式里照常开了/.test(schedule),
-  /设备在深度省电 \(Doze\) 里, 网络可能要等维护窗口/.test(schedule),
-  /isDeviceIdleMode\(\)/.test(schedule),
-], [true, true, true, true, true])
+// 2026-11-21 二改: 省电那一道闸与"到点那一趟"整段都不在应用这一侧了 —— 只剩宿主那条路按读数处理
+check('省电不拦探索 (2026-10-26 口径, 现在只有宿主那一侧还有读数)', [
+  !/powerSave/u.test(schedule),
+  /async function explorePowerSave\(\)/u.test(host),
+  section.includes('省电只当读数'),
+], [true, true, true])
 
-check('到点那几件事都在: 读卡 / 写收件箱 / 记 last', [
-  /ExploreTask\.read\(context\)/.test(schedule),
-  /VoiceInbox\.append\(\s*context,\s*text,\s*source = VoiceInbox\.SOURCE_EXPLORE/u.test(schedule),
-  /save\(context, current\.copy\(last = Last\(now, "skipped", why\)\)\)/.test(schedule),
-  /save\(context, current\.copy\(last = Last\(now, "started", why\)\)\)/.test(schedule),
-], [true, true, true, true])
-
-check('排期配置文件: lw/explore-schedule.json + 三个读数键', [
+check('排期文件只剩两格 (步数 / 解锁), 老键一个都不再写', [
   /const val FILE = "explore-schedule.json"/.test(schedule),
-  schedule.includes('put("enabled", plan.enabled)'),
-  schedule.includes('put("outcome", last.outcome)'),
-  schedule.includes('put("why", it)'),
-], [true, true, true, true])
+  schedule.includes('put("steps", clamp(plan.steps, STEPS_RANGE))'),
+  schedule.includes('put("unlock", plan.unlock)'),
+  !schedule.includes('put("enabled"'),
+  !schedule.includes('put("minutes"'),
+  !schedule.includes('put("last"'),
+], [true, true, true, true, true, true])
 
 /*
  * 保活那三件 (2026-11-07): 到点叫醒了却跑不完 / 漏一次就永久停 / 看不出卡在哪一层
@@ -542,57 +551,56 @@ check('排期配置文件: lw/explore-schedule.json + 三个读数键', [
 const keepAlive = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwSessionLock.kt')
 const engine = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationEngine.kt')
 
-check('投出去之后按会话锁 (熄屏 CPU 不 suspend, 那一场才跑得完)', [
+check('会话锁本身还在, 探索那一侧不再按它 (排期那趟才是按锁的地方)', [
   /fun hold\(context: Context, tag: String, timeoutMs: Long\): Long/.test(keepAlive),
   // 一定带超时: 忘掉的锁不该变成电量黑洞
   /acquire\(budget\)/.test(keepAlive),
   /const val SLACK_MS = 10 \* 60_000L/.test(keepAlive),
-  /LwSessionLock\.hold\(/.test(schedule),
-  /current\.minutes \* 60_000L \+ LwSessionLock\.SLACK_MS/.test(schedule),
-], [true, true, true, true, true])
-
-check('心跳里自愈 + 收尾放锁 (闹钟丢了自己补排, 一场跑完就放手)', [
-  /fun ensureIfStale\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
-  /if \(armedAt == next\) return/.test(schedule),
-  /ExploreSchedule\.ensureIfStale\(context, now\)/.test(engine),
-  /LwSessionLock\.reconcile\(/.test(engine),
+  !/LwSessionLock\.hold\(/u.test(schedule),
 ], [true, true, true, true])
 
-check('错过那一场能补跑 (八小时窗口, last 之后没跑过才算漏)', [
-  /const val CATCH_UP_WINDOW_MS = 8 \* 60 \* 60_000L/.test(schedule),
-  /fun catchUpLateMs\(/.test(schedule),
-  /if \(lastAt >= dueAt\) return null/.test(schedule),
-  /lateMs\?\.let \{ "补跑/.test(schedule),
-  // 补跑挂在心跳上: 漏掉的那一次不会再有闹钟来叫 (只写在 fire 里等于永远轮不到)
-  /fun ensureCatchUp\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
+// 2026-11-21: 探索不再按时间自愈/补跑闹钟 (改由判断层挑时机), 心跳只留会话锁收尾
+check('心跳只收尾会话锁, 不再自愈/补排探索闹钟', [
+  /ExploreSchedule\.ensureIfStale\(context, now\)/.test(engine),
   /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
-], [true, true, true, true, true, true])
+  /LwSessionLock\.reconcile\(/.test(engine),
+], [false, false, true])
+
+// 2026-11-21 二改: 那套补跑纯函数与闹钟一起删了, 不再"留着当死代码"
+check('错过那一场不再补跑 (探索改由判断层触发, 那套纯函数已删)', [
+  !/ensureCatchUp|catchUpLateMs/u.test(schedule),
+  /ExploreSchedule\.ensure\(this\)/.test(engine),
+], [true, false])
 
 check('宿主停掉时把会话锁放掉 (onTaskRemoved 顺手校一遍两个闹钟)', [
   /LwSessionLock\.releaseAll\(\)/.test(service),
   /override fun onTaskRemoved\(rootIntent: Intent\?\) \{/.test(service),
 ], [true, true])
 
-check('接收器在清单里且 exported=false', [
-  /<receiver\s+android:name="\.tool\.ExploreAlarmReceiver"\s+android:exported="false" \/>/u.test(manifest),
-], [true])
-
-check('宿主起来时两个 ensure 都调', [
-  /ExploreTask\.ensure\(this\)/.test(service),
-  /ExploreSchedule\.ensure\(this\)/.test(service),
+check('探索那个闹钟广播已从清单摘掉 (42 号不再有人 arm)', [
+  !/<receiver\s+android:name="\.tool\.ExploreAlarmReceiver"/u.test(manifest),
+  !/ExploreAlarmReceiver/u.test(schedule),
 ], [true, true])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限 (2026-11-07 起这一段并进「活动」)', [
+// 2026-11-21: 探索不再按时间排闹钟 —— 宿主起来只 ensure 任务卡, 不再 ensure 探索闹钟
+check('宿主起来只 ensure 探索任务卡, 不再排探索/主动对话闹钟', [
+  /ExploreTask\.ensure\(this\)/.test(service),
+  /ExploreSchedule\.ensure\(this\)/.test(service),
+  /ProactiveSchedule\.ensure\(this\)/.test(service),
+], [true, false, false])
+
+check('设置页那段: 解锁 / 步数 / 卡 / 读数, 没有开关 / 时刻 / 分钟 / 手动开始', [
   /settingsSection\(\s*key = "activity"/u.test(screen),
-  screen.includes('R.string.settings_explore_toggle'),
-  screen.includes('R.string.settings_explore_at'),
+  !screen.includes('R.string.settings_explore_toggle'),
+  screen.includes('R.string.settings_explore_by_router'),
   screen.includes('R.string.settings_explore_card'),
   screen.includes('ExploreSchedule.save('),
   screen.includes('ExploreTask.write('),
+  !screen.includes('R.string.settings_explore_at'),
+  !screen.includes('R.string.settings_explore_minutes'),
   !screen.includes('settings_explore_start'),
-  !screen.includes('settings_explore_said_title'),
   !screen.includes('saidLimit'),
-], [true, true, true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true, true, true])
 
 check('构建把初始卡拷进 assets', (await read('app/build.gradle.kts')).includes('projectDirectory.file("explore-card.md")'), true)
 
@@ -605,41 +613,54 @@ check('status 那两行读数换了账本 (每日总上限 2.8.0 起取消, 不�
 
 /* ── 十三、预算透传 (2.7.9 第 8 条 T4) ─────────────────────────────────── */
 
-check('排期文件写的是 minutes / steps 两个键 (应用这一侧单写者)', [
-  schedule.includes('put("minutes",'),
+check('排期文件只写步数与解锁 (分钟那一路 2026-11-21 撤了)', [
+  !schedule.includes('put("minutes",'),
   schedule.includes('put("steps",'),
-], [true, true])
-check('读回来也认这两个键 (认不出来落缺省)', [
-  schedule.includes('root["minutes"]'),
+  schedule.includes('put("unlock", plan.unlock)'),
+], [true, true, true])
+check('读回来也只认这两格 (认不出来落缺省)', [
   schedule.includes('root["steps"]'),
-  /const val MINUTES_DEFAULT = 30/.test(schedule),
+  schedule.includes('root["unlock"]'),
   /const val STEPS_DEFAULT = 60/.test(schedule),
+  !/MINUTES_DEFAULT/u.test(schedule),
 ], [true, true, true, true])
-check('应用与宿主的缺省 / 范围是同一对 (差一个数就是"设置页写的不是宿主认的")', [
-  Number(/const val MINUTES_DEFAULT = (\d+)/.exec(schedule)[1]),
+check('应用与宿主的步数缺省 / 范围是同一对 (差一个数就是"设置页写的不是宿主认的")', [
   Number(/const val STEPS_DEFAULT = (\d+)/.exec(schedule)[1]),
-  Number(/val MINUTES_RANGE = 1\.\.(\d+)/.exec(schedule)[1]),
   Number(/val STEPS_RANGE = 1\.\.(\d+)/.exec(schedule)[1]),
 ], [
-  api.EXPLORE_MINUTES_DEFAULT,
   api.EXPLORE_STEPS_DEFAULT,
-  api.EXPLORE_MINUTES_RANGE[1],
   api.EXPLORE_STEPS_RANGE[1],
 ])
-check('到点那一行把预算交给收件箱', [
-  /VoiceInbox\.append\(\s*context,\s*text,\s*source = VoiceInbox\.SOURCE_EXPLORE,\s*minutes = current\.minutes,\s*steps = current\.steps,\s*\)/u.test(schedule),
-], [true])
+check('判断层开那场把卡与步数交给 startExplore (2026-11-21 二改)', [
+  /const card = await readExploreTask\(\)/u.test(host),
+  /const \{ steps \} = await readExploreSchedule\(\)/u.test(host),
+  /await startExplore\(ctx, \{ via: 'router', speakOnFinish: line \|\| opening, text: card, steps \}\)/u.test(host),
+], [true, true, true])
+check('步数那一格的真值: 缺键 / 越界 / 坏值都落 60 与范围, 老键不再影响它', [
+  api.exploreStepsFrom({}),
+  api.exploreStepsFrom({ steps: 3000 }),
+  api.exploreStepsFrom({ steps: 'abc' }),
+  api.exploreStepsFrom({ enabled: false, at: '03:00', minutes: 30, steps: 10 }),
+], [api.EXPLORE_STEPS_DEFAULT, api.EXPLORE_STEPS_RANGE[1], api.EXPLORE_STEPS_DEFAULT, 10])
+check('卡正文的真值: 去首尾空行 / 8000 字封顶 / 读不出来是空', [
+  api.exploreTaskText('  \n看相册最近三张\n'),
+  api.exploreTaskText('x'.repeat(9000)).length,
+  api.exploreTaskText(undefined),
+], ['看相册最近三张', api.EXPLORE_TASK_CHARS, ''])
 check('收件箱只给探索那一个来源写这两个键', [
   /fun append\([\s\S]*?minutes: Int\? = null,[\s\S]*?steps: Int\? = null,/u.test(inbox),
   /val exploring = source == SOURCE_EXPLORE/u.test(inbox),
   /if \(exploring\) \{\s*minutes\?\.let \{ put\("minutes", it\) \}\s*steps\?\.let \{ put\("steps", it\) \}/u.test(inbox),
 ], [true, true, true])
-check('宿主那一支把这两个值透传给 startExplore', [
-  exploreBranch.includes('minutes: line.minutes'),
+check('宿主那一支把收件箱里的步数透传给 startExplore', [
   exploreBranch.includes('steps: line.steps'),
-  /const minutes = exploreClamp\(options\?\.minutes, EXPLORE_MINUTES_RANGE, EXPLORE_MINUTES_DEFAULT\)/u.test(section),
+  !exploreBranch.includes('minutes: line.minutes'),
   /const stepLimit = exploreClamp\(options\?\.steps, EXPLORE_STEPS_RANGE, EXPLORE_STEPS_DEFAULT\)/u.test(section),
+  /async function readExploreSchedule\(\)/u.test(section),
 ], [true, true, true, true])
+check('门户那颗「开始这一趟」也带步数 (两条路同一个预算)', [
+  portalBridge.includes('steps = ExploreSchedule.plan(context).steps'),
+], [true])
 // 2026-10-19 量到的: 收件箱那一行写着 5 / 10, 宿主开出来的是 30 / 60 —— 读那一行时对象是逐键构造的,
 // `voiceReadNew` 不加这两个键, 后面整条链再对也没用
 const voiceReadNew = host.slice(
@@ -650,25 +671,29 @@ check('读收件箱那一关把 minutes / steps 也带过去 (T4 在这里漏过
   /minutes: record\.minutes,/u.test(voiceReadNew),
   /steps: record\.steps,/u.test(voiceReadNew),
 ], [true, true])
-check('老行没有这两个键时仍落 30 / 60', [
+check('老行没有这两个键时仍落 30 / 60 (宿主内部那对缺省没动)', [
   api.exploreClamp(undefined, api.EXPLORE_MINUTES_RANGE, api.EXPLORE_MINUTES_DEFAULT),
   api.exploreClamp(undefined, api.EXPLORE_STEPS_RANGE, api.EXPLORE_STEPS_DEFAULT),
 ], [30, 60])
 
 const exploreItems = screen.slice(
   screen.indexOf('fun ExploreItems()'),
-  screen.indexOf('private fun ExploreTimeDialog'),
+  screen.indexOf('private fun ExploreCardDialog'),
 )
-check('设置页那两条在 (分钟用滑块 / 步数用档位), 仍然没有手动开始', [
-  exploreItems.includes('R.string.settings_explore_minutes'),
+// 2026-11-21: 预算只留步数 (时间那一路撤了), 没有时刻 / 分钟 / 手动开始
+check('设置页只剩步数那一条 (分钟/时刻已撤), 仍然没有手动开始', [
+  !exploreItems.includes('R.string.settings_explore_minutes'),
   exploreItems.includes('R.string.settings_explore_steps'),
   exploreItems.includes('ArrowSlider('),
   exploreItems.includes('ExploreSchedule.clamp('),
-  exploreItems.includes('plan.copy(minutes ='),
   exploreItems.includes('plan.copy(steps ='),
+  !exploreItems.includes('plan.copy(minutes ='),
   !exploreItems.includes('settings_explore_start'),
 ], [true, true, true, true, true, true, true])
-check('段首那句读数带上预算 (分 / 步)', screen.includes('R.string.settings_explore_budget'), true)
+check('段首那句读数改成判断层触发, 不再带分/步预算那句', [
+  screen.includes('R.string.settings_explore_by_router'),
+  !screen.includes('R.string.settings_explore_budget'),
+], [true, true])
 
 /* ── 十四、工作区与读数 (2.7.9 T5) ─────────────────────────────────────── */
 
@@ -721,12 +746,11 @@ check('摘要窗真的把文件读出来 (读不出来也如实说)', [
   /settings_explore_summary_failed/.test(screen),
 ], [true, true])
 
-check('排期没开成时给一条通知 (不只是写文件)', [
-  /LwNotify\.notify\(/.test(schedule),
-  /settings_explore_not_started/.test(schedule),
-  // 两条"没开成"的路径各调一次: 三条闸跳过的 skipped 与收件箱写不进去的 failed
-  (schedule.match(/report\(context, /gu) ?? []).length >= 2,
-], [true, true, true])
+// 2026-11-21 二改: "到点没开成"那条通知跟着排期一起撤了 —— 现在开不开由判断层定, 没有"叫不醒"这一档
+check('没有"到点没开成"那一条通知 (排期那一路已撤)', [
+  !/LwNotify/u.test(schedule),
+  !/settings_explore_not_started/u.test(schedule),
+], [true, true])
 
 /* ── 十五、探索时允许锁屏解锁 (2.7.10) ─────────────────────────────────── */
 
@@ -740,18 +764,18 @@ check('排期文件多一个 unlock 键 (老文件就是关着)', [
   /val unlock = root\["unlock"\]\?\.jsonPrimitive\?\.booleanOrNull \?: false/.test(schedule),
   /val unlock: Boolean = false/.test(schedule),
 ], [true, true, true])
-check('到点先解屏再投那一行 (否则模型第一眼看到的是锁屏)', [
-  /val unlockNote = if \(current\.unlock\) unlockForExplore\(context\) else null/.test(schedule),
-  schedule.indexOf('unlockForExplore(context)') < schedule.indexOf('VoiceInbox.append('),
-], [true, true])
+check('那把锁只在探索里那一次 (没有"到点先解屏"了)', [
+  !/unlockForExplore/u.test(schedule),
+  /fun unlockAtSchedule\(context: Context, tag: String\): String\?/.test(schedule),
+  !/VoiceInbox\.append/u.test(schedule),
+], [true, true, true])
 check('解屏走「锁屏」那一段: 点亮 / 没录过不放 / 失败太多次不放', [
-  /fun unlockForExplore\(context: Context\): String\? =\s*unlockAtSchedule\(context, "the scheduled exploration"\)/.test(schedule),
   /fun unlockAtSchedule\(context: Context, tag: String\): String\?/.test(schedule),
   /LockReplay\.wakeScreen\(context, allowConnecting = true\)/.test(schedule),
   /LockReplay\.replayNow\(context, tag\)/.test(schedule),
   /if \(!LockSetting\.unlockable\(context\)\)/.test(schedule),
   /if \(LockTries\.exhausted\(LockSetting\.tries\(context\)\)\)/.test(schedule),
-], [true, true, true, true, true, true])
+], [true, true, true, true, true])
 check('"有没有可放的东西"只有一处 (两条开关问同一句)', [
   /fun unlockable\(context: Context\): Boolean/.test(lockSettings),
   /if \(on && !unlockable\(context\)\)/.test(lockSettings),
@@ -768,18 +792,17 @@ check('设置页那一行: 标题 / 说明 / 落盘 / 没录过时说一句', [
   exploreItems.includes('plan.copy(unlock ='),
   exploreItems.includes('LockSetting.unlockable(context)'),
 ], [true, true, true, true, true])
-check('读数那句带上"开始前屏幕怎么了"', [
-  screen.includes('R.string.settings_explore_last_started_note'),
-  /"started" -> "开始了一场探索" \+ \(last\.why\?\.let \{ " · \$it" \} \?: ""\)/.test(schedule),
+check('没有「上一次」那一行 (那个读数只有到点那趟会写)', [
+  !screen.includes('settings_explore_last_started_note'),
+  !/describeLast/u.test(schedule),
 ], [true, true])
 check('三条字符串两边都在, 先后顺序也一致', [
-  ['settings_explore_unlock', 'settings_explore_unlock_summary', 'settings_explore_unlock_missing',
-    'settings_explore_last_started_note']
+  ['settings_explore_unlock', 'settings_explore_unlock_summary', 'settings_explore_unlock_missing']
     .every((key) => resZh.includes(`name="${key}"`) && resEn.includes(`name="${key}"`)),
   // 两边的相对顺序相同 (一处加、另一处忘了加就会在这里红)
   (() => {
     const inOrder = (text) => {
-      const at = ['settings_explore_unlock', 'settings_explore_unlock_missing', 'settings_explore_last_started_note']
+      const at = ['settings_explore_unlock', 'settings_explore_unlock_missing', 'settings_explore_steps']
         .map((key) => text.indexOf(`name="${key}"`))
       return at.every((one, index) => one > 0 && (index === 0 || one > at[index - 1]))
     }
@@ -1067,12 +1090,12 @@ process.env.DSH_HOME = checksHome
 function checksBook() {
   return new Function(
     'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'temporaryName',
-    'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES',
+    'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES', 'TAP_EFFECT_STREAK', 'tapEffectLog',
     `${section}\nreturn { exploreRecordChecks, exploreFinishFromRecord, exploreStateRestore,`
       + ' streakOf: () => exploreChecksStreak, lastFinishOf: () => exploreLastFinish }',
   )(
     readFile, readdir, join, dirname, mkdir, writeFile, rename, rm,
-    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES,
+    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES, TAP_EFFECT_STREAK, [],
   )
 }
 
@@ -1262,7 +1285,7 @@ check('跨应用记忆 ⑨: 桥只报动作送到了 → unknown; 熄屏与没�
 ], ['unknown', 'unknown', 'unknown', 'failed', 'failed', 'failed'])
 
 check('跨应用记忆 ⑩: run 上三格 / 开场定 intent 清账 / 收尾与重启都认它', [
-  /\n {2}intent: '',\n {2}pkg: '',\n {2}memory: \{\},\n\}/u.test(host),
+  /\n {2}intent: '',\n {2}pkg: '',\n {2}memory: \{\},/u.test(host),
   /exploreRun\.intent = exploreMemoryIntent\(options\?\.text\) \|\| '自由探索这台手机'/u.test(host),
   /const keptMemory = exploreMemoryLimit\(\) === 0 \? \{\} : exploreMemoryOpen\(run\.memory\)/u.test(host),
   /exploreRun\.intent = exploreMemoryIntent\(run\.intent\)/u.test(host),
@@ -1276,7 +1299,7 @@ check('跨应用记忆 ⑪: status 里那四个数与那一行回执都在', [
 
 check('跨应用记忆 ⑫: 看一眼 / 按一下 / 划一下 / 起一个应用都往账上记 (只认这一场)', [
   /exploreMemoryNote\(exec, exploreMemorySeen\(args\?\.displayId, result\?\.package\), 'read', ''\)/u.test(host),
-  /exploreMemoryNote\(exec, exploreMemoryOnDisplayPkg\(args\.displayId\), effect \?\? exploreMemoryEffect\(result\),/u
+  /exploreMemoryNote\(context, exploreMemoryOnDisplayPkg\(args\.displayId\), effect \?\? exploreMemoryEffect\(result\),/u
     .test(host),
   /exploreMemoryTapText\(args\), delivered === true\)/u.test(host),
   /exploreMemoryNote\(exec, exploreMemoryOnDisplayPkg\(args\.displayId\), 'read', ''\)/u.test(host),
@@ -1458,11 +1481,14 @@ const tapSource = host.slice(tapStart, tapStop)
 
 /** 那一档的个数从宿主源码里取 (`const MAX_TAP_CANDIDATES = n`), 抽出来的那段自己看不见它 */
 const MAX_TAP_CANDIDATES = Number((host.match(/const MAX_TAP_CANDIDATES = (\d+)/u) ?? [])[1])
+/** 同名两行分得开的分差 (#37) —— 抽出来的那段也看不见它, 同样从源码里取 */
+const TAP_SCORE_GAP = Number((host.match(/const TAP_SCORE_GAP = ([\d.]+)/u) ?? [])[1])
 
 /** 一份只替桥的读屏: 第一次 `ocr` 回这里给的, 之后 `tap` 回队列里下一个 */
 function readingWith(replies) {
   const queue = [...replies]
   return new Function('call', 'closestReadLines', 'scatterInside', 'formatMs', 'MAX_TAP_CANDIDATES',
+    'tapPrecheckGeometry', 'TAP_SCORE_GAP',
     `${tapSource}\nreturn tapByReading`)(
     async (op) => (op === 'tap'
       ? (queue.shift() ?? { tapped: true, displayId: 7 })
@@ -1471,6 +1497,8 @@ function readingWith(replies) {
     (box) => ({ x: Number(box?.[0] ?? 0) + 1, y: Number(box?.[1] ?? 0) + 1 }),
     (value) => `${value}ms`,
     MAX_TAP_CANDIDATES,
+    () => null,
+    TAP_SCORE_GAP,
   )
 }
 
@@ -1511,9 +1539,13 @@ check('跨应用记忆 ⑱: 五种"没按"各自说得出原因, 真按到了才
 const answerStart = host.indexOf('function tapReadingAnswer(')
 const answerStop = host.indexOf('const MAX_TAP_CANDIDATES', answerStart)
 if (answerStart < 0 || answerStop < 0) throw new Error('tapReadingAnswer is not in host-plugin/index.mjs')
-const tapAnswer = new Function('tapCandidatesAnswer',
-  `${host.slice(answerStart, answerStop)}\nreturn tapReadingAnswer`)((_d, _w, candidates) => `CANDIDATES:${(candidates ?? []).length}`)
-const answerOf = (reading, prefix = '') => tapAnswer(reading, 4, '设置', undefined, prefix)
+const tapAnswer = new Function('tapCandidatesAnswer', 'tapPrecheckCandidatesAnswer', 'tapSkipAnswer',
+  `${host.slice(answerStart, answerStop)}\nreturn tapReadingAnswer`)(
+  (_d, _w, candidates) => `CANDIDATES:${(candidates ?? []).length}`,
+  (_d, _w, candidates) => `CANDIDATES:${(candidates ?? []).length}`,
+  (_d, _w, skip) => `SKIP:${String(skip?.skip ?? '')}`,
+)
+const answerOf = (reading, prefix = '') => tapAnswer(4, '设置', reading, undefined, prefix)
 
 check('跨应用记忆 ⑱-b: 熄屏 / 读不到 / 没送达三种照念原因, 没这一行给最像的、同名两行给这两条', [
   answerOf(readAsleep).startsWith('the screen is dozing'),
@@ -1536,9 +1568,12 @@ check('跨应用记忆 ⑱-c: 同名两条那段话换成「按坐标选一条�
 const candidateStart = host.indexOf('function tapCandidatesAnswer(')
 const candidateStop = host.indexOf('function scatterInside(', candidateStart)
 if (candidateStart < 0 || candidateStop < 0) throw new Error('tapCandidatesAnswer is not in host-plugin/index.mjs')
-const candidatesAnswer = new Function('withJson',
+const candidatesAnswer = new Function('withJson', 'candidateLines', 'centreInBox',
   `${host.slice(candidateStart, candidateStop)}\nreturn tapCandidatesAnswer`)(
   (lines, json) => ({ lines, json }),
+  (candidates) => candidates.map((one) => `- ${JSON.stringify(one.text)}`),
+  (box) => ({ x: Math.round((Number(box?.[0] ?? 0) + Number(box?.[2] ?? 0)) / 2),
+    y: Math.round((Number(box?.[1] ?? 0) + Number(box?.[3] ?? 0)) / 2) }),
 )
 const ambiguousAnswer = candidatesAnswer(4, '设置', readAmbiguous.candidates, undefined,
   '2 lines on displayId 4 say "设置", so pick the one you meant')
@@ -1893,10 +1928,8 @@ check('跨应用记忆 ㉙: a11y 按名成功 (clicked) → 真的进「上次�
   api.exploreMemoryDelivered({ tapped: true }),
   api.exploreMemoryStatus(memoryApi.exploreRun).pressedCount,
   api.exploreMemoryHint(a11yView)[1],
-  /remember\(formatNamedTap\(tree, args\.note\), tree, undefined, exploreMemoryDelivered\(tree\)\)/u
-    .test(tapBody),
-  /remember\(formatGesture\('tapped', tapped, args\.note\), tapped, undefined, exploreMemoryDelivered\(tapped\)\)/u
-    .test(tapBody),
+  /const deliveredNamed = exploreMemoryDelivered\(tree\)/u.test(tapBody),
+  /exploreMemoryDelivered\(delivered\)/u.test(tapBody),
 ], [true, true, false, true, 1, '上次按过: 省电开关', true, true])
 
 /** 第三轮 E 的边: `pressed` 那一档也只留 3 条 (与「已确认」同一把尺子), 跨应用合起来数得对 */
@@ -1921,6 +1954,275 @@ await memoryApi.exploreStateWrite()
 await rm(memoryHome, { recursive: true, force: true })
 if (previousMemoryHome === undefined) delete process.env.DSH_HOME
 else process.env.DSH_HOME = previousMemoryHome
+/* ── 八、按完先验一次: 连着两下没变就停 (2.8.1 落实表 #32) ───────────────── */
+
+/**
+ * 点按效果那一小段在探索那一段外面 (`lw_tap` 那一侧): 抽出来真跑, 不复制第二份
+ *
+ * 只递它真正用到的那几个名字 —— `call` / `withTimeout` 在这里一次都不会被调到 (它们只服务真按下去
+ * 的那条路), `closestReadLines` 给一个同形状的替身 (真正的打分由 `check-phone-actions` 端到端量)
+ */
+const effectStart = host.indexOf('/* ── 按完这一下先验一次')
+const effectEnd = host.indexOf('/** A report a model can read, with the structured answer kept underneath it */')
+if (effectStart < 0 || effectEnd < 0 || effectEnd < effectStart) {
+  throw new Error('the tap effect section is not in host-plugin/index.mjs')
+}
+/** 这一节假设备的树 (`call('ui')` 答的那一份): 换 `tapUiAnswer` 就是换一屏 */
+let tapUiAnswer = null
+
+const tapApi = new Function(
+  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect', 'squashText',
+  `${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
+    + ' TAP_EFFECT_WAIT_MS, TAP_MIN_SIDE, TAP_SCORE_GAP, tapEffectSnapshot, tapEffectFingerprint,'
+    + ' tapEffectOf, tapEffectTail, tapEffectStreak, tapEffectBrake, formatTapEffect,'
+    + ' tapNameMatches, tapPrecheckGeometry, tapPrecheck, tapAnchorMismatch, tapEffectRecover }',
+)(
+  async () => tapUiAnswer,
+  (promise) => promise,
+  (lines, _wanted, limit) => lines.slice(0, limit).map((line) => ({
+    text: line.text, score: 1, bbox: line.box,
+  })),
+  3,
+  (left, right) => JSON.stringify(left) === JSON.stringify(right),
+  (value) => String(value ?? '').toLowerCase().replace(/\s+/gu, ''),
+)
+
+check('两处那个"连着几条算停"是同一个数 (2)', [
+  tapApi.TAP_EFFECT_STREAK,
+  new RegExp(`const TAP_EFFECT_STREAK = ${TAP_EFFECT_STREAK}\\b`, 'u').test(host),
+], [TAP_EFFECT_STREAK, true])
+
+/** 一块屏的快照 (与 `tapEffectSnapshot` 同一个形状), 只给得出字的那几格 */
+const screenOf = (labels) => ({
+  displayId: 0,
+  label: 'Settings',
+  nodes: labels.map((label, index) => ({
+    label,
+    bounds: [40, 300 + index * 100, 900, 380 + index * 100],
+  })),
+  texts: [...labels],
+})
+
+/**
+ * 与 `lw_tap` 同一个次序走三步: 先读一次树 → 看刹车 → 决定发不发 → 记一条
+ *
+ * 屏幕一动不动, 于是三下都是 unchanged: 前两下发出去, 第三下被拦在原地
+ */
+const runPresses = (howMany) => {
+  const log = []
+  const screen = screenOf(['设置', '蓝牙', '位置信息', '设备连接'])
+  const sent = []
+  let blocked = null
+  for (let step = 1; step <= howMany; step += 1) {
+    const brake = tapApi.tapEffectBrake(log, 'explore-1', screen, '设置')
+    if (brake !== null) {
+      sent.push(false)
+      blocked = brake
+      continue
+    }
+    sent.push(true)
+    log.push({
+      step,
+      effect: 'unchanged',
+      displayId: 0,
+      at: 0,
+      fingerprint: tapApi.tapEffectFingerprint(screen),
+      session: 'explore-1',
+    })
+  }
+  return { sent, blocked, log }
+}
+
+const pressed = runPresses(3)
+check('连着两下 unchanged 之后第三次 tap 一次都不发 (发出去的是前两下)', pressed.sent, [true, true, false])
+check('第三次被拦下来时报 reason=effect-missing', pressed.blocked?.reason, 'effect-missing')
+check('拦下来那一下给三个候选 (text / score / bbox)', [
+  pressed.blocked?.candidates.length,
+  pressed.blocked?.candidates.every((one) => typeof one.text === 'string'
+    && typeof one.score === 'number'
+    && Array.isArray(one.bbox) && one.bbox.length === 4),
+], [3, true])
+check('候选里没有刚按过的那一格', pressed.blocked?.candidates.map((one) => one.text).includes('设置'), false)
+
+check('中间有一条 changed 就重新算 (不让刹车越界到下一屏)', (() => {
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: 'f', session: 'explore-1' },
+    { effect: 'changed', displayId: 0, fingerprint: '', session: 'explore-1' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', screenOf(['设置', '蓝牙']), '设置')
+})(), null)
+check('别的会话 (或别的屏) 的账不算到这一场上', (() => {
+  const screen = screenOf(['设置', '蓝牙'])
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(screen), session: 'someone-else' },
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(screen), session: 'someone-else' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', screen, '设置')
+})(), null)
+check('屏真的变了就放行 (指纹对不上就不拦)', (() => {
+  const before = screenOf(['设置', '蓝牙'])
+  const now = screenOf(['设置', '蓝牙', '位置信息'])
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(before), session: 'explore-1' },
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(before), session: 'explore-1' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', now, '设置')
+})(), null)
+
+check('两棵树一样时判 unchanged, 差一行时判 changed 并只列那一行', [
+  tapApi.tapEffectOf(screenOf(['设置', '蓝牙']), screenOf(['设置', '蓝牙']), '设置'),
+  tapApi.tapEffectOf(screenOf(['设置', '蓝牙']), screenOf(['设置', '蓝牙', '已连接']), '设置'),
+  tapApi.formatTapEffect('changed', screenOf(['设置']), screenOf(['设置', '已连接'])).split('\n'),
+], [
+  'unchanged',
+  'changed',
+  ['effect=changed: the screen answered the press', '  + "已连接"'],
+])
+check('有一份读不到时判 unknown (不把"核不了"说成"没变")', [
+  tapApi.tapEffectOf(null, screenOf(['设置']), '设置'),
+  tapApi.tapEffectOf(screenOf(['设置']), null, '设置'),
+  /effect=unknown/u.test(tapApi.formatTapEffect('unknown', null, null, [])),
+], ['unknown', 'unknown', true])
+
+/* ── 九、按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ───────────────── */
+
+/**
+ * 三道前置校验与三档恢复都是纯函数 (恢复只多读一次树), 所以在这一侧也能量, 不必起设备
+ *
+ * 端到端那一份 (触摸次数 = 0 / 1) 在 `check-phone-actions` 第八节
+ */
+const SETTINGS_TREE = [
+  { text: '设置', bounds: [40, 300, 900, 380] },
+  { text: '蓝牙', bounds: [40, 400, 900, 480] },
+]
+const uiTree = (rows) => ({
+  enabled: true,
+  displayId: 0,
+  label: 'Settings',
+  width: 1080,
+  height: 2400,
+  nodes: rows.map((row, depth) => ({ text: row.text, bounds: row.bounds, clickable: true, depth })),
+})
+
+tapUiAnswer = uiTree(SETTINGS_TREE)
+const tapScreen = await tapApi.tapEffectSnapshot(0)
+
+check('前置校验: 名字对得上的子节点被外面那格包住时只算一处', (() => {
+  const nested = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380] },
+      { label: '设置', bounds: [60, 310, 300, 370] },
+    ],
+  }
+  return tapApi.tapNameMatches(nested, '设置').length
+})(), 1)
+
+check('前置校验: 短边 < TAP_MIN_SIDE → small, 整格出屏 → occluded, 正常格放行', [
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 338])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 3000, 900, 3080])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 380]),
+  tapApi.TAP_MIN_SIDE,
+], ['small', 'occluded', null, 48])
+
+check('前置校验: 要按的那一点被另一个能按的控件盖住 → occluded, 并说清是谁', (() => {
+  const covered = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '广告弹窗', bounds: [200, 320, 600, 360], target: [200, 320, 600, 360], clickable: true },
+    ],
+  }
+  const skip = tapApi.tapPrecheck(covered, covered.nodes[0])
+  return [skip?.skip, /广告弹窗/u.test(skip?.why ?? '')]
+})(), ['occluded', true])
+check('前置校验: 同一格里换了个名字 (子节点按下去仍落在那一行) 不算盖住', (() => {
+  const same = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '存储', bounds: [200, 320, 600, 360], target: [40, 300, 900, 380], clickable: true },
+    ],
+  }
+  return tapApi.tapPrecheck(same, same.nodes[0])
+})(), null)
+
+check('前置校验: expect 对不上时报出点上实测的那个标签, 对得上时放行', [
+  tapApi.tapAnchorMismatch(tapScreen, '蓝牙', 500, 340)?.found,
+  tapApi.tapAnchorMismatch(tapScreen, '设置', 500, 340),
+], ['设置', null])
+
+/** 恢复那一档会读一次树: 把它的 stdout 收起来, 免得三行读数混进判据表里 */
+const quiet = async (run) => {
+  const keep = console.log
+  try {
+    console.log = () => {}
+    return await run()
+  } finally {
+    console.log = keep
+  }
+}
+const recoverOn = async (answer, effect, { wanted = '设置', after = tapScreen } = {}) => {
+  tapUiAnswer = answer
+  return quiet(() => tapApi.tapEffectRecover({
+    before: tapScreen, after, effect, wanted, displayId: 0,
+  }))
+}
+
+const late = await recoverOn(uiTree([...SETTINGS_TREE, { text: '已连接', bounds: [40, 700, 900, 780] }]), 'unchanged')
+check('恢复 ①: 重读那一屏变了 → reread (没有重放那一下)', late.recover, 'reread')
+
+const anchor = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged')
+check('恢复 ②: 屏没变而目标还在 → reanchor, 交回它现在的中心', [
+  anchor.recover,
+  /centre 470,340/u.test(anchor.text),
+], ['reanchor', true])
+
+const blind = await recoverOn(null, 'unknown', { after: null })
+check('恢复 ②b: 重读读不回来 → reanchor 用按之前那一份, 并说清这次没读到', [
+  blind.recover,
+  /could not be read back/u.test(blind.text),
+], ['reanchor', true])
+
+const nowhere = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged', { wanted: '' })
+check('恢复 ③: 屏上哪儿都不是目标 (按在空白处) → giveup', nowhere.recover, 'giveup')
+
+check('lw_tap 的账里带 recover 那一格, 而且三档各有一行 stdout 读数', [
+  /const recovery = await tapEffectRecover\(/u.test(host),
+  /recover: recovery\.recover,/u.test(host),
+  /LwTap: recover=reread/u.test(host) && /LwTap: recover=reanchor/u.test(host)
+    && /LwTap: recover=giveup/u.test(host),
+], [true, true, true])
+
+check('exploreEffectReason: 连着两条 recover=giveup 才停 (2.8.1 落实表 #37)', [
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'giveup' }]),
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'reanchor' }]),
+  api.exploreEffectReason([{ recover: 'reread' }, { recover: 'giveup' }]),
+  api.exploreEffectReason([]),
+], ['giveup', '', '', ''])
+check('exploreEffectReason: 连着两条 unchanged 不再算停 (effect 判定不回归, 停判只认 giveup)', [
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reanchor' },
+    { effect: 'unchanged', recover: 'reanchor' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
+], ['', ''])
+check('exploreEffectsFor 只挑这一场, 别的会话点的不算', [
+  api.exploreEffectsFor([
+    { session: 'a', effect: 'unchanged' },
+    { session: 'b', effect: 'unchanged' },
+    { session: 'a', effect: 'changed' },
+  ], 'a'),
+  api.exploreEffectsFor([{ session: 'a' }], ''),
+], [[{ session: 'a', effect: 'unchanged' }, { session: 'a', effect: 'changed' }], []])
+check('status 的 `effects` 只留最近 20 条', [
+  api.EXPLORE_EFFECTS_KEPT,
+  api.exploreEffectsFor(Array.from({ length: 25 }, (_, index) => ({ session: 'a', step: index })), 'a').length,
+], [20, 20])
+
+check('lw_explore op=status 里带 effects 与 reason (读数与文本两处都在)', [
+  /effects,\n {4}effectReason: exploreEffectReason\(effects\)/u.test(host),
+  /press effects: \$\{readings\.effects\.length\} recorded this run/u.test(host),
+  /reason=\$\{readings\.effectReason\}/u.test(host),
+], [true, true, true])
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
