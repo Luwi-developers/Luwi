@@ -1293,7 +1293,6 @@ private fun ChannelItems() {
     val context = LocalContext.current
     val state = ChannelSetting.state
     val routes = ChannelSetting.routes
-    val working = ChannelSetting.working
     LaunchedEffect(Unit) { ChannelSetting.refresh() }
     // fillMaxWidth 是必要的: 这一段的子项里有纯文字, 撑不满宽度, 而 Miuix 的 Card 是包着内容的 ——
     // 不填满, 卡片就比这一页别的卡片窄一截 (设置项自己会撑开, 所以别处不用管)。
@@ -1330,23 +1329,11 @@ private fun ChannelItems() {
                 )
             }
         }
+        // 「刷新状态」按钮 (2026-11-19 主人: 不要「用 root 连接」那个开关, 改成在「允许 DSH 通过
+        // 无障碍服务读取屏幕内容」上方一颗按钮 —— 点一下确认 root 与 shizuku 的可用状态, 优先 shizuku)
+        RefreshRow()
         AccessibilityRows()
         OcrRows()
-        if (state?.connected != true) {
-            Button(
-                onClick = { ChannelSetting.connect() },
-                enabled = !working,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
-            ) {
-                Text(
-                    text = stringResource(
-                        if (working) R.string.settings_channel_connecting else R.string.settings_channel_connect,
-                    ),
-                )
-            }
-        }
         ArrowPreference(
             title = stringResource(R.string.settings_channel_autostart),
             summary = stringResource(R.string.settings_channel_autostart_summary),
@@ -1395,6 +1382,49 @@ private fun KeepAliveRow() {
             whitelisted = BatteryWhitelist.ignored(context)
         },
     )
+}
+
+/**
+ * 「刷新状态」那一颗按钮 (2.8.1 #30 改口径, 2026-11-19 主人定)
+ *
+ * 主人: "最好不用加这个用 root 的按钮, 而是在『允许…内容』上方加一个刷新状态按钮, 点击后确认 root 和
+ * shizuku 的可用状态, 优先 shizuku" —— 于是原来那个「用 root 连接」开关整行撤掉: "要不要去问 root"
+ * 这件事改由**点这一下**表态, 问完就收回, 不落盘 (见 [ChannelSetting.reprobe])
+ *
+ * 位置就是读数块与无障碍那一行之间: 读数在上、按钮居中、两条路各自的状态同时在上面那几行里看得见
+ *
+ * 上一次刷新里 root 被拒时, 按钮下面留一句去哪儿办 (那件事只能在 root 管理器里做) —— 这里不放开关,
+ * 也就没必要把"被拒"藏进任何一行 Setting 的副标题里
+ */
+@Composable
+private fun RefreshRow() {
+    val working = ChannelSetting.working
+    val refused = ChannelSetting.rootRefused
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { ChannelSetting.reprobe() },
+            enabled = !working,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
+        ) {
+            Text(
+                text = stringResource(
+                    if (working) R.string.settings_channel_refreshing else R.string.settings_channel_refresh,
+                ),
+            )
+        }
+        if (refused) {
+            Text(
+                text = stringResource(R.string.settings_channel_refresh_refused),
+                modifier = Modifier.padding(
+                    start = UiSpacing.Large,
+                    end = UiSpacing.Large,
+                    bottom = UiSpacing.Medium,
+                ),
+            )
+        }
+    }
 }
 
 /**

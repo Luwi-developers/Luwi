@@ -154,6 +154,9 @@
     <string name="settings_channel_state_stopped">not running</string>
     <string name="settings_channel_connect">Connect</string>
     <string name="settings_channel_connecting">Connecting...</string>
+    <string name="settings_channel_refresh">Refresh status</string>
+    <string name="settings_channel_refreshing">Checking...</string>
+    <string name="settings_channel_refresh_refused">root refused: allow Luwi in the root manager, then refresh again</string>
     <string name="ready_title">Getting started</string>
     <string name="ready_remaining">%1$d steps to go</string>
     <string name="ready_complete">All set</string>

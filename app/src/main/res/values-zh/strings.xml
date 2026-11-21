@@ -153,6 +153,9 @@
     <string name="settings_channel_state_stopped">未运行</string>
     <string name="settings_channel_connect">连接</string>
     <string name="settings_channel_connecting">连接中...</string>
+    <string name="settings_channel_refresh">刷新状态</string>
+    <string name="settings_channel_refreshing">正在确认...</string>
+    <string name="settings_channel_refresh_refused">root 被拒: 在 root 管理器里允许 Luwi, 再点一次刷新</string>
     <string name="ready_title">开始使用</string>
     <string name="ready_remaining">还差 %1$d 步</string>
     <string name="ready_complete">全部就绪</string>
