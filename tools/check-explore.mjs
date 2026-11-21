@@ -72,18 +72,44 @@ const section = host.slice(start, end)
  */
 const EVENT_BEFORE_DEFAULT = 15
 
+/**
+ * 判断层那张桌面表 (`ROUTER_HOME_PACKAGES`) 直接从宿主那一份源码里取
+ *
+ * 第二轮 B 要探索与判断层**共用一张表**: 那两张表只差一步就会漂 (一边加了新 ROM 的桌面, 另一边
+ * 还当成"探索走到了这个应用"), 所以判据吃的是宿主真跑的那一份, 不是抄一份名单在这里
+ */
+function hostSet(name) {
+  const at = host.indexOf(`const ${name} = new Set([`)
+  if (at < 0) throw new Error(`${name} is not in host-plugin/index.mjs`)
+  const body = host.slice(at, host.indexOf('])', at))
+  return new Set([...body.matchAll(/'([^']+)'/gu)].map((one) => one[1]))
+}
+
+const ROUTER_HOME_PACKAGES = hostSet('ROUTER_HOME_PACKAGES')
+
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
-  'ROUTER_EVENT_BEFORE_DEFAULT',
+  'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
     + ' exploreCheckRow, EXPLORE_CARD_TAIL,'
+    + ' exploreMemoryLimit, exploreMemoryText, exploreMemoryIntent, exploreMemoryOpen,'
+    + ' exploreMemoryStep, exploreMemoryFor, exploreMemoryHint, exploreMemoryCounts,'
+    + ' exploreMemoryStatus, exploreMemoryEffect, exploreMemoryTapText,'
+    + ' exploreMemoryHash, exploreMemorySeal, exploreMemoryMask, exploreMemoryBare,'
+    + ' exploreMemorySensitive, exploreMemoryShell, exploreMemorySeen, exploreMemoryOnDisplayPkg,'
+    + ' exploreMemoryDropDisplay, exploreMemoryForgetDisplays, exploreMemoryBlankEntry,'
+    + ' exploreMemoryDelivered, exploreReset,'
+    + ' EXPLORE_MEMORY_MAX_DEFAULT, EXPLORE_MEMORY_MAX_RANGE, EXPLORE_MEMORY_CONFIRMED,'
+    + ' EXPLORE_MEMORY_TEXT_CHARS, EXPLORE_MEMORY_INTENT_CHARS, EXPLORE_MEMORY_HASH_CHARS,'
+    + ' EXPLORE_MEMORY_ROW_CHARS, EXPLORE_MEMORY_PRESSED, EXPLORE_MEMORY_SECRET,'
+    + ' EXPLORE_MEMORY_SENSITIVE_PARTS, EXPLORE_MEMORY_SENSITIVE_PACKAGES,'
     + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
     + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
     + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
 )(
   () => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {},
-  async () => {}, EVENT_BEFORE_DEFAULT,
+  async () => {}, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES,
 )
 
 check('event 缺省 15 分钟, 这一侧与宿主那一个数一致', [
@@ -783,7 +809,7 @@ const releaseCalls = []
 let releaseAnswer = (displayId) => ({ released: true, displayId })
 const screensApi = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'call', 'shortSession',
-  'temporaryName',
+  'temporaryName', 'ROUTER_HOME_PACKAGES',
   `${section}\nreturn { getScreens: () => exploreScreens,`
     + ' setScreens: (next) => { exploreScreens = next; exploreScreensLoaded = true },'
     + ' resetScreens: () => { exploreScreens = []; exploreScreensLoaded = true },'
@@ -799,6 +825,7 @@ const screensApi = new Function(
   // 主线的写盘已经改成唯一临时名 (2efab39), 而这一段源码是抽出来跑的 —— 临时名这一步给个
   // 同形状的替身就行, 这个文件里判的是账怎么走, 不是 `.tmp` 叫什么
   (path) => `${path}.check.tmp`,
+  ROUTER_HOME_PACKAGES,
 )
 
 const owned = (displayId, sessionId) => ({ displayId, sessionId, createdAt: 1, released: false })
@@ -1040,12 +1067,12 @@ process.env.DSH_HOME = checksHome
 function checksBook() {
   return new Function(
     'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'temporaryName',
-    'ROUTER_EVENT_BEFORE_DEFAULT',
+    'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES',
     `${section}\nreturn { exploreRecordChecks, exploreFinishFromRecord, exploreStateRestore,`
       + ' streakOf: () => exploreChecksStreak, lastFinishOf: () => exploreLastFinish }',
   )(
     readFile, readdir, join, dirname, mkdir, writeFile, rename, rm,
-    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT,
+    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES,
   )
 }
 
@@ -1089,6 +1116,811 @@ check('那一笔读数形状不对就当没有 (设置页少一行, 不显示编
 await rm(checksHome, { recursive: true, force: true })
 if (previousChecksHome === undefined) delete process.env.DSH_HOME
 else process.env.DSH_HOME = previousChecksHome
+
+/* ── 十九、跨应用记忆 (2026-11-20, 2.8.1 #36) ───────────────────────────── */
+
+/**
+ * 主人这一条要的是"切走再回来还知道自己要找什么": 账按应用记, 切走时标 interrupted, 切回来
+ * `resumed` +1, 下一步提示的第一行是这一趟的原 intent。三个假应用跑九步 (中间切走两次再回到第一个),
+ * 读数与提示逐条对; `EXPLORE_MEMORY_MAX=0` 同一个场景一笔都不记
+ */
+
+const MEMORY_APPS = ['com.example.notes', 'com.example.mail', 'com.example.calendar']
+const MEMORY_INTENT = '找设置里的省电开关'
+const MEMORY_SCENE = [
+  [0, 'changed', '打开设置'],
+  [0, 'unchanged', '点电池'],
+  [1, 'changed', '打开邮件'],
+  [1, 'changed', '点收件箱'],
+  [2, 'changed', '打开日历'],
+  [2, 'failed', '点新增'],
+  [0, 'changed', '点省电'],
+  [0, 'changed', '点开关'],
+  [0, 'changed', '看阈值'],
+]
+
+/** 那九步真跑一遍: 每一步都走宿主同一个纯函数 */
+function memoryScene(limit) {
+  let memory = {}
+  MEMORY_SCENE.forEach(([app, effect, text], index) => {
+    memory = api.exploreMemoryStep(memory, {
+      pkg: MEMORY_APPS[app], intent: MEMORY_INTENT, effect, text, at: 1_000 + index,
+    }, limit)
+  })
+  return memory
+}
+
+delete process.env.EXPLORE_MEMORY_MAX
+const remembered = memoryScene(api.EXPLORE_MEMORY_MAX_DEFAULT)
+const counts = api.exploreMemoryCounts(remembered)
+const back = api.exploreMemoryFor(remembered, MEMORY_APPS[0])
+const hint = api.exploreMemoryHint(back)
+
+check('跨应用记忆 ①: 三个假应用九步、中途切走再回来 → packages=3 / interrupted=2 / resumed=1', [
+  counts.packages, counts.interrupted, counts.resumed,
+], [3, 2, 1])
+/**
+ * ② 断言的是**生账** (第二轮 H): 账上那一行必须是 `6 位 hash + 掩码后 1~24 字`
+ *
+ * 把 `said = exploreMemorySeal(...)` 换回 `exploreMemoryText(step?.text, 40)` 时这一条会红 —— 40 字
+ * 明文既不匹配这个形状, 条数与内容也对不上
+ */
+const backRows = remembered[MEMORY_APPS[0]].confirmed
+check('跨应用记忆 ②: 回到的那一个把 intent 取回来, 账上每行都是「6 位 hash + 掩码后前 24 字」', [
+  back.intent, back.resumed,
+  backRows.every((row) => /^[0-9a-f]{6} \S{1,24}$/u.test(row)),
+  backRows.map((row) => api.exploreMemoryBare(row)),
+], [MEMORY_INTENT, 1, true, ['点省电', '点开关', '看阈值']])
+check('跨应用记忆 ③: 下一步提示第一行含原 intent, 后面 3 条 confirmed', [
+  hint.length,
+  (hint[0] ?? '').includes(MEMORY_INTENT),
+  hint.slice(1),
+], [4, true, ['已确认: 点省电', '已确认: 点开关', '已确认: 看阈值']])
+check('跨应用记忆 ④: 失败那一条只计数, 不进提示', [
+  api.exploreMemoryFor(remembered, MEMORY_APPS[2]).failed,
+  hint.some((line) => line.includes('点新增')),
+], [1, false])
+check('跨应用记忆 ④-b: intent 取第一行 (记号剥掉), 超长截到 60 字', [
+  api.exploreMemoryIntent('\n## 下一场先看什么\n- 聊天记录里的称呼'),
+  api.exploreMemoryIntent('   \n\n'),
+  api.exploreMemoryIntent(`看${'很'.repeat(80)}`).length,
+], ['下一场先看什么', '', 60])
+
+let repeated = {}
+for (const at of [1, 2]) {
+  repeated = api.exploreMemoryStep(repeated, {
+    pkg: 'com.example.notes', intent: MEMORY_INTENT, effect: 'changed', text: '点省电', at,
+  }, 8)
+}
+check('跨应用记忆 ④-c: 连点同一个控件只占一行 confirmed (同一行封出来的 hash 也一样)', [
+  api.exploreMemoryFor(repeated, 'com.example.notes').confirmed
+    .map((row) => row.replace(/^[0-9a-f]{6} /u, '')),
+  api.exploreMemoryFor(repeated, 'com.example.notes').confirmed.length,
+], [['点省电'], 1])
+
+process.env.EXPLORE_MEMORY_MAX = '0'
+const offLimit = api.exploreMemoryLimit()
+const off = memoryScene(offLimit)
+const offStatus = api.exploreMemoryStatus({ memory: off, pkg: MEMORY_APPS[0] }, offLimit)
+const offHint = api.exploreMemoryHint(api.exploreMemoryFor(off, MEMORY_APPS[0]))
+delete process.env.EXPLORE_MEMORY_MAX
+check('跨应用记忆 ⑤: EXPLORE_MEMORY_MAX=0 同一场景 → resumed=0 且提示里没有 intent', [
+  offLimit, api.exploreMemoryCounts(off), Object.keys(off).length, offHint, offStatus.enabled,
+], [0, { packages: 0, interrupted: 0, resumed: 0, pressedCount: 0 }, 0, [], false])
+
+const status = api.exploreMemoryStatus({ memory: remembered, pkg: MEMORY_APPS[0] })
+check('跨应用记忆 ⑥: status 里四个数 + 手里这一个 + 取回的下一步提示', [
+  status.packages, status.interrupted, status.resumed, status.pressedCount,
+  status.current, status.enabled,
+  (status.hint[0] ?? '').includes(MEMORY_INTENT),
+], [3, 2, 1, 0, MEMORY_APPS[0], true, true])
+
+/**
+ * 上限那一档 (审查 M3 / 第二轮 G): cap=3 走过 4 个应用 → **硬界是 cap**, 最早那一条被淘汰
+ *
+ * 第一级 (不是手里这个、也没被打断) 和第三级 (按 at 升序, 手里这个最后) 都走一遍: 三个应用全被打断
+ * 之后只能走第三级, 走掉的是 `at` 最小的那一个, 最近被打断的那条还在账上
+ */
+const FOUR_APPS = ['com.example.one', 'com.example.two', 'com.example.three', 'com.example.four']
+let capped = {}
+FOUR_APPS.forEach((pkg, index) => {
+  capped = api.exploreMemoryStep(capped, {
+    pkg, intent: MEMORY_INTENT, effect: 'changed', text: `点第${index + 1}个`, at: 100 + index,
+  }, 3)
+})
+const cappedBack = api.exploreMemoryFor(capped, FOUR_APPS[2])
+check('跨应用记忆 ⑦: cap=3 走过四个应用 → 条数 = cap, 最近被打断那条还在、最早那条被淘汰', [
+  api.exploreMemoryCounts(capped).packages,
+  Object.keys(capped),
+  cappedBack.found,
+  cappedBack.interrupted,
+  api.exploreMemoryFor(capped, FOUR_APPS[0]).found,
+  (api.exploreMemoryHint(cappedBack)[0] ?? '').includes(MEMORY_INTENT),
+], [3, [FOUR_APPS[1], FOUR_APPS[2], FOUR_APPS[3]], true, true, false, true])
+
+let twice = {}
+for (const [index, pkg] of ['a', 'b', 'a', 'b', 'a'].entries()) {
+  twice = api.exploreMemoryStep(twice, { pkg, intent: 'x', effect: 'read', at: index + 1 }, 8)
+}
+check('跨应用记忆 ⑧: 第一次进不算回来, 第二次进同一个应用才 +1', [
+  api.exploreMemoryCounts(twice), api.exploreMemoryFor(twice, 'a').resumed,
+], [{ packages: 2, interrupted: 1, resumed: 3, pressedCount: 0 }, 2])
+
+/**
+ * ⑨ 这一档喂**真生产者发得出的回执**, 不再喂 `{effect:'unchanged'}` (那个字段基线里没有人生成)
+ *
+ * 基线这一档的桥只会回 `tapped` / `swiped` / `clicked` (没有 #32 的 effect 回读), 所以"发出去
+ * 了"一律 `unknown` (审查 M1); 等 #32 进基线, 回执里带上 `effect` 才会走到那三档
+ */
+check('跨应用记忆 ⑨: 桥只报动作送到了 → unknown; 熄屏与没发出去仍按失败算', [
+  api.exploreMemoryEffect({ tapped: true }),
+  api.exploreMemoryEffect({ swiped: true, displayId: 3 }),
+  api.exploreMemoryEffect({ clicked: true, outcome: 'clicked' }),
+  api.exploreMemoryEffect({ tapped: true, screen: 'off' }),
+  api.exploreMemoryEffect({ clicked: false, outcome: 'unclicked' }),
+  api.exploreMemoryEffect({ error: 'no accessibility' }),
+], ['unknown', 'unknown', 'unknown', 'failed', 'failed', 'failed'])
+
+check('跨应用记忆 ⑩: run 上三格 / 开场定 intent 清账 / 收尾与重启都认它', [
+  /\n {2}intent: '',\n {2}pkg: '',\n {2}memory: \{\},\n\}/u.test(host),
+  /exploreRun\.intent = exploreMemoryIntent\(options\?\.text\) \|\| '自由探索这台手机'/u.test(host),
+  /const keptMemory = exploreMemoryLimit\(\) === 0 \? \{\} : exploreMemoryOpen\(run\.memory\)/u.test(host),
+  /exploreRun\.intent = exploreMemoryIntent\(run\.intent\)/u.test(host),
+], [true, true, true, true])
+
+check('跨应用记忆 ⑪: status 里那四个数与那一行回执都在', [
+  /memory: exploreMemoryStatus\(exploreRun\)/u.test(host),
+  /`memory: \$\{readings\.memory\.packages\} app\(s\), \$\{readings\.memory\.interrupted\} interrupted,/u.test(host),
+  /\$\{readings\.memory\.resumed\} resumed, \$\{readings\.memory\.pressedCount\} pressed/u.test(host),
+], [true, true, true])
+
+check('跨应用记忆 ⑫: 看一眼 / 按一下 / 划一下 / 起一个应用都往账上记 (只认这一场)', [
+  /exploreMemoryNote\(exec, exploreMemorySeen\(args\?\.displayId, result\?\.package\), 'read', ''\)/u.test(host),
+  /exploreMemoryNote\(exec, exploreMemoryOnDisplayPkg\(args\.displayId\), effect \?\? exploreMemoryEffect\(result\),/u
+    .test(host),
+  /exploreMemoryTapText\(args\), delivered === true\)/u.test(host),
+  /exploreMemoryNote\(exec, exploreMemoryOnDisplayPkg\(args\.displayId\), 'read', ''\)/u.test(host),
+  /exploreMemoryNote\(exec, exploreMemorySeen\(args\?\.displayId, launched\?\.package, true\), 'read', ''\)/u
+    .test(host),
+  /if \(exploreRun\.session === null \|\| exploreRun\.over === true\) return false\n {2}if \(sessionIdOf\(exec\) !== exploreRun\.session\) return false/u
+    .test(host),
+], [true, true, true, true, true, true])
+
+/**
+ * 真跑一遍那本账: 纯函数对了不等于接上了 —— 这一步走宿主真正用的入口 (`exploreMemoryNote`), 看它认
+ * 不认这一场、那一句话到底塞给了哪一场、落不落进 `explore.json`、`EXPLORE_MEMORY_MAX=0` 关不关得掉
+ *
+ * `hostCtx` 不再是 null (审查 m7 的 ⑭): 桩一个会话控制器, 把 `steer` / `followup` 记下来 ——
+ * "steer 塞进的是不是这一场 / over 之后还发不发"于是真跑出来, 不是从源码正则上看出来的
+ */
+const sayLog = []
+const sayHost = {
+  get: (name) => (name === 'sessionController'
+    ? {
+      resolveAgent: async (id) => ({
+        agent: {
+          id,
+          status: 'running',
+          session: { id },
+          steer: (message) => sayLog.push({ how: 'steer', to: String(id), text: String(message?.text ?? '') }),
+          followup: (message) => sayLog.push({ how: 'followup', to: String(id), text: String(message?.text ?? '') }),
+          cancel: () => sayLog.push({ how: 'cancel', to: String(id) }),
+        },
+      }),
+    }
+    : null),
+  agents: { withoutInitiator: (run) => run() },
+  sessions: { flush: async () => true },
+}
+
+/** 一条消息就是那段正文 (exploreSay 只把它交给 agent) */
+const sayMessage = async (text) => ({ text: String(text ?? '') })
+
+/** `void exploreMemorySay(...)` 是从同步的执行里发出去的: 放两拍就够整条链走完 */
+async function settle() {
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
+const memoryHome = await mkdtemp(join(tmpdir(), 'lw-explore-memory-'))
+const previousMemoryHome = process.env.DSH_HOME
+process.env.DSH_HOME = memoryHome
+
+/**
+ * 记下每一次写 `explore.json` 的载荷 (第三轮 C): 判"恢复时自己重写了一次"要的是那一次**写**,
+ * 不是再去读一遍文件 —— Windows 上 rename 撞上正在读的句柄会 EPERM, 读文件那一路会抖
+ */
+const stateWrites = []
+const writeFileRecording = (path, data, ...rest) => {
+  if (String(path).includes('explore.json')) stateWrites.push(String(data))
+  return writeFile(path, data, ...rest)
+}
+
+/** 等到某一笔写盘载荷满足条件 (最多 ~1 s) */
+async function waitForWrite(predicate, tries = 200) {
+  for (let round = 0; round < tries; round += 1) {
+    if (stateWrites.some(predicate)) return true
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  return false
+}
+
+const memoryApi = new Function(
+  'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'call',
+  'shortSession', 'temporaryName', 'sessionIdOf', 'hostCtx', 'createVoiceMessage',
+  'ROUTER_EVENT_BEFORE_DEFAULT', 'ROUTER_HOME_PACKAGES',
+  `${section}\nreturn { exploreRun, exploreMemoryNote, exploreMemoryStatus, exploreMemoryFor,`
+    + ' exploreMemoryHint, exploreMemorySeen, exploreMemoryOnDisplayPkg, exploreStateWrite,'
+    + ' exploreStateRestore, exploreMemoryDropDisplay, exploreMemoryForgetDisplays,'
+    + ' displays: () => ({ ...exploreMemoryOnDisplay }),'
+    + ' resetRun: () => { exploreRun.memory = {}; exploreRun.pkg = ""; exploreRun.intent = "" } }',
+)(
+  readFile, readdir, join, dirname, mkdir, writeFileRecording, rename, rm, async () => ({}),
+  (id) => String(id).slice(0, 8), (path) => `${path}.check.tmp`,
+  // 与宿主那一份逐字同义 (它在这个文件里没有第二份)
+  (exec) => (exec?.agent?.id === undefined || exec?.agent?.id === null ? null : String(exec.agent.id)),
+  sayHost, sayMessage, EVENT_BEFORE_DEFAULT, ROUTER_HOME_PACKAGES,
+)
+
+const memoryExec = { agent: { id: 'explore-m' } }
+const foreignExec = { agent: { id: 'someone-else' } }
+memoryApi.exploreRun.session = 'explore-m'
+memoryApi.exploreRun.over = false
+memoryApi.exploreRun.intent = MEMORY_INTENT
+const notedSteps = MEMORY_SCENE.map(([app, effect, text]) =>
+  memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[app], effect, text))
+await settle()
+const foreignNote = memoryApi.exploreMemoryNote(foreignExec, MEMORY_APPS[1], 'changed', '别人的')
+const liveStatus = memoryApi.exploreMemoryStatus(memoryApi.exploreRun)
+
+check('跨应用记忆 ⑬: 切回来那一句走 steer, 塞给的就是这一场, 第一行是取回的 intent', [
+  sayLog.length,
+  sayLog[0]?.how,
+  sayLog[0]?.to,
+  sayLog[0]?.text.split('\n'),
+], [1, 'steer', 'explore-m', [
+  `回到 ${MEMORY_APPS[0]}, 接着找: ${MEMORY_INTENT}`,
+  '已确认: 打开设置',
+  '已确认: 点省电',
+]])
+
+const saidBeforeOver = sayLog.length
+memoryApi.exploreRun.over = true
+const overNoted = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'changed', 'over 之后')
+await settle()
+memoryApi.exploreRun.over = false
+check('跨应用记忆 ⑬-b: over 之后一步都不记, 也不再发 steer', [
+  overNoted, sayLog.length - saidBeforeOver,
+], [false, 0])
+
+await memoryApi.exploreStateWrite()
+const memoryBook = JSON.parse(await readFile(join(memoryHome, 'lw', 'explore.json'), 'utf8'))
+const liveBack = memoryApi.exploreMemoryFor(memoryApi.exploreRun.memory, MEMORY_APPS[0])
+
+check('跨应用记忆 ⑭: 真入口九步 → 三个数进 run / 别的会话记不进来', [
+  notedSteps.every((one) => one === true),
+  foreignNote,
+  liveStatus.packages, liveStatus.interrupted, liveStatus.resumed, liveStatus.current,
+], [true, false, 3, 2, 1, MEMORY_APPS[0]])
+check('跨应用记忆 ⑮: 那本账真的落进 explore.json, 回来那一条的 intent 是原话', [
+  Object.keys(memoryBook.run.memory),
+  memoryBook.run.memory[MEMORY_APPS[0]].resumed,
+  memoryBook.run.pkg,
+  memoryApi.exploreMemoryHint(liveBack)[0].includes(MEMORY_INTENT),
+], [MEMORY_APPS, 1, MEMORY_APPS[0], true])
+
+process.env.EXPLORE_MEMORY_MAX = '0'
+const offNoted = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[1], 'changed', '不该记')
+const offLive = memoryApi.exploreMemoryStatus(memoryApi.exploreRun)
+delete process.env.EXPLORE_MEMORY_MAX
+/**
+ * ⑯ 拆成两条 (第二轮 I): 「0 只挡新写」这一条是**已知的半关**, 不能写成"关掉就是回到今天"
+ *
+ * 一条判新账 (0 时一笔都不记), 一条判旧账 (盘上那本账照样报出来) —— 两条一起才说得出回退的边界
+ */
+check('跨应用记忆 ⑯: EXPLORE_MEMORY_MAX=0 → 新的一步一笔都不记 (memory 不长)', [
+  offNoted, offLive.enabled, offLive.packages, offLive.interrupted,
+], [false, false, 3, 2])
+check('跨应用记忆 ⑯-b: 半关的边界 —— 0 只挡新写, 盘上旧账照样报 (已知, 不是"逐字回到今天")', [
+  offLive.packages === 3, offLive.resumed, offLive.hint.length > 0,
+], [true, 1, true])
+
+/* ── 十九之二、审查返工 (2026-11-21, 36.rework.md 的 M1–M5 / m6–m8) ─────────── */
+
+/**
+ * 判据 6 (M1): 回执里没有 effect 时记 unknown —— confirmed 与 failed 两边都不进
+ *
+ * `unknown` 由 [exploreMemoryEffect] 自己给, 这里把它的答案喂给真值表那一份 `exploreMemoryStep`,
+ * 看两边都没多出一行
+ */
+const unknownEffect = api.exploreMemoryStep({}, {
+  pkg: 'com.example.notes',
+  intent: MEMORY_INTENT,
+  effect: api.exploreMemoryEffect({ tapped: true }),
+  text: '点省电',
+  at: 1,
+}, 8)
+check('跨应用记忆 ⑰: effect 拿不到 (unknown) → confirmed 与 failed 都不进', [
+  api.exploreMemoryFor(unknownEffect, 'com.example.notes').confirmed,
+  api.exploreMemoryFor(unknownEffect, 'com.example.notes').failed,
+], [[], 0])
+
+/**
+ * 判据 4 (M2): `tapByReading` 的四种"什么都没按"必须自己说 pressed=false
+ *
+ * 抽宿主那一份源码来真跑 (`call` 是桩), 于是"读屏失败 / 熄屏 / 没这一行 / 同名两行"这四种情形
+ * 各走一遍真分支 —— 不靠"候选是不是空"反推, 也不靠源码正则
+ */
+const tapStart = host.indexOf('async function tapByReading(')
+const tapStop = host.indexOf('const MAX_TAP_CANDIDATES', tapStart)
+if (tapStart < 0 || tapStop < 0) throw new Error('tapByReading is not in host-plugin/index.mjs')
+const tapSource = host.slice(tapStart, tapStop)
+
+/** 那一档的个数从宿主源码里取 (`const MAX_TAP_CANDIDATES = n`), 抽出来的那段自己看不见它 */
+const MAX_TAP_CANDIDATES = Number((host.match(/const MAX_TAP_CANDIDATES = (\d+)/u) ?? [])[1])
+
+/** 一份只替桥的读屏: 第一次 `ocr` 回这里给的, 之后 `tap` 回队列里下一个 */
+function readingWith(replies) {
+  const queue = [...replies]
+  return new Function('call', 'closestReadLines', 'scatterInside', 'formatMs', 'MAX_TAP_CANDIDATES',
+    `${tapSource}\nreturn tapByReading`)(
+    async (op) => (op === 'tap'
+      ? (queue.shift() ?? { tapped: true, displayId: 7 })
+      : (queue.shift() ?? {})),
+    (lines) => lines.slice(0, 3).map((line) => ({ text: String(line.text ?? ''), score: 1, bbox: line.box })),
+    (box) => ({ x: Number(box?.[0] ?? 0) + 1, y: Number(box?.[1] ?? 0) + 1 }),
+    (value) => `${value}ms`,
+    MAX_TAP_CANDIDATES,
+  )
+}
+
+const readFailed = await readingWith([{ error: 'accessibility is off' }])(4, '设置')
+const readAsleep = await readingWith([{ screen: 'dozing', lines: [] }])(4, '设置')
+const readMissing = await readingWith([{ screen: 'on', lines: [{ text: '蓝牙', box: [1, 2, 30, 40] }] }])(4, '设置')
+const readAmbiguous = await readingWith([
+  { screen: 'on', lines: [{ text: '设置', box: [1, 2, 30, 40] }, { text: '设置', box: [1, 50, 30, 90] }] },
+])(4, '设置')
+const readPressed = await readingWith([
+  { screen: 'on', lines: [{ text: '设置', score: 0.9, box: [1, 2, 30, 40] }] },
+  { tapped: true, displayId: 4 },
+])(4, '设置')
+const readUndelivered = await readingWith([
+  { screen: 'on', lines: [{ text: '设置', score: 0.9, box: [1, 2, 30, 40] }] },
+  { tapped: false, displayId: 4 },
+])(4, '设置')
+
+check('跨应用记忆 ⑱: 五种"没按"各自说得出原因, 真按到了才 pressed=true', [
+  readFailed.pressed, readAsleep.pressed, readMissing.pressed, readAmbiguous.pressed,
+  readMissing.candidates.length, readAmbiguous.candidates.length,
+  readPressed.pressed, readUndelivered.pressed,
+  readPressed.report.startsWith('pressed'),
+  [readFailed.reason, readAsleep.reason, readMissing.reason, readAmbiguous.reason,
+    readPressed.reason, readUndelivered.reason],
+  // 同名两行交回去的是两条带 bbox 的候选 (第三轮 F): 只写报告不给候选 = 那句"按坐标选"没有坐标
+  readAmbiguous.candidates.map((one) => [one.text, Array.isArray(one.bbox) ? one.bbox.length : 0]),
+], [false, false, false, false, 1, 2, true, false, true,
+  ['unreadable', 'asleep', 'no-match', 'ambiguous', 'pressed', 'undelivered'],
+  [['设置', 4], ['设置', 4]]])
+
+/**
+ * 第二轮 F: 五种"没按"到模型那里要分成三路
+ *
+ * 熄屏 / 读不到 / 找到了没送达三种原样念原因 (下一步各不相同: 先唤醒 / 先开无障碍 / 换个点再按),
+ * 只有"没这一行"与"同名两行"才换成候选列表 —— 上一版把它二分吃了, 三种原因全变成空候选
+ */
+const answerStart = host.indexOf('function tapReadingAnswer(')
+const answerStop = host.indexOf('const MAX_TAP_CANDIDATES', answerStart)
+if (answerStart < 0 || answerStop < 0) throw new Error('tapReadingAnswer is not in host-plugin/index.mjs')
+const tapAnswer = new Function('tapCandidatesAnswer',
+  `${host.slice(answerStart, answerStop)}\nreturn tapReadingAnswer`)((_d, _w, candidates) => `CANDIDATES:${(candidates ?? []).length}`)
+const answerOf = (reading, prefix = '') => tapAnswer(reading, 4, '设置', undefined, prefix)
+
+check('跨应用记忆 ⑱-b: 熄屏 / 读不到 / 没送达三种照念原因, 没这一行给最像的、同名两行给这两条', [
+  answerOf(readAsleep).startsWith('the screen is dozing'),
+  answerOf(readFailed).startsWith('the screen could not be read'),
+  answerOf(readUndelivered).startsWith('found but the press was NOT reported'),
+  answerOf(readMissing), answerOf(readAmbiguous),
+  answerOf(readPressed, 'TREE'),
+], [true, true, true, 'CANDIDATES:1', 'CANDIDATES:2', 'TREE\n' + readPressed.report])
+
+/** 同名两条的开头不能再是「no line says it」(第三轮 F): 屏幕上有这一行, 只是不止一条 */
+check('跨应用记忆 ⑱-c: 同名两条那段话换成「按坐标选一条」, 并且把两条候选原样交给模型', [
+  /so pick the one you meant/u.test(host.slice(host.indexOf('function tapReadingAnswer('),
+    host.indexOf('const MAX_TAP_CANDIDATES', host.indexOf('function tapReadingAnswer(')))),
+  readAmbiguous.candidates.every((one) => one.bbox.length === 4 && typeof one.score === 'number'),
+], [true, true])
+
+/**
+ * 第三轮 F: 那句开头与候选 JSON 真的出现在回执里 (抽 `tapCandidatesAnswer` 真跑, 只桩 `withJson`)
+ */
+const candidateStart = host.indexOf('function tapCandidatesAnswer(')
+const candidateStop = host.indexOf('function scatterInside(', candidateStart)
+if (candidateStart < 0 || candidateStop < 0) throw new Error('tapCandidatesAnswer is not in host-plugin/index.mjs')
+const candidatesAnswer = new Function('withJson',
+  `${host.slice(candidateStart, candidateStop)}\nreturn tapCandidatesAnswer`)(
+  (lines, json) => ({ lines, json }),
+)
+const ambiguousAnswer = candidatesAnswer(4, '设置', readAmbiguous.candidates, undefined,
+  '2 lines on displayId 4 say "设置", so pick the one you meant')
+const noMatchAnswer = candidatesAnswer(4, '设置', readMissing.candidates, undefined)
+check('跨应用记忆 ⑱-d: 同名两条的开头按坐标为先, 候选 JSON 带 bbox; 没这一行仍说「没有这一行」', [
+  ambiguousAnswer.lines[0],
+  ambiguousAnswer.json.candidates.length,
+  ambiguousAnswer.json.candidates.every((one) => one.bbox.length === 4),
+  /^no line on displayId 4 says/u.test(noMatchAnswer.lines[0]),
+], ['2 lines on displayId 4 say "设置", so pick the one you meant: nothing was pressed. These are'
+  + ' the ones to pick from:', 2, true, true])
+
+/**
+ * 判据 5 (m6): 滑动只算"还在这个应用里", 三个"已确认"格留给 lw_tap 的控件名
+ *
+ * 行为那一半真跑三下 (效果就是 lw_swipe 现在交的那个 `read` + 空文本), 接线那一半看 lw_swipe
+ * 那一段自己 (工具体要桥, 跑不起来; 只切这一段, 不是整份源码正则)
+ */
+const swipeAt = host.indexOf("name: 'lw_swipe'")
+const swipeStop = host.indexOf("name: 'lw_type'", swipeAt)
+const swipeBody = host.slice(swipeAt, swipeStop)
+const swipeSteps = [1, 2, 3].reduce((memory, index) => api.exploreMemoryStep(memory, {
+  pkg: 'com.example.notes', intent: MEMORY_INTENT, effect: 'read', text: '', at: 500 + index,
+}, 8), {})
+check('跨应用记忆 ⑲: 滑动三次 → confirmed 不增, 也不进 failed', [
+  swipeBody.length > 0,
+  /exploreMemoryNote\(exec, exploreMemoryOnDisplayPkg\(args\.displayId\), 'read', ''\)/u.test(swipeBody),
+  /exploreMemoryEffect\(swiped\)|exploreMemorySwipeText/u.test(swipeBody),
+  api.exploreMemoryFor(swipeSteps, 'com.example.notes').confirmed,
+  api.exploreMemoryFor(swipeSteps, 'com.example.notes').failed,
+], [true, true, false, [], 0])
+
+/**
+ * 判据 3 (M4) 与第二轮 B: 敏感包跑一趟 → 一条都不记, 盘上也没有那句明文
+ *
+ * 正样本是第二轮实测漏掉的那批 (微信 / QQ / 各邮箱 / 密码管理器 / 健康 / 银行券商 / spay /
+ * smsextra / 输入法); 反样本是探索真会走的普通应用, 一个都不许误伤
+ */
+const tapAt = host.indexOf("name: 'lw_tap'")
+const tapEnd = host.indexOf("name: 'lw_key'", tapAt)
+const tapBody = host.slice(tapAt, tapEnd)
+const sensitivePkgs = [
+  'com.android.messaging', 'com.google.android.contacts', 'com.android.dialer',
+  'com.icbc', 'com.eg.android.AlipayGphone', 'com.tencent.mm.wallet',
+  'com.tencent.mm', 'com.tencent.mobileqq', 'com.google.android.gm', 'com.netease.mail',
+  'com.x8bit.bitwarden', 'com.onepassword.android', 'com.google.android.apps.fitness',
+  'com.xiaomi.hm.health', 'com.huawei.health', 'com.chinamworld.bocmbci', 'com.chinamworld.main',
+  'com.pingan.paces.ccms', 'com.eastmoney.android.berlin', 'com.htsc.mdc',
+  'com.samsung.android.spay', 'com.miui.smsextra', 'com.iflytek.inputmethod',
+]
+check('跨应用记忆 ⑳: 短信 / 通讯录 / 电话 / 微信 / QQ / 邮箱 / 密码管理器 / 健康 / 银行券商 / 支付 / 输入法都认', [
+  sensitivePkgs.filter((pkg) => api.exploreMemorySensitive(pkg) !== true),
+  ['com.example.notes', 'com.android.settings', 'com.example.mail', 'com.example.calendar'].map(
+    (pkg) => api.exploreMemorySensitive(pkg),
+  ),
+  api.exploreMemorySensitive(''),
+], [[], [false, false, false, false], false])
+
+memoryApi.resetRun()
+const smsNote = memoryApi.exploreMemoryNote(memoryExec, 'com.android.messaging', 'changed', '验证码 8891')
+const bankNote = memoryApi.exploreMemoryNote(memoryExec, 'com.icbc', 'changed', '余额 120000.00')
+const notesNote = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'changed', '打开设置')
+await memoryApi.exploreStateWrite()
+const bookText = await readFile(join(memoryHome, 'lw', 'explore.json'), 'utf8')
+check('跨应用记忆 ⑳-b: 敏感包整条跳过 —— 账上没有它, explore.json 里没有那句明文', [
+  smsNote, bankNote, notesNote,
+  Object.keys(memoryApi.exploreRun.memory),
+  /验证码|120000/u.test(bookText),
+  /com\.android\.messaging|com\.icbc/u.test(bookText),
+], [false, false, true, [MEMORY_APPS[0]], false, false])
+
+/**
+ * 第二轮 C: **读侧也要滤** —— 升级机器上盘里还留着上一版 40 字明文写的敏感行
+ *
+ * 只挡写这一侧等于老明文留着照念: `run.pkg` 是短信、`memory` 里有 `com.android.messaging` 那一行
+ * (confirmed 里就是「验证码 8891」)。重启读回来之后: 包名置空、那一行不在、三条读路都不念它
+ */
+const legacyRun = {
+  session: 'explore-legacy',
+  workspace: '', startedAt: 1, deadline: 2, minutes: 30, steps: 3, stepLimit: 60,
+  reminded: false, over: false, intent: MEMORY_INTENT,
+  pkg: 'com.android.messaging',
+  memory: {
+    'com.android.messaging': {
+      intent: MEMORY_INTENT, confirmed: ['验证码 8891'], failed: [], interrupted: false,
+      resumed: 0, active: true, at: 3,
+    },
+    [MEMORY_APPS[0]]: {
+      intent: MEMORY_INTENT, confirmed: ['打开设置'], failed: [], interrupted: true,
+      resumed: 0, active: false, at: 4,
+    },
+  },
+}
+await writeFile(join(memoryHome, 'lw', 'explore.json'),
+  JSON.stringify({ v: 1, updatedAt: 1, run: legacyRun }), 'utf8')
+const restoredLegacy = await memoryApi.exploreStateRestore()
+const legacyStatus = memoryApi.exploreMemoryStatus(memoryApi.exploreRun)
+const legacyView = memoryApi.exploreMemoryFor(memoryApi.exploreRun.memory, 'com.android.messaging')
+const legacyHint = api.exploreMemoryHint(legacyView)
+
+check('跨应用记忆 ⑳-c: 盘上预置一行敏感包 → 读回来就丢, 盘上那份当场重写干净 (没人再写一次)', [
+  restoredLegacy,
+  memoryApi.exploreRun.pkg,
+  Object.keys(memoryApi.exploreRun.memory),
+  legacyStatus.packages,
+  legacyView.found,
+  legacyHint,
+  legacyStatus.hint.some((line) => line.includes('验证码')),
+  await waitForWrite((one) => !/8891|com\.android\.messaging/u.test(one)),
+], [true, '', [MEMORY_APPS[0]], 1, false, [], false, true])
+
+/** 第三轮 C 的同一条纪律对 `run.pkg` 也成立: 盘上那一格是平台壳的, 读回来置空并重写 */
+const shellBookRun = {
+  session: 'explore-shell',
+  workspace: '', startedAt: 1, deadline: 2, minutes: 30, steps: 1, stepLimit: 60,
+  reminded: false, over: false, intent: MEMORY_INTENT,
+  pkg: 'com.android.systemui',
+  memory: {
+    [MEMORY_APPS[0]]: {
+      intent: MEMORY_INTENT, confirmed: ['打开设置'], failed: [], interrupted: true,
+      resumed: 0, active: false, at: 4,
+    },
+  },
+}
+// 先把还挂着的写链走完再种这一份 (免得自己种的内容被上一次写盖掉)
+await memoryApi.exploreStateWrite()
+stateWrites.length = 0
+await writeFile(join(memoryHome, 'lw', 'explore.json'),
+  JSON.stringify({ v: 1, updatedAt: 1, run: shellBookRun }), 'utf8')
+const restoredShell = await memoryApi.exploreStateRestore()
+check('跨应用记忆 ㉚: 盘上 run.pkg 是平台壳 → 置空, 恢复时就把盘上那份写干净', [
+  restoredShell,
+  memoryApi.exploreRun.pkg,
+  Object.keys(memoryApi.exploreRun.memory),
+  await waitForWrite((one) => /"pkg":""/u.test(one) && !/com\.android\.systemui/u.test(one)),
+], [true, '', [MEMORY_APPS[0]], true])
+
+const seenProbe = {
+  sameAgain: [api.exploreMemorySeen(0, 'com.example.notes'), api.exploreMemorySeen(0, 'com.example.notes')],
+  changed: api.exploreMemorySeen(0, 'com.example.calendar'),
+  trusted: api.exploreMemorySeen(0, 'com.example.notes', true),
+  shade: api.exploreMemorySeen(4, 'com.android.systemui'),
+  permission: api.exploreMemorySeen(4, 'com.android.permissioncontroller'),
+  homes: ['com.miui.home', 'com.bbk.launcher2', 'com.huawei.android.launcher',
+    // 这张只有共用表才认得 (包名里没有 launcher 这个段): 删掉 shell 里那行 `ROUTER_HOME_PACKAGES`
+    // 就只剩它会被当成"探索走到了这个应用" (第三轮 ㉑ 补硬)
+    'com.google.android.apps.nexuslauncher',
+  ].map((pkg) => api.exploreMemorySeen(5, pkg)),
+  ime: api.exploreMemorySeen(4, 'com.iflytek.inputmethod'),
+  virtualScreen: api.exploreMemorySeen(4, 'com.example.mail'),
+  displayFour: api.exploreMemoryOnDisplayPkg(4),
+  displayZero: api.exploreMemoryOnDisplayPkg(0),
+  displayUnknown: api.exploreMemoryOnDisplayPkg(9),
+}
+check('跨应用记忆 ㉑: 归属 = 起应用 (一定认) 或主屏/虚拟屏上包名真的变了; 平台那几张脸不认', [
+  seenProbe.sameAgain,
+  seenProbe.changed,
+  seenProbe.trusted,
+  [seenProbe.shade, seenProbe.permission, seenProbe.ime, ...seenProbe.homes],
+  [seenProbe.displayFour, seenProbe.displayZero, seenProbe.displayUnknown],
+  tapBody.length > 0,
+  /exploreMemoryOnDisplayPkg\(args\.displayId\)/u.test(tapBody),
+], [
+  // 主屏第一次认下来, 同一个包再看一次不算"换应用" (第二轮 A)
+  ['com.example.notes', ''],
+  'com.example.calendar',
+  'com.example.notes',
+  ['', '', '', '', '', '', ''],
+  ['com.example.mail', 'com.example.notes', ''],
+  true,
+  true,
+])
+
+/**
+ * 第二轮 A / 第三轮 ㉑-b 补硬: 那张表跟场次一起走 —— 还掉一块屏就删一格, 换一场就整张清空
+ *
+ * 只断言"源码里有这行"是软判据 (删掉调用点仍然全绿): 这里真调一次 `exploreReset`, 看表空不空
+ */
+api.exploreMemorySeen(7, 'com.example.notes')
+const afterDrop = (() => {
+  api.exploreMemoryDropDisplay(7)
+  return api.exploreMemoryOnDisplayPkg(7)
+})()
+api.exploreMemorySeen(8, 'com.example.mail')
+api.exploreMemorySeen(9, 'com.example.calendar')
+const beforeReset = [api.exploreMemoryOnDisplayPkg(8), api.exploreMemoryOnDisplayPkg(9)]
+api.exploreReset()
+check('跨应用记忆 ㉑-b: 还屏删那一格、换场清整张表 (真跑一次 exploreReset, 删掉调用点就红)', [
+  afterDrop,
+  beforeReset,
+  [api.exploreMemoryOnDisplayPkg(8), api.exploreMemoryOnDisplayPkg(9)],
+  /exploreMemoryForgetDisplays\(\)/u.test(host),
+  (host.match(/exploreMemoryDropDisplay\(entry\.displayId\)/gu) ?? []).length,
+], ['', ['com.example.mail', 'com.example.calendar'], ['', ''], true, 2])
+
+/**
+ * M3: 切走不改别人的 `at` (那把尺子被改写, 淘汰就只能按包名字典序挑), 淘汰按 `at` 再按包名稳定排
+ */
+let clockOn = {}
+clockOn = api.exploreMemoryStep(clockOn, { pkg: 'com.example.a', intent: MEMORY_INTENT, effect: 'read', at: 1_000 }, 8)
+clockOn = api.exploreMemoryStep(clockOn, { pkg: 'com.example.b', intent: MEMORY_INTENT, effect: 'read', at: 2_000 }, 8)
+const handLedger = {
+  'com.example.b': { intent: 'x', confirmed: [], failed: [], interrupted: false, resumed: 0, active: false, at: 5 },
+  'com.example.a': { intent: 'x', confirmed: [], failed: [], interrupted: false, resumed: 0, active: false, at: 5 },
+  'com.example.c': { intent: 'x', confirmed: [], failed: [], interrupted: false, resumed: 0, active: false, at: 9 },
+}
+const evictedLedger = api.exploreMemoryStep(handLedger, {
+  pkg: 'com.example.d', intent: 'x', effect: 'read', at: 20,
+}, 3)
+check('跨应用记忆 ㉒: 切走不改别人的 at; 淘汰按 at 再按包名 (同 at 时字典序小的先走)', [
+  clockOn['com.example.a'].at,
+  clockOn['com.example.b'].at,
+  Object.keys(evictedLedger),
+], [1_000, 2_000, ['com.example.b', 'com.example.c', 'com.example.d']])
+
+/**
+ * 第二轮 D: 盘上那条 = 短 hash + **掩码后**前 24 字
+ *
+ * 三件一起判: ① 长文本第 25 字之后不留; ② 数字串与金额被抹掉; ③ 幂等按"切 7 字重算 hash"认,
+ * 所以 `100000 元` 这种真控件文本不会被当成已封而吃掉头 6 个字符
+ */
+const longText = `省电模式 ${'很'.repeat(60)}`
+const sealedLong = api.exploreMemorySeal(longText)
+const sealedMoney = api.exploreMemorySeal('余额 120000.00 元')
+const sealedOrder = api.exploreMemorySeal('订单 12345678 已发货')
+check('跨应用记忆 ㉓: 落盘那条 = hash + 掩码后前 24 字, 幂等, 数字与金额先抹掉', [
+  api.EXPLORE_MEMORY_TEXT_CHARS,
+  api.exploreMemoryBare(sealedLong),
+  sealedLong.length <= api.EXPLORE_MEMORY_ROW_CHARS,
+  api.exploreMemorySeal(sealedLong) === sealedLong,
+  api.exploreMemorySeal(''),
+  /\d{4,}/u.test(api.exploreMemoryBare(sealedOrder)),
+  api.exploreMemoryBare(sealedOrder),
+  // 「余额」那一类整条不进 (数字掩掉了也还是那句话)
+  sealedMoney,
+  api.exploreMemorySeal('验证码 8891'),
+], [24, longText.slice(0, 24), true, true, '', false, '订单 **** 已发货', '', ''])
+
+/** 第二轮 D: 幂等判据不再只看形状 —— 以 6 位十六进制开头的真控件文本一个字都不许被吃掉 */
+check('跨应用记忆 ㉓-b: 「100000 元」这种以 6 位 hex 开头的真文本不被当成已封', [
+  api.exploreMemoryBare('100000 元'),
+  api.exploreMemoryBare('abcdef 已完成'),
+  /^[0-9a-f]{6} \*{4} 元$/u.test(api.exploreMemorySeal('100000 元')),
+  api.exploreMemoryBare(api.exploreMemorySeal('100000 元')),
+], ['100000 元', 'abcdef 已完成', true, '**** 元'])
+
+/** 提示念的是控件名, 不念盘上那个 hash (hash 只给磁盘对账用) */
+check('跨应用记忆 ㉔: 下一步提示念控件名, 不念 hash', [
+  api.exploreMemoryHint({
+    pkg: 'com.example.notes',
+    intent: MEMORY_INTENT,
+    confirmed: [api.exploreMemorySeal('点省电')],
+  }),
+], [[`回到 com.example.notes, 接着找: ${MEMORY_INTENT}`, '已确认: 点省电']])
+
+/**
+ * 第二轮 E: `pressed` 档 —— 基线没有 effect 回读, `changed` 在生产里没有生产者
+ *
+ * 真入口: "按到了但界面变没变没人读"记进第三档 (confirmed 仍是空的), 提示第二段念「上次按过: X」,
+ * status 的 pressedCount 跟着长 —— 真机上"3 条已确认"不可能出现, 但提示不会空着
+ */
+memoryApi.resetRun()
+// ⑳-c 那条 restore 把场次换成了盘上那一场 (`explore-legacy`): 这里换回桩的场次再往下走
+memoryApi.exploreRun.session = 'explore-m'
+memoryApi.exploreRun.over = false
+memoryApi.exploreRun.intent = MEMORY_INTENT
+const pressedNote = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'unknown', '省电开关', true)
+const notDelivered = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'unknown', '不该进', false)
+const pressedView = memoryApi.exploreMemoryFor(memoryApi.exploreRun.memory, MEMORY_APPS[0])
+const pressedStatus = memoryApi.exploreMemoryStatus(memoryApi.exploreRun)
+check('跨应用记忆 ㉕: 按到了 (unknown + delivered) → 进「上次按过」, confirmed 仍空', [
+  pressedNote, notDelivered,
+  pressedView.confirmed,
+  api.exploreMemoryBare(pressedView.pressed[0] ?? ''),
+  pressedStatus.pressedCount,
+  api.exploreMemoryHint(pressedView),
+], [true, true, [], '省电开关', 1, [
+  `回到 ${MEMORY_APPS[0]}, 接着找: ${MEMORY_INTENT}`,
+  '上次按过: 省电开关',
+]])
+
+/**
+ * 第二轮 G: 三级淘汰的硬界 —— 10 个应用走过, 条数仍是 cap, 最近被打断那条还在
+ *
+ * 一级 (非手里/非 interrupted) 恒空、二级 (回去过却什么都没捞到) 也空, 于是走到三级: 按 `at` 升序
+ * 淘汰, 手里这个最后 —— 留下的是最近那 8 个, 最早两个走掉
+ */
+const TEN_APPS = Array.from({ length: 10 }, (_, index) => `com.example.app${index + 1}`)
+let tenLedger = {}
+TEN_APPS.forEach((pkg, index) => {
+  tenLedger = api.exploreMemoryStep(tenLedger, {
+    pkg, intent: MEMORY_INTENT, effect: 'read', at: 1_000 + index,
+  }, api.EXPLORE_MEMORY_MAX_DEFAULT)
+})
+const tenKeys = Object.keys(tenLedger)
+check('跨应用记忆 ㉖: 十个应用走过 → 条数 = cap(8), 最近被打断那条还在、最早两条被淘汰', [
+  tenKeys.length,
+  tenKeys.includes(TEN_APPS[8]),
+  tenKeys.includes(TEN_APPS[9]),
+  tenKeys.includes(TEN_APPS[0]),
+  tenKeys.includes(TEN_APPS[1]),
+  api.exploreMemoryCounts(tenLedger).interrupted,
+], [8, true, true, false, false, 7])
+
+/**
+ * 第二轮 H (最要紧): 判据要能把实现改回去**证伪**
+ *
+ * 这一段钉的是 lw_tap 的工具体: 两处读屏兜底一律 `null, 'unknown'` (不是 changed/failed), 两处
+ * 判断按没按都用 `reading.pressed === true` (不是"候选是不是空") —— 拿回上一版的写法这里就红
+ */
+check('跨应用记忆 ㉗: lw_tap 两处都是 unknown + pressed 布尔 (改回 changed/候选反推就红)', [
+  (tapBody.match(/null, 'unknown'/gu) ?? []).length,
+  (tapBody.match(/reading\.pressed === true/gu) ?? []).length,
+  /reading\.candidates\.length === 0/u.test(tapBody),
+  /null, 'changed'|null, 'failed'/u.test(tapBody),
+  /tapReadingAnswer\(/gu.test(tapBody),
+], [2, 2, false, false, true])
+
+/**
+ * 第二轮 H: ⑨ 的邻居 —— #32 的 effect 回读进基线之后的那份契约
+ *
+ * 回执里带 `effect` 就照它走 (changed / unchanged / failed / unknown 四档原样透传); 把
+ * `exploreMemoryEffect` 里那三行透传删掉, 这一条立刻红
+ */
+check('跨应用记忆 ㉘: #32 回读进基线之后的透传契约 (effect 四档原样透传, 熄灭仍算 failed)', [
+  api.exploreMemoryEffect({ effect: 'changed' }),
+  api.exploreMemoryEffect({ effect: 'unchanged', tapped: true }),
+  api.exploreMemoryEffect({ effect: 'failed', tapped: true }),
+  api.exploreMemoryEffect({ effect: 'unknown', tapped: true }),
+  api.exploreMemoryEffect({ effect: 'changed', screen: 'off' }),
+], ['changed', 'unchanged', 'failed', 'unknown', 'failed'])
+
+/**
+ * 第三轮 E: 生产里最常见的那条 (a11y 按名成功) 也要落到 `pressed` 档
+ *
+ * 桩桥回 `{clicked:true}` → `exploreMemoryDelivered` 为真 → 真入口记一行 `pressed`; 少传这一个布尔,
+ * 真机上 `confirmed` 空、`pressed` 也空, 提示只剩 intent 一行 —— 这一条就是那个口子的钉子
+ */
+memoryApi.resetRun()
+memoryApi.exploreRun.session = 'explore-m'
+memoryApi.exploreRun.over = false
+memoryApi.exploreRun.intent = MEMORY_INTENT
+const a11yTree = { clicked: true, outcome: 'clicked', displayId: 3, matches: [{ text: '省电开关' }] }
+const a11yAmbiguous = { clicked: false, outcome: 'ambiguous' }
+const a11yNote = memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'unknown', '省电开关',
+  api.exploreMemoryDelivered(a11yTree))
+const a11yView = memoryApi.exploreMemoryFor(memoryApi.exploreRun.memory, MEMORY_APPS[0])
+check('跨应用记忆 ㉙: a11y 按名成功 (clicked) → 真的进「上次按过」, 同名两条不算按到', [
+  a11yNote,
+  api.exploreMemoryDelivered(a11yTree),
+  api.exploreMemoryDelivered(a11yAmbiguous),
+  api.exploreMemoryDelivered({ tapped: true }),
+  api.exploreMemoryStatus(memoryApi.exploreRun).pressedCount,
+  api.exploreMemoryHint(a11yView)[1],
+  /remember\(formatNamedTap\(tree, args\.note\), tree, undefined, exploreMemoryDelivered\(tree\)\)/u
+    .test(tapBody),
+  /remember\(formatGesture\('tapped', tapped, args\.note\), tapped, undefined, exploreMemoryDelivered\(tapped\)\)/u
+    .test(tapBody),
+], [true, true, false, true, 1, '上次按过: 省电开关', true, true])
+
+/** 第三轮 E 的边: `pressed` 那一档也只留 3 条 (与「已确认」同一把尺子), 跨应用合起来数得对 */
+memoryApi.resetRun()
+memoryApi.exploreRun.session = 'explore-m'
+memoryApi.exploreRun.over = false
+memoryApi.exploreRun.intent = MEMORY_INTENT
+for (const text of ['开关一', '开关二', '开关三', '开关四', '开关五']) {
+  memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[0], 'unknown', text, true)
+}
+memoryApi.exploreMemoryNote(memoryExec, MEMORY_APPS[1], 'unknown', '邮件设置', true)
+const cappedPressed = memoryApi.exploreMemoryFor(memoryApi.exploreRun.memory, MEMORY_APPS[0]).pressed
+const pressedAll = api.exploreMemoryCounts(memoryApi.exploreRun.memory)
+check('跨应用记忆 ㉛: 「上次按过」每个应用只留最近 3 条, pressedCount 跨应用合起来数', [
+  cappedPressed.length,
+  cappedPressed.map((row) => api.exploreMemoryBare(row)),
+  pressedAll.pressedCount,
+], [3, ['开关三', '开关四', '开关五'], 4])
+
+// 把还挂着的写盘链走完再删目录 (不然那几行 ENOENT 是判据自己的噪声)
+await memoryApi.exploreStateWrite()
+await rm(memoryHome, { recursive: true, force: true })
+if (previousMemoryHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = previousMemoryHome
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
