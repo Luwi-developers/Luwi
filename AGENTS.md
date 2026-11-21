@@ -549,6 +549,21 @@
   `event`), 宿主写进 `$DSH_HOME/lw/router.json`, 判断层当第三档候选 (分数 3); **默认要交**: 没有就在摘要
   `仍不确定的点` 写明为什么; 任务卡覆盖带尾注 `EXPLORE_CARD_TAIL`
 - **空手也留痕**: `explore.json` 的 `lastFinish {at, ended, written, total, session}` 与 `checksStreak` (同场重交不 +1)
+- **跨应用记忆记在 `explore.json` 的 `run` 里** (2.8.1 #36): 三格 `run.intent` / `run.pkg` / `run.memory`
+  (`{pkg: {intent, confirmed, pressed, failed, interrupted, resumed, active, at}}`) —— 切走标 `interrupted`,
+  切回来 `resumed` +1 并把 intent 当 steer 第一行交回去 (`lw_explore op=status` 的 `memory.packages /
+  interrupted / resumed / pressed` 读它); 一处真源、两处读 (`exploreMemoryStatus` 与 `exploreMemoryFor`);
+  **硬界 `EXPLORE_MEMORY_MAX`** (缺省 8, 进程级环境变量): 超了按三级淘汰 —— ① 不是手里这个也没被打断的
+  ② 回去过一次却什么都没捞到的 ③ 按 `at` 升序 (手里这个最后); 被打断的先留着, 但硬界照收
+  (`0` **只关 memory 三格的新写**, `run.intent` / `run.pkg` 仍落盘, 盘上旧账仍报 —— 回退不是"逐字回到今天")
+- **那三格记什么 / 不记什么** (2026-11-21 第二轮): `confirmed` 只在 `effect === 'changed'` 时记 (要等 #32
+  的 effect 回读进基线), 基线里能记的是 **`pressed` 档** —— `unknown` + 真的按到了才有, 提示念「上次按过:
+  X」; 盘上每行只留 `6 位 hash + 掩码后前 24 字` (`\d{4,}` → `****`, 金额 → `***`, 含验证码 / 密码 / 余额 /
+  金额 / 身份证 / 卡号的整条不进), 幂等靠"切 7 字重算 hash 对得上"而不是看形状; **读侧也过滤**: `run.pkg` 与
+  `memory` 里上一版留下的敏感行读回来就丢; 敏感包 = 短信 / 通讯录 / 电话 / 微信 / QQ / 邮箱 / 密码管理器 /
+  健康 / 银行券商 / 支付 / 输入法 (段名 + 段前缀 + 全名三路), 归属只认 `lw_launch` 或"屏上包名真的变了"
+  (主屏也走这条; 通知栏 / 权限弹窗 / 桌面 / 安装器不算, 桌面表与 `ROUTER_HOME_PACKAGES` 共用, 那张
+  "哪块屏是哪个应用"的表随场次清、还屏删一格); 判据 `tools/check-explore.mjs` 第十九节
 - **事件型判法要日历, 准点那拍应用自己算**: 宿主每拍问桥 `calendarWindow` (1.5 s 超时 / 60 s 缓存 / 读不到就
   `available:false`), 数据由 `LwCalendar.window` 给 (**不进 `LwCalendar.OPERATIONS`**); 提前量由 `RouterTick.leadAtOf`
   读 `router.json` 的 `checks` + `AutomationCalendar` 算 (`arm()` 跑得太早, 宿主那时还没判断完); 去重键
