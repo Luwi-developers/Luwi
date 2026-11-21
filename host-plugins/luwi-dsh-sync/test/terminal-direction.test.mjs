@@ -2,7 +2,7 @@
 //
 // 这一份钉的是"只由手机管电脑"那四条底线, 全是行为断言 (起真路由、发真请求, 不碰网络):
 //   ① 回环判据: 只有本机发出来的请求算本机 (v4 / v6 / v4-mapped 三种写法都认)
-//   ② 面板写面 (op) 与终端 (term) 对非回环请求回 403, 而且**根本不执行**那一下
+//   ② 面板写面 (op) 对非回环请求回 403, 而且**根本不执行**那一下 (原 /term 那条随沙盒终端下线)
 //   ③ 对端入站 send: 控制器的 `acceptSend` 缺省关, 带对的令牌也回 403; 电脑那一侧照旧收
 //   ④ 角色派生: 有 `pairing` 的那台 (手机) 缺省不听、不收指令; 没有的那台 (电脑) 缺省都开;
 //      queue 模式两档一律关; 显式写 true 才放开
@@ -87,7 +87,8 @@ test('loopback: the four spellings of this machine count, everything else does n
 })
 
 // ---------------------------------------------------------------------------
-// ② 面板写面 / 终端: 非回环一律 403, 而且不执行
+// ② 面板写面: 非回环一律 403, 而且不执行
+// (2026-11-21: 沙盒终端 /luwi-sync/term 已下线, 这一节只钉写面)
 // ---------------------------------------------------------------------------
 
 function makePanelDeps(calls) {
@@ -101,28 +102,19 @@ function makePanelDeps(calls) {
       calls.push(`op:${body?.op ?? ''}`)
       return { status: 200, body: { ok: true, action: body?.op ?? '' } }
     },
-    runTerm: async () => {
-      calls.push('term')
-      return {
-        ok: true,
-        installed: true,
-        stdout: 'hi',
-        exitCode: 0,
-      }
-    },
   }
 }
 
-test('panel: the write surface and the terminal are loopback-only, and a refused call never runs', async () => {
+test('panel: the write surface is loopback-only, and a refused call never runs', async () => {
   const calls = []
   const panel = createPanel(makePanelDeps(calls))
   const routes = panel.routes()
 
   // Host 头不是回环的 (DNS rebinding / 同机反代) 也要拒: socket 是回环但 Host 是 evil.example
-  const rebound = await callRoute(routes, '/luwi-sync/term', {
+  const rebound = await callRoute(routes, '/luwi-sync/op', {
     method: 'POST',
     headers: { host: 'evil.example:3080' },
-    body: { command: 'id' },
+    body: { op: 'push', target: 'sessions', confirm: true },
   })
   assert.equal(rebound.status, 403)
 
@@ -133,27 +125,14 @@ test('panel: the write surface and the terminal are loopback-only, and a refused
   })
   assert.equal(opFromPeer.status, 403)
   assert.match(opFromPeer.body.error, /loopback-only/u)
+  assert.deepEqual(calls, [], 'a refused request must not reach runOp')
 
-  const termFromPeer = await callRoute(routes, '/luwi-sync/term', {
-    method: 'POST',
-    remoteAddress: '192.168.1.20',
-    body: { command: 'id' },
-  })
-  assert.equal(termFromPeer.status, 403)
-  assert.match(termFromPeer.body.error, /loopback-only/u)
-  assert.deepEqual(calls, [], 'a refused request must not reach runOp / runTerm')
-
-  // 本机 (回环) 照旧: 写面进 runOp (这棵树上没有镜像, 于是它到不了 runOp 就先 409 —— 重点是没有 403),
-  // 终端进 runTerm
+  // 本机 (回环) 照旧: 写面进 runOp (这棵树上没有镜像, 于是它到不了 runOp 就先 409 —— 重点是没有 403)
   const opLocal = await callRoute(routes, '/luwi-sync/op', {
     method: 'POST',
     body: { op: 'push', target: 'sessions', confirm: true },
   })
   assert.notEqual(opLocal.status, 403)
-  const termLocal = await callRoute(routes, '/luwi-sync/term', { method: 'POST', body: { command: 'id' } })
-  assert.equal(termLocal.status, 200)
-  assert.match(String(termLocal.body.stdout), /hi/u)
-  assert.ok(calls.includes('term'), 'the loopback terminal call reaches runTerm')
 
   // 方法那一条先判: 非回环的 GET 仍是 405, 与老读数逐字一致
   const wrongMethod = await callRoute(routes, '/luwi-sync/op', { method: 'GET', remoteAddress: '192.168.1.20' })

@@ -82,17 +82,9 @@ function makePanel(opts = {}) {
     readP2p: opts.readP2p,
     p2pConfirm: opts.p2pConfirm,
     p2pRevoke: opts.p2pRevoke,
-    // Luwi 加 (2026-10-23): 账号那四个口 (登录 / 轮询 / 退出 / 刷新权益)
-    readLicense: opts.readLicense,
-    loginStart: opts.loginStart,
-    loginPoll: opts.loginPoll,
-    logout: opts.logout,
-    refreshLicense: opts.refreshLicense,
+    // 2026-11-21: 账号那四个口 (readLicense / loginStart / loginPoll / logout / refreshLicense) 与
+    // 沙盒终端那三个口 (runTerm / termStatus / termInterrupt) 连同宿主半一起下线, 这里不再注入
     collectDoctor: opts.collectDoctor ?? (async () => ({ status: 'PASS', mount: { mounted: true, runner: 'subprocess' }, peers: [], problems: [], warnings: [], notes: [] })),
-    // Luwi 加 (2026-11-05/06): 终端面板三档 (run / status / interrupt)
-    runTerm: opts.runTerm,
-    termStatus: opts.termStatus,
-    termInterrupt: opts.termInterrupt,
     info: {
       plugin: 'luwi-dsh-sync',
       version: '0.2.24',
@@ -372,7 +364,7 @@ test('runOp: doctor / peers 自己抛错时回 ok:false 而不是 5xx', async ()
 
 // ── routes ─────────────────────────────────────────────────────────────────
 
-test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', async () => {
+test('routes: 四条精确路由, 前缀命中, /op 只收 POST', async () => {
   const { panel } = makePanel()
   const routes = panel.routes()
   assert.deepEqual(routes.map(r => r.path), [
@@ -380,7 +372,6 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
     `${PANEL_PREFIX}/doctor`,
     `${PANEL_PREFIX}/peers`,
     `${PANEL_PREFIX}/op`,
-    `${PANEL_PREFIX}/term`,
   ])
   assert.equal(routes.every(r => r.kind === 'exact'), true)
 
@@ -402,17 +393,8 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   assert.equal(ok.statusCode, 200)
   assert.equal(JSON.parse(ok.body).ok, true)
 
-  // Luwi 加 (2026-11-05): 终端面板那条路由 —— 只收 POST, 宿主没有通道时如实说没有
-  const term = routes[4]
-  assert.equal(term.path, `${PANEL_PREFIX}/term`)
-  const termGet = fakeResponse()
-  await term.handler(fakeRequest(null, { method: 'GET' }), termGet)
-  assert.equal(termGet.statusCode, 405)
-  const termNoChannel = fakeResponse()
-  await term.handler(fakeRequest('{"command":"echo hello"}'), termNoChannel)
-  assert.equal(termNoChannel.statusCode, 200)
-  assert.equal(JSON.parse(termNoChannel.body).ok, false)
-  assert.match(JSON.parse(termNoChannel.body).error, /not started by Luwi/)
+  // 2026-11-21: /term 那条路由 (沙盒终端) 已下线 —— 面上不该再有它
+  assert.equal(routes.some(r => r.path === `${PANEL_PREFIX}/term`), false)
 
   const panelRoute = routes[0]
   const snap = fakeResponse()
@@ -420,7 +402,7 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   assert.equal(snap.statusCode, 200)
   assert.equal(JSON.parse(snap.body).handshake, PANEL_HANDSHAKE)
 
-  // 2026-11-21 终端口径: 局域网里别的机器打过来的写面与终端一律 403 (控制面只认回环)
+  // 2026-11-21 终端口径: 局域网里别的机器打过来的写面一律 403 (控制面只认回环)
   const lanOp = fakeResponse()
   await op.handler(fakeRequest(
     '{"op":"push","target":"sessions","confirm":true}',
@@ -428,43 +410,6 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   ), lanOp)
   assert.equal(lanOp.statusCode, 403)
   assert.match(JSON.parse(lanOp.body).error, /loopback-only/)
-  const lanTerm = fakeResponse()
-  await term.handler(fakeRequest('{"command":"id"}', { socket: { remoteAddress: '192.168.1.20' } }), lanTerm)
-  assert.equal(lanTerm.statusCode, 403)
-})
-
-test('routes: /term 的 status / run / interrupt 三档 (2.8.0 #32)', async () => {
-  const calls = []
-  const { panel } = makePanel({
-    termStatus: async () => ({ ok: true, installed: false, version: '' }),
-    runTerm: async (command, timeoutMs) => {
-      calls.push({ command, timeoutMs })
-      return { ok: true, text: 'hi\n' }
-    },
-    termInterrupt: async () => ({ ok: true, interrupted: true }),
-  })
-  const term = panel.routes().find(route => route.path === `${PANEL_PREFIX}/term`)
-
-  const status = fakeResponse()
-  await term.handler(fakeRequest('{"op":"status"}'), status)
-  assert.equal(status.statusCode, 200)
-  assert.deepEqual(JSON.parse(status.body), { ok: true, installed: false, version: '', action: PANEL_OPS.TERM })
-
-  // 老面板不带 op 也按 run 算 (2026-11-05 那条通道的兼容面)
-  const legacy = fakeResponse()
-  await term.handler(fakeRequest('{"command":"echo hi"}'), legacy)
-  assert.equal(JSON.parse(legacy.body).ok, true)
-  assert.equal(JSON.parse(legacy.body).text, 'hi\n')
-  assert.deepEqual(calls, [{ command: 'echo hi', timeoutMs: undefined }])
-
-  const interrupt = fakeResponse()
-  await term.handler(fakeRequest('{"op":"interrupt"}'), interrupt)
-  assert.deepEqual(JSON.parse(interrupt.body), { ok: true, interrupted: true, action: PANEL_OPS.TERM })
-
-  const unknown = fakeResponse()
-  await term.handler(fakeRequest('{"op":"nope"}'), unknown)
-  assert.equal(unknown.statusCode, 400)
-  assert.match(JSON.parse(unknown.body).error, /unknown term op/)
 })
 
 test('routes: dispose 清掉成本缓存 (下一次快照重新量)', async () => {
@@ -523,81 +468,21 @@ test('the snapshot carries the p2p readings when the host provides them', async 
   assert.equal('p2p' in without, false)
 })
 
-// ── 账号 (2026-10-23): 生成配对码的前提 ─────────────────────────────────────
+// ── 账号 / 权益 (2026-11-21 下线): 四个 op 与 license 块都不在面上 ─────────────
 
-test('login ops: start returns a one-time state in the url, poll hands back the entitlement', async () => {
-  let polls = 0
+test('账号那一组 op 与 license 块整条下线: 发过来就是未知 op, 快照里也没有 license', async () => {
   const { panel } = makePanel({
-    loginStart: async () => ({ ok: true, url: 'https://luwi.dpdns.org/login?ls=abc123', state: 'abc123', expiresAt: 1 }),
-    loginPoll: async () => {
-      polls += 1
-      return polls === 1 ? { ok: true, waiting: true } : { ok: true, signedIn: true, license: { state: 'active', login: 'octo' } }
-    },
-    logout: async () => ({ ok: true }),
-    refreshLicense: async () => ({ ok: true, license: { state: 'active' } }),
+    // 就算有人还往装配面上塞这几口, 它们也不该再被认 (op 词汇已经没了)
+    readLicense: async () => ({ state: 'active', login: 'octo', hasToken: true }),
+    loginStart: async () => ({ ok: true, url: 'https://example.com/login?ls=x' }),
   })
-
-  const started = await panel.runOp({ op: 'login-start' })
-  assert.equal(started.status, 200)
-  assert.equal(started.body.ok, true)
-  assert.match(started.body.url, /\/login\?ls=/u)
-  // 不针对哪根镜像: 不传 target 也得能跑
-  assert.equal(new URL(started.body.url).searchParams.get('ls'), 'abc123')
-
-  const waiting = await panel.runOp({ op: 'login-poll' })
-  assert.equal(waiting.body.ok, true)
-  assert.equal(waiting.body.waiting, true)
-
-  const signed = await panel.runOp({ op: 'login-poll' })
-  assert.equal(signed.body.signedIn, true)
-  assert.equal(signed.body.license.login, 'octo')
-
-  assert.equal((await panel.runOp({ op: 'license-refresh' })).body.ok, true)
-  assert.equal((await panel.runOp({ op: 'logout' })).body.ok, true)
-})
-
-test('login ops respect panelOps:false and a host without the account hooks', async () => {
-  const off = makePanel({ panelOps: false, loginStart: async () => ({ ok: true, url: 'x' }) })
-  assert.equal((await off.panel.runOp({ op: 'login-start' })).status, 403)
-
-  const bare = makePanel()
-  assert.equal((await bare.panel.runOp({ op: 'login-start' })).status, 501)
-  assert.equal((await bare.panel.runOp({ op: 'login-poll' })).status, 501)
-})
-
-test('a throwing login hook degrades to {ok:false} instead of failing the channel', async () => {
-  const { panel } = makePanel({ loginStart: async () => { throw new Error('boom') } })
-  const answer = await panel.runOp({ op: 'login-start' })
-  assert.equal(answer.status, 200)
-  assert.equal(answer.body.ok, false)
-  assert.match(answer.body.error, /boom/u)
-})
-
-test('the snapshot carries the license block, and never a token', async () => {
-  const license = {
-    state: 'grace',
-    login: 'octo',
-    email: 'octo@example.com',
-    accountId: 7,
-    plan: 'sync',
-    expiresAt: 1000,
-    graceUntil: 2000,
-    issuedAt: 500,
-    hasToken: true,
+  for (const op of ['login-start', 'login-poll', 'logout', 'license-refresh']) {
+    const answer = await panel.runOp({ op })
+    assert.equal(answer.status, 400)
+    assert.match(answer.body.error, /unknown op/u)
   }
-  const snapshot = await makePanel({ readLicense: async () => license }).panel.snapshot()
-  assert.equal(snapshot.license.state, 'grace')
-  assert.equal(snapshot.license.login, 'octo')
-  assert.equal(snapshot.license.hasToken, true)
-  assert.equal('token' in snapshot.license, false)
-  assert.equal(JSON.stringify(snapshot).includes('tok-'), false)
-
-  const without = await makePanel().panel.snapshot()
-  assert.equal('license' in without, false)
+  const snapshot = await panel.snapshot()
+  assert.equal('license' in snapshot, false)
+  assert.equal(snapshot.v, 5)
 })
 
-test('a broken license reader degrades to invalid instead of failing the snapshot', async () => {
-  const snapshot = await makePanel({ readLicense: async () => { throw new Error('disk gone') } }).panel.snapshot()
-  assert.equal(snapshot.license.state, 'invalid')
-  assert.match(snapshot.license.reason, /disk gone/u)
-})

@@ -827,24 +827,6 @@ export function createPeerRuntime(deps) {
           }
         },
       },
-      {
-        kind: 'exact',
-        path: '/luwi-sync/send',
-        handler: async (req, res) => {
-          // 本机面板 / 门户终端发起的发送: 同源 (浏览器) 那一侧, 令牌不出宿主
-          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '/luwi-sync/send is POST-only' })
-          // 2026-11-21: 这条会真的在对端跑一句话, 只认回环 —— 电脑那边打过来就是"电脑控制手机"
-          if (!isLocalRequest(req)) return sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
-          let body
-          try {
-            body = await readJsonBody(req, 8192)
-          } catch (error) {
-            return sendJson(res, 400, { ok: false, error: messageOf(error) })
-          }
-          const answer = await send(body)
-          sendJson(res, answer.ok ? 200 : 502, answer)
-        },
-      },
     ]
   }
 

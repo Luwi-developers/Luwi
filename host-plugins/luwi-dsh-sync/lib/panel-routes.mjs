@@ -7,7 +7,8 @@
 //   GET  /luwi-sync/doctor  只读自检 (runDoctor, 不触网不写盘)
 //   GET  /luwi-sync/peers   镜像里的名片 (readPeerCards)
 //   POST /luwi-sync/op      {op, target, confirm} 跑一个动作
-//   POST /luwi-sync/term    {command, timeoutMs} 在手机的沙盒里跑一条命令 (侧边栏的终端面板)
+//
+// 2026-11-21: `POST /luwi-sync/term` (手机沙盒里跑命令) 与整段账号权益都下线了, 这条面上不再有它们
 //
 // 纪律 (与 docs/Luwi-dsh-sync-设计.md §11.3 / §11.4 逐条对上):
 //   · 应答一律 JSON, 非 2xx 也是 —— 面板永远解析得动, 不靠状态码分支
@@ -22,7 +23,7 @@ import { join } from 'node:path'
 
 import { sanitizeRemote } from './sanitize.mjs'
 import { messageOf } from './errors.mjs'
-// 2026-11-21 终端口径: 写面 (op) 与终端 (term) 只认本机回环, 见 lib/loopback.mjs
+// 2026-11-21 终端口径: 写面 (op) 只认本机回环, 见 lib/loopback.mjs (原 /term 那扇门已随沙盒终端下线)
 import { LOOPBACK_ONLY_ERROR, isLocalRequest } from './loopback.mjs'
 
 /** 路由前缀 (webserver 的 path 不带尾斜杠)。 */
@@ -38,7 +39,9 @@ export const PANEL_HANDSHAKE = 'luwi-dsh-sync/panel'
 // v2 (Luwi, G1-2): 快照多一块 peer (对端通道读数)
 // v3 (Luwi, 2026-10-20): 一个仓库多根源 / 扫码配对 / 会话基线 / 手机只读那一档
 // v4 (Luwi, 2026-10-23): 账号权益 (license 块) —— 生成配对码的前提
-export const PANEL_SCHEMA_VERSION = 4
+// v5 (Luwi, 2026-11-21): 账号那一段整条下线 (license 块、login-* / logout / license-refresh 四个 op
+// 与 /term 沙盒终端一并撤); 面板只留配对 / 配置 / 镜像 / 对端 / P2P
+export const PANEL_SCHEMA_VERSION = 5
 
 /** 面板能发的动作。 */
 export const PANEL_OPS = Object.freeze({
@@ -59,13 +62,6 @@ export const PANEL_OPS = Object.freeze({
   // Luwi 加 (P2P T6): 信任表的两个写动作 —— 确认换机 (换过 nodeId 的对端重新放行) 与吊销
   P2P_CONFIRM: 'p2p-confirm',
   P2P_REVOKE: 'p2p-revoke',
-  // Luwi 加 (2026-10-23): 账号 —— 生成配对码的前提; 登录走"浏览器打开官网 + 面板轮询"
-  LOGIN_START: 'login-start',
-  LOGIN_POLL: 'login-poll',
-  LOGOUT: 'logout',
-  LICENSE_REFRESH: 'license-refresh',
-  // Luwi 加 (2026-11-05): 终端面板 —— 在手机的沙盒里跑一条命令 (不是同步语义, 借这张面用同一套纪律)
-  TERM: 'term',
 })
 
 /** 会改远端/本地工作树/配置的那几个: 要 confirm, 要单飞。 */
@@ -231,9 +227,6 @@ export async function measureTree(root, maxEntries = COST_MAX_ENTRIES) {
  * @param {() => Promise<object>} deps.collectDoctor 只读自检 (runDoctor 的装配)。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pConfirm] Luwi 加 (P2P T6)：确认换机。
  * @param {(deviceId: string) => Promise<{ok: boolean}>} [deps.p2pRevoke] Luwi 加 (P2P T6)：吊销对端。
- * @param {(command: string, timeoutMs?: number) => Promise<{ok: boolean, text?: string, interrupted?: boolean, error?: string}>} [deps.runTerm] Luwi 加 (2026-11-05)：终端面板跑的沙盒命令 (缺省 = 这台宿主没有通道, 回 ok:false)。
- * @param {() => Promise<{ok: boolean, installed: boolean, version?: string, error?: string}>} [deps.termStatus] Luwi 加 (2026-11-06)：沙盒装没装 (终端入口置灰与「先装 Linux 沙盒」那句)。
- * @param {() => Promise<{ok: boolean, interrupted?: boolean, error?: string}>} [deps.termInterrupt] Luwi 加 (2026-11-06)：Ctrl-C 中断正在跑的那一条。
  * @param {object} deps.info - 启动面读数 { plugin, version, runner, disabledReason, mounted, config }。
  * @param {object} [deps.logger] - 宿主 logger (可选)。
  * @param {number} [deps.now] - 取当前时间的钩子 (测试用)。
@@ -373,15 +366,6 @@ export function createPanel(deps) {
         pairing = { paired: false, error: messageOf(thrown) }
       }
     }
-    // Luwi 加 (2026-10-23): 账号权益 (state / login / 到期 / 有没有 token; **token 本身永不外发**)
-    let license = null
-    if (typeof deps.readLicense === 'function') {
-      try {
-        license = await deps.readLicense()
-      } catch (thrown) {
-        license = { state: 'invalid', reason: messageOf(thrown) }
-      }
-    }
     return {
       ok: true,
       handshake: PANEL_HANDSHAKE,
@@ -400,7 +384,6 @@ export function createPanel(deps) {
       ...(peer === null ? {} : { peer }),
       ...(p2p === null ? {} : { p2p }),
       ...(pairing === null ? {} : { pairing }),
-      ...(license === null ? {} : { license }),
       op: running === null ? lastOp : runningView(ts),
     }
   }
@@ -476,35 +459,8 @@ export function createPanel(deps) {
       }
     }
 
-    // Luwi 加 (2026-10-23): 账号相关的四个动作 —— 都是"本机这一份", 不针对哪根镜像,
-    // 所以排在 target 归一前面。登录本身是明确的点击, 不要第二次确认 (与 pair 同一口径)
-    // 2026-10-25: 签到下线, CHECKIN 那一条一起撤掉 (旧面板发过来会落到"未知 op")
-    if (
-      op === PANEL_OPS.LOGIN_START ||
-      op === PANEL_OPS.LOGIN_POLL ||
-      op === PANEL_OPS.LOGOUT ||
-      op === PANEL_OPS.LICENSE_REFRESH
-    ) {
-      if (deps.info.config.panelOps !== true) {
-        return { status: 403, body: { ok: false, error: 'panel-initiated writes are disabled (panelOps: false)' } }
-      }
-      const hook = op === PANEL_OPS.LOGIN_START
-        ? deps.loginStart
-        : op === PANEL_OPS.LOGIN_POLL
-          ? deps.loginPoll
-          : op === PANEL_OPS.LOGOUT
-            ? deps.logout
-            : deps.refreshLicense
-      if (typeof hook !== 'function') {
-        return { status: 501, body: { ok: false, error: 'this host has no account hook' } }
-      }
-      try {
-        const result = await hook()
-        return { status: 200, body: { ok: result?.ok === true, action: op, ...(result ?? {}) } }
-      } catch (thrown) {
-        return { status: 200, body: { ok: false, action: op, error: messageOf(thrown) } }
-      }
-    }
+    // 2026-11-21: 账号权益那一组 op (login-start / login-poll / logout / license-refresh) 整条下线 ——
+    // 它只给 P2P 到期闸供读数, 而 P2P 缺省关、手机侧从不启用 (见 CHANGELOG 0.4.0)
 
     // Luwi 加 (P2P T6): 信任表动作不碰镜像, 在 target 归一之前处理
     if (op === PANEL_OPS.P2P_CONFIRM || op === PANEL_OPS.P2P_REVOKE) {      if (deps.info.config.panelOps !== true) {
@@ -709,82 +665,6 @@ export function createPanel(deps) {
           sendJson(res, status, answer)
         } catch (thrown) {
           sendJson(res, 500, { ok: false, error: messageOf(thrown) })
-        }
-      },
-    })
-    table.push({
-      kind: 'exact',
-      path: `${PANEL_PREFIX}/term`,
-      handler: async (req, res) => {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: `${PANEL_PREFIX}/term is POST-only` })
-          return
-        }
-        // 2026-11-21 终端口径: 在手机的沙盒里跑命令只认本机回环 —— 电脑的浏览器打过来一律 403,
-        // 这条正是"电脑控制手机"最直接的那一扇门
-        if (!isLocalRequest(req)) {
-          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
-          return
-        }
-        let body
-        try {
-          body = await readJsonBody(req)
-        } catch (thrown) {
-          sendJson(res, 400, { ok: false, error: messageOf(thrown) })
-          return
-        }
-        // 这台宿主没被 Luwi 拉起时没有沙盒可跑 —— 如实说没有, 不假装跑过
-        if (typeof deps.runTerm !== 'function') {
-          sendJson(res, 200, {
-            ok: false,
-            action: PANEL_OPS.TERM,
-            installed: false,
-            error: 'this host was not started by Luwi, so there is no sandbox to run in',
-          })
-          return
-        }
-        // 2026-11-06 (2.8.0 #32): 老面板发的是裸命令 (没有 op), 按 run 算
-        const op = typeof body.op === 'string' && body.op !== '' ? body.op : 'run'
-        if (op === 'status') {
-          try {
-            const answer = typeof deps.termStatus === 'function'
-              ? await deps.termStatus()
-              : { ok: false, installed: false, error: 'this host cannot read the sandbox state' }
-            sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
-          } catch (thrown) {
-            sendJson(res, 200, {
-              ok: false,
-              installed: false,
-              action: PANEL_OPS.TERM,
-              error: messageOf(thrown),
-            })
-          }
-          return
-        }
-        if (op === 'interrupt') {
-          try {
-            const answer = typeof deps.termInterrupt === 'function'
-              ? await deps.termInterrupt()
-              : { ok: false, error: 'this host cannot interrupt a running command' }
-            sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
-          } catch (thrown) {
-            sendJson(res, 200, { ok: false, action: PANEL_OPS.TERM, error: messageOf(thrown) })
-          }
-          return
-        }
-        if (op !== 'run') {
-          sendJson(res, 400, {
-            ok: false,
-            action: PANEL_OPS.TERM,
-            error: `unknown term op ${JSON.stringify(op)} (expected run|status|interrupt)`,
-          })
-          return
-        }
-        try {
-          const answer = await deps.runTerm(body.command, body.timeoutMs)
-          sendJson(res, 200, { ...answer, action: PANEL_OPS.TERM })
-        } catch (thrown) {
-          sendJson(res, 200, { ok: false, action: PANEL_OPS.TERM, error: messageOf(thrown) })
         }
       },
     })

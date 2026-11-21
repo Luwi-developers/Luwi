@@ -14,9 +14,11 @@ import {
 } from '../lib/p2p-config.mjs'
 import { SyncError } from '../lib/errors.mjs'
 
-test('resolveP2pConfig: defaults keep p2p off and resident', () => {
+test('resolveP2pConfig: defaults keep p2p on and resident (2026-11-21 晚 主人: 应当使用)', () => {
   const config = resolveP2pConfig()
-  assert.equal(config.enabled, false)
+  assert.equal(config.enabled, true)
+  // 显式关掉仍然算数 (面板那颗开关写的就是这一项)
+  assert.equal(resolveP2pConfig({ enabled: false }).enabled, false)
   assert.equal(config.power, 'resident')
   assert.equal(config.idleMs, 0)
   assert.equal(config.heartbeatMs, P2P_DEFAULTS.heartbeatMs)

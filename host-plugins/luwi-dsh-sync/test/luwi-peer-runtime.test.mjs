@@ -158,7 +158,7 @@ test('peer/info and peer/send answer the method they own', async () => {
     const runtime = createPeerRuntime(deps)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/info', { method: 'POST', token: TOKEN })).status, 405)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/send', { method: 'GET', token: TOKEN })).status, 405)
-    assert.equal((await callRoute(runtime, '/luwi-sync/send', { method: 'GET' })).status, 405)
+    assert.equal(runtime.routes().some(route => route.path === '/luwi-sync/send'), false, '面板发送路 2026-11-21 起整条下线')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

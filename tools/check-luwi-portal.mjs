@@ -3478,6 +3478,64 @@ if (refsSource === '' || bubbleSource === '') {
     expect('client.js', unmountSource, 'openWorkspace(home)')
   }
 
+  // ②c 2026-11-21 返工: 门牌不闪 + 进终端不显示门户对话
+  //
+  // 主人两条: ① 「正在找电脑」那张卡一直反复闪 —— 探针 5/15 秒一拍, 每一拍都先把卡翻成 probing
+  // 再翻回来; ② 进终端时门户的对话仍显示在终端 (黑底上透出门户那一场的气泡)
+  const firstProbeGate = terminalGateState(
+    { paired: true, syncOn: true, terminalReady: true },
+    { ok: false, busy: true, why: '', at: 0 },
+  )
+  const refreshingOnline = terminalGateState(
+    { paired: true, syncOn: true, terminalReady: true },
+    { ok: true, busy: true, why: '', at: 2 },
+  )
+  const refreshingOffline = terminalGateState(
+    { paired: true, syncOn: true, terminalReady: true },
+    { ok: false, busy: true, why: '网络不通', at: 1 },
+  )
+  if (firstProbeGate.state === 'probing' && refreshingOnline.state === ''
+    && refreshingOffline.state === 'offline' && refreshingOffline.note.includes('网络不通')) {
+    note('terminalGateState: 只有首探说「正在找电脑」; 之后每一拍重探按上一次结论画 (在线不弹 / 掉线卡连原因都不闪)')
+  } else {
+    fail(`terminalGateState: 重探那一拍还是把卡片翻面了 (${JSON.stringify([firstProbeGate.state, refreshingOnline.state, refreshingOffline.state])})`)
+  }
+  expect('client.js', client, 'var firstProbe = busy && !(at > 0)')
+  expect('client.js', client, 'if (terminalMode && firstProbe) renderTerminalGate()')
+  expect('client.js', client, 'terminalProbe = { at: terminalProbe.at, ok: terminalProbe.ok, busy: true, why: terminalProbe.why }')
+  // 门户对话那条: 样式兜第一帧, 脚本清 DOM, 退出终端再画回来
+  expect('client.js', client, '#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}')
+  expect('client.js', client, 'function markTerminalSession')
+  expect('client.js', client, "root.setAttribute('data-term-session', isTerminalSession(sessionId) ? 'on' : 'off')")
+  expect('client.js', client, 'var TERMINAL_HIDDEN_SIG')
+  const markSource = takeFunction('markTerminalSession')
+  if (markSource !== '' && markSource.includes('root.removeAttribute(\'data-term-session\')')) {
+    note('markTerminalSession: 不在终端时把记号摘掉 (门户照旧显示对话)')
+  } else {
+    fail('client.js: markTerminalSession 不在终端时不摘记号 —— 门户会一直空着')
+  }
+  const metaSource = takeFunction('renderMeta')
+  const modeSource = takeFunction('applyTerminalMode')
+  if (metaSource.includes('markTerminalSession()') && modeSource.includes('markTerminalSession()')) {
+    note('renderMeta / applyTerminalMode 各对一次「落到电脑那一场没有」')
+  } else {
+    fail('client.js: renderMeta 或 applyTerminalMode 没对记号 —— 换场之后对话上不了屏')
+  }
+  const flowSource = takeFunction('renderFlow')
+  if (flowSource === '') fail('client.js: 抽不出 renderFlow')
+  else {
+    expectOrder('renderFlow: 终端里还没落到电脑那一场就一格都不画', flowSource, 'renderMeta()', 'if (terminalMode && !isTerminalSession(sessionId))')
+    expect('client.js', flowSource, 'flowSig = TERMINAL_HIDDEN_SIG')
+  }
+  // 退出终端要把门户那一场立刻画回来 (没真换过场时 terminalRestore 一个字节都不动)
+  expect('client.js', closeSource, 'flowSig = null')
+  const openForClean = takeFunction('openTerminal')
+  if (openForClean.includes('flowSig = null') && openForClean.includes('renderFlow()')) {
+    note('openTerminal: 进终端当场把 DOM 也清掉 (不等 3 秒那一拍)')
+  } else {
+    fail('client.js: openTerminal 没当场清掉门户对话 —— 离线门牌期会一直贴着旧气泡')
+  }
+
   // ③ 原生那一半
   const portalTerminalKt = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalTerminal.kt')
   expect('PortalTerminal.kt', portalTerminalKt, 'var open by mutableStateOf(false)')

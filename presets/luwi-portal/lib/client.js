@@ -121,6 +121,13 @@ window.__ModuleLoader__.load({
     var TERMINAL_RECENT_MS = 60 * 60 * 1000
     /** 自动进终端那一趟之间至少隔这么久 (建不出来时别每个探测拍都重试一趟, 新建那条一等就是 10 秒) */
     var TERMINAL_ENTER_COOLDOWN_MS = 20 * 1000
+    /**
+     * 终端里"还没落到电脑那一场"时 `#lwp-flow` 的内容签名 (2026-11-21 主人: "进入终端时门户的对话仍显示在终端")
+     *
+     * 记一个正常签名撞不上的值: 清空之后走到这里, 换场那一下内容一变签名自然不同, 于是自己重画;
+     * 不带这个记号的话 `resetFlow()` 之后签名是空内容那一份, 再来一次同样的对话就判成"画过了"
+     */
+    var TERMINAL_HIDDEN_SIG = '\u0000terminal-hidden'
 
     /**
      * 把页面收到的采样封成 16 kHz 单声道 PCM16 WAV (纯函数, 判据真跑)
@@ -1184,6 +1191,10 @@ window.__ModuleLoader__.load({
       'line-height:1;padding:4px 6px 4px 2px;margin-right:2px}',
       '#lwp-term-back[hidden]{display:none}',
       '#lwp-root[data-mode="terminal"] #lwp-flow{color:#d8d8d8}',
+      // 终端里还没落到电脑那一场 (`data-term-session` 不是 on) 时, 门户那几条对话一条都不给看 (2026-11-21 主人:
+      // "进入终端时, 门户的对话仍显示在终端, 进入终端时应当不显示") —— `visibility` 而不是 `display`,
+      // 排版尺寸照旧, 换场之后不用重排; JS 那一半见 `renderFlow` 的闸与 `markTerminalSession`
+      '#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}',
       '#lwp-root[data-mode="terminal"] .lwp-bubble{background:rgba(255,255,255,.07);color:#e8e8e8;',
       'box-shadow:none}',
       '#lwp-root[data-mode="terminal"] .lwp-row[data-who="user"] .lwp-bubble{background:rgba(120,200,160,.16)}',
@@ -4490,6 +4501,16 @@ window.__ModuleLoader__.load({
         if (!els.flow) return
         // 每画一次流就顺手对一次那颗点: "正在做…"那一行与它是同一个判据, 不该一个亮一个不亮
         renderMeta()
+        // 终端里还没落到电脑那一场: 门户的对话一格都不上屏 (2026-11-21 主人原话) ——
+        // `openTerminal` 到 `terminalEnter` 落场之间有几百毫秒 (离线时是整个门牌期), 那一段 `sessionId`
+        // 还是门户那一场, 照常画就等于把"我的对话"贴在黑底上; 落到电脑那一场之后签名一变自己重画
+        if (terminalMode && !isTerminalSession(sessionId)) {
+          if (flowSig !== TERMINAL_HIDDEN_SIG) {
+            resetFlow()
+            flowSig = TERMINAL_HIDDEN_SIG
+          }
+          return
+        }
         var items = nodesOf()
         var shown = []
         for (var i = 0; i < items.length; i++) {
@@ -4596,6 +4617,9 @@ window.__ModuleLoader__.load({
 
       function renderMeta() {
         updateBusy()
+        // 终端那身皮上的"落到电脑那一场没有"跟着每一次重画对一次 (见 [markTerminalSession]):
+        // 终端里的对话该不该上屏就认这个记号, `renderFlow` 的闸也在同一拍里读它
+        markTerminalSession()
         // 旧元素留着但不进屏 (样式里 `display:none`): 有几条判据还认 `lwp-meta` 这个名字
         if (els.meta) els.meta.textContent = ''
       }
@@ -7308,14 +7332,23 @@ window.__ModuleLoader__.load({
        *
        * 四档: 没配对 / 终端关着 / 配对码缺连接口令或通道没开 / 电脑没连上 (探测通了就不弹, 不看配置缺不缺地址); `online` 时**不弹**
        * (状态是空串). 每一档都给一句能照着做的人话 —— 弹窗上那两颗钮不变 (扫码配对 / 返回)
+       *
+       * **「正在找电脑」只有第一次探测才说** (2026-11-21 主人: "一直会反复闪这个弹窗"): 探针 5/15 秒一拍,
+       * 每一拍都先把卡片翻成「正在找电脑」再翻回来就是那个闪。已经有过落定读数 (`probe.at > 0`) 时,
+       * 重探那一拍按上一次的结论画 —— 掉线那张卡连原因都不闪 (`probe.why` 在重探期间保留)
        * @param {object|null} info `portalTerminal()` 那一份
        * @param {{ok: boolean, busy: boolean, why: string, at: number}} probe 最近一次探测
        * @returns {{state: string, title: string, body: string, note: string}} 界面照它画
        */
       function terminalGateState(info, probe) {
         var paired = !!(info && info.paired === true)
+        var at = probe && typeof probe.at === 'number' && isFinite(probe.at) ? probe.at : 0
+        var busy = !!(probe && probe.busy === true)
+        // 还没有任何落定读数的那一次探测 = 才配说「正在找电脑」; 其余重探都按上一次的结论画
+        var firstProbe = busy && !(at > 0)
+        var online = !firstProbe && !!(probe && probe.ok === true)
         // 探通了就是通: 配置里缺 `peerUrl` 之类只影响"能不能主动拨", 对端在线这件事以探测为准
-        if (probe && probe.busy !== true && probe.ok === true && paired && info && info.syncOn === true) {
+        if (online && paired && info && info.syncOn === true) {
           return { state: '', title: '', body: '', note: '' }
         }
         if (!paired) {
@@ -7342,11 +7375,7 @@ window.__ModuleLoader__.load({
             note: '',
           }
         }
-        var busy = !!(probe && probe.busy === true)
-        if (!busy && probe && probe.ok === true) {
-          return { state: '', title: '', body: '', note: '' }
-        }
-        if (busy) {
+        if (firstProbe) {
           return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '' }
         }
         var why = probe && typeof probe.why === 'string' ? probe.why : ''
@@ -7399,6 +7428,22 @@ window.__ModuleLoader__.load({
       }
 
 
+      /**
+       * 终端那身皮上的记号: 屏上这一场是不是电脑那一场 (2026-11-21 主人: "进入终端时门户的对话仍显示")
+       *
+       * 写的是 `#lwp-root` 的 `data-term-session` —— 样式表里那条
+       * `:not([data-term-session="on"]) #lwp-flow{visibility:hidden}` 靠它兜住 JS 还没跑的第一帧,
+       * `renderFlow` 的闸靠它决定要不要画。**不在终端时一律摘掉属性** (门户照旧显示对话)
+       */
+      function markTerminalSession() {
+        if (root === null) return
+        if (!terminalMode) {
+          root.removeAttribute('data-term-session')
+          return
+        }
+        root.setAttribute('data-term-session', isTerminalSession(sessionId) ? 'on' : 'off')
+      }
+
       /** 把终端那身皮穿上 / 脱掉 (整页黑 + 那颗「‹」+ 强制的身份) */
       function applyTerminalMode() {
         if (root !== null) {
@@ -7406,6 +7451,8 @@ window.__ModuleLoader__.load({
           else root.removeAttribute('data-mode')
         }
         if (els.termBack) els.termBack.hidden = !terminalMode
+        // 落到电脑那一场没有: 决定对话上不上屏 (见 [markTerminalSession])
+        markTerminalSession()
         // 身份: 终端里名字与头像都归这一页说了算 (见 [applyIdentity] 里那一段覆盖)
         applyIdentity(look || {})
       }
@@ -7439,6 +7486,10 @@ window.__ModuleLoader__.load({
           writeStored(TERMINAL_KEY, { on: true, back: terminalReturn })
         }
         applyTerminalMode()
+        // 门户那几条对话当场下屏 (样式已经靠 `data-term-session` 藏起来了, 这里再把 DOM 也清掉):
+        // 落到电脑那一场之后 `renderFlow` 会自己重画, 不必等 3 秒那一拍
+        flowSig = null
+        renderFlow()
         call('portalTerminalVisible', true)
         probeTerminal()
         scheduleTerminalProbe()
@@ -7462,7 +7513,11 @@ window.__ModuleLoader__.load({
         var back = terminalReturn
         terminalReturn = null
         terminalAutoAt = 0
+        // 终端里 `#lwp-flow` 是空的 (见 [renderFlow] 那道闸): 先作废签名, 再把屏换回门户那一场 ——
+        // 换成功了那条 `switchTo → follow` 会自己重画; 屏上本来就不是电脑那一场 (没换过场) 时这里当场画一次
+        flowSig = null
         terminalRestore(back)
+        if (!isTerminalSession(sessionId)) renderFlow()
       }
 
       /**
@@ -7541,8 +7596,11 @@ window.__ModuleLoader__.load({
        */
       function probeTerminal() {
         if (terminalProbe.busy) return
-        terminalProbe = { at: terminalProbe.at, ok: terminalProbe.ok, busy: true, why: '' }
-        if (terminalMode) renderTerminalGate()
+        // 还没有落定读数的那一次探测才让卡片说「正在找电脑」; 之后每一拍重探都把上一次的结论
+        // (ok / at / why) 原样带过去 —— 卡片只在 `done()` 里按新读数画一次, 不在这一行翻面
+        var firstProbe = !(terminalProbe.at > 0)
+        terminalProbe = { at: terminalProbe.at, ok: terminalProbe.ok, busy: true, why: terminalProbe.why }
+        if (terminalMode && firstProbe) renderTerminalGate()
         var settled = false
         var control = null
         var timer = null

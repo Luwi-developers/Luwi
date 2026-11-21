@@ -17,6 +17,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../index.mjs'
+import { shadowDirName } from '../lib/luwi-peer.mjs'
 
 const TOKEN = 'p'.repeat(24)
 const PEER_URL = 'http://peer.test:3080'
@@ -27,11 +28,15 @@ function makeRoot(prefix) {
 }
 
 /** 一场假会话 (append 收集事件) */
-function fakeSession(id) {
+function fakeSession(id, options = {}) {
   return {
     id,
     seq: 0,
-    header: { cwd: '/w' },
+    title: String(options.title ?? ''),
+    updatedAt: Number(options.updatedAt ?? 0),
+    header: { cwd: String(options.cwd ?? '/w') },
+    // 投影会话的游标就是从这些 `peer-<seq>` 的 id 上读回来的 (见 peerSeqOfSession)
+    log: Array.isArray(options.log) ? options.log : [],
     appended: [],
     append(type, data, opts) {
       this.seq += 1
@@ -54,12 +59,15 @@ function makeWiredContext(options = {}) {
   const errors = []
   const disposers = []
   const handlers = new Map()
-  const sessions = new Map()
+  // 2026-11-21: 跨重启那几条测试要把同一份会话表带到第二轮 (冷会话也算"还在")
+  const sessions = options.sessions ?? new Map()
   const workspaces = new Map()
   const created = []
   const renamed = []
   const archivedSessions = []
-  const table = { get: async () => undefined, put: async () => {} }
+  const unarchivedSessions = []
+  const puts = []
+  const table = { get: async () => undefined, put: async (_key, value) => { puts.push(value) } }
   const domain = { table: () => Promise.resolve(table), close: async () => {} }
   const registry = {
     list: () => [...workspaces.values()].map(entry => ({ id: entry.id, title: entry.title, path: entry.path, sessionIds: entry.sessionIds })),
@@ -78,12 +86,24 @@ function makeWiredContext(options = {}) {
       return entity
     },
     archiveSession: async (id) => { archivedSessions.push(id) },
+    // 2026-11-21: 账上的 localId 归档了就先放回来 (接管的第二条路)
+    unarchiveSession: async (id) => { unarchivedSessions.push(id) },
   }
   for (const [index, workspace] of (options.localWorkspaces ?? []).entries()) {
     workspaces.set(`local-${index + 1}`, { id: `local-${index + 1}`, title: workspace, path: `/local/${workspace}`, sessionIds: [], setTitle: async () => {} })
   }
   const controller = {
-    list: async () => ({ items: [] }),
+    // 2026-11-21: 会话表要真的报出本机那几场 —— 接管判据 (标题 + 影子目录) 读的就是它
+    list: async () => ({
+      items: [...sessions.values()].map(session => ({
+        sessionId: session.id,
+        title: String(session.title ?? ''),
+        cwd: String(session.header?.cwd ?? ''),
+        updatedAt: Number(session.updatedAt ?? 0),
+        running: false,
+        projections: { values: { title: String(session.title ?? '') } },
+      })),
+    }),
     create: async (request) => {
       const id = `proxy-${created.length + 1}`
       created.push({ id, request })
@@ -125,7 +145,7 @@ function makeWiredContext(options = {}) {
     webServer: { register: (route) => { routes.push(route); return () => {} } },
     ...optionals,
   }
-  return { ctx, commands, routes, tools, warns, errors, disposers, handlers, sessions, workspaces, created, renamed, archivedSessions }
+  return { ctx, commands, routes, tools, warns, errors, disposers, handlers, sessions, workspaces, created, renamed, archivedSessions, unarchivedSessions, puts }
 }
 
 /** 一个能当 req 用的最小对象 */
@@ -215,7 +235,7 @@ function makePeer() {
 }
 
 /** 装一次 (在临时 DSH_HOME 下; 结束后自己清理) */
-async function withMount({ config, localWorkspaces, state, handler }) {
+async function withMount({ config, localWorkspaces, state, handler, seed, storage }) {
   const root = makeRoot('lw-peer-proxy')
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = root
@@ -227,6 +247,12 @@ async function withMount({ config, localWorkspaces, state, handler }) {
     const table = { get: async () => state, put: async (_key, value) => { Object.assign(state, value) } }
     wired.ctx.storageDomain = { open: () => Promise.resolve({ table: () => Promise.resolve(table), close: async () => {} }) }
   }
+  // storage 给了就整张桌子交给测试 (演"写不进去"/"挂住"的那两档)
+  if (storage !== undefined) {
+    wired.ctx.storageDomain = { open: () => Promise.resolve({ table: () => Promise.resolve(storage), close: async () => {} }) }
+  }
+  // seed 在装配之前铺本机会话 (接管判据要的那些)
+  if (typeof seed === 'function') seed(wired, root)
   const peer = makePeer()
   const stub = stubPeer(peer)
   const lines = []
@@ -238,7 +264,11 @@ async function withMount({ config, localWorkspaces, state, handler }) {
       sessionRoot: join(root, 'sessions'),
       repoDir: join(root, 'repo'),
       registerTools: true,
-      peer: { token: TOKEN, url: PEER_URL },
+      // 夹具里 P2P 关掉: 缺省开之后它会起 sidecar 进程 (这里测的是投影, 不是传输)
+      p2p: { enabled: false },
+      // 2026-11-21 单向口径: 只有控制器 (手机) 才建影子/投影, 这一份测的就是那条路
+      role: 'phone',
+      peer: { token: TOKEN, url: PEER_URL, listen: true, acceptSend: true },
       ...(config ?? {}),
     })
     if (plugin.mountState.mounted !== true) {
@@ -314,7 +344,7 @@ test('a fresh revision appends only the new entries, and the view reports the le
       assert.equal(view.on, true)
       assert.equal(view.device.name, 'Luwi 手机')
       assert.equal(view.shadows.length, 1)
-      assert.deepEqual(view.proxies, [{ peerSessionId: 'session-phone-1', localId: 'proxy-1', running: false, applied: 4 }])
+      assert.deepEqual(view.proxies, [{ peerSessionId: 'session-phone-1', localId: 'proxy-1', title: '修一下登录', running: false, applied: 4 }])
       assert.ok(view.root.includes('peer-workspaces'))
     },
   })
@@ -882,19 +912,14 @@ test('cwd 拿不到时按工作区注册表认影子 (id 优先的那一条口�
   })
 })
 
-test('面板那条发送路 (/luwi-sync/send) 现在真的能把一句话送到对端新开一场', async () => {
+test('2026-11-21 单向口径: 面板那条发送路 (/luwi-sync/send) 整条下线', async () => {
   await withMount({
-    handler: async ({ wired, stub }) => {
+    handler: async ({ wired }) => {
       await plugin.mountState.peerRefresh()
       const route = wired.routes.find(entry => entry.path === '/luwi-sync/send')
-      assert.ok(route !== undefined, 'the panel send route is registered')
-      const req = makeReq({ method: 'POST', url: '/luwi-sync/send', body: { text: '检查电脑状态', target: { kind: 'new', id: '', name: 'DSH' } } })
-      const res = makeRes()
-      await route.handler(req, res)
-      assert.equal(res.record.status, 200)
-      assert.equal(res.record.body.ok, true)
-      assert.equal(res.record.body.sessionId, 'session-fresh-1')
-      assert.deepEqual(stub.posts.at(-1).target, { kind: 'new', id: '', name: 'DSH' })
+      assert.equal(route, undefined, '面板不再有"发给对端"那一条路; 手机管电脑走门户终端那条归属方闸')
+      // 对端那几条读面还在 (手机要读电脑的快照)
+      assert.ok(wired.routes.some(entry => entry.path === '/luwi-sync/peer/transcript'))
     },
   })
 })
@@ -998,13 +1023,15 @@ test('对端拨不通: 回答从仓库里那份 live 拷贝折回本机窗口', 
 test('a restart does not fold the peer transcript twice', async () => {
   const root = makeRoot('lw-peer-restart')
   const previous = process.env.DSH_HOME
+  // 会话表跨两轮共用: 真实宿主重启之后那一场仍然在盘上 (冷会话也算"还在")
+  const sharedSessions = new Map()
   try {
     process.env.DSH_HOME = root
     /** 用同一份 storage 装一次 (第二次装配 = 宿主重启) */
     const runOnce = async () => {
       delete globalThis[plugin.MOUNT_KEY]
       plugin.mountState.mounted = false
-      const wired = makeWiredContext()
+      const wired = makeWiredContext({ sessions: sharedSessions })
       const peer = makePeer()
       const stub = stubPeer(peer)
       const table = { get: async () => (Object.keys(stored).length === 0 ? undefined : stored), put: async (_key, value) => { Object.assign(stored, value) } }
@@ -1016,7 +1043,9 @@ test('a restart does not fold the peer transcript twice', async () => {
           enabled: true,
           sessionRoot: join(root, 'sessions'),
           repoDir: join(root, 'repo'),
-          peer: { token: TOKEN, url: PEER_URL },
+          p2p: { enabled: false },
+          role: 'phone',
+          peer: { token: TOKEN, url: PEER_URL, listen: true, acceptSend: true },
         })
         if (plugin.mountState.mounted !== true) return null
         const refresh = await plugin.mountState.peerRefresh()
@@ -1099,3 +1128,216 @@ test('queue 模式: 只读仓库的工作区名片与 live 快照, 一次 HTTP �
   })
 })
 
+// ---------------------------------------------------------------------------
+// 8 · 账本落盘 + 重挂接管 (2026-11-21)
+//   · 写不进 storage 要响亮报出来, 并且落下文件镜像 lw/peer-ledger.json
+//   · 账上的 localId 不在了 → 接管本机现存的那一份 (同标题 + 同影子目录), 不新开一场
+//   · 归档了 → 先放回来
+// ---------------------------------------------------------------------------
+
+/** 影子目录 (与插件自己拼的那个同一条规则) */
+function shadowDirOf(root) {
+  return join(root, 'lw', 'peer-workspaces', 'dev-peer', shadowDirName('DSH', 'dev-peer'))
+}
+
+/** 一份最小的账本 */
+function ledgerStateWith(record) {
+  return {
+    ledgerAt: Date.now(),
+    deviceId: 'dev-local',
+    peerProxies: { 'dev-peer|session-phone-1': record },
+    peerShadows: {},
+    peerRetired: {},
+    peerEpochAt: 1,
+  }
+}
+
+test('账本写不进 storage: error 日志 + 文件镜像照样落下', async () => {
+  const storage = {
+    get: async () => undefined,
+    put: async () => { throw new Error('the storage domain is gone') },
+  }
+  await withMount({
+    localWorkspaces: ['DSH'],
+    storage,
+    handler: async ({ wired, root }) => {
+      const result = await plugin.mountState.peerRefresh()
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.ok(
+        wired.errors.some(line => /projection ledger to the storage domain failed/u.test(line)),
+        `写失败要进 error 日志 (拿到: ${JSON.stringify(wired.errors)})`,
+      )
+      const mirror = join(root, 'lw', 'peer-ledger.json')
+      assert.equal(existsSync(mirror), true, '文件镜像必须落下 (storage 挂住时它是唯一的账)')
+      const mirrored = JSON.parse(readFileSync(mirror, 'utf8'))
+      assert.equal(mirrored.v, 1)
+      assert.equal(mirrored.at > 0, true)
+      assert.equal(typeof mirrored.peerProxies, 'object')
+      assert.match(String(result.ledger?.error ?? ''), /storage domain is gone/u, '读数里也要带原因')
+    },
+  })
+})
+
+test('重挂接管: 账上的 localId 不在了, 就接管同标题同影子的那一份, 不再新开一场', async () => {
+  const state = ledgerStateWith({
+    localId: 'gone-1',
+    title: '修一下登录',
+    lastSeq: 0,
+    openTurn: null,
+    turnCounter: 0,
+    pendingTexts: [],
+    revision: -1,
+    running: false,
+    snapshotV: 2,
+  })
+  await withMount({
+    state,
+    localWorkspaces: ['DSH'],
+    seed: (wired, root) => {
+      wired.sessions.set('stale-copy', fakeSession('stale-copy', {
+        title: '修一下登录',
+        cwd: shadowDirOf(root),
+        updatedAt: PEER_UPDATED_AT,
+        // 它已经折过第一条 (peer-1) —— 接管之后只补后面那条回答
+        log: [{ type: 'user/message', data: { id: 'peer-1' } }],
+      }))
+    },
+    handler: async ({ wired, root }) => {
+      const result = await plugin.mountState.peerRefresh()
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.equal(wired.created.length, 0, '有现成的就不许再开一场')
+      const adopted = wired.sessions.get('stale-copy')
+      assert.deepEqual(adopted.appended.map(event => event.type), ['turn/start', 'step/start', 'assistant/message', 'step/end', 'turn/end'])
+      assert.equal(adopted.appended[2].data.message.content[0].text, '好的', '只补游标之后那条回答')
+      const ledger = JSON.parse(readFileSync(join(root, 'lw', 'peer-ledger.json'), 'utf8'))
+      assert.equal(ledger.peerProxies['dev-peer|session-phone-1'].localId, 'stale-copy', '账要改成接管后的那一场')
+    },
+  })
+})
+
+test('账上的 localId 归档了: 先把它放回来, 不新开一场', async () => {
+  const state = ledgerStateWith({
+    localId: 'arch-1',
+    title: '修一下登录',
+    lastSeq: 2,
+    openTurn: null,
+    turnCounter: 1,
+    pendingTexts: [],
+    revision: -1,
+    running: false,
+    snapshotV: 2,
+  })
+  const unarchived = []
+  await withMount({
+    state,
+    localWorkspaces: ['DSH'],
+    seed: (wired, root) => {
+      const registry = wired.ctx.get('workspaceRegistry')
+      registry.unarchiveSession = async (id) => {
+        unarchived.push(id)
+        wired.sessions.set(id, fakeSession(id, { title: '修一下登录', cwd: shadowDirOf(root), updatedAt: PEER_UPDATED_AT }))
+      }
+    },
+    handler: async ({ wired }) => {
+      const result = await plugin.mountState.peerRefresh()
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.deepEqual(unarchived, ['arch-1'], '先试着把归档的那一场放回来')
+      assert.equal(wired.created.length, 0, '放回来之后不许再开一场')
+      assert.equal(wired.sessions.get('arch-1').appended.length, 0, '游标已经在 2, 没有新条目可折')
+    },
+  })
+})
+
+test('账上那一条还活着时, 同名的旧投影副本也被归档 (历史窗不留两行)', async () => {
+  const state = ledgerStateWith({
+    localId: 'proxy-1',
+    title: '修一下登录',
+    lastSeq: 2,
+    openTurn: null,
+    turnCounter: 1,
+    pendingTexts: [],
+    revision: -1,
+    running: false,
+    snapshotV: 2,
+  })
+  await withMount({
+    state,
+    localWorkspaces: ['DSH'],
+    seed: (wired, root) => {
+      wired.sessions.set('proxy-1', fakeSession('proxy-1', { title: '修一下登录', cwd: shadowDirOf(root), updatedAt: PEER_UPDATED_AT, log: [{ type: 'user/message', data: { id: 'peer-2' } }] }))
+      // 老副本: 同名同目录, 里面有 peer-1 (投影长出来的), 该被归档
+      wired.sessions.set('old-1', fakeSession('old-1', {
+        title: '修一下登录',
+        cwd: shadowDirOf(root),
+        updatedAt: PEER_UPDATED_AT - 1000,
+        log: [{ type: 'user/message', data: { id: 'peer-1' } }],
+      }))
+      // 同一目录里人自己开的一场 (没有 peer- 事件): 不许动
+      wired.sessions.set('mine-1', fakeSession('mine-1', { title: '修一下登录', cwd: shadowDirOf(root), updatedAt: PEER_UPDATED_AT - 500 }))
+    },
+    handler: async ({ wired }) => {
+      const result = await plugin.mountState.peerRefresh()
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.deepEqual(wired.archivedSessions, ['old-1'], '只归档投影副本')
+      assert.equal(wired.created.length, 0, '不许再开新的一场')
+    },
+  })
+})
+
+test('storage 整条记录读不出来时, 按文件镜像恢复账本, 不另开一场', async () => {
+  const storage = {
+    get: async () => { throw new Error("domain 'session_sync': stored record 'singleton' does not match its schema") },
+    put: async () => {},
+  }
+  await withMount({
+    localWorkspaces: ['DSH'],
+    storage,
+    seed: (wired, root) => {
+      mkdirSync(join(root, 'lw'), { recursive: true })
+      writeFileSync(join(root, 'lw', 'peer-ledger.json'), JSON.stringify({
+        v: 1,
+        at: Date.now(),
+        deviceId: 'dev-local',
+        peerProxies: {
+          'dev-peer|session-phone-1': {
+            localId: 'keep-1',
+            title: '修一下登录',
+            lastSeq: 2,
+            openTurn: null,
+            turnCounter: 1,
+            pendingTexts: [],
+            revision: -1,
+            running: false,
+            snapshotV: 2,
+          },
+        },
+        peerShadows: {},
+        peerRetired: {},
+        peerEpochAt: 1,
+      }))
+      wired.sessions.set('keep-1', fakeSession('keep-1', { title: '修一下登录', cwd: shadowDirOf(root), updatedAt: PEER_UPDATED_AT }))
+    },
+    handler: async ({ wired }) => {
+      const result = await plugin.mountState.peerRefresh()
+      assert.equal(result.ok, true, JSON.stringify(result))
+      assert.equal(wired.created.length, 0, '镜像里有账就不许新开一场')
+      assert.equal((await plugin.mountState.peerView()).proxies[0].localId, 'keep-1')
+      assert.match(String(result.ledger?.error ?? ''), /does not match its schema/u, '读失败要报出来')
+    },
+  })
+})
+
+test('2026-11-21 单向口径: 电脑那一侧不再建手机会话的影子/投影, 但仍收手机指令', async () => {
+  await withMount({
+    config: { role: 'pc', peer: { token: TOKEN, url: PEER_URL } },
+    handler: async ({ wired }) => {
+      // peer.proxy=false: 投影那一整段 (peerRefresh / peerView) 在电脑侧根本不装配
+      assert.equal(plugin.mountState.peerRefresh, undefined, '电脑侧不建手机会话的投影')
+      assert.equal(plugin.mountState.peerView, undefined)
+      assert.equal(wired.created.length, 0, '电脑侧不建投影会话')
+      // 收指令那一道闸仍在: 手机管电脑靠它
+      const route = wired.routes.find(entry => entry.path === '/luwi-sync/peer/send')
+      assert.ok(route !== undefined, 'peer/send 还注册着')
+    },
+  })
+})

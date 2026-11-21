@@ -227,8 +227,38 @@
   **会话表那条跟随也两扇门互不串** (`listUnsub` 的 `sameKind`): 普通门户不跟电脑那几场, 终端里也不跟回手机那一场;
   **`adopt` 不再把电脑那几场写进 `SESSION_KEY`** —— 记了之后重载 / 退出门户再进来门户会停在电脑那一场 (在终端里退出门户时, 只有 mainView 真在电脑那一场才切一次工作区: 影子场 `openSession` 留不住, 只切门)
   **插件侧只有一个方向**: 手机 (扫码那台, `role:"phone"`) 写 `peer.listen=false` / `peer.acceptSend=false` / `workspace.enabled=false`; 电脑由面板写 `role:"pc"` — **别拿 `pairing` 判角色**, 电脑生成码时也写它
-  电脑不能再读也不能下发指令 (队列那条路同闸: `receive()` 也看 `acceptSend`); 手机的控制面 (`panel/op` · `panel/term` · `/luwi-sync/send` · `/peer-live`) 只认**回环 + 回环 Host 头** (`lib/loopback.mjs` 的 `isLocalRequest`, 挡 DNS rebinding 与同机反代)
-  判据 `check-luwi-portal` 第二十七节 + `check-terminal` 回环那几节 + `check-sync-setting` 第六节,
+  电脑不能再读也不能下发指令 (队列那条路同闸: `receive()` 也看 `acceptSend`); 手机的控制面 (`panel/op` · `/luwi-sync/send` · `/peer-live`) 只认**回环 + 回环 Host 头** (`lib/loopback.mjs` 的 `isLocalRequest`, 挡 DNS rebinding 与同机反代)
+  **2026-11-21 修整 (主人四条)**: ① 插件在 DSH 侧边栏那一行显示名改成 **`luwi终端`** (原「同步」), 同一插件里那枚**沙盒终端面板**
+  (在手机的 Linux 沙盒里跑命令: `luwi-term` 入口 + `POST /luwi-sync/term` + `lib/term-channel.mjs`) 与同步无关, 整条下线;
+  ② 「正在找电脑」那张卡**只许首探说一次** (`terminalGateState` 的 `firstProbe = busy && !(at > 0)`, 后续每一拍重探按上一次结论画 ——
+  探针 5/15 秒一拍, 之前每拍都翻面, 症状就是"弹窗反复闪"); ③ **进终端不显示门户对话**: `renderFlow` 在
+  `terminalMode && !isTerminalSession(sessionId)` 时清空并记 `TERMINAL_HIDDEN_SIG`, 样式那条
+  `#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}` 兜第一帧 (`markTerminalSession` 由
+  `renderMeta` / `applyTerminalMode` 各对一次, 退出终端时 `closeTerminal` 作废签名再画回来); ④ 插件的**登录 Luwi 账号 / 权益**
+  (`lib/luwi-license.mjs`、`sync-license.json`、`login-*` / `logout` / `license-refresh` 四个 op、P2P 到期闸) 整条删除 —— 它只给
+  P2P 供读数而 P2P 缺省关、手机侧从不启用 (`p2p-service` 的 `requirePlan` 注入点留着, 缺省恒放行)
+  **2026-11-21 晚 (插件 0.4.1)**: ① **账本写不进去的真因在 storage 的 schema**: `lib/domain.mjs` 的
+  `lastPushHead` 钉着 sha 正则, 而 2026-10-21 真机把它写成一整段 git 输出 → 整条 `state` 记录每次
+  `open/get/put` 都抛 `invalid-record`, 插件的账 (投影游标 / 基线) 从此静默停写; 现在这一格只校验 `string ≤ 4000`
+  (它只作诊断); ② **投影账本必须落盘**: `persistProxyState()` 整段包 try, storage 写 4 s 超时,
+  **无论成败都写** `<DSH_HOME>/lw/peer-ledger.json` (原子 rename), 失败走 `logger.error` + `peer.ledger` (面板 / `/sync doctor` /
+  `peerRefresh()` 都读得到); 同一 `localId` 的 `lastSeq/snapshotV/turnCounter` 只许前进 (重做投影那一路两条异步收尾的先后
+  不保证, 曾把 `snapshotV` 写回 1 → 下一轮再重做一次 → 一场变两场); ③ **重挂接管旧的那一场**: `reconcileProjections` 在
+  建投影之前跑 —— 账上的 `localId` 归档了先 `unarchiveSession`, 不见了就按「标题 + 影子目录」挑本机现存那份 (**人正开着的
+  优先**), 接管后游标对齐到它已有的 `peer-<seq>`, 同名副本归档; 账上那一条还活着时也顺手归档同名**投影**副本
+  (`peer-<seq>` 事件 > 0 的才收, 人自己开的会话不动), 历史窗里不再两行同名; `applyTranscript` **先确认会话存在再折**
+  (接管不成一个字节都不折、游标不动); ④ **没文本的轮也要有东西**: `lib/luwi-live.mjs` 数 `tool/call` 次数,
+  `exit_plan_mode` 的 `plan` 正文当这一轮的回答, 否则落一行「这一轮在电脑上跑了 N 次工具，没有文字回复」;
+  工具名与参数一个字都不进, `LIVE_SNAPSHOT_VERSION` **仍是 2** (升版本会再触发一轮"重做投影")
+  **2026-11-21 深夜 (0.4.2)**: ① **单向**: 方向由角色定死 —— 电脑 (`role:pc`) 仍听 (手机要读它的快照) 仍收指令
+  (手机管电脑), 但 **`proxy` 恒 false** (不再为手机会话建影子/投影); 面板那条「发给对端」与
+  `POST /luwi-sync/send` 整条下线 (手机那一侧不动); ② **P2P 缺省开** (`P2P_DEFAULTS.enabled = true`, 显式
+  `p2p.enabled:false` 才关), 面板 P2P 卡那颗开关走 `configure` 写回 JSON, 电脑 `native/win32-x64/lwiroh.exe`
+  与手机 APK 里的 `lib/arm64-v8a/liblwiroh.so` 各自解析, 缺 sidecar 退 git 并在卡/doctor 说明;
+  ③ **侧边栏不许无声消失**: 左座位先装、先摘旧注册 (HMR 重复 apply 会 `duplicate id`)、身体失败回滚图标,
+  失败 `console.warn`; 宿主写 `$DSH_HOME/lw/plugin-mount.json` (`mounted/disabledReason/routes/seats/peer/p2p`),
+  `withWebServer()` 拿不到服务时 `logger.error`, `/sync doctor` 打路由条数
+  判据 `check-luwi-portal` 第二十七节 + `check-terminal` (回环 / 角色 / 沙盒终端已下线 / 侧边栏显示名与左座位) + `check-sync-setting` 第六节,
   方案 `docs/Luwi-终端-手机管电脑-方案-2026-11-21.md`
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由

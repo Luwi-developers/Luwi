@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import os from 'node:os'
 import {
   resolveSessionRoot,
   resolveRepoDir,
@@ -19,13 +20,26 @@ import {
 test('sessionRoot resolves to $DSH_HOME/sessions when unset', () => {
   assert.equal(resolveSessionRoot('', '/home/u/.dsh'), path.join('/home/u/.dsh', 'sessions'))
   assert.equal(resolveSessionRoot('/custom/root', '/home/u/.dsh'), path.resolve('/custom/root'))
-  assert.throws(() => resolveSessionRoot('', ''), /sessionRoot is empty/)
+  // 2026-11-21 深夜: env 里没有 DSH_HOME 时退 ~/.dsh (桌面宿主装载那一刻 env 还没设上)
+  assert.equal(resolveSessionRoot('', ''), path.join(os.homedir(), '.dsh', 'sessions'))
 })
 
 test('repoDir resolves to $DSH_HOME/dsh-session-sync/repo when unset', () => {
   assert.equal(resolveRepoDir('', '/home/u/.dsh'), path.join('/home/u/.dsh', 'dsh-session-sync', 'repo'))
   assert.equal(resolveRepoDir('/custom/repo', '/home/u/.dsh'), path.resolve('/custom/repo'))
-  assert.throws(() => resolveRepoDir('', ''), /repoDir is empty/)
+  assert.equal(resolveRepoDir('', ''), path.join(os.homedir(), '.dsh', 'dsh-session-sync', 'repo'))
+})
+
+test('desktop boot: no $DSH_HOME at all still resolves under the platform home', () => {
+  // 桌面宿主 (Electron main) 装载插件那一刻 env 里没有 DSH_HOME, 而 dsh 的 home 恒为 <用户目录>/.dsh
+  const previous = process.env.DSH_HOME
+  delete process.env.DSH_HOME
+  try {
+    assert.equal(resolveSessionRoot(''), path.join(os.homedir(), '.dsh', 'sessions'))
+    assert.equal(resolveRepoDir(''), path.join(os.homedir(), '.dsh', 'dsh-session-sync', 'repo'))
+  } finally {
+    if (previous !== undefined) process.env.DSH_HOME = previous
+  }
 })
 
 test('nesting safety rejects mirror recursion in both directions', () => {

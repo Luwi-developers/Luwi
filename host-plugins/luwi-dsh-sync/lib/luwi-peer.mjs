@@ -110,13 +110,15 @@ export function resolvePeerSpec(config, role = {}) {
       ? false
       : (typeof raw.listen === 'boolean' ? raw.listen : !controller),
     // acceptSend: 接不接受对端**下发的指令** (peer/send). 与 listen 分两档是因为
-    // "只读一次对话" 与 "在我这里跑一句话" 是两件事 —— 2026-11-21 起电脑那一侧照旧收,
-    // 手机那一侧一律拒 (显式写 true 才放开, 配对时由 app 写 false)
+    // "只读一次对话" 与 "在我这里跑一句话" 是两件事 —— 2026-11-21 起电脑那一侧照旧收
+    // (手机管电脑走的就是这一条), 手机那一侧一律拒 (显式写 true 才放开, 配对时由 app 写 false)
     acceptSend: mode === 'queue'
       ? false
-      : (typeof raw.acceptSend === 'boolean' ? raw.acceptSend : !controller),
+      : (controller ? raw.acceptSend === true : true),
     // proxy: 要不要为对端工作区建影子目录与投影会话 (关掉 = 回到逐字节取回)
-    proxy: typeof raw.proxy === 'boolean' ? raw.proxy : true,
+    // 2026-11-21 单向口径: 电脑只为**手机那几场**建投影是"电脑接收手机的对话", 主人点名关掉;
+    // 手机那一侧照旧为电脑那几场建投影 (PC -> Luwi 这一条仍在)
+    proxy: controller ? (typeof raw.proxy === 'boolean' ? raw.proxy : true) : false,
     token,
     url,
     sendTimeoutMs,
