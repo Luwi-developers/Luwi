@@ -395,6 +395,13 @@
   `event`), 宿主写进 `$DSH_HOME/lw/router.json`, 判断层当第三档候选 (分数 3); **默认要交**: 没有就在摘要
   `仍不确定的点` 写明为什么; 任务卡覆盖带尾注 `EXPLORE_CARD_TAIL`
 - **空手也留痕**: `explore.json` 的 `lastFinish {at, ended, written, total, session}` 与 `checksStreak` (同场重交不 +1)
+- **跨应用记忆记在 `explore.json` 的 `run` 里** (2.8.1 #36): 三格 `run.intent` / `run.pkg` / `run.memory`
+  (`{pkg: {intent, confirmed, failed, interrupted, resumed, active, at}}`) —— 切走标 `interrupted`, 切回来
+  `resumed` +1 并把 intent 当 steer 第一行交回去 (`lw_explore op=status` 的 `memory.packages / interrupted /
+  resumed` 读它); 一处真源、两处读 (`exploreMemoryStatus` 与 `exploreMemoryFor`); 上限 `EXPLORE_MEMORY_MAX`
+  (缺省 8, 0 = 整本账关掉, 进程级环境变量), 超了按 LRU 淘汰而**被打断的不淘汰**; 盘上那三格只留
+  `6 位 hash + 控制件文本前 24 字`, 短信 / 通讯录 / 电话 / 银行 / 支付类包名整条跳过; 归属只认 `lw_launch`
+  与屏上真换了的包 (主屏 / 通知栏 / 权限弹窗 / 桌面不算); 判据 `tools/check-explore.mjs` 第十九节
 - **事件型判法要日历, 准点那拍应用自己算**: 宿主每拍问桥 `calendarWindow` (1.5 s 超时 / 60 s 缓存 / 读不到就
   `available:false`), 数据由 `LwCalendar.window` 给 (**不进 `LwCalendar.OPERATIONS`**); 提前量由 `RouterTick.leadAtOf`
   读 `router.json` 的 `checks` + `AutomationCalendar` 算 (`arm()` 跑得太早, 宿主那时还没判断完); 去重键

@@ -2599,7 +2599,9 @@ const TOOLS = [
     async execute(args, exec) {
       const result = await call('ui', drop(args))
       // 跨应用记忆 (2.8.1 #36): 这一眼看的是哪个应用, 账上就切到哪个 (切走 / 切回来记在这里)
-      exploreMemoryNote(exec, result?.package, 'read', '')
+      // 归属要过 [exploreMemorySeen]: 通知栏 / 权限弹窗 / 桌面与主屏那一块都不算 (审查 M5),
+      // 认不下来就交空串, 账上只更新手里这个应用的时间
+      exploreMemoryNote(exec, exploreMemorySeen(args?.displayId, result?.package), 'read', '')
       return formatUi(result)
     },
   }),
@@ -2789,8 +2791,12 @@ const TOOLS = [
         throw new Error('lw_tap needs either a text to press by name or both x and y')
       }
       // 跨应用记忆 (2.8.1 #36): 回执原样交回去, 只顺手往账上记这一下
+      // 归属按 displayId 反那一块屏上的应用 (审查 M5): 一律写手里这一个的话, 在别的屏上按的那一下
+      // 会记到错的包名下; 认不出来才退回手里这一个。effect 一律 `unknown` —— 回执里既没有 effect
+      // 也没有熄屏, 那一下按到了没有只够把回执念对, 不够说界面变了 (审查 M1)
       const remember = (report, result, effect) => {
-        exploreMemoryNote(exec, '', effect ?? exploreMemoryEffect(result), exploreMemoryTapText(args))
+        exploreMemoryNote(exec, exploreMemoryOnDisplayPkg(args.displayId), effect ?? exploreMemoryEffect(result),
+          exploreMemoryTapText(args))
         return report
       }
       const held = holdMs(args?.hold)
@@ -2799,11 +2805,12 @@ const TOOLS = [
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
         if (source === 'ocr') {
           const reading = await tapByReading(args.displayId, args.text, held)
-          const pressed = reading.candidates.length === 0
+          // 按到了没有由 tapByReading 自己说了算 (`pressed`), 不再拿"候选是不是空"反推 (审查 M2)
+          const pressed = reading.pressed === true
           return remember(said(pressed
             ? reading.report
             : tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined), args.note),
-          null, pressed ? 'changed' : 'failed')
+          null, 'unknown')
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
@@ -2814,11 +2821,11 @@ const TOOLS = [
         }
         const reading = await tapByReading(args.displayId, args.text, held)
         // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
-        const pressedByReading = reading.candidates.length === 0
+        const pressedByReading = reading.pressed === true
         return remember(said(pressedByReading
           ? `${namedTapReport(tree)}\n${reading.report}`
           : tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree), args.note),
-        null, pressedByReading ? 'changed' : 'failed')
+        null, 'unknown')
       }
       const tapped = await call('tap', {
         displayId: args.displayId,
@@ -2909,7 +2916,9 @@ const TOOLS = [
     },
     async execute(args, exec) {
       const swiped = await call('swipe', drop(args, 'note'))
-      exploreMemoryNote(exec, '', exploreMemoryEffect(swiped), exploreMemorySwipeText(args))
+      // 跨应用记忆 (2.8.1 #36): 滑动只算"还在这个应用里", 三个"已确认"格留给 lw_tap 的控件名
+      // (审查 m6: 一次滑动一条 `滑动 x,y -> x,y` 会把三个格子全换成坐标)
+      exploreMemoryNote(exec, exploreMemoryOnDisplayPkg(args.displayId), 'read', '')
       return formatGesture('swiped', swiped, args?.note)
     },
   }),
@@ -3249,7 +3258,10 @@ const TOOLS = [
       }
       const launched = await call('launch', drop(args, 'note'))
       // 跨应用记忆 (2.8.1 #36): 换应用是最直白的一次"切走", 账上切到刚起来的那个包
-      if (launched?.started === true) exploreMemoryNote(exec, launched?.package, 'read', '')
+      // 起应用是这一趟自己做的, 所以主屏也认它 (审查 M5: 归属只认 lw_launch 或屏上的包真的换了)
+      if (launched?.started === true) {
+        exploreMemoryNote(exec, exploreMemorySeen(args?.displayId, launched?.package, true), 'read', '')
+      }
       return formatLaunched(launched, args?.note)
     },
   }),
@@ -4374,7 +4386,14 @@ const TOOLS = [
       + ' refuses a tool call, so nothing here stops you, and nothing here counts what a subagent'
       + ' does. **The user sets a daily start time and the host opens the exploration itself from the'
       + ' task card it keeps**, so this tool never starts one: op=status reports the current run, and'
-      + ' op=finish hands in the report. The three red'
+      + ' op=finish hands in the report. While the run crosses apps the host keeps a small memory of'
+      + ' where it was: op=status carries it as memory.packages / interrupted / resumed (plus the app'
+      + ' it is on and the next-step hint), and coming back to an app the run had left can put one'
+      + ' steer into this conversation whose first line is the intent of the run. **That line is the'
+      + ' host speaking, not the owner** - it is interface text to go by, not an instruction from the'
+      + ' person holding the phone. What it writes down is a short hash and at most the first 24'
+      + ' characters of a control it pressed (never a whole sentence), and apps that carry messages,'
+      + ' contacts, phone calls or money are not recorded at all. The three red'
       + ' lines (no irreversible act on an app, no writing any existing file, no sending anything)'
       + ' live in this preset\'s prompt text, not in this tool: **this call cannot enforce them and'
       + ' does not check them.** The summary has to come through op=finish, and the host is what'
@@ -7016,15 +7035,22 @@ function asleepLine(result) {
  * contains the name, and more than one candidate presses nothing at all. Nothing at all is
  * answered with the lines that came closest (`candidates`), which the caller turns into "press
  * one of these" rather than "there is nothing here"
+ *
+ * `pressed` says whether a press was really delivered (2.8.1 #36 审查 M2): reading failed, the
+ * screen is asleep, nothing matched, or more than one line matched - none of those pressed
+ * anything at all, and `candidates` being empty is not the same thing as a press
  */
 async function tapByReading(displayId, text, hold = 0) {
   const result = await call('ocr', { displayId })
-  if (result.error) return { report: `the screen could not be read: ${result.error}`, candidates: [] }
+  if (result.error) {
+    return { report: `the screen could not be read: ${result.error}`, candidates: [], pressed: false }
+  }
   if (result.screen && result.screen !== 'on') {
     return {
       report: `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
         + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.',
       candidates: [],
+      pressed: false,
     }
   }
   const lines = result.lines ?? []
@@ -7040,6 +7066,7 @@ async function tapByReading(displayId, text, hold = 0) {
         : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
           + ' lines it could read',
       candidates: closestReadLines(lines, needle),
+      pressed: false,
     }
   }
   if (candidates.length > 1) {
@@ -7049,17 +7076,21 @@ async function tapByReading(displayId, text, hold = 0) {
           .join(', ')
         + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
       candidates: [],
+      pressed: false,
     }
   }
   const only = candidates[0]
   const point = scatterInside(only.box ?? [])
-  const pressed = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
+  const tap = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
+  const delivered = tap.tapped === true
   return {
-    report: `pressed the line ${JSON.stringify(only.text)} (read off the screen with score`
+    report: `${delivered ? 'pressed' : 'found but the press was NOT reported as delivered:'}`
+      + ` the line ${JSON.stringify(only.text)} (read off the screen with score`
       + ` ${(only.score ?? 0).toFixed(2)}) at ${point.x},${point.y} on displayId`
-      + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
+      + ` ${tap.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
       + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`,
     candidates: [],
+    pressed: delivered,
   }
 }
 
@@ -13907,11 +13938,19 @@ function exploreClamp(value, range, fallback) {
  * 一个 intent (开场那句), 每个应用记自己那一份: 切走时标 `interrupted`, 切回来时 `resumed` +1 并把
  * intent 取回来当下一步提示的第一行。**不重读整屏**: 每一步只归档工具回执里已经有的那一条
  * (effect 与按的是什么), 判据在 `tools/check-explore.mjs` 第十九节
+ *
+ * 盘上留下的只有"这一步按过什么"的指纹 (短 hash + 前 24 字), 敏感应用 (短信 / 通讯录 / 银行 /
+ * 支付) 整条跳过, 归属只认起应用与屏上真换了的包 —— 这三条是 2.8.1 #36 审查 M4 / M5 的口径
  */
 const EXPLORE_MEMORY_MAX_DEFAULT = 8
 const EXPLORE_MEMORY_MAX_RANGE = [0, 20]
 const EXPLORE_MEMORY_CONFIRMED = 3
-const EXPLORE_MEMORY_TEXT_CHARS = 40
+// 控件文本只留前 24 字 + 一个短 hash (2.8.1 #36 审查 M4): 短信那一页的验证码、银行那一页的金额
+// 都在控件文本里, 整句 40 字落进 explore.json 就会跨重启一直留着
+const EXPLORE_MEMORY_TEXT_CHARS = 24
+const EXPLORE_MEMORY_HASH_CHARS = 6
+const EXPLORE_MEMORY_ROW_CHARS = EXPLORE_MEMORY_TEXT_CHARS + EXPLORE_MEMORY_HASH_CHARS + 1
+const EXPLORE_MEMORY_SEALED = /^[0-9a-f]{6} /u
 const EXPLORE_MEMORY_INTENT_CHARS = 60
 
 /**
@@ -13935,6 +13974,93 @@ function exploreMemoryText(value, chars = EXPLORE_MEMORY_TEXT_CHARS) {
   return text.length > chars ? text.slice(0, chars) : text
 }
 
+/**
+ * 一条控件文本的短 hash (纯函数): 6 位十六进制, FNV-1a
+ *
+ * 落盘那一条要能"对得上同一个控件"而不留下整句话 (2.8.1 #36 审查 M4): 连点同一个按钮两次要认成
+ * 同一行, 但短信与银行页上的数字不该原样躺着
+ */
+function exploreMemoryHash(text) {
+  let hash = 0x811c9dc5
+  for (const one of String(text ?? '')) {
+    hash ^= one.codePointAt(0)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0').slice(0, EXPLORE_MEMORY_HASH_CHARS)
+}
+
+/**
+ * 落盘的那一条 (纯函数, 幂等): `短 hash + 前 24 字`
+ *
+ * 幂等是为了重启之后读回来的那一行不被再截一次: hash 只算一次, 认得出自己是封过的就只重算 hash,
+ * 于是同一行写盘 / 读回 / 再写盘逐字节一样, 那三格"确认过什么"也算得准
+ */
+function exploreMemorySeal(value) {
+  const raw = exploreMemoryText(value, EXPLORE_MEMORY_ROW_CHARS)
+  if (raw === '') return ''
+  const bare = exploreMemoryText(EXPLORE_MEMORY_SEALED.test(raw)
+    ? raw.slice(EXPLORE_MEMORY_HASH_CHARS + 1)
+    : raw)
+  return bare === '' ? '' : `${exploreMemoryHash(bare)} ${bare}`
+}
+
+/**
+ * 敏感应用 (2.8.1 #36 审查 M4): 短信 / 通讯录 / 电话 / 银行 / 支付 / 钱包
+ *
+ * 这一趟走过这些应用时一个字都不记, 连包名都不进账 —— 前 24 字也可能带出验证码与金额, hash 保不住
+ * 它, 所以整条跳过。包名按段看 (`com.android.messaging`、`com.eg.android.AlipayGphone` 都算),
+ * 段内再看前缀 (`bankofamerica` / `walletxxx` / `paytm` 这一类)
+ */
+const EXPLORE_MEMORY_SENSITIVE_PARTS = new Set([
+  'sms', 'mms', 'messaging', 'messages', 'telephony', 'contacts', 'contactsprovider', 'contact',
+  'dialer', 'phone', 'calllog', 'incallui',
+  'bank', 'banking', 'wallet', 'pay', 'payment', 'payments', 'paypal', 'alipay', 'unionpay',
+  'icbc', 'cmb', 'cmbchina', 'ccb', 'boc', 'bocom', 'spdb', 'psbc', 'cebbank', 'cmbc',
+])
+
+const EXPLORE_MEMORY_SENSITIVE_PREFIX = /^(?:bank|wallet|pay|alipay|unionpay|contact|messag|dial|call)/u
+
+/** 这个包名算不算敏感 (纯函数): 按段判, 空包名不算 */
+function exploreMemorySensitive(pkg) {
+  return String(pkg ?? '').toLowerCase().split('.')
+    .filter((part) => part !== '')
+    .some((part) => EXPLORE_MEMORY_SENSITIVE_PARTS.has(part)
+      || EXPLORE_MEMORY_SENSITIVE_PREFIX.test(part))
+}
+
+/**
+ * 平台自己的那几张脸 (2.8.1 #36 审查 M5): 通知栏 / 权限弹窗 / 桌面 / 安装器
+ *
+ * 它们出现在 `lw_ui` 的 `package` 里, 但都不是"探索走到哪个应用": 记成归属会把这个应用标成被打断,
+ * 下一次回来就多算一次 resumed、多发一句 steer
+ */
+const EXPLORE_MEMORY_SHELL = /^(?:com\.android\.systemui|com\.android\.launcher[0-9]*|com\.google\.android\.apps\.nexuslauncher|com\.android\.permissioncontroller|com\.google\.android\.permissioncontroller|com\.android\.packageinstaller|com\.google\.android\.packageinstaller)$/u
+
+/** 每一块屏上最近一次认得是哪个应用 (displayId → pkg): `lw_tap` / `lw_swipe` 按它归属 */
+const exploreMemoryOnDisplay = {}
+
+/**
+ * 这一步是哪个应用 (不抛, 2.8.1 #36 审查 M5): 认下来就记在那一块屏上, 空串 = 不认
+ *
+ * `trusted` 为真时是 `lw_launch` 那一下 —— 应用是这一趟自己起的, 主屏也认; 读屏 (`lw_ui`) 不 trusted:
+ * displayId 0 是主人手里那块, 读到的窗口是主人在做什么, 不是这一趟走到哪。主屏一概不记进那张表,
+ * 于是 tap / swipe 在那块屏上仍按手里这一个归属 (读错屏也不改账)
+ */
+function exploreMemorySeen(displayId, pkg, trusted = false) {
+  const id = Math.max(0, Math.round(Number(displayId) || 0))
+  const text = String(pkg ?? '').trim()
+  if (text === '' || EXPLORE_MEMORY_SHELL.test(text)) return ''
+  if (id === 0) return trusted === true ? text : ''
+  exploreMemoryOnDisplay[id] = text
+  return text
+}
+
+/** 这一块屏上是哪个应用 (不抛): 没认过就是空串, 调用方退回手里这一个 */
+function exploreMemoryOnDisplayPkg(displayId) {
+  const id = Math.max(0, Math.round(Number(displayId) || 0))
+  return exploreMemoryOnDisplay[id] ?? ''
+}
+
 /** 这一趟要找什么 (纯函数): 开场正文的第一个非空行, 标题 / 列表记号剥掉, 截到一句提示放得下的长度 */
 function exploreMemoryIntent(value) {
   const lines = String(value ?? '')
@@ -13944,11 +14070,11 @@ function exploreMemoryIntent(value) {
   return lines.length === 0 ? '' : exploreMemoryText(lines[0], EXPLORE_MEMORY_INTENT_CHARS)
 }
 
-/** 账里那一条 (纯函数): 形状不对就当没有 */
+/** 账里那一条 (纯函数): 形状不对就当没有, 行一律封过 (hash + 前 24 字, 幂等) */
 function exploreMemoryEntry(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
   const list = (rows) => (Array.isArray(rows) ? rows : [])
-    .map((row) => exploreMemoryText(row))
+    .map((row) => exploreMemorySeal(row))
     .filter((row) => row !== '')
     .slice(-EXPLORE_MEMORY_CONFIRMED)
   return {
@@ -13988,12 +14114,16 @@ function exploreMemoryStep(memory, step, limit = EXPLORE_MEMORY_MAX_DEFAULT) {
   const next = exploreMemoryOpen(memory)
   const pkg = exploreMemoryText(step?.pkg, 120)
   if (pkg === '') return next
+  // 敏感应用整条跳过 (2.8.1 #36 审查 M4): 连包名都不进账, 于是"跑过短信"这件事一个字都留不下来
+  if (exploreMemorySensitive(pkg)) return next
   const at = Math.max(0, Number(step?.at) || Date.now())
   const asked = exploreMemoryIntent(step?.intent)
-  // 切走: 别处那条 active 的意图标 interrupted (回到它时才 +1 resumed)
+  // 切走: 别处那条 active 的意图标 interrupted (回到它时才 +1 resumed) —— **只动标记不动 at**
+  // (审查 M3): `at` 是"谁最久没碰过"那把尺子, 切走那一刻改写它等于把别人刚碰过的时间抹掉,
+  // 后面的淘汰就只能按包名字典序挑
   for (const [key, entry] of Object.entries(next)) {
     if (key === pkg || entry.active !== true) continue
-    next[key] = { ...entry, active: false, interrupted: true, at }
+    next[key] = { ...entry, active: false, interrupted: true }
   }
   const before = next[pkg] ?? null
   const back = before !== null && before.interrupted === true
@@ -14001,7 +14131,8 @@ function exploreMemoryStep(memory, step, limit = EXPLORE_MEMORY_MAX_DEFAULT) {
     intent: '', confirmed: [], failed: [], interrupted: false, resumed: 0, active: false, at: 0,
   }
   const effect = String(step?.effect ?? '').trim().toLowerCase()
-  const said = exploreMemoryText(step?.text)
+  // 落盘那一条封过 (hash + 前 24 字): 纯函数见 [exploreMemorySeal]
+  const said = exploreMemorySeal(step?.text)
   // 同一条连着来两次 (连点同一个控件) 只占一行: 那三格是"确认过什么", 不是点击流水
   const add = (rows, one) => (rows[rows.length - 1] === one
     ? rows
@@ -14020,11 +14151,13 @@ function exploreMemoryStep(memory, step, limit = EXPLORE_MEMORY_MAX_DEFAULT) {
     active: true,
     at,
   }
-  // 记几个应用: 超了就从最久没碰过的 (不是手里这一个) 开始丢
+  // 记几个应用: 超了就从最久没碰过的 (不是手里这一个, **也不碰被打断的**) 开始丢
+  // (审查 M3: 被打断的那一条正是"切回来还记不记得"要用的, 丢了它这一整本账就没意义了;
+  // 所以 `cap` 是软上限 —— 一场探索真的走过 cap 个以上应用时, 被打断的几条留着, 宁可多几行)
   const keys = Object.keys(next)
   if (keys.length > cap) {
     const order = keys
-      .filter((key) => key !== pkg)
+      .filter((key) => key !== pkg && next[key].interrupted !== true)
       .sort((left, right) => (next[left].at - next[right].at) || (left < right ? -1 : 1))
     for (const key of order.slice(0, keys.length - cap)) delete next[key]
   }
@@ -14064,7 +14197,8 @@ function exploreMemoryHint(view) {
   const lines = [pkg === '' ? `接着找: ${intent}` : `回到 ${pkg}, 接着找: ${intent}`]
   const confirmed = Array.isArray(view?.confirmed) ? view.confirmed : []
   for (const one of confirmed.slice(0, EXPLORE_MEMORY_CONFIRMED)) {
-    const text = exploreMemoryText(one)
+    // 盘上那一行是 `hash + 前 24 字`, 提示里只念盒子后面那句话 (hash 是给磁盘对账用的)
+    const text = exploreMemoryText(one, EXPLORE_MEMORY_ROW_CHARS).replace(EXPLORE_MEMORY_SEALED, '')
     if (text !== '') lines.push(`已确认: ${text}`)
   }
   return lines
@@ -14093,19 +14227,20 @@ function exploreMemoryStatus(run, limit = exploreMemoryLimit()) {
 }
 
 /**
- * 这一步算成什么 (纯函数): 有 #32 回读算的 `effect` 就用它, 没有就按"发出去没有"算
+ * 这一步算成什么 (纯函数): 回执里有 #32 回读算的 `effect` 就用它, 没有就是 `unknown`
  *
- * 设备侧回 `tapped` / `swiped` / `clicked` 只说明动作用送到了, 所以没有回读的那一档只能算
- * `changed` —— 它不是"确认界面变了", 是"没有别的说法"
+ * 基线这一档的桥回执只有 `tapped` / `swiped` / `clicked` (没有 effect 回读), 那三个只说明**动作
+ * 送到了**, 不说明界面变了 —— 于是记 `unknown`, confirmed 与 failed 两边都不进 (2.8.1 #36 审查 M1:
+ * 拿"发出去了"冒充"界面真变了", 提示里就会点名其实没变化的控件)。等 #32 的 effect 回读进基线,
+ * 同一行代码自己就接上了。熄屏时注入是静默失效的, 那种"发出去也没有用"的仍按 `failed` 算
  */
 function exploreMemoryEffect(result) {
-  // 熄屏时注入是静默失效的 (与 formatGesture 那一句同一个判据): 动作算没成
   if (typeof result?.screen === 'string' && result.screen !== 'on') return 'failed'
   const effect = String(result?.effect ?? '').trim().toLowerCase()
   if (effect === 'changed' || effect === 'unchanged' || effect === 'failed' || effect === 'unknown') {
     return effect
   }
-  if (result?.tapped === true || result?.swiped === true || result?.clicked === true) return 'changed'
+  if (result?.tapped === true || result?.swiped === true || result?.clicked === true) return 'unknown'
   return 'failed'
 }
 
@@ -14116,12 +14251,6 @@ function exploreMemoryTapText(args) {
   const x = Number(args?.x)
   const y = Number(args?.y)
   return Number.isFinite(x) && Number.isFinite(y) ? `(${x},${y})` : ''
-}
-
-/** 这一下划的是哪一段 (纯函数) */
-function exploreMemorySwipeText(args) {
-  const point = (x, y) => `${Number(x)},${Number(y)}`
-  return `滑动 ${point(args?.fromX, args?.fromY)} -> ${point(args?.toX, args?.toY)}`
 }
 
 /** 那一份摘要叫什么: `yyyyMMdd-HHmm` (本地时间, 按这一场开始那一刻算 —— 纯函数) */
@@ -14714,6 +14843,8 @@ function exploreMemoryNote(exec, pkg, effect, text) {
   if (limit === 0) return false
   const wanted = String(pkg ?? '').trim() || exploreRun.pkg
   if (wanted === '') return false
+  // 敏感应用连"路过"都不记 (2.8.1 #36 审查 M4): 记下包里那个名字也是一条隐私
+  if (exploreMemorySensitive(wanted)) return false
   const before = exploreMemoryCounts(exploreRun.memory)
   exploreRun.memory = exploreMemoryStep(exploreRun.memory, {
     pkg: wanted,
