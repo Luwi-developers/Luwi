@@ -343,8 +343,9 @@ check('一次说几句时朗读等它们上完屏再开口 (耳朵不比眼睛�
 // **jsonl 一个字节都不动**, `voice` 只走朗读流, 绝不进显示字段
 check('jsonl 的显示字段没被朗读稿改动 (话那一行只有 kind/text, 数组那三样还是 kind/text/sticker)',
   /\{ kind: 'text', text: texts\[index\] \}/.test(host)
-    && !/\{ kind: 'text'[^}]*voice/.test(host)
-    && !/lwOutAppend\([^)]*voice/.test(host))
+    && !/\{ kind: 'text'[^}]*\bvoice\b/.test(host)
+    // 只禁"往 lwOutAppend 里塞 voice 那个键"; `voiceDelivery.current` 是球那一场的会话 id (2.8.1 #31), 不是朗读稿
+    && !/lwOutAppend\([^)]*\bvoice\s*:/.test(host))
 check('`voice` 是念法不是说法: 只交给 readAloudScript, 差异落一行日志',
   /readAloudScript\(shownText, voice\)/.test(host)
     && /lw_say: the spoken line differs from the shown one/.test(host)

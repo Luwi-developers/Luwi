@@ -329,7 +329,7 @@ check('工具说明里写清"宿主自己按排期开, 这条工具不开"', [
   toolFace.includes('never starts one') || toolFace.includes('never starts'),
   toolFace.includes('daily start time'),
 ], [true, true])
-check('工具数的下限抬到 66', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 66)
+check('工具数的下限抬到 67 (2.8.1 #45 加了 lw_memory)', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 67)
 
 /* ── 八、文件与键名 ───────────────────────────────────────────────────── */
 

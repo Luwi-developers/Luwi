@@ -358,9 +358,14 @@ check('开场正文: 快照排在权限那一段前面 (先看对话再读档位
 })(), [true])
 check('startProactive 里真的接上了快照 (buildPortalSnapshot -> 开场正文)', [
   /await buildPortalSnapshot\(ctx, workspace\?\.path/u.test(startBody),
-  /proactiveStartLine\(options\?\.text, summaryPath, acting, snapshot\)/u.test(startBody),
+  // 2026-11-20 (方案 §7.3): 第 5 参是那一场的状态 / 策略 / 记着的事 —— 空串时整块不出现
+  /proactiveStartLine\(options\?\.text, summaryPath, acting, snapshot, mood\?\.block \?\? ''\)/u.test(startBody),
   /the portal snapshot was not built/u.test(startBody),
 ], [true, true, true])
+check('startProactive 里那一场先算状态, 再把整段交给开场正文 (方案 §7.3)', [
+  /await affectSnapshotNow\(\{ cue: String\(options\?\.text \?\? ''\)\.trim\(\) \}\)/u.test(startBody),
+  /the affect block was not built/u.test(startBody),
+], [true, true])
 
 /* ── 四、三张表 × 三档的硬闸 (2026-11-10) ────────────────────────────── */
 
@@ -377,12 +382,16 @@ check('旧名字 (proactiveScreenGate) 还留着, 不引新代码去挂它', [
 ], [true, false])
 check('三张表都在 (A 屏 / B 写动 / C 命令)', [
   api.PROACTIVE_SCREEN_DENIED.size,
-  // 23 + lw_persona (2026-11-10) + lw_forge (2.8.1 工坊) = 25
+  // 23 + lw_persona (2026-11-10) + lw_forge (2.8.1 工坊) + lw_memory (2026-11-20 方案 §6.2) = 26
   api.PROACTIVE_ACT_TABLE.size,
   api.PROACTIVE_COMMAND_DENIED.has('lw_linux'),
   api.PROACTIVE_COMMAND_DENIED.has('bash'),
   api.PROACTIVE_COMMAND_DENIED.has('pwsh'),
-], [21, 25, true, true, true])
+], [21, 26, true, true, true])
+check('lw_memory 只放读那一面 (缺省那一档只能想, 不能记)', [
+  api.PROACTIVE_ACT_TABLE.has('lw_memory'),
+  [...(api.PROACTIVE_ACT_TABLE.get('lw_memory') ?? [])].sort(),
+], [true, ['list', 'status']])
 check('三档字面量与设置页 / SimSetting 同一套', [
   api.PROACTIVE_ACTING_REMIND, api.PROACTIVE_ACTING_ACT, api.PROACTIVE_ACTING_FULL,
   api.PROACTIVE_ACTING_CACHE_MS,

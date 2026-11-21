@@ -38,6 +38,13 @@
 - 附件：她的图与文件先复制到 `<工作区>/.lw-snapshot/<id>/`，快照行里给工作区相对路径，主动场的 `read` / `read_image` 直接能用；他的附件本来就在工作区（`lw-in/`、`.lw-inbox/`），路径已在正文里。
 - 预算：单条 200 字、整段 4000 字（从最旧开始丢）；没有可说的就**整段不出现**。开场照旧发得出去 —— 快照读不到只记一行 warn。
 
+## 情感与记忆那一块（2026-11-20，方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`）
+
+- 开场正文末尾多一段（`proactiveStartLine` 第 5 参，空串时整块不出现）：〔此刻〕一声 / 心情与关系 / 这一场主调 / 今天的分寸 / 〔记着的几件事〕。由宿主 `affectSnapshotNow` 现算，落在 `$DSH_HOME/lw/memory/affect.json` 的 `opener` 字段上。
+- **人格不再另起一份**：`{{lw_persona}}` 在这一档也求值，但只取人格卡里「二之二」那一段（四条特质 / 三条禁区 / 一句关系），全文留给对话场。预设第五节写明"与对话场同一张卡"。
+- 记忆三层在 `$DSH_HOME/lw/memory/`：`episodes.jsonl`（情节，宿主从 `wishes.json` 补 + 她自己的 `lw_memory op=add`）、`profile.json`（画像）、`relation.json`（关系，宿主自动）；他划的线在 `boundaries.json`，`hard: true` 的由 `lw_say` 硬拒。
+- 他说过"别说了"那一段由 `relation.json` 的 `mutedUntil` 管住：`via: 'wake'`（人亲手点的那一下）不受限，到点与判断层两路都不开口。
+
 ## 卸载回滚
 
 把 profile patch 里 `- id: preset-proactive` 所在的 `- insert:` 整段删掉即可。`$DSH_HOME/lw/proactive-schedule.json` 与 `proactive.json` 都是普通文件，删不删不影响预设本身。

@@ -379,6 +379,16 @@
 
 - 全在 `host-plugin/index.mjs`, 现 74 个 (`lw_probe` / `lw_screen*` / `lw_tap` / `lw_ocr` / `lw_wait_text` /
   `lw_capabilities` / `lw_quickapp` / `lw_persona` …), 每个一次桥调用 (人格卡这类纯宿主读写不走桥)
+- **她自己的记忆是 `lw_memory`** (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`):
+  op = `add` / `list` / `profile` / `forget` / `boundary` / `mute` / `status`; 三层落 `$DSH_HOME/lw/memory/`
+  (`episodes.jsonl` 情节 / `profile.json` 画像 / `relation.json` 关系 —— 最后一份**宿主单写**, 她只能读),
+  他划的线落 `boundaries.json` (`hard: true` 的由 `lw_say` 硬拒, 所以 hard 那条至少 4 字, 免得把嘴堵上).
+  **写入前有一道隐私形状闸** (长数字串 / 金额 / 链接 / 验证码那类词一律拒收), 宿主从 `wishes.json` 自动补情节
+  也要过它; `forget` 会落墓碑 (`forgotten.json`), 否则下一轮宿主又把它补回来. 读那一面三档都放,
+  写那一面归写动 (`PROACTIVE_ACT_TABLE` 的 `['list', 'status']`)
+- **情感状态也是宿主算的** (`host-plugin/emotion/state.mjs`, 纯函数): 每轮 `turn/start` 落 `lw/memory/affect.json`,
+  对话场拼在 `{{lw_persona}}` 后面, 主动场走开场正文第 5 参; 四个维度 (valence / arousal / engagement / phase)
+  与共情策略都不调模型 —— 判据 `tools/check-emotion.mjs`
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 白名单

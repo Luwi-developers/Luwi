@@ -2496,6 +2496,13 @@ window.__ModuleLoader__.load({
         // `fallback`). 只进元数据 (`meta.topicSource`), 气泡上不加字 —— 历史与排障看得出就够了
         var topicSource = typeof line.topicSource === 'string' ? line.topicSource : ''
         if (topicSource !== '') item.meta = { topicSource: topicSource }
+        // 透明引用 (2026-11-20, 方案 §8.3): 这一句引的是哪一条记忆 (`episodes.jsonl` 的 id).
+        // 只进元数据 (`meta.memoryRef` → 行的 `data-ref`), 气泡上不加字 —— 她要能"被查", 不是"被看着"
+        var memoryRef = typeof line.memoryRef === 'string' ? line.memoryRef : ''
+        if (memoryRef !== '') {
+          item.meta = item.meta || {}
+          item.meta.memoryRef = memoryRef
+        }
         if (kind === 'sticker') {
           item.sticker = typeof line.sticker === 'string' ? line.sticker : ''
           item.text = ''
@@ -4319,6 +4326,9 @@ window.__ModuleLoader__.load({
         row.setAttribute('data-who', item.who)
         // 一句气泡从哪条信号来的 (2.8.1 #31): 值就是 `meta.topicSource`, 老行没有这一格就不写
         if (item.meta && item.meta.topicSource) row.setAttribute('data-topic', item.meta.topicSource)
+        // 这一句引的是哪条记忆 (2026-11-20, 方案 §8.3): 值就是 `meta.memoryRef` —— 排障时顺着它
+        // 去 `lw/memory/episodes.jsonl` 查原话
+        if (item.meta && item.meta.memoryRef) row.setAttribute('data-ref', item.meta.memoryRef)
         // 本机占位那一行 (2.8.1 #33): 还欠 dsh 一条落盘的 user 节点, 画淡一点 —— 人一眼看得出"还在送"
         if (item.pending) row.setAttribute('data-pending', 'on')
         if (item.who === 'user' && item.hasImage && !(item.attach && item.attach.length > 0)) {

@@ -28,6 +28,10 @@ import { fileURLToPath } from 'node:url'
 
 import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 
+// 情感状态与共情策略 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`)
+// 纯函数都放那一个文件里: 宿主这一侧只负责"喂读数 / 拼进提示词", 判据可以直接 import 它真跑
+import * as emotion from './emotion/state.mjs'
+
 /** Set by the app when it starts the host; both absent everywhere else */
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
 const TOKEN_VARIABLE = 'LW_CHANNEL_TOKEN'
@@ -218,6 +222,14 @@ export function apply(ctx) {
     startModeModel(ctx)
   } catch (error) {
     warn(ctx, `the mode model correction was not started: ${error?.message ?? error}`)
+  }
+
+  // 情感状态 (2026-11-20, 方案 §5.5): 每轮开始把〔此刻〕算一遍落 `lw/memory/affect.json`, 对话场与
+  // 主动场读的都是那一份 —— 她"此刻什么状态"只有一个源头, 两条路不会各说各的
+  try {
+    startAffectSnapshot(ctx)
+  } catch (error) {
+    warn(ctx, `the affect snapshot was not started: ${error?.message ?? error}`)
   }
 
   // 探索那一档的预算 (2.7.8 批次 7): 数步那道闸 (只数不拒) 与到点那一拍 (5 s), 与上面两道闸并列
@@ -1038,13 +1050,87 @@ function packedPersonaText() {
   }
 }
 
-/** 这一步的人设: 设备卡 -> 包内默认 -> 四行兜底; 非 luwi 档一个字都不给 */
+/** 会说话的那两档 (2026-11-20): 同一个人格, 两种场合 —— 探索 / 酒馆照旧一个字都不给 */
+const PERSONA_PRESETS = new Set(['luwi', 'proactive'])
+
+/** 内核那一节的开头 (方案 §4.2 的「二之二」): 主动场只给它, 全文留给对话场 */
+const PERSONA_CORE_HEAD = '## 二之二'
+
+/**
+ * 整张卡 → 内核那一段 (方案 §4.3)
+ *
+ * 切不到就退全文 —— **宁可多给, 不可空着**: 人格断层的代价比多几百字大得多
+ */
+function personaCoreOf(card) {
+  const text = String(card ?? '')
+  const at = text.indexOf(PERSONA_CORE_HEAD)
+  if (at < 0) return text
+  const rest = text.slice(at + PERSONA_CORE_HEAD.length)
+  const next = rest.indexOf('\n## ')
+  return (next < 0 ? text.slice(at) : text.slice(at, at + PERSONA_CORE_HEAD.length + next)).trim()
+}
+
+/**
+ * 主动场只要内核, 对话场要全文 (方案 §4.1 / §4.3)
+ *
+ * 主动场一场只说一两句, 而开场正文已经带着状态 / 策略 / 记着的事; 2371 字全文在那里既贵又容易
+ * 让她复述卡里的句子. 对话场照旧全文 —— 那是"她是谁"唯一的地方
+ */
+function personaForPreset(preset, full, core) {
+  return preset === 'proactive' ? core : full
+}
+
+/** `lw/memory/affect.json` 里那一段〔此刻〕的缓存 (path + mtime + size -> 文本) */
+const affectPromptCache = { key: '', text: '' }
+
+/**
+ * 这一步要拼在人格卡后面的〔此刻〕(2026-11-20, 方案 §5.5)
+ *
+ * 为什么读文件而不是现算: 这一步是**同步**求值 (dsh 每轮组提示词调一次 provider), 而算状态要读
+ * 五份文件. 宿主在 turn/start 与判断层那几拍已经算过一遍落成 `affect.json`, 这里只取那段成品文本
+ * —— 与 `{{lw_stickers}}` 同一个手法 (那一个也是宿主先算好)
+ *
+ * 读不到 / 文件坏了回空串: 状态是加分项, 不许因为它让整段人设消失
+ */
+function readAffectBlock() {
+  const path = homePath('lw', 'memory', 'affect.json')
+  if (path === null) return ''
+  let info
+  try {
+    info = statSync(path)
+  } catch {
+    return ''
+  }
+  if (!info.isFile() || info.size === 0) return ''
+  const key = `${path}:${info.mtimeMs}:${info.size}`
+  if (affectPromptCache.key === key) return affectPromptCache.text
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const text = String(parsed?.block ?? '').trim()
+    affectPromptCache.key = key
+    affectPromptCache.text = text
+    return text
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 这一步的人设: 设备卡 -> 包内默认 -> 四行兜底; 只有 luwi / proactive 两档给
+ *
+ * 2026-11-20 (方案 §4): 主动场以前在这里拿空串, 于是"手机里有两个人格"; 现在两档共用同一张卡,
+ * 主动场取内核那一段. 对话场末尾再拼一段宿主算好的〔此刻〕(§5.5) —— 状态是**读**出来的, 不是
+ * 让她"回忆"出来的
+ */
 function personaFor(context) {
   try {
     const session = context?.agent?.session
     const preset = session?.meta?.agentPreset ?? session?.agentPreset
-    if (typeof preset === 'string' && preset !== '' && preset !== 'luwi') return ''
-    return readPersonaCard() || packedPersonaText() || PERSONA_FALLBACK
+    if (typeof preset === 'string' && preset !== '' && !PERSONA_PRESETS.has(preset)) return ''
+    const full = readPersonaCard() || packedPersonaText() || PERSONA_FALLBACK
+    if (preset === 'proactive') return personaForPreset(preset, full, personaCoreOf(full))
+    const state = readAffectBlock()
+    return state === '' ? full : `${full}\n\n${state}`
   } catch (error) {
     console.warn(`luwi-channel: the persona card could not be read: ${error?.message ?? error}`)
     return PERSONA_FALLBACK
@@ -2114,6 +2200,16 @@ async function pluginAnswer(result) {
   }
   return { text, images }
 }
+
+/**
+ * 画像只认这几个键 (方案 §6.1: 作息 / 称呼 / 雷区 / 偏好怎么被安慰)
+ *
+ * **必须放在 `const TOOLS` 之前** (2026-11-20 审查抓到的 blocker): `lw_memory` 的参数描述在
+ * **模块求值**时就拼这个数组, 而 TOOLS 数组在两千行处就求值了 —— 声明留在后面会让整个插件
+ * `Cannot access 'PROFILE_KEYS' before initialization`, 39 个工具一个都不注册 (预设引用
+ * `{{lw_persona}}` 的那几档还会 fail loud)
+ */
+const PROFILE_KEYS = Object.freeze(['call', 'sleep', 'work', 'taboo', 'comfort', 'like', 'dislike', 'note'])
 
 const TOOLS = [
   defineTool({
@@ -5413,6 +5509,19 @@ const TOOLS = [
       if (texts.length === 0 && sticker === '' && image === '' && file === '') {
         throw new Error('lw_say needs text, lines, sticker, image or file - something has to be said')
       }
+      // **他划过的线** (2026-11-20, 方案 §8.1): `hard` 条目命中就整趟不发 —— 这是人格层的硬边界,
+      // 与 `PROACTIVE_*_DENIED` 同一风格: 拒在宿主这一侧, 不靠提示词自觉. 回执里点名是哪一条,
+      // 她要么换个说法, 要么先问他这条线还留着吗
+      if (texts.length > 0) {
+        const drawn = await readBoundaries()
+        for (const one of [...texts, String(args?.voice ?? '')]) {
+          const hit = emotion.hardBoundaryHit(one, drawn)
+          if (hit !== null) {
+            throw new Error(`not said: 他划过这条线「${String(hit.what ?? '')}」`
+              + ' - 换个说法, 或者先问问他还要不要留着这条')
+          }
+        }
+      }
       // 一次只递一样媒体: 图与文件同时给说明这一遍想错了, 落哪一行都不对
       if (image !== '' && file !== '') {
         throw new Error('one call carries either an image or a file, not both')
@@ -5770,6 +5879,222 @@ const TOOLS = [
         return `snoozed ${id} until ${new Date(at).toISOString()}`
       }
       throw new Error(`op has to be add, list, done or snooze, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_memory',
+    description:
+      'What she actually remembers about him. Three layers in $DSH_HOME/lw/memory: episodes.jsonl '
+      + '(things worth bringing up later, one line each: what he said, when, whether it is still open), '
+      + 'profile.json (his habits, what to call him, what not to touch, how he likes to be comforted) '
+      + 'and relation.json (days known, closeness - the host keeps that one, never write it). '
+      + 'op=add stores ONE thing in HIS OWN WORDS (at most 120 characters) - never a summary of how you '
+      + 'think he felt, and nothing that looks like a code, a password, an amount or an address. '
+      + 'op=list searches what is already stored (give q with the words he just used) - check it before '
+      + 'saying "you mentioned before". op=profile reads or sets one whitelisted key. op=forget removes '
+      + 'one episode by id (use it the moment he asks you to forget something). op=boundary is the line '
+      + 'he drew: hard=true means lw_say refuses to send a line containing it. op=mute stops her from '
+      + 'starting anything for N hours (he said he needs quiet). op=status counts each layer.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'add, list, profile, forget, boundary, mute or status',
+      },
+      what: {
+        type: 'string',
+        description: 'For op=add / op=boundary: the thing itself, in his words, one short line',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For op=add: up to 6 words that would make this come back later (开会 / 键盘 / 累)',
+      },
+      valence: {
+        type: 'number',
+        description: 'For op=add: -1 if it was a bad moment, 1 if it was a good one, 0 / omitted otherwise',
+      },
+      open: {
+        type: 'boolean',
+        description: 'For op=add: true when it is still unresolved (he has not come back to it yet)',
+      },
+      hard: {
+        type: 'boolean',
+        description: 'For op=boundary: true = lw_say must refuse a line containing it; false = a note only',
+      },
+      q: {
+        type: 'string',
+        description: 'For op=list / op=forget: words to look for',
+      },
+      id: {
+        type: 'string',
+        description: 'For op=forget / op=boundary: the id op=list printed',
+      },
+      key: {
+        type: 'string',
+        description: `For op=profile: one of ${PROFILE_KEYS.join(' / ')}`,
+      },
+      value: {
+        type: 'string',
+        description: 'For op=profile: what to store under that key (at most 200 characters)',
+      },
+      hours: {
+        type: 'number',
+        description: 'For op=mute: how many hours she should stay quiet (1 to 168, default 168)',
+      },
+      limit: {
+        type: 'number',
+        description: 'For op=list: at most how many lines (default 5, max 20)',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'list').trim()
+      const now = Date.now()
+      const rows = await readEpisodes()
+      if (op === 'list') {
+        const limit = Math.min(20, Math.max(1, Math.round(Number(args?.limit) || 5)))
+        const found = emotion.relatedEpisodesFor(rows, String(args?.q ?? '').trim(), now, {
+          ...emotion.EPISODE_BUDGET,
+          rows: limit,
+        })
+        if (found.rows.length === 0) {
+          return rows.length === 0
+            ? 'memory is empty: nothing said to you has been kept yet'
+            : `${rows.length} episode(s) stored, none match "${String(args?.q ?? '').trim()}"`
+        }
+        return found.rows
+          .map((one) => {
+            const day = new Date(Number(one?.at ?? 0) || now)
+            const stamp = `${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
+            const tags = Array.isArray(one?.tags) && one.tags.length > 0 ? ` [${one.tags.join('/')}]` : ''
+            const open = one?.open === true ? ' (still open)' : ''
+            return `- ${one.id}: ${stamp} ${one.what}${tags}${open}`
+          })
+          .join('\n')
+      }
+      if (op === 'add') {
+        const what = String(args?.what ?? '').trim()
+        if (what === '') throw new Error('op=add needs what: the thing to remember, in his words')
+        // 隐私形状闸 (方案 §4.2): 记一次就会随每次主动场 prompt 出网, 所以拒在写入之前
+        const shape = privateShapeOf(what)
+        if (shape !== '') throw new Error(`not kept: 这条看着像 ${shape}, 别记进记忆`)
+        const tags = (Array.isArray(args?.tags) ? args.tags : [])
+          .map((one) => String(one ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 6)
+        const valence = Number(args?.valence)
+        const row = {
+          id: `e${now.toString(36)}`,
+          at: now,
+          who: 'he',
+          what: what.slice(0, 120),
+          tags,
+          valence: Number.isFinite(valence) ? Math.max(-2, Math.min(2, valence)) : 0,
+          refs: [],
+          open: args?.open === true,
+        }
+        const written = await writeEpisodes([...rows, row])
+        if (!written) throw new Error('episodes.jsonl was not written: check that $DSH_HOME is writable')
+        // 顺带记一条"他划过的线"是 op=boundary 的事 (2026-11-20 审查): 普通记忆带 `hard` 会把
+        // 一句原话变成硬闸, 而常见短语会把她的嘴整个堵上
+        const note = args?.hard === undefined
+          ? ''
+          : ' (a line he drew goes through op=boundary, not here)'
+        return `kept ${row.id}: ${row.what}${note}`
+      }
+      if (op === 'profile') {
+        const path = memoryPath('profile.json')
+        const file = (await readMemoryJson(path)) ?? {}
+        const values = file.values && typeof file.values === 'object' ? file.values : {}
+        const key = String(args?.key ?? '').trim()
+        if (key === '') {
+          const keys = Object.keys(values)
+          if (keys.length === 0) return `profile is empty; keys allowed: ${PROFILE_KEYS.join(', ')}`
+          return keys.map((one) => `- ${one}: ${String(values[one]).slice(0, 200)}`).join('\n')
+        }
+        if (!PROFILE_KEYS.includes(key)) {
+          throw new Error(`profile key has to be one of ${PROFILE_KEYS.join(', ')}, not "${key}"`)
+        }
+        const value = String(args?.value ?? '').trim()
+        if (value === '') return values[key] === undefined ? `${key}: (not set)` : `${key}: ${values[key]}`
+        const next = { ...values, [key]: value.slice(0, 200) }
+        const kept = Object.fromEntries(Object.entries(next).slice(-PROFILE_MAX))
+        await writeMemoryJsonStrict(path, { v: 1, at: now, values: kept }, 'profile.json')
+        return `profile ${key} = ${kept[key]}`
+      }
+      if (op === 'forget') {
+        const id = String(args?.id ?? '').trim()
+        const q = String(args?.q ?? '').trim()
+        if (id === '' && q === '') throw new Error('op=forget needs id or q: what should be forgotten')
+        const gone = rows.filter((one) => (id === '' ? String(one?.what ?? '').includes(q) : one?.id === id))
+        if (gone.length === 0) throw new Error(`nothing matched: ${id === '' ? q : id}`)
+        const kept = rows.filter((one) => !gone.includes(one))
+        const written = await writeEpisodes(kept)
+        if (!written) throw new Error('episodes.jsonl was not written: check that $DSH_HOME is writable')
+        // 墓碑 (2026-11-20 审查): 宿主会把 `wishes.json` 的每一件补成情节, 只删那一行的话下一轮
+        // 又补回来 —— 他要求忘掉的东西一轮内复活
+        await addForgottenRefs(gone.map((one) => one?.ref).filter(Boolean))
+        return `forgot ${gone.length} episode(s); ${kept.length} left`
+      }
+      if (op === 'boundary') {
+        const path = memoryPath('boundaries.json')
+        const items = await readBoundaries()
+        const what = String(args?.what ?? '').trim()
+        const id = String(args?.id ?? '').trim()
+        if (what !== '') {
+          const shape = privateShapeOf(what)
+          if (shape !== '') throw new Error(`not kept: 这条看着像 ${shape}, 别记进边界`)
+          // hard 是**硬闸**, 而匹配是子串: 太短的一条会把她的嘴整个堵上 (2026-11-20 审查)
+          if (args?.hard === true && what.length < 4) {
+            throw new Error('a hard line has to be at least 4 characters: 短句会连普通发言一起拦掉')
+          }
+          const kept = items.filter((one) => String(one?.what ?? '') !== what)
+          const item = { id: id || `b${now.toString(36)}`, what, hard: args?.hard === true, learnedAt: now }
+          await writeMemoryJsonStrict(path, { v: 1, at: now, items: [...kept, item].slice(-40) }, 'boundaries.json')
+          return `boundary ${item.id}: ${what} (${item.hard ? 'hard' : 'note'})`
+        }
+        if (id !== '') {
+          const kept = items.filter((one) => one?.id !== id)
+          if (kept.length === items.length) throw new Error(`no such boundary: ${id}`)
+          await writeMemoryJsonStrict(path, { v: 1, at: now, items: kept }, 'boundaries.json')
+          return `removed boundary ${id}; ${kept.length} left`
+        }
+        if (items.length === 0) return 'no lines drawn yet'
+        return items.map((one) => `- ${one.id}: ${one.what}${one.hard === true ? ' (hard)' : ''}`).join('\n')
+      }
+      if (op === 'mute') {
+        // hours 必填, 0 = 解除 (2026-11-20 审查): 缺省 168 又没有任何清零的 op, 误调一次就停一周
+        const raw = Number(args?.hours)
+        if (!Number.isFinite(raw)) throw new Error('op=mute needs hours (1 to 168), or 0 to lift it')
+        const hours = Math.min(168, Math.max(0, Math.round(raw)))
+        const path = memoryPath('relation.json')
+        const relation = await readRelation()
+        const until = hours === 0 ? 0 : now + hours * 60 * 60 * 1000
+        await writeMemoryJsonStrict(path, { ...relation, v: 1, at: now, mutedUntil: until }, 'relation.json')
+        return until === 0 ? 'quiet lifted' : `quiet until ${new Date(until).toISOString()} (${hours} h)`
+      }
+      if (op === 'status') {
+        const profile = (await readMemoryJson(memoryPath('profile.json'))) ?? {}
+        const relation = await readRelation()
+        const items = await readBoundaries()
+        return JSON.stringify({
+          episodes: rows.length,
+          openEpisodes: rows.filter((one) => one?.open === true).length,
+          profileKeys: Object.keys(profile?.values ?? {}).length,
+          relation: {
+            days: Number(relation?.days ?? 0) || 0,
+            closeness: Number(relation?.closeness ?? 0) || 0,
+            mutedUntil: Number(relation?.mutedUntil ?? 0) || 0,
+          },
+          boundaries: items.length,
+          hardBoundaries: items.filter((one) => one?.hard === true).length,
+        })
+      }
+      throw new Error(`op has to be add, list, profile, forget, boundary, mute or status, not "${op}"`)
     },
   }),
   defineTool({
@@ -13759,6 +14084,13 @@ async function routerTick(ctx) {
   }
   // 这一场能发几条 / 检测项占几条: 由 `send` 段算 (2026-11-14), 开场与记账用的是同一个数
   const quota = routerCheckQuota(inputs.send)
+  // 他要求安静那一段 (方案 §8.2 第三条): 连球那一场还开着的直推也一起停 —— 只拦 `startProactive`
+  // 的话, 最常用的那一条路上"停 7 天"根本不成立 (2026-11-20 审查)
+  const mutedUntil = Number((await readRelation())?.mutedUntil ?? 0) || 0
+  if (mutedUntil > Date.now()) {
+    console.log(`luwi-channel: the router stayed quiet (he asked until ${new Date(mutedUntil).toISOString()})`)
+    return { said: false, why: 'muted' }
+  }
   const opening = routerStartLine(decision, inputs.checks, inputs.checksSaid, quota)
   const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
   const line = routerLine(decision)
@@ -14259,6 +14591,475 @@ function startBallPhase(ctx) {
   void writeBallPhase()
 }
 
+/* ── 情感状态 / 关系记忆 / 共情策略 (2026-11-20) ────────────────────────────
+ *
+ * 方案: `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md` (P0 / P1)
+ *
+ * 分三层, 理由写在方案 §5.1 与 §14:
+ *   · **纯函数**在 `host-plugin/emotion/state.mjs` —— 状态向量 / 衰减 / 共情策略 / 召回打分 / 五格.
+ *     判据 `tools/check-emotion.mjs` 直接 import 它真跑, 一行都不依赖设备
+ *   · **宿主这一节**只做三件: 读现成文件 → 折成 inputs → 落 `lw/memory/affect.json` (给 `personaFor`
+ *     与开场正文各取一段). 这里一旦调模型, 那套"确定性内核"就白抄了
+ *   · **记忆三层**落 `lw/memory/`: `episodes.jsonl` (情节) / `profile.json` (画像) / `relation.json`
+ *     (关系), 边界落 `boundaries.json`. `lw_memory` 是模型唯一的写入口, `lw_say` 拿 `hard` 条目当硬闸
+ *
+ * 三条纪律与纯函数那一份一致: **读不到不抛 / 空值不出现 / 只记有出处的原话**
+ */
+
+/** 记忆目录 (`$DSH_HOME/lw/memory`), 没设 DSH_HOME 就是 null */
+function memoryDir() {
+  return homePath('lw', 'memory')
+}
+
+/** 情节那份 jsonl 在哪 */
+function episodesPath() {
+  const dir = memoryDir()
+  return dir === null ? null : join(dir, 'episodes.jsonl')
+}
+
+/** 画像 / 关系 / 边界 / 状态那四份 json 的路径 */
+function memoryPath(name) {
+  const dir = memoryDir()
+  return dir === null ? null : join(dir, name)
+}
+
+/** 情节最多几条: 400 条是方案 §6.1 的上限, 再多召回也翻不动 */
+const EPISODE_MAX = 400
+
+/** 画像最多几个键 (方案 §6.1): 白名单之外一律不收 —— 30 个键已经能把一个人写得很细 */
+const PROFILE_MAX = 30
+
+/** 他说的那些像隐私的形状: 只用来拒收, 原文一个字都不留 (方案 §4.2「看见了也当没看见」) */
+const AFFECT_PRIVATE_SHAPES = Object.freeze([
+  { label: '长数字串 (验证码 / 卡号 / 手机号)', test: /\d{6,}/u },
+  { label: '金额', test: /\d+\s*(元|块|千|万)/u },
+  { label: '链接', test: /(https?:|www\.)/iu },
+  { label: '隐私词 (验证码 / 密码 / 住址…)', test: /(验证码|密码|口令|身份证|银行卡|住址|地址|定位)/u },
+])
+
+/** 他说过的负面词 (只用来数一个数, 原文一个字都不留) */
+const AFFECT_NEGATIVE_WORDS = Object.freeze(['烦', '累死', '别烦', '不想聊', '难受', '难过', '气死', '滚'])
+
+/** 读一份 json, 坏了当没有 (与 [readRouterJson] 同一条路) */
+async function readMemoryJson(path) {
+  return readRouterJson(path)
+}
+
+/** 原子写一份 json */
+async function writeMemoryJson(path, payload) {
+  return writeRouterJson(path, payload)
+}
+
+/**
+ * 写不进就抛 (2026-11-20 审查): `writeRouterJson` 只 warn, 于是 `lw_memory` 会在盘满 / 只读时
+ * 照样回一句"记住了" —— 她说过的话与真的记住是两件事, 这里不许糊过去
+ */
+async function writeMemoryJsonStrict(path, payload, what) {
+  if (!path) throw new Error(`${what} has nowhere to go: DSH_HOME is not set`)
+  const temporary = temporaryName(path)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`, 'utf8')
+    await rename(temporary, path)
+  } catch (error) {
+    throw new Error(`${what} was not written: ${error?.message ?? error}`)
+  }
+}
+
+/**
+ * 这一句能不能落进记忆 (方案 §4.2: 验证码 / 金额 / 地址看见了也当没看见)
+ *
+ * 代码侧一道形状闸, 不只靠提示词: 记一次就会随每次主动场 prompt 出网, 那是**永久**的
+ *
+ * @returns {string} 命中的那一类 (空串 = 可以记)
+ */
+function privateShapeOf(text) {
+  const said = String(text ?? '')
+  if (said === '') return ''
+  for (const one of AFFECT_PRIVATE_SHAPES) {
+    if (one.test.test(said)) return one.label
+  }
+  return ''
+}
+
+/** 他要求忘掉的那几条的墓碑: `wish:<id>` 之类的 ref —— 免得宿主下一轮又补回来 */
+async function readForgottenRefs() {
+  const file = (await readMemoryJson(memoryPath('forgotten.json'))) ?? {}
+  return Array.isArray(file.refs) ? file.refs.map((one) => String(one)) : []
+}
+
+/** 记一条"这个 ref 已被他要求忘掉" */
+async function addForgottenRefs(refs) {
+  const wanted = (Array.isArray(refs) ? refs : []).map((one) => String(one ?? '')).filter(Boolean)
+  if (wanted.length === 0) return
+  const before = await readForgottenRefs()
+  await writeMemoryJsonStrict(
+    memoryPath('forgotten.json'),
+    { v: 1, at: Date.now(), refs: [...new Set([...before, ...wanted])].slice(-200) },
+    'forgotten.json',
+  )
+}
+
+/** 读情节 (坏行跳过: 一行坏了不该让整份记忆消失) */
+async function readEpisodes() {
+  const path = episodesPath()
+  if (path === null) return []
+  try {
+    const text = await readFile(path, 'utf8')
+    return text
+      .split('\n')
+      .filter(Boolean)
+      .map((one) => {
+        try {
+          const parsed = JSON.parse(one)
+          return parsed && typeof parsed === 'object' ? parsed : null
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** 整份重写 (上限 400 条, 留最新的) */
+async function writeEpisodes(rows) {
+  const path = episodesPath()
+  if (path === null) return false
+  const kept = (Array.isArray(rows) ? rows : []).slice(-EPISODE_MAX)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    const temporary = temporaryName(path)
+    await writeFile(temporary, kept.map((one) => JSON.stringify(one)).join('\n') + (kept.length > 0 ? '\n' : ''), 'utf8')
+    await rename(temporary, path)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: episodes.jsonl was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/** 他划过的那几条线 (方案 §8.1) */
+async function readBoundaries() {
+  const file = (await readMemoryJson(memoryPath('boundaries.json'))) ?? {}
+  return (Array.isArray(file.items) ? file.items : []).filter((one) => one && typeof one === 'object')
+}
+
+/** 关系那一格: 相识天数 / 亲近度 / 他划过的线之外的账 */
+async function readRelation() {
+  return (await readMemoryJson(memoryPath('relation.json'))) ?? {}
+}
+
+/**
+ * 关系账跟着事件走 (方案 §6.1 的第三层: **宿主自动, 不调模型**)
+ *
+ * 只累加两样: 相识天数 (从第一次见到他算) 与亲近度 (他接了她的话才涨). 亲近度涨得慢是刻意的 ——
+ * 方案 §12.2 要看的就是"上升过快 = 伪亲密, 一直平 = 没长进"
+ */
+async function touchRelation(now, inputs) {
+  const path = memoryPath('relation.json')
+  if (path === null) return {}
+  const before = await readRelation()
+  const firstSeenAt = Number(before?.firstSeenAt ?? 0) > 0 ? Number(before.firstSeenAt) : now
+  const days = Math.max(0, Math.floor((now - firstSeenAt) / (24 * 60 * 60 * 1000)) + 1)
+  let closeness = Number(before?.closeness ?? 0)
+  if (!Number.isFinite(closeness)) closeness = 0
+  // 他接了她的话 / 他主动开口: 记一点点亲近; 没人接就退回去一点点 (不是惩罚, 是别虚高)
+  const lastUserAt = Number(inputs?.lastUserAt ?? 0) || 0
+  const lastSpokenAt = Number(inputs?.lastSpokenAt ?? 0) || 0
+  const answeredAt = Number(before?.answeredAt ?? 0) || 0
+  if (lastSpokenAt > 0 && lastUserAt > lastSpokenAt && answeredAt !== lastSpokenAt) {
+    closeness += 0.02
+  }
+  const ignored = Math.max(0, Number(inputs?.ignored ?? 0) || 0)
+  // 减分也要去重 (2026-11-20 审查): 只看"又涨了一次"那一格, 否则他两次没接之后的每一拍都再扣
+  // 0.01, 一晚上能把 closeness 从 0.6 扣到 0
+  const penalizedFor = Number(before?.penalizedFor ?? 0) || 0
+  let nextPenalized = penalizedFor
+  if (ignored >= 2 && ignored > penalizedFor) {
+    closeness -= 0.01
+    nextPenalized = ignored
+  }
+  closeness = Math.min(0.95, Math.max(0, closeness))
+  const next = {
+    v: 1,
+    at: now,
+    firstSeenAt,
+    days,
+    closeness: Math.round(closeness * 100) / 100,
+    ignored,
+    answeredAt: lastSpokenAt > 0 && lastUserAt > lastSpokenAt ? lastSpokenAt : answeredAt,
+    penalizedFor: nextPenalized,
+    // 他明确说"别说了"之后那一段静默 (方案 §8.2 第三条, 由 lw_memory op=mute 写)
+    mutedUntil: Number(before?.mutedUntil ?? 0) || 0,
+  }
+  // 每 20 s 一拍都换 `at` 会让这份文件每轮必写一次 (2026-11-20 审查)。只比真正有意义的那几格
+  const SAME = ['firstSeenAt', 'days', 'closeness', 'ignored', 'answeredAt', 'penalizedFor', 'mutedUntil']
+  const unchanged = SAME.every((key) => (Number(next[key]) || 0) === (Number(before?.[key]) || 0))
+  if (!unchanged) await writeMemoryJson(path, next)
+  return next
+}
+
+/**
+ * 宿主把 `wishes.json` 的未了的事补进情节 (方案 §6.1: 宿主自动补)
+ *
+ * **只补他亲口交代过的那几件** (`wishes.json` 本来就是"他交代她记着的事"): 聊天原文不落这里 ——
+ * 那是隐私, 也是方案 §8.3 那句"不许假装"的另一半
+ */
+async function hostMaintainEpisodes(now) {
+  const wishes = await readWishes()
+  const rows = await readEpisodes()
+  const forgotten = new Set(await readForgottenRefs())
+  const live = new Set(wishes.map((one) => `wish:${String(one?.id ?? '')}`))
+  let changed = 0
+  // ① 那件他交代的事办完了 (wishes 里没了): 这条情节的"未了"收掉 —— 留着会一直按未了加权
+  for (const row of rows) {
+    if (row?.open !== true || typeof row?.ref !== 'string' || !row.ref.startsWith('wish:')) continue
+    if (live.has(row.ref)) continue
+    row.open = false
+    changed += 1
+  }
+  // ② 新的那几件补进来 (被要求忘掉的 ref 不再复活)
+  const known = new Set(rows.map((one) => String(one?.ref ?? '')))
+  for (const wish of wishes) {
+    const ref = `wish:${String(wish?.id ?? '')}`
+    if (ref === 'wish:' || known.has(ref) || forgotten.has(ref)) continue
+    const what = String(wish?.what ?? '').slice(0, 120)
+    if (what === '' || privateShapeOf(what) !== '') continue
+    rows.push({
+      id: `e${now.toString(36)}${changed.toString(36)}`,
+      at: Number(wish?.madeAt ?? 0) || now,
+      who: 'he',
+      what,
+      valence: 0,
+      refs: [],
+      ref,
+      open: true,
+    })
+    known.add(ref)
+    changed += 1
+  }
+  if (changed > 0) await writeEpisodes(rows)
+  return changed
+}
+
+/**
+ * 把现成文件折成 `affectEstimateOf` 要的那几个事实 (方案 §5.4)
+ *
+ * 全是**读**, 一个桥调用都不发: 状态是推导值, 每轮开始算一次不该带 1.5 s 的日历开销
+ */
+async function emotionInputsOf(now) {
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  const lw = join(home, 'lw')
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
+  const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
+  const inbox = await readRouterSignals(join(home, 'voice', 'inbox.jsonl'), 200)
+  const his = inbox.filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
+  const dayStart = new Date(now)
+  dayStart.setHours(0, 0, 0, 0)
+  const today = his.filter((one) => Number(one?.at ?? 0) >= dayStart.getTime())
+  const last24 = his.filter((one) => now - Number(one?.at ?? 0) <= 24 * 60 * 60 * 1000)
+  const firstUserAt = today.reduce((min, one) => {
+    const at = Number(one?.at ?? 0) || 0
+    if (at <= 0) return min
+    return min === 0 ? at : Math.min(min, at)
+  }, 0)
+  const negativeHits = last24.reduce((sum, one) => {
+    const text = String(one?.text ?? '')
+    return sum + (AFFECT_NEGATIVE_WORDS.some((word) => text.includes(word)) ? 1 : 0)
+  }, 0)
+  const phoneMinutes = (Array.isArray(usage?.today) ? usage.today : [])
+    .filter((one) => !routerExcludedApp(one))
+    .reduce((sum, one) => sum + Math.max(0, Number(one?.ms ?? 0) || 0) / 60000, 0)
+  const busy = routerBusyUseApp(usage?.foreground, usage?.today)
+  // "打游戏打久了"那一条 (方案 §5.3 的 long_game): 今天有哪个游戏过了 appMinutes 那条线
+  const appMinutes = Math.max(5, Number(state?.rules?.appMinutes ?? ROUTER_DEFAULTS.appMinutes) || ROUTER_DEFAULTS.appMinutes)
+  const longGame = (Array.isArray(usage?.today) ? usage.today : [])
+    .map((one) => ({
+      minutes: Math.floor((Number(one?.ms ?? 0) || 0) / 60000),
+      game: one?.game === true || ROUTER_GAME_PACKAGES.has(String(one?.pkg ?? '')),
+    }))
+    .filter((one) => one.game && one.minutes >= appMinutes)
+    .sort((a, b) => b.minutes - a.minutes)[0] ?? null
+  const callRecent = signals.some(
+    (one) => one?.kind === 'call' && now - Number(one?.at ?? 0) <= ROUTER_CALL_RECENT_MS,
+  )
+  const lastUserAt = his.reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
+  return {
+    now,
+    phase: emotion.phaseOf(now),
+    lastUserAt,
+    lastSpokenAt: Math.max(
+      Number(state?.lastSpokenAt ?? 0) || 0,
+      Number(state?.awaiting?.at ?? 0) || 0,
+    ),
+    ignored: Math.max(0, Number(state?.ignored ?? 0) || 0),
+    userTurns: last24.length,
+    userTurnsToday: today.length,
+    firstUserAt,
+    negativeHits,
+    phoneMinutes,
+    foregroundGame: busy?.game === true,
+    busy: busy !== null,
+    longGame: longGame !== null,
+    longGameMinutes: Number(longGame?.minutes ?? 0) || 0,
+    callRecent,
+    chatMisses: Math.max(0, Number(state?.chatMisses ?? 0) || 0),
+  }
+}
+
+/** `sim.json` 的 `affect` 段 (五格; 缺键回缺省) */
+async function readSimAffect() {
+  const home = process.env.DSH_HOME
+  if (!home) return emotion.AFFECT_SETTING_DEFAULTS
+  const sim = (await readRouterJson(join(home, 'lw', 'sim.json'))) ?? {}
+  return emotion.affectSettingsOf(sim?.affect)
+}
+
+/** 上一次那一笔 (用于算"过了多久、回了多少") */
+async function readAffectState() {
+  const file = await readMemoryJson(memoryPath('affect.json'))
+  if (!file || typeof file !== 'object') return null
+  const affect = file.affect
+  if (!affect || typeof affect !== 'object') return null
+  return {
+    at: Number(file.at ?? 0) || 0,
+    affect,
+    lastUserAt: Number(file.lastUserAt ?? 0) || 0,
+    lastSpokenAt: Number(file.lastSpokenAt ?? 0) || 0,
+    ignored: Number(file.ignored ?? 0) || 0,
+    // "带刺"按水位比, 不按 24 h 滚动计数比 (2026-11-20 审查): 计数滑出窗口会回落, 回落再涨就重复记
+    negativeSeen: Number(file.negativeSeen ?? 0) || 0,
+    // 打游戏过线只记一次: 上一拍是不是已经记过
+    longGame: file.longGame === true,
+    phase: String(file.phase ?? ''),
+  }
+}
+
+/**
+ * 算一次〔此刻〕并落盘 (方案 §5.4 / §5.5)
+ *
+ * 落盘的那一份同时给两处用: `personaFor` (对话场, 同步读) 与开场正文 (主动场). 于是"她此刻什么
+ * 状态"只有一个源头 —— 两条路不会各算一份、各说一句
+ *
+ * @param {{now?: number, cue?: string, event?: string}} options `cue` 是召回的打分线索 (话题原话)
+ * @returns {Promise<{block: string, memoryRef: string, affect: object, plan: object}|null>}
+ */
+async function affectSnapshotNow(options = {}) {
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  const now = Number(options?.now ?? 0) || Date.now()
+  const inputs = await emotionInputsOf(now)
+  if (inputs === null) return null
+  const settings = await readSimAffect()
+  const previous = await readAffectState()
+  const event = options?.event || emotion.affectEventOf(previous, inputs)
+  const affect = previous === null
+    ? emotion.affectEstimateOf(inputs)
+    : emotion.affectStep(previous.affect, { at: previous.at, now, kind: event })
+  const relation = await touchRelation(now, inputs)
+  // 时段一律取 `inputs.phase` (2026-11-20 审查): `affectStep` 只回三个维度, 拿它当 moment.phase
+  // 会让 `late and low` 那条分支永不命中, 也让 late_night 每拍重记一次
+  const phase = inputs.phase
+  // 先陪还是先给办法那一格 (方案 §9.2): 只改写**缺省**那一档, 具体的场景判断照 §7.2 走
+  const plan = emotion.applyEmpathySetting(
+    emotion.empathyPlanOf(affect, relation, { phase, busy: inputs.busy || inputs.callRecent }),
+    settings.empathy,
+  )
+  await hostMaintainEpisodes(now)
+  const registered = await readEpisodes()
+  const wanted = emotion.recallRowsOf(settings.recall)
+  const recalled = emotion.relatedEpisodesFor(
+    registered,
+    options?.cue ?? '',
+    now,
+    { ...emotion.EPISODE_BUDGET, rows: wanted },
+  )
+  const facts = {
+    now,
+    firstUserAt: inputs.firstUserAt,
+    userTurnsToday: inputs.userTurnsToday,
+    lastUserAt: inputs.lastUserAt,
+    lastSpokenAt: inputs.lastSpokenAt,
+    phoneMinutes: inputs.phoneMinutes,
+    foregroundGame: inputs.foregroundGame,
+  }
+  // 两份: 对话场只接状态那一小段 (§5.5 ≤140 字), 主动场的开场正文再接上五格与记着的事 (§7.3 / §6.4)
+  const stateText = emotion.affectBlockOf({ affect, facts, relation, plan })
+  const boundaries = await readBoundaries()
+  const soft = emotion.softBoundaryBlock(boundaries)
+  const openerText = [
+    emotion.affectBlockOf({
+      affect,
+      facts,
+      relation,
+      plan,
+      episodes: recalled.rows,
+      settings,
+    }),
+    // 他划的那些软的线 (方案 §8.1): 只当"注意", 不作硬拦 —— 以前这一段没有任何调用点
+    soft,
+  ].filter((one) => one !== '').join('\n')
+  // 透明引用 (方案 §8.3): 只在这一句真的引到了某条情节的**原话**时才带 —— 取召回第一名而不看
+  // 词重叠的话, 会指向一条无关的记忆, 那比不指更糟
+  const cue = String(options?.cue ?? '').trim()
+  const cued = recalled.rows.find((one) => emotion.overlapRatio(emotion.tokenize(one?.what), emotion.tokenize(cue)) > 0)
+  const memoryRef = cued === undefined ? '' : String(cued?.id ?? '')
+  const payload = {
+    v: 1,
+    at: now,
+    phase,
+    affect,
+    plan,
+    settings,
+    relation: { days: relation.days ?? 0, closeness: relation.closeness ?? 0 },
+    memoryRef,
+    event: event ?? null,
+    lastUserAt: inputs.lastUserAt,
+    lastSpokenAt: inputs.lastSpokenAt,
+    ignored: inputs.ignored,
+    negativeHits: inputs.negativeHits,
+    // 两个水位: 下一拍比"带刺"与"游戏过线"都用它, 于是同一件事只记一次
+    negativeSeen: Math.max(Number(previous?.negativeSeen ?? 0) || 0, inputs.negativeHits),
+    longGame: inputs.longGame === true,
+    // `block` 是对话场读的那一份, `opener` 是主动场读的那一份 (两个注入点各取所需)
+    block: stateText,
+    opener: openerText,
+  }
+  await writeMemoryJson(memoryPath('affect.json'), payload)
+  // 读数 (方案 §14.2: 出问题先看这一行) —— 一、换算是不是离谱; 二、为什么这一场是这个策略
+  console.log(
+    `luwi-channel: affect: v=${Number(affect.valence).toFixed(1)} a=${Number(affect.arousal).toFixed(1)}`
+      + ` e=${Number(affect.engagement).toFixed(1)} phase=${phase} event=${event ?? 'none'}`
+      + ` plan=${plan.lead}/${plan.avoid} why=${plan.why} recalls=${recalled.rows.length}`
+      + `${memoryRef === '' ? '' : ` ref=${memoryRef}`}`,
+  )
+  return { block: openerText, state: stateText, memoryRef, affect, plan, settings, relation, episodes: recalled.rows }
+}
+
+/**
+ * 每轮开始把状态算一遍 (方案 §5.5: 对话场也读得到)
+ *
+ * 20 s 节流: 一轮里可能有几步, 而状态是"小时级"的变量 —— 每一步都重算一遍纯属浪费
+ */
+function startAffectSnapshot(ctx) {
+  let lastAt = 0
+  onSessionEvent(ctx, (session, event) => {
+    if (event.type !== 'turn/start') return
+    if (session.meta?.origin === 'subagent') return
+    if (isPeerProjection(session) || session.agentPreset === 'tavern') return
+    const now = Date.now()
+    if (now - lastAt < 20_000) return
+    lastAt = now
+    void affectSnapshotNow({ now }).catch((error) => {
+      console.warn(`luwi-channel: the affect snapshot was not written: ${error?.message ?? error}`)
+    })
+  })
+}
+
 /* ── 主动对话 (2.8.0 B4-a, 排期骨架) ────────────────────────────────────────
  *
  * 到点那一场与浮标 / 探索都不一样: **固定新开一场**, 开场就用 `proactive` 预设, 默认只提醒
@@ -14390,6 +15191,9 @@ const PROACTIVE_ACT_TABLE = new Map([
   ['lw_sticker', new Set(['list', 'say', 'pick'])],
   // 工坊 (2.8.1): 读项目状态与构建日志不动设备; 建 / 改 / 图标 / 构建 / 装机 / 建屏全归写动
   ['lw_forge', new Set(['status', 'logs'])],
+  // 她自己的记忆 (2026-11-20, 方案 §6.2): 读那一面三档都放; `add` / `profile` / `forget` / `boundary`
+  // 写的是 `lw/memory/`, 归写动 (act 以上) —— 缺省那一档只能想, 不能记
+  ['lw_memory', new Set(['list', 'status'])],
   // 没有只读那一面: 一调就是动手
   ['lw_app_control', new Set()],
   ['lw_launch', new Set()],
@@ -14920,15 +15724,21 @@ async function buildPortalSnapshot(ctx, workspacePath) {
  * 2026-11-20 (2.8.1 #36): 多第 4 个可选参数 `snapshot` —— 门户当前那一场最近 20 条, 由
  * [buildPortalSnapshot] 出。空串时**这一段整块不出现**, 于是 2 参 / 3 参调用的输出一个字节不变
  *
+ * 2026-11-20 (方案 §7.3, 情感那一批): 多第 5 个可选参数 `memory` —— 〔此刻〕/ 关系 / 这一场主调 /
+ * 记着的事, 由 [affectSnapshotNow] 出。**排在"可以沉默"之后、"语气"之前**: 先读"该不该说", 再读
+ * "怎么陪", 最后读"什么口气"。空串时整块不出现, 于是 2 / 3 / 4 参调用的输出仍逐字不变
+ *
  * @param {string} text 卡里的正文 (空 = 缺省那句)
  * @param {string} summaryPath 最新那份探索摘要的绝对路径
  * @param {string} acting 档位 (`remind` / `act` / `full`)
  * @param {string} snapshot 「本次消息快照」整段 (空串 = 不带)
+ * @param {string} memory 状态 + 关系 + 策略 + 记着的事 (空串 = 不带)
  * @returns {string} 这一场的开场正文
  */
-function proactiveStartLine(text, summaryPath, acting, snapshot) {
+function proactiveStartLine(text, summaryPath, acting, snapshot, memory) {
   const asked = String(text ?? '').trim() || PROACTIVE_ASK_DEFAULT
   const snap = String(snapshot ?? '').trim()
+  const mood = String(memory ?? '').trim()
   const tier = PROACTIVE_ACTING_TIERS.has(acting) ? acting : PROACTIVE_ACTING_DEFAULT
   const permission = tier === PROACTIVE_ACTING_FULL
     ? '这一场全放开: 能写文件 / 开应用 / 跑命令, 也能建虚拟屏、截图、点、滑; 但动手前先说一句你要做什么.'
@@ -14949,6 +15759,8 @@ function proactiveStartLine(text, summaryPath, acting, snapshot) {
     permission,
     // "可以沉默"先说, "怎么说"留到最后一行: 说完这段她就要动嘴, 最后读到的该是语气
     '没有值得说的就保持沉默, 一条话都不要写.',
+    // 这一场该怎么陪 (方案 §7.3): 状态 / 关系 / 策略 / 记着的事 —— 没有就整块不出现
+    ...(mood === '' ? [] : [mood]),
     PROACTIVE_START_VOICE,
   ].join('\n')
 }
@@ -15070,6 +15882,16 @@ async function chooseProactivePreset(ctx) {
  */
 async function startProactive(ctx, options = {}) {
   const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'inbox'
+  // **干净的分手** (2026-11-20, 方案 §8.2 第三条): 他明确说过"别说了"之后那一段，宿主自己不开这一场
+  // —— 不是路由层不发话，是"她真的停"。人亲手点的那一下 (`via: 'wake'`) 不受这条管：那不是她在开新话头
+  if (via !== 'wake') {
+    const relation = await readRelation()
+    const mutedUntil = Number(relation?.mutedUntil ?? 0) || 0
+    if (mutedUntil > Date.now()) {
+      console.log(`luwi-channel: proactive skipped (he asked for quiet until ${new Date(mutedUntil).toISOString()})`)
+      return { started: false, why: 'muted', mutedUntil, session: null, via }
+    }
+  }
   const controller = ctx?.get?.('sessionController')
   if (!controller) {
     throw new Error('this profile has no session controller, so a proactive conversation has nowhere to go')
@@ -15087,6 +15909,20 @@ async function startProactive(ctx, options = {}) {
     snapshot = await buildPortalSnapshot(ctx, workspace?.path ?? '')
   } catch (error) {
     console.warn(`luwi-channel: the portal snapshot was not built: ${error?.message ?? error}`)
+  }
+  // 这一场该怎么陪 (方案 §7.3): 〔此刻〕/ 关系 / 这一场主调 / 记着的事。读不到就整段不带 ——
+  // 与快照同一条纪律: 状态是加分项, 不许因为它把这一场拖死
+  let mood = null
+  try {
+    mood = await affectSnapshotNow({ cue: String(options?.text ?? '').trim() })
+  } catch (error) {
+    console.warn(`luwi-channel: the affect block was not built: ${error?.message ?? error}`)
+  }
+  // 读数 (真机验收就看这一行): 那一段多少字、这一场是什么主调 —— 开场正文本身不落盘
+  if (typeof mood?.block === 'string' && mood.block !== '') {
+    console.log(`luwi-channel: proactive mood ${Array.from(mood.block).length} chars`
+      + ` (plan ${String(mood.plan?.lead ?? '?')}/${String(mood.plan?.avoid ?? '?')}`
+      + `, episodes ${Array.isArray(mood.episodes) ? mood.episodes.length : 0})`)
   }
   const request = {
     ...ballCreatePlace(workspace),
@@ -15136,6 +15972,8 @@ async function startProactive(ctx, options = {}) {
         kind: 'text',
         text: openLine,
         ...(openTopic === '' ? {} : { topicSource: openTopic }),
+        // 透明引用 (方案 §8.3): 这一句引的是哪一条记忆 —— 门户能顺着它查"她凭什么这么说"
+        ...(typeof mood?.memoryRef === 'string' && mood.memoryRef !== '' ? { memoryRef: mood.memoryRef } : {}),
       })
     } catch (error) {
       console.warn(`luwi-channel: the wake line was not written: ${error?.message ?? error}`)
@@ -15147,7 +15985,7 @@ async function startProactive(ctx, options = {}) {
       controller,
       sessionId,
       // `via: 'proactive'` 是给门户的记号: 开场提示词不进门户正文, 但她说的那几句照常投 (2026-11-12 #38)
-      { text: proactiveStartLine(options?.text, summaryPath, acting, snapshot), via: 'proactive' },
+      { text: proactiveStartLine(options?.text, summaryPath, acting, snapshot, mood?.block ?? ''), via: 'proactive' },
       { images: [] },
     )
   } catch (error) {
