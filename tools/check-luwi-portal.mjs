@@ -255,6 +255,14 @@ if (landBlock !== null && landBlock[0].includes('portalBind')) {
 } else {
   failures.push('client.js: newConversation 的 land() 里没有 portalBind —— 会被账本拽回旧场')
 }
+// **每发一句都要续一次账本** (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"): 只在第一句写的
+// 话, 门户里聊久了回浮标就换场了。判据钉两件 —— send 里那次 portalBind 还在, 而且不再有 `bound` 那道闸
+if (client.includes("call('portalBind', sessionId)")
+  && !client.includes('bound !== sessionId') && !client.includes('var bound')) {
+  notes.push('ok   门户每发一句都 portalBind 续账本 (没有 bound 那道闸)')
+} else {
+  failures.push('client.js: send() 里缺 portalBind, 或者还被 `bound !== sessionId` 挡着 —— 门户聊久了回浮标会换场')
+}
 // 记忆只该有一条写入口: 写进 localStorage 的那一句在 rememberSession 里
 if (client.includes('function rememberSession') && client.includes('SESSION_KEY')) {
   notes.push('ok   client.js 记住了上次那一场')
@@ -298,8 +306,15 @@ else failures.push(`工作区名对不上: host-plugin ${String(hostBall)} / Por
 
 const hostWindow = grab(hostPlugin, /const VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)/)
 const kotlinWindow = grab(portalBridge, /const val VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)L/)
-if (hostWindow !== null && hostWindow === kotlinWindow) notes.push(`ok   账本窗口 ${hostWindow} 秒 = 10 分钟`)
-else failures.push(`账本窗口对不上: host-plugin ${String(hostWindow)} / PortalBridge ${String(kotlinWindow)}`)
+const windowTriple = /const VOICE_SESSION_MS = (\d+) \* (\d+) \* (\d+)/.exec(hostPlugin)
+const windowMinutes = windowTriple === null
+  ? null
+  : (Number(windowTriple[1]) * Number(windowTriple[2]) * Number(windowTriple[3])) / 60000
+if (hostWindow !== null && hostWindow === kotlinWindow) {
+  notes.push(`ok   账本窗口 ${windowMinutes} 分钟 (两边逐字相同)`)
+} else {
+  failures.push(`账本窗口对不上: host-plugin ${String(hostWindow)} / PortalBridge ${String(kotlinWindow)}`)
+}
 
 const routerSource = grab(hostPlugin, /const val SOURCE_ROUTER = "([^"]+)"/) ??
   grab(hostPlugin, /const SOURCE_ROUTER = "([^"]+)"/)
@@ -527,7 +542,12 @@ expect('client.js', client, "drawerRow('探索', '探索排期与上一次摘要
 expect('client.js', client, "h('h3', null, '判断')")
 expect('client.js', client, "h('h3', null, '探索')")
 expect('client.js', client, 'id = \'lwp-more-btn\'')
-expect('client.js', client, 'id = \'lwp-history-btn\'')
+// 头栏那颗「历史」胶囊 2026-11-19 撤了: 入口并进左边那颗头像 (见 §二十三)
+if (!client.includes('lwp-history-btn') && !client.includes("'lwp-tab', '历史'")) {
+  notes.push('ok   头栏的历史胶囊已撤 (入口并进头像)')
+} else {
+  failures.push('client.js: 头栏还挂着「历史」那颗胶囊 —— 2026-11-19 起它的入口是头像')
+}
 expect('client.js', client, 'function renderMenuDrawer')
 expect('client.js', client, "drawer === 'menu'")
 expect('client.js', client, "'‹ 返回'")
@@ -1859,12 +1879,14 @@ expect('后台「开发」仍由掷标开原生面板', portalMenu, 'PortalAsk.T
 expect('球菜单有开发那一行', hostScreen, 'text = "开发"')
 expect('开发面板复用同一份 DevItems', hostScreen, 'DevPanelDialog(')
 expect('释放仍带 byUser', portalMenu, 'VirtualScreen.release(it, byUser = true)')
-expect('同步仍是那一个开关', portalMenu, 'SyncSetting.setSyncOn(context, wanted)')
-expect('同步改完顺手重启 host', portalMenu, 'DshHost.restart(context)')
+// 2026-11-21 终端那一行改口径: 点它 = 打开终端那一页 (手机管电脑), 不再在菜单里翻开关
+expect('终端那一行打开终端页', portalMenu, 'PortalTerminal.open(context)')
+expect('终端的开关只剩设置页一处', String(!/SyncSetting\.setSyncOn\(context, wanted\)/u.test(portalMenu)), 'true')
+expect('终端改完顺手重启 host', hostScreen, 'DshHost.restart(context)')
 expect('回到后台走页面那条入口', portalMenu, 'window.__LUWI_PORTAL__')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenu(): String')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenuPick(id: String): String')
-expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT }')
+expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC, PAIR }')
 expect('PortalAsk.kt', portalAsk, 'val pending = mutableStateOf<Target?>(null)')
 expect('前台浮球让位', hostScreen, 'if (!PortalState.open) {')
 expect('小窗那一格挪到进程里', hostScreen, 'ScreenWindow.hidden')
@@ -1884,29 +1906,24 @@ if (/if \(!portal\.isOpen\(\)\) portal\.mount\(\)/u.test(client)) {
 
 // ── 十六、判断抽屉那两颗按钮 (2026-11-15 主人: "关掉唤醒和唤醒一下无法点击") ────
 //
-// 两句抱怨背后是两件可量的事: ① 开关态是 `router.json` 与 `sim.json` 的**合成值**, 只写前者时
+// 两句抱怨背后是两件可量的事: ① 开关态当时是 `router.json` 与 `sim.json` 的合成值, 只写前者时
 // 按「关掉唤醒」按钮文案不变, 看上去就是点不动 ② 「唤醒一下」投完一行就再无回音, 屏上什么都不变,
 // 与"没接上"同形。于是这里钉三处: 关的时候 sim 也收 / 点了有回执 / 动作行钉在抽屉底部 (检测项一多
 // 就滚出可视区的另一档)
+//
+// **2026-11-20 改口**: `sim.json` 的 `wake.mode` 那一格整格删掉了, 开关只剩 `router.json` 一个来源 ——
+// 于是 bySim / setWakeMode / 「更多设置里选的活跃」那几句一起退场, 那一行只说"开着 / 关着"
 
-const simSetting = read('app/src/main/java/io/github/yuloong07star/luwi/tool/SimSetting.kt')
-
-expect('PortalBridge.kt', portalBridge, 'put("bySim"')
-expect('PortalBridge.kt', portalBridge, 'SimSetting.setWakeMode(')
-expect('PortalBridge.kt', portalBridge, 'SimSetting.MODE_DIVING')
+expect('PortalBridge.kt', portalBridge, 'put("enabled", RouterTick.enabled(context))')
 expect('PortalBridge.kt', portalBridge, 'put("host"')
 expect('PortalBridge.kt', portalBridge, 'ExploreSchedule.wakeHost(')
 expect('PortalBridge.kt', portalBridge, 'Log.i(LOOK_TAG, "portal wake: queued')
 expect('PortalBridge.kt', portalBridge, '"portal tick switch -> ')
-expect('SimSetting.kt', simSetting, 'fun setWakeMode(context: Context, mode: String): Boolean')
-// 关掉唤醒那一趟必须落成潜水 (否则 `RouterTick.enabled` 的合成值仍是开)
-expect('SimSetting.kt', simSetting, 'MODE_DIVING')
 expect('client.js', client, "call('portalTickEnabled', !tickOn)")
 expect('client.js', client, "result.host === 'starting'")
 expect('client.js', client, "tickNote = '已投出去")
 expect('client.js', client, 'position:sticky')
-// 开关态与"哪一侧来的"两句话都得在, 否则 `bySim` 白给
-expect('client.js', client, "'开着 (更多设置里选的活跃)'")
+// 开关态只剩一句话, 且页面不许再出现"哪一侧来的"那种第二档说法
 expect('client.js', client, "'开着 (25-55 分一次)'")
 
 // ── 十七、判断层「唤醒一下」必须主动说话 (2.8.1 #8) ─────────────────────────────
@@ -1934,11 +1951,14 @@ if (wakeSource === '') {
   if (present.length > 0) failures.push(`routerWakeNow 里又接上了判断闸: ${present.join(' / ')}`)
   else notes.push('ok   routerWakeNow 一道判断闸都不看 (人点了就必须出声)')
 }
-expect('host-plugin', hostPlugin, 'text: wakeStartLine(chosen.text)')
+expect('host-plugin', hostPlugin, 'text: wakeStartLine(chosen.text, chosen)')
 expect('host-plugin', hostPlugin, 'openLine: chosen.text')
 expect('host-plugin', hostPlugin, "via: 'wake'")
 // 那一声已经说出去了: 开场要交代"别重复它", 否则模型把同一句再发一遍就是两条一样的气泡
 expect('host-plugin', hostPlugin, '不要重复它')
+// 2.8.1 #31: 第一句由宿主从判断层里挑 (检测项 / 未了的事), 不是模型那一轮赶出来
+expect('host-plugin', hostPlugin, 'wakeTopicFor(before, await readWishes()')
+expect('host-plugin', hostPlugin, 'wakeStartLine(chosen.text, chosen)')
 
 // 应声要**排在投第一句之前**: 气泡先到, 模型那一轮后到 —— 反过来就又要等模型
 const startAt = hostPlugin.indexOf('async function startProactive(ctx, options = {}) {')
@@ -1983,16 +2003,24 @@ if (lineSource === '') {
   }
 }
 
-// 池子本身至少三句且不重复 (只有一句 = 连点三次同一句, 正是验收里不许的那一条)
-const poolAt = hostPlugin.indexOf('const ROUTER_WAKE_LINES = Object.freeze([')
+// 池子本身至少三句且不重复, 并且**一句被动应声都不许有** (2.8.1 #31)
+const poolAt = hostPlugin.indexOf('const ROUTER_WAKE_TOPICS = Object.freeze([')
 const poolEnd = poolAt < 0 ? -1 : hostPlugin.indexOf('])', poolAt)
 const poolSource = poolAt < 0 || poolEnd < 0 ? '' : hostPlugin.slice(poolAt, poolEnd)
 const wakeLines = [...poolSource.matchAll(/'([^']+)'/gu)].map((one) => one[1])
-if (wakeLines.length >= 3 && new Set(wakeLines).size === wakeLines.length) {
-  notes.push(`ok   应声池子 ${wakeLines.length} 句且不重复`)
+const passiveWake = ['怎么了', '怎么啦', '叫我', '在呢', '嗯?', '嗯嗯']
+const passiveHits = wakeLines.filter((one) => passiveWake.some((word) => one.includes(word)))
+if (wakeLines.length >= 3 && new Set(wakeLines).size === wakeLines.length && passiveHits.length === 0) {
+  notes.push(`ok   唤醒开场池子 ${wakeLines.length} 句, 全是主动找话题 (没有「怎么了」「嗯?」这类)`)
 } else {
-  failures.push(`应声池子不足三句或有重复: ${JSON.stringify(wakeLines)}`)
+  failures.push(`唤醒开场池子不对 (句数 / 重复 / 被动句): ${JSON.stringify(wakeLines)}`)
 }
+if (hostPlugin.includes('const ROUTER_WAKE_LINES')) {
+  failures.push('host-plugin: 被动应声池 ROUTER_WAKE_LINES 还在 (2.8.1 #31 要的是主动找话题)')
+} else {
+  notes.push('ok   被动应声池已撤 (ROUTER_WAKE_LINES 不在了)')
+}
+
 
 // 门户那一侧: 点完自己补几拍, 换场不清屏上已有的气泡, 连点之间被覆盖的那一场也补得上
 expect('client.js', client, 'function watchWake')
@@ -2161,6 +2189,1015 @@ if (readingSource === '' || workKeySource === '') {
     notes.push('ok   workReading: 卡 / 摘要 / 时刻 / 这一趟 四行都照盘上那份写 (空与关着各有各的说法)')
   } else {
     failures.push(`workReading 判错了: ${broken.join(' / ')}`)
+  }
+}
+
+// ── 二十、唤醒开场句必须从判断层里挑, 且不是被动式 (2.8.1 #31) ─────────────────
+//
+// 主人 2026-11-18: "发送的内容不能是'怎么了''嗯?'这种疑问句 ... 要求必须主动找话题, 话题必须依据
+// 判断层内容展开". 四段真值: ① 话题从那两处来源排出来 (关掉的不算 / 今天说过的沉底) ② 挑中的那句
+// 带 `source` (`usage` / `schedule` / `check` / `wish` / `fallback`), 门户把它透成 `meta.topicSource`
+// ③ 台词闸把被动开场拦下 (重选 3 次仍不合格才 `opener:"fallback"`) ④ 开场正文把话题单子交给模型
+
+/** 从一段正文里抽一个整函数 (头一行到它自己的收尾 `}`) */
+function sliceWakeFunction(source, header) {
+  const at = source.indexOf(header)
+  const end = at < 0 ? -1 : source.indexOf('\n}\n', at)
+  return at < 0 || end < 0 ? '' : source.slice(at, end + 3)
+}
+
+/** 从一段正文里抽一个 `const X = ...` 声明 (到下一个空行为止) */
+function sliceWakeConst(source, name) {
+  const at = source.indexOf(`const ${name} = `)
+  if (at < 0) return ''
+  const end = source.indexOf('\n\n', at)
+  return end < 0 ? '' : source.slice(at, end)
+}
+
+const wakeConsts = [
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_TOPICS'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_TOPIC_LINES'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_FALLBACK'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_PASSIVE_PREFIXES'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_PASSIVE_CHARS'),
+  sliceWakeConst(hostPlugin, 'ROUTER_WAKE_RESELECT_MAX'),
+].filter((one) => one !== '').join('\n')
+const wakeDayKey = sliceWakeFunction(hostPlugin, 'function routerDayKey(now) {')
+const wakeLineFn = sliceWakeFunction(hostPlugin, 'function wakeLineFor(lines, cursor) {')
+const wakeSourceFn = sliceWakeFunction(hostPlugin, 'function wakeSourceOf(when) {')
+const wakePassiveFn = sliceWakeFunction(hostPlugin, 'function isPassiveOpener(text) {')
+const wakeTopicsFn = sliceWakeFunction(hostPlugin, 'function wakeTopicsOf(state, wishes, now) {')
+const wakeTopicFn = sliceWakeFunction(hostPlugin, 'function wakeTopicFor(state, wishes, now, cursor) {')
+const wakeStartFn = sliceWakeFunction(hostPlugin, 'function wakeStartLine(alreadySaid, material = {}) {')
+if ([wakeConsts, wakeDayKey, wakeLineFn, wakeSourceFn, wakePassiveFn, wakeTopicsFn, wakeTopicFn, wakeStartFn]
+  .some((one) => one === '')) {
+  failures.push('host-plugin: 抽不出唤醒话题那几段 (wakeTopicsOf / wakeTopicFor / isPassiveOpener / wakeStartLine 名字或缩进改过?)')
+} else {
+  const api = new Function([
+    wakeConsts,
+    wakeDayKey,
+    wakeLineFn,
+    wakeSourceFn,
+    wakePassiveFn,
+    wakeTopicsFn,
+    wakeTopicFn,
+    wakeStartFn,
+    'return { wakeTopicsOf, wakeTopicFor, wakeStartLine, isPassiveOpener, ROUTER_WAKE_TOPICS, ROUTER_WAKE_FALLBACK, ROUTER_WAKE_RESELECT_MAX }',
+  ].join('\n'))()
+  const wakeNow = Date.parse('2026-11-18T21:00:00+08:00')
+  const wakeDay = '2026-11-18'
+  const wakeState = {
+    checks: [
+      { id: 'c1', what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, enabled: true },
+      { id: 'c2', what: '开会前提醒', when: { kind: 'event', beforeMinutes: 30 }, enabled: true },
+      { id: 'c3', what: '关掉的那条', when: { kind: 'time' }, at: '09:00', enabled: false },
+    ],
+    checksSaid: { c1: wakeDay },
+  }
+  const wakeWishes = [{ id: 'w1', what: '考四级', said: [] }]
+  const wakeTopics = api.wakeTopicsOf(wakeState, wakeWishes, wakeNow)
+  const wakeOrdered = wakeTopics.map((one) => one.what)
+  const wakeSources = wakeTopics.map((one) => one.source)
+  const wakeFirst = api.wakeTopicFor(wakeState, wakeWishes, wakeNow, 0)
+  const wakeClicks = []
+  const wakeClickSources = []
+  let wakeCursor = 0
+  for (let i = 0; i < 3; i += 1) {
+    const one = api.wakeTopicFor(wakeState, wakeWishes, wakeNow, wakeCursor)
+    wakeClicks.push(one.text)
+    wakeClickSources.push(one.source)
+    wakeCursor = one.cursor
+  }
+  const wakeChats = []
+  wakeCursor = 0
+  for (let i = 0; i < 3; i += 1) {
+    const one = api.wakeTopicFor({}, [], wakeNow, wakeCursor)
+    wakeChats.push(one.text)
+    wakeCursor = one.cursor
+  }
+  const wakeAllSaid = api.wakeTopicFor(
+    { checks: wakeState.checks, checksSaid: { c1: wakeDay, c2: wakeDay } },
+    wakeWishes,
+    wakeNow,
+    0,
+  )
+  // 台词闸: 被动开场一律判 true, 带话题的长句 / 不带问号的主动开场判 false
+  const gateCases = [
+    ['怎么了?', true],
+    ['嗯? 叫我?', true],
+    ['在吗', true],
+    ['在不在', true],
+    ['有啥事', true],
+    ['嗯嗯, 在的.', true],
+    ['今天怎么样?', true],
+    ['今天过得怎么样呀', false],
+    ['你之前提到的「开会前提醒」, 我还记着呢, 别忘了哦~', false],
+    [api.ROUTER_WAKE_FALLBACK, false],
+  ]
+  const gateBroken = gateCases
+    .filter(([text, want]) => api.isPassiveOpener(text) !== want)
+    .map(([text]) => text)
+  // 一整圈游标扫下来一句被动都不许有 (池子 / 句式 / 兜底三处一起看)
+  const sweep = []
+  for (let i = 0; i < 40; i += 1) sweep.push(api.wakeTopicFor(wakeState, wakeWishes, wakeNow, i).text)
+  for (let i = 0; i < 40; i += 1) sweep.push(api.wakeTopicFor({}, [], wakeNow, i).text)
+  const sweepPassive = sweep.filter((one) => api.isPassiveOpener(one))
+  const wakePrompt = api.wakeStartLine(wakeFirst.text, wakeFirst)
+  const wakeCases = [
+    ['今天说过的沉底 / 关掉的不算', JSON.stringify(wakeOrdered)
+      === JSON.stringify(['开会前提醒', '考四级', '打游戏太久'])],
+    ['三条信号的 source 各就各位', JSON.stringify(wakeSources)
+      === JSON.stringify(['schedule', 'wish', 'usage'])],
+    ['第一句带判断层里的那件事', wakeFirst.text.includes('「开会前提醒」')
+      && wakeFirst.source === 'schedule' && wakeFirst.opener === 'active'],
+    ['连点三次不是同一句', new Set(wakeClicks).size === 3],
+    ['三次都从判断层里挑', wakeClicks.every((one) => one.includes('「')
+      && (one.includes('开会前提醒') || one.includes('考四级') || one.includes('打游戏太久')))],
+    ['三次的 source 互不相同', new Set(wakeClickSources).size === 3],
+    ['三次都不是被动式', wakeClicks.every((one) => api.isPassiveOpener(one) === false)],
+    ['判断层空了就挑主动开场', wakeChats.every((one) => api.ROUTER_WAKE_TOPICS.includes(one))
+      && new Set(wakeChats).size === 3],
+    ['两件都说过了也挑得出一件', wakeAllSaid.text.includes('「考四级」')],
+    ['开场交代别重复那一句', wakePrompt.includes('不要重复它')],
+    ['开场要求主动找话题', wakePrompt.includes('主动找话题')],
+    ['开场把话题单子交给她', wakePrompt.includes('开会前提醒') && wakePrompt.includes('考四级')],
+    ['开场点名不许被动应声', wakePrompt.includes('「怎么了」「嗯?」')],
+  ]
+  const wakeBroken = wakeCases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (gateBroken.length === 0) {
+    notes.push('ok   isPassiveOpener: 被动开场一律拦下 (怎么了 / 嗯? / 在吗 / 短问句), 带话题的长句放行')
+  } else {
+    failures.push(`isPassiveOpener 判错了: ${JSON.stringify(gateBroken)}`)
+  }
+  if (wakeBroken.length === 0 && sweepPassive.length === 0) {
+    notes.push('ok   wakeTopicFor: 话题从判断层里挑 (source 三档 / 沉底 / 关掉 / 空判断层 / 连点三句不同)')
+  } else {
+    failures.push(`wakeTopicFor 真值表不对: ${wakeBroken.join(' / ')}; 整圈扫出被动句 ${JSON.stringify(sweepPassive[0] ?? '')}`
+      + ` (ordered=${JSON.stringify(wakeOrdered)})`)
+  }
+  if (api.ROUTER_WAKE_RESELECT_MAX === 3) {
+    notes.push('ok   重选上限 3 条 (三次都不合格才走 fallback)')
+  } else {
+    failures.push(`ROUTER_WAKE_RESELECT_MAX 不是 3: ${JSON.stringify(api.ROUTER_WAKE_RESELECT_MAX)}`)
+  }
+}
+
+// 那一句的来处跟着行走: 宿主把 `topicSource` 写进 jsonl, 门户透成 `meta.topicSource` 与 `data-topic`
+expect('host-plugin', hostPlugin, 'openTopic: chosen.source')
+expect('host-plugin', hostPlugin, '...(openTopic === \'\' ? {} : { topicSource: openTopic })')
+expect('host-plugin', hostPlugin, 'source: chosen.source')
+expect('host-plugin', hostPlugin, 'opener: chosen.opener')
+if (hostPlugin.includes("the router spoke (wake: ${chosen.source})")) {
+  notes.push('ok   唤醒那一行按 `the router spoke (wake: <source>)` 落日志 (真机 logcat 照这条 grep)')
+} else {
+  failures.push('host-plugin: 唤醒的日志行没有 `the router spoke (wake: <source>)` 形状')
+}
+expect('client.js', client, 'item.meta = { topicSource: topicSource }')
+expect('client.js', client, "row.setAttribute('data-topic', item.meta.topicSource)")
+if (client.includes("typeof line.topicSource === 'string'")) {
+  notes.push('ok   门户把 jsonl 的 topicSource 透成气泡元数据 (老行没有这一格就不写)')
+} else {
+  failures.push('client.js: outItemOf 没读 line.topicSource')
+}
+// ── 二十一、拖文件进输入区 = 加附件 (2.8.1 #34) ───────────────────────────────
+//
+// 主人: "前台门户的输入框也要像后台DSH一样可拖放文件加入". 四条都真跑 (抽出原文, 假节点假事件):
+// 1) 输入卡 (`#lwp-card`) 与 dock (`#lwp-dock`) 都挂了 dragenter / dragover / dragleave / drop
+// 2) `dragover` 必须 `preventDefault()` (不叫这一声浏览器就不认这块能接, `drop` 永远不来) 并把
+//    `dropEffect` 置成 `copy`
+// 3) `drop` 把 `DataTransfer.files` 原样交给 `onFilesChosen` —— 与 `+` 选完同一根链
+//    (`portalStash` 落 `lw-in/` → 待发 chip), 不在这里再读一遍字节
+// 4) 一份都没有时说一句 (不静默), 卡上那圈高亮 (data-drop) 进出摘干净
+
+const markDropSource = takeFunction('markDrop')
+const dropFilesSource = takeFunction('dropFiles')
+const bindDropSource = takeFunction('bindDropTarget')
+
+expect('client.js: 输入卡挂拖放', client, 'bindDropTarget(els.card)')
+expect('client.js: dock 挂拖放', client, 'bindDropTarget(els.dock)')
+expect('client.js: 输入卡那块元素记下来了', client, 'els.card = card')
+expect('client.js: dock 那块元素记下来了', client, 'els.dock = dock')
+expect('client.js: 拖进来那一刻的高亮', client, '#lwp-card[data-drop="over"]')
+expect('client.js: 高亮摘掉', client, "els.card.removeAttribute('data-drop')")
+// 拖进来那一刻的说明牌 (2026-11-19 主人: "再加上如图所示的提示"): 两行字 + 那块盖在卡上的层
+expect('client.js: 说明牌那块层', client, '#lwp-drop-hint')
+expect('client.js: 说明牌只在拖进来时出现', client, '#lwp-card[data-drop="over"] #lwp-drop-hint{display:flex}')
+expect('client.js: 说明牌不接点击', client, 'pointer-events:none')
+expect('client.js: 第一行说拖到这儿就能加', client, '文件或图片拖动到此处即可添加')
+expect('client.js: 第二行的上限取本机真数', client, "'最多 ' + MAX_ATTACH + ' 个附件, 每份不超过 '")
+expect('client.js: 上限从一个常量来', client, "Math.round(MAX_STASH_BYTES / (1024 * 1024)) + ' MB'")
+expect('client.js: 两个图标是内联 SVG', client, 'var DROP_MARKS_SVG')
+// 真机上系统拖放不给页面 HTML5 事件, 说明牌只能由原生喊: 暴露一个 dropOver 给 HostScreen
+expect('client.js: 暴露 dropOver 给原生', client, 'dropOver: function (over) { markDrop(over === true) }')
+
+if (markDropSource === '' || dropFilesSource === '' || bindDropSource === '') {
+  failures.push('client.js: 抽不出 markDrop / dropFiles / bindDropTarget (拖放那条路不在)')
+} else {
+  /** 一块假节点: 记下挂上来的监听, 能按类型派一个事件 */
+  function dropNode(id) {
+    const listeners = new Map()
+    const attrs = new Map()
+    return {
+      id,
+      attrs,
+      listeners,
+      addEventListener: (type, fn) => { listeners.set(type, fn) },
+      setAttribute: (name, value) => { attrs.set(name, value) },
+      removeAttribute: (name) => { attrs.delete(name) },
+      dispatch: (type, event) => {
+        const fn = listeners.get(type)
+        if (fn === undefined) throw new Error(`没有挂 ${type} 监听`)
+        return fn(event)
+      },
+    }
+  }
+
+  /** 一个假事件: 数 preventDefault / stopPropagation 各叫了几次, `files` 是那几份 */
+  function dropEvent(files) {
+    const calls = { prevent: 0, stop: 0 }
+    return {
+      calls,
+      dataTransfer: files === undefined ? null : { files, dropEffect: 'none' },
+      preventDefault: () => { calls.prevent += 1 },
+      stopPropagation: () => { calls.stop += 1 },
+    }
+  }
+
+  const cardEl = dropNode('lwp-card')
+  const elsStub = { card: cardEl }
+  const markDrop = new Function('els', `${markDropSource}\nreturn markDrop`)(elsStub)
+
+  const landed = []
+  const saidNote = []
+  const logged = []
+  const dropFiles = new Function(
+    'markDrop', 'onFilesChosen', 'showNote', 'console',
+    `${dropFilesSource}\nreturn dropFiles`,
+  )(
+    markDrop,
+    (files) => { landed.push(files) },
+    (text, isError) => { saidNote.push({ text, isError }) },
+    { log: (line) => { logged.push(String(line)) } },
+  )
+  const bindDropTarget = new Function(
+    'markDrop', 'dropFiles', `${bindDropSource}\nreturn bindDropTarget`,
+  )(markDrop, dropFiles)
+
+  // ① 四条监听都挂上
+  const wired = dropNode('lwp-card')
+  bindDropTarget(wired)
+  const types = [...wired.listeners.keys()].sort().join(',')
+  if (types === 'dragenter,dragleave,dragover,drop') {
+    notes.push('ok   dragenter / dragover / dragleave / drop 四条都挂上了')
+  } else {
+    failures.push(`bindDropTarget 挂的是 ${types} (应 dragenter,dragleave,dragover,drop)`)
+  }
+  // 挂不上的输入 (null / 不是节点) 不许抛
+  let threw = ''
+  try {
+    bindDropTarget(null)
+    bindDropTarget({})
+  } catch (error) {
+    threw = error.message
+  }
+  if (threw === '') notes.push('ok   bindDropTarget 遇到空节点就地返回 (不抛)')
+  else failures.push(`bindDropTarget(null) 抛了: ${threw}`)
+
+  // ② dragover 必须 preventDefault, 并且置 dropEffect='copy' + 亮高亮
+  const over = dropEvent([])
+  wired.dispatch('dragover', over)
+  if (over.calls.prevent === 1 && over.calls.stop === 1) {
+    notes.push('ok   dragover: preventDefault + stopPropagation 各一下')
+  } else {
+    failures.push(`dragover 的 preventDefault ${String(over.calls.prevent)} 次 / stopPropagation ${String(over.calls.stop)} 次 (各应 1)`)
+  }
+  if (over.dataTransfer !== null && over.dataTransfer.dropEffect === 'copy') {
+    notes.push("ok   dragover: dropEffect 置成 copy")
+  } else {
+    failures.push('dragover 没把 dropEffect 置成 copy (光标显示成不收)')
+  }
+  if (cardEl.attrs.get('data-drop') === 'over') notes.push('ok   dragover: 卡上亮起 data-drop=over')
+  else failures.push('dragover 没让输入卡亮起来 (data-drop 不是 over)')
+
+  // dragenter 也要 preventDefault: 有的 WebView 只认这一声
+  const enter = dropEvent([])
+  wired.dispatch('dragenter', enter)
+  if (enter.calls.prevent === 1) notes.push('ok   dragenter: 也 preventDefault')
+  else failures.push('dragenter 没 preventDefault (老 WebView 上 drop 就不来)')
+
+  // dragleave 摘高亮
+  wired.dispatch('dragleave', dropEvent([]))
+  if (cardEl.attrs.has('data-drop') !== true) notes.push('ok   dragleave: 高亮摘掉')
+  else failures.push('dragleave 之后卡上还亮着 (data-drop 没摘)')
+
+  // ③ drop: DataTransfer.files 原样交给 onFilesChosen, 高亮摘掉, 一行读数带来源与文件名
+  const files = [
+    { name: '检查.png', size: 2048, type: 'image/png' },
+    { name: 'notes.md', size: 512, type: 'text/markdown' },
+  ]
+  landed.length = 0
+  logged.length = 0
+  const drop = dropEvent(files)
+  wired.dispatch('drop', drop)
+  if (drop.calls.prevent === 1) notes.push('ok   drop: preventDefault (不交给 WebView 当默认拖放)')
+  else failures.push('drop 没 preventDefault (WebView 会自己去打开那个文件)')
+  if (landed.length === 1 && landed[0] === files) {
+    notes.push('ok   drop: DataTransfer.files 原样交给 onFilesChosen (同一条附件链)')
+  } else {
+    failures.push(`drop 没把 files 交给 onFilesChosen (交了 ${String(landed.length)} 次)`)
+  }
+  if (cardEl.attrs.has('data-drop') !== true) notes.push('ok   drop: 落下后高亮摘掉')
+  else failures.push('drop 之后卡上还亮着 (data-drop 没摘)')
+  const dropLine = logged.find((line) => line.indexOf('[luwi-portal] drop ') === 0) || ''
+  if (dropLine.includes('lwp-card') && dropLine.includes('2') && dropLine.includes('检查.png')
+    && dropLine.includes('notes.md')) {
+    notes.push('ok   drop: 那行读数带来源 / 份数 / 文件名 (真机 logcat 只认它)')
+  } else {
+    failures.push(`drop 那行读数不对: ${JSON.stringify(dropLine)}`)
+  }
+
+  // ④ 一份都没有: 说一句, 不静默、也不空转 onFilesChosen
+  landed.length = 0
+  saidNote.length = 0
+  wired.dispatch('drop', dropEvent([]))
+  if (landed.length === 0 && saidNote.length === 1 && saidNote[0].isError === true) {
+    notes.push('ok   drop 空手而归: 说一句错话, 不调 onFilesChosen')
+  } else {
+    failures.push('drop 空手而归时既不说也不拦 (静默)')
+  }
+  // dataTransfer 都没有 (不是拖文件进来的 drop) 也一样要有个说法
+  wired.dispatch('drop', { preventDefault: () => {}, stopPropagation: () => {}, dataTransfer: null })
+
+  // 这里不许自己读字节 / 自己落盘: 那会是第二份文件读取逻辑
+  if (/portalStash|FileReader|readImage\(|stashOne\(/.test(dropFilesSource)) {
+    failures.push('client.js: dropFiles 里自己读字节 / 自己落盘了 (该只转手给 onFilesChosen)')
+  } else {
+    notes.push('ok   dropFiles 不自己读字节、不自己落盘 (只转手给 onFilesChosen)')
+  }
+}
+
+// ── 二十二、接住系统拖放的是原生这一层 (2.8.1 #34) ───────────────────────────
+//
+// 第二十节验的是"页面接得住 HTML5 drop", 但 Android 的 WebView 对文件管理器拖过来的 `content://`
+// **不派发 HTML5 drop** (2026-11-19 复核: 只挂 JS 监听时真机拿不到"投 1 个 -> 出 1 个 chip" 的读数),
+// 真正接住它的是 `HostScreen` 里那个 `setOnDragListener`. 这一节读源码盯五件:
+// 1) WebView 上确实挂了 setOnDragListener
+// 2) 落盘走与 `+` 选完同一份实现 (`PortalBridge.stashPicked`), 再把落好的几份交回页面 (`pickedFiles`)
+// 3) 只认带 Uri 的拖拽: 页面自己的拖拽与拖纯文本不被吃掉, 否则 dsh 页面里那些拖拽全哑
+// 4) drop 有一行读数 (真机上"拖进来没有 / 几份 / 叫什么"只认它)
+// 5) 一份都没落成时也得说一句 (`nothingLanded`, 与选文件那条路同一份)
+//
+// 注: 页面上那圈虚线高亮只对桌面浏览器有效 —— 系统拖进来时 WebView 不给页面 dragover, 所以真机上
+// 看到的是系统自己的拖拽影子, 那圈 `data-drop` 高亮不会亮. 这不是缺陷, 是那套事件的边界
+
+// 源码正文用上面那份 `hostScreen` (球菜单那一节读的), 这里不再读第二遍
+expect('HostScreen: WebView 挂上 setOnDragListener', hostScreen, 'setOnDragListener { _, event ->')
+expect('HostScreen: 拖放走 stashPicked (与 + 同一条落盘)', hostScreen, 'portal.stashPicked(uris)')
+expect('HostScreen: 落好的几份交回页面', hostScreen, 'pickedFiles(landed ?: nothingLanded(uris.size))')
+expect('HostScreen: drop 那行读数 (份数与文件名)', hostScreen, 'Log.i(WEB_TAG, "drop -> ')
+expect(
+  'HostScreen: 只认带 Uri 的拖拽 (不抢页面自己的拖拽)',
+  hostScreen,
+  'DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()',
+)
+expect(
+  'HostScreen: ClipData 只认 content / file',
+  hostScreen,
+  'uri.scheme == "content" || uri.scheme == "file"',
+)
+expect('HostScreen: 拖进来读挂了也不静默', hostScreen, 'nothingLanded(uris.size)')
+// 说明牌与那圈虚线在真机上只能由原生喊醒 (系统拖放不给页面 HTML5 事件)
+expect('HostScreen: 拖进来时点亮说明牌', hostScreen, 'DragEvent.ACTION_DRAG_ENTERED -> {')
+expect('HostScreen: 拖进来那一拍调 dropOver(true)', hostScreen, 'dropOver(true)')
+expect('HostScreen: 拖走 / 松手 / 结束三拍都灭', hostScreen, 'DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {')
+expect('HostScreen: 灭的那一句', hostScreen, 'dropOver(false)')
+// 一处一致性: 说明牌上写的 12 MB 与宿主落盘那一份上限必须是同一个数 (漂了就是在骗人)
+const lwInSource = read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwIn.kt')
+const hostLimit = /const val MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(lwInSource)?.[1] ?? ''
+const portalLimit = /var MAX_STASH_BYTES = (\d+) \* 1024 \* 1024/.exec(client)?.[1] ?? ''
+if (hostLimit !== '' && hostLimit === portalLimit) {
+  notes.push(`ok   说明牌的上限与宿主 LwIn.MAX_BYTES 同一个数 (${hostLimit} MB)`)
+} else {
+  failures.push(`说明牌的上限与宿主对不上: 宿主=${hostLimit || '?'} 门户=${portalLimit || '?'}`)
+}
+
+// ── 二十三、头像 = 历史 + 「已开新对话」是浮层 (2026-11-19, 主人) ────────────────
+//
+// 原话: "点击头像开新对话改为打开历史" + "头像点击进入新对话按钮生效范围缩小到头像大小" +
+// "新对话的提示弹窗要单独一层, 否则会导致中间的图文受弹窗影响下移, 弹窗消失后又上移"
+
+// ① 头像那颗钮开的是历史窗, 而且里面**只有头像** (昵称搬出去当标识)
+expect('client.js', client, 'els.brand.onclick = function () { openHistory() }')
+expect('client.js', client, 'els.brand.setAttribute(\'aria-label\', \'历史对话\')')
+if (!client.includes('els.brand.appendChild(brandText)')) {
+  notes.push('ok   昵称不在那颗按钮里 (点名字不再开任何东西)')
+} else {
+  failures.push('client.js: 昵称又塞回头像按钮里了 —— 点名字会被当成点按钮')
+}
+// ② 热区 = 头像本身: 28x28 的圆钮, 不是原来那条 flex:1 的大胶囊
+if (client.includes("'#lwp-brand{display:block;flex:none;width:28px;height:28px;")
+  && !client.includes("'#lwp-brand{display:flex")) {
+  notes.push('ok   头像按钮就是头像那么大 (28x28, 主体热区没有外扩)')
+} else {
+  failures.push('client.js: 头像按钮还是那条 flex:1 的大胶囊 (热区没有缩到头像)')
+}
+// ③ 新对话仍有入口: 历史窗底部那一颗 (头栏不再是入口)
+expect('client.js', client, 'function startFromHistory')
+expect('client.js', client, 'els.historyNew.onclick = function () { startFromHistory() }')
+// ④ 「已开新对话」是 absolute 的一层: 不参与排版, top 按头栏实际高度写
+expect('client.js', client, "'#lwp-undo{position:absolute;left:50%;transform:translateX(-50%);z-index:2;pointer-events:none;")
+expect('client.js', client, 'els.undo.style.top = String(')
+if (!client.includes("'#lwp-undo{align-self:center")) {
+  notes.push('ok   「已开新对话」不再占流里的高度 (出现/收起都不顶动中间的图文)')
+} else {
+  failures.push('client.js: 提示还是流里的一块 —— 一出现中间那张脸就被顶下去')
+}
+
+// ── 二十四、语音输入 + 「终端」那一颗上移 (2026-11-20) ─────────────────────────
+//
+// 主人四条: "输入框灰字提示改成「发消息或长按说话」" / "长按输入框进入语音输入" /
+// "原来「历史」的位置加上语音开关" / "将同步由更多内移动到更多按钮左边, 语音开关右边, 在两者之间。
+// 并将「同步」改名为「终端」, 设置里的字样也同步改动"
+//
+// 这一段钉四件事: ① 灰字就是那一句 ② 头栏三颗的顺序与身份 ③ 录音那一套两侧的接线与同一个上限
+// ④ 「终端」的字样在两份 strings 里都换了, 而技术提法 (同步插件 / session-sync.json) 没被误伤
+
+/** 从 client.js 里取一个 4 空格缩进的模块级函数源 (顶层那几个纯函数) */
+function takeModuleFunction(name) {
+  const found = new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n    \\}`, 'u').exec(client)
+  return found === null ? '' : found[0]
+}
+
+// ① 输入框灰字
+expect('client.js', client, "var VOICE_HINT = '发消息或长按说话'")
+expect('client.js', client, 'els.input.placeholder = VOICE_HINT')
+if (!client.includes("'说点什么'")) notes.push('ok   输入框灰字整句换成「发消息或长按说话」')
+else failures.push('client.js: 输入框灰字还留着「说点什么」')
+
+// ② 头栏: 自动朗读(喇叭) → 终端 → ⋯ 装成一簇贴最右; 喇叭那颗是**图标钮**, 两副图标按状态换
+expect('client.js', client, "els.speakButton = h('button', 'lwp-tab lwp-tab-icon')")
+expect('client.js', client, "els.speakButton.id = 'lwp-speak-btn'")
+expect('client.js', client, 'els.speakButton.innerHTML = SPEAKER_OFF_ICON')
+expect('client.js', client, 'var SPEAKER_ON_ICON = [')
+expect('client.js', client, 'var SPEAKER_OFF_ICON = [')
+// 两副形状: 开 = 喇叭 + 两道声波; 关 = 喇叭 + 一道斜杠 (照官方手机端那两张图)
+expect('client.js', client, '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z">')
+expect('client.js', client, 'M10.7 5.6C11.75 6.3 12.35 7.1 12.35 8s-.6 1.7-1.65 2.4')
+expect('client.js', client, 'M11 6.3l3.6 3.6M14.6 6.3L11 9.9')
+// 点一下翻的是 设置 → 说话 那一格; 两句 Toast 与官方图上逐字相同
+expect('client.js', client, "call('portalSpeak'")
+expect('client.js', client, "'已开启自动朗读'")
+expect('client.js', client, "'已关闭自动朗读'")
+expect('client.js', client, 'function applySpeakStatus')
+expect('client.js', client, "els.speakButton.innerHTML = speakOn ? SPEAKER_ON_ICON : SPEAKER_OFF_ICON")
+expect('client.js', client, "els.syncButton = h('button', 'lwp-tab', SYNC_TITLE)")
+expect('client.js', client, "els.syncButton.id = 'lwp-sync-btn'")
+expectOrder('头栏: 喇叭在终端左边', client, "els.speakButton.id = 'lwp-speak-btn'", "els.syncButton.id = 'lwp-sync-btn'")
+expectOrder('头栏: 终端在 ⋯ 左边', client, "els.syncButton.id = 'lwp-sync-btn'", "els.moreButton.id = 'lwp-more-btn'")
+// 三颗装进 `#lwp-tabs` 这一簇: 向右对齐挂在这一簇上, 不再挂在 `⋯` 上
+expect('client.js', client, "tabs.id = 'lwp-tabs'")
+expect('client.js', client, 'tabs.appendChild(els.speakButton)')
+expect('client.js', client, 'tabs.appendChild(els.syncButton)')
+expect('client.js', client, 'tabs.appendChild(els.moreButton)')
+expect('client.js', client, 'head.appendChild(tabs)')
+expect('样式: 一簇靠右', client, "'#lwp-tabs{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}'")
+expect('样式: 图标钮 30x28', client, "'#lwp-head .lwp-tab.lwp-tab-icon{display:grid;place-items:center;width:30px;height:28px;padding:0}'")
+if (!client.includes("'#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px;margin-left:auto}'")) {
+  notes.push('ok   `⋯` 不再自己顶右 (顶右交给那一簇)')
+} else {
+  failures.push('client.js: `⋯` 还挂着 margin-left:auto —— 另两颗会被晾在昵称旁边')
+}
+// 反向: 麦克风那套与"语音态"整块不许再回来
+for (const gone of ['MIC_ICON', 'KEYBOARD_ICON', "'lwp-voice-btn'", "'#lwp-voice'", 'els.voiceHold',
+  'toggleVoice', 'enterVoice', 'leaveVoice', 'voiceOn']) {
+  if (!client.includes(gone)) notes.push(`ok   麦克风/语音态那一套已经撤干净 (${gone})`)
+  else failures.push(`client.js: 还留着 ${JSON.stringify(gone)} —— 顶栏现在是喇叭(语音输出), 输入走长按即录`)
+}
+// 「终端」那一颗的文案 / 亮灯 / 无障碍名字只有一处来源 (原生清单), 页不抄第二份;
+// **2026-11-21 起点它打开终端那一页** (不再翻开关)
+expect('client.js', client, 'function applySyncState')
+expect('client.js', client, "els.syncButton.setAttribute('data-on'")
+expect('client.js', client, 'function pickSync')
+expect('client.js', client, 'openTerminal()')
+expect('client.js', client, String(!client.includes("call('portalMenuPick', 'sync')")), 'true')
+// 抽屉不再画那一行 (球菜单那一份仍是原生下拉: `PortalMenu.kt` 一个字节没改)
+expect('client.js', client, "if (menu[i] && menu[i].id === 'sync') continue")
+expect('PortalMenu.kt 仍带 sync 那一行', portalMenu, 'id = "sync"')
+
+// ③ 语音输入那一套: 长按当场开录 → 桥 → LwSpeech → 回推
+expect('client.js', client, "call('portalVoice'")
+expect('client.js', client, 'voice: function (payload) { portal.voice(payload) }')
+expect('client.js', client, 'releaseVoiceCapture()')
+expect('client.js', client, "els.input.addEventListener('pointerdown'")
+expect('client.js', client, 'var VOICE_LONG_PRESS_MS = 450')
+// 长按到点就开录: 中间没有"语音态"那一步
+expect('client.js', client, 'beginHoldRecording()')
+expect('client.js', client, 'function beginHoldRecording')
+expect('client.js', client, 'showRecPanel()')
+expect('client.js', client, "window.addEventListener('pointermove', onRecMove")
+expect('client.js', client, "window.addEventListener('pointerup', onRecRelease")
+// 录音条: 第一行「提示 + 计时」, 第二行波形 (2026-11-20 三次改口径: 面积 = 输入框 1.5 倍)
+expect('client.js', client, "els.rec.id = 'lwp-rec'")
+expect('client.js', client, "els.rec = h('div')")
+expect('client.js', client, "els.recRow.id = 'lwp-rec-row'")
+expect('client.js', client, "els.recDot = h('i', 'lwp-rec-dot')")
+expect('client.js', client, "els.recArrow.className = 'lwp-rec-arrow'")
+expect('client.js', client, "els.recWave.className = 'lwp-rec-wave'")
+expect('client.js', client, "els.recDots = h('div', 'lwp-rec-dots')")
+expect('client.js', client, "els.recTime = h('div', 'lwp-rec-time'")
+expect('client.js', client, "els.recText.setAttribute('aria-live', 'polite')")
+expect('client.js', client, "var REC_HINT = '松手转写，上滑取消'")
+expect('client.js', client, "var REC_HINT_CANCEL = '松开取消'")
+// 位置: 与 `#lwp-dock` 的 `0 12px 12px` 对齐, 正好压住输入卡那一块
+expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;")
+expect('client.js', client, 'pointer-events:none')
+expect('client.js', client, 'function paintRecWave')
+// 高度: 量输入卡 × 1.5 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
+expect('client.js', client, 'var REC_PANEL_RATIO = 1.5')
+expect('client.js', client, 'var REC_PANEL_FALLBACK = 148')
+expect('client.js', client, 'var REC_PANEL_MAX = 210')
+expect('client.js', client, 'function fitRecPanel')
+expect('client.js', client, 'els.card.getBoundingClientRect()')
+expect('client.js', client, 'els.rec.style.height = String(wanted)')
+// 边缘渐变: 面板上沿 22px 淡出 + 波形左右两端各 9% 淡出
+expect('client.js', client, "'-webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);'")
+expect('client.js', client, "'-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);'")
+// 材质: 上沿内高光 / 顶部径向柔光 / 噪点 (mask 会裁掉外投影, 所以不再写外发光)
+expect('client.js', client, 'box-shadow:inset 0 1px 0 rgba(255,255,255,.24);')
+expect('client.js', client, "'#lwp-rec::before{content:\"\";position:absolute;left:-10%;right:-10%;top:-40%;height:86%;'")
+expect('client.js', client, 'radial-gradient(62% 52% at 50% 40%,rgba(255,255,255,.14)')
+expect('client.js', client, "'#lwp-rec::after{content:\"\";position:absolute;inset:0;pointer-events:none;opacity:.035;'")
+// 转写中三点接管波形那一行的空间 (`flex:1` 只在 busy 时给, 平时不占位)
+expect('client.js', client, "'#lwp-rec[data-busy=\"on\"] .lwp-rec-dots{flex:1;height:auto;opacity:1}'")
+// 三态各自像"那一件事": 取消下沉变中性色 / 转写三点 / 录制呼吸点
+expect('client.js', client, "'#lwp-rec[data-cancel=\"on\"]{transform:translateY(8px) scale(.988);'")
+expect('client.js', client, 'background:linear-gradient(180deg,#8b93a3 0%,#6f7686 54%,#5d6472 100%)')
+expect('client.js', client, "@keyframes lwp-rec-breath{0%,100%{opacity:.55;box-shadow:0 0 0 3px rgba(255,93,93,.16)}")
+expect('client.js', client, "@keyframes lwp-rec-bounce{0%,80%,100%{transform:translateY(0);opacity:.5}")
+expect('client.js', client, "'@media (prefers-reduced-motion:reduce){'")
+// 计时是胶囊, 现在跟提示同一行 (矮条里没有第二个绝对定位的地方)
+expect('client.js', client, "'.lwp-rec-time{flex:none;padding:2px 9px;border-radius:999px;")
+// 帧循环的起手位置 (2026-11-20 真因): 必须排在 `voiceState = 'recording'` 之后, 且 `showRecPanel` 里不许起帧
+expect('client.js', client, 'function startRecPump')
+expectOrder('录音帧循环在 recording 之后才起', client, "voiceState = 'recording'", '\n          startRecPump()')
+if (!client.includes('46vh')) notes.push('ok   录音条不再是 46vh 的大面板')
+else failures.push('client.js: 录音条还写着 46vh —— 面积应当是输入框的 1.5 倍')
+
+// 反向: 上一版那套"假波形"与发灰的取消态不许回来
+for (const gone of ['Math.sin((Math.PI * i)', 'filter:saturate(.7)', 'recBars', 'pushRecBar']) {
+  if (!client.includes(gone)) notes.push(`ok   旧的粗糙做法已经撤掉 (${gone})`)
+  else failures.push(`client.js: 还留着 ${JSON.stringify(gone)} —— 波形是走带 + 归一化了, 不再用固定正弦包络`)
+}
+
+// 真跑四个波形纯函数: 几何 / 归一化 / 峰值保持 / 雷达压缩
+const recConstNames = ['REC_BAR_W', 'REC_BAR_GAP', 'REC_BAR_R', 'REC_BAR_MIN', 'REC_SILENT', 'REC_HOLD_DECAY']
+const recConsts = recConstNames
+  .map((name) => new RegExp(`var ${name} = ([-0-9.]+)`, 'u').exec(client))
+  .map((hit, index) => (hit ? `var ${recConstNames[index]} = ${hit[1]};` : ''))
+  .join('\n')
+const recFns = ['recLevelOf', 'recNextHold', 'recNormalise', 'recWaveRects'].map(takeModuleFunction)
+if (recFns.some((source) => source === '')) {
+  failures.push('client.js: 抽不出波形那四个纯函数 (名字或缩进改过?)')
+} else {
+  const wave = new Function(`${recConsts}\n${recFns.join('\n')}
+return { recLevelOf, recNextHold, recNormalise, recWaveRects }`)()
+  if (Math.abs(wave.recLevelOf(0.01) - 0.06) < 1e-9 && wave.recLevelOf(0.9) === 1) {
+    notes.push('ok   recLevelOf: 对数感压缩且夹到 1')
+  } else {
+    failures.push('recLevelOf: 压缩曲线不对')
+  }
+  const quiet = wave.recNormalise(0.05, 0.5)
+  if (wave.recNormalise(0.005, 0.5) === 0 && wave.recNormalise(0.5, 0.5) === 1 && quiet > 0.2) {
+    notes.push(`ok   recNormalise: 静音归零, 满幅到 1, 小声 (0.05/0.5) 也有 ${quiet.toFixed(3)}`)
+  } else {
+    failures.push(`recNormalise: 归一化不对 (quiet=${String(quiet)})`)
+  }
+  const decayed = wave.recNextHold(0.4, 0.2)
+  const raised = wave.recNextHold(0.2, 0.9)
+  if (decayed < 0.4 && decayed > 0.39 && raised === 0.9) {
+    notes.push('ok   recNextHold: 新的高就抬, 否则按 0.995 落')
+  } else {
+    failures.push(`recNextHold: 峰值保持不对 (${String(decayed)} / ${String(raised)})`)
+  }
+  const flat = wave.recWaveRects([], 100, 96)
+  const bars = wave.recNormalise ? wave.recWaveRects([0, 0.5, 1], 100, 96) : []
+  const tail = bars[bars.length - 1]
+  const middle = bars[bars.length - 2]
+  if (flat.length === 33 && flat.every((rect) => rect.h === 2)
+    && tail.h === 88 && tail.x === 97 && Math.abs((tail.y + tail.h / 2) - 48) < 1e-9
+    && middle.h === 44) {
+    notes.push('ok   recWaveRects: 走带右对齐 / 2px 点 / 镜像中线 / 高按电平')
+  } else {
+    failures.push(`recWaveRects: 几何不对 (${JSON.stringify({ n: flat.length, tail, middle })})`)
+  }
+  // 走带: 历史超过窗宽时, 左边最先被丢掉 (新的贴右)
+  const long = new Array(40).fill(0).map((_, index) => (index === 0 ? 1 : 0.2))
+  const scrolled = wave.recWaveRects(long, 100, 96)
+  if (scrolled[0].h === wave.recWaveRects(long.slice(7), 100, 96)[0].h) {
+    notes.push('ok   recWaveRects: 超过窗宽从左边丢 (走带语义)')
+  } else {
+    failures.push('recWaveRects: 走带没有从左边丢')
+  }
+}
+const portalVoice = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalVoice.kt')
+expect(
+  'PortalVoice.kt 收一段录音并回推',
+  portalVoice,
+  'fun transcribe(context: Context, id: Int, data: String, language: String, done: (JSONObject) -> Unit): JSONObject',
+)
+expect('PortalVoice.kt 转写走 LwSpeech', portalVoice, 'LwSpeech.dispatch(')
+expect('PortalVoice.kt 作废在途那一趟', portalVoice, 'fun cancel()')
+expect('PortalBridge.kt 那座桥', portalBridge, 'fun portalVoice(payload: String): String')
+expect('PortalBridge.kt 交给 PortalVoice', portalBridge, 'PortalVoice.transcribe(')
+expect('PortalBridge.kt 回推页面的那一句', portalBridge, 'window.__LUWI_PORTAL__.voice(')
+expect('HostScreen 弹麦克风授权窗', hostScreen, 'ActivityResultContracts.RequestPermission()')
+expect('HostScreen 弹的是 RECORD_AUDIO', hostScreen, 'micPermission.launch(Manifest.permission.RECORD_AUDIO)')
+// 语音输出那颗喇叭: 翻的是 设置 → 说话 里同一个开关 (一处状态两处界面)
+expect('PortalBridge.kt 那座喇叭桥', portalBridge, 'fun portalSpeak(payload: String): String')
+expect('PortalBridge.kt 翻的是朗读开关', portalBridge, 'SpeakSettings.setReadAloud(context, !SpeakSettings.readAloud)')
+expect('PortalBridge.kt 回执带 readAloud', portalBridge, 'put("readAloud", SpeakSettings.readAloud)')
+
+// 同一个上限: 页面的 60 s 与宿主的 `MAX_SECONDS`
+const jsVoiceMax = /var VOICE_MAX_MS = (\d+) \* 1000/u.exec(client)?.[1] ?? ''
+const hostVoiceMax = /const val MAX_SECONDS = (\d+)/u.exec(portalVoice)?.[1] ?? ''
+if (jsVoiceMax !== '' && jsVoiceMax === hostVoiceMax) {
+  notes.push(`ok   语音上限两侧同一个数 (${hostVoiceMax} s)`)
+} else {
+  failures.push(`语音上限对不上: 页面=${jsVoiceMax || '?'}s 宿主=${hostVoiceMax || '?'}s`)
+}
+
+// wavOf 真跑: 头 44 字节 / 16 kHz / 单声道 / 16 位, 采样数与重采样都对
+const wavOfSource = takeModuleFunction('wavOf')
+if (wavOfSource === '') {
+  failures.push('client.js: 抽不出 wavOf (名字或缩进改过?)')
+} else {
+  const wavOf = new Function(`${wavOfSource}\nreturn wavOf`)()
+  const view = (bytes) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const empty = wavOf([], 16000)
+  if (empty.length === 44) notes.push('ok   wavOf: 没有采样时只有 44 字节头')
+  else failures.push(`wavOf: 空输入应当只有头 (拿到 ${String(empty.length)} 字节)`)
+
+  const samples = new Float32Array(1600)
+  samples[0] = 2
+  samples[1] = -2
+  const one = wavOf([samples], 16000)
+  const head = (offset, length) => Array.from(one.slice(offset, offset + length))
+    .map((byte) => String.fromCharCode(byte)).join('')
+  const headView = view(one)
+  if (one.length === 44 + 1600 * 2 && head(0, 4) === 'RIFF' && head(8, 4) === 'WAVE' && head(36, 4) === 'data') {
+    notes.push('ok   wavOf: RIFF/WAVE/data 三处头对得上, 采样数 = 输入长度')
+  } else {
+    failures.push('wavOf: 头或者长度不对 (16 kHz 单声道 PCM16 应当是 44 + 2 × 采样数)')
+  }
+  if (headView.getUint32(24, true) === 16000 && headView.getUint16(22, true) === 1
+    && headView.getUint16(34, true) === 16 && headView.getUint32(40, true) === 1600 * 2) {
+    notes.push('ok   wavOf: 采样率 16 kHz / 单声道 / 16 位 / data 长度都对')
+  } else {
+    failures.push('wavOf: 采样率 / 声道 / 位深 / data 长度有一处不对')
+  }
+  // 超范围的两端要夹到 16 位整数里 (2 → 32767, -2 → -32767)
+  if (headView.getInt16(44, true) === 32767 && headView.getInt16(46, true) === -32767) {
+    notes.push('ok   wavOf: 超范围的采样被夹在 16 位整数里')
+  } else {
+    failures.push(`wavOf: 削顶没做 (${String(headView.getInt16(44, true))} / ${String(headView.getInt16(46, true))})`)
+  }
+  // 48 kHz 的流要降到 16 kHz: 48000 个采样 → 16000 个
+  const wide = new Float32Array(48000)
+  const narrowed = wavOf([wide], 48000)
+  if (narrowed.length === 44 + 16000 * 2) notes.push('ok   wavOf: 48 kHz 降到 16 kHz (样本数三等分)')
+  else failures.push(`wavOf: 48 kHz 那一路没降采样 (${String(narrowed.length)} 字节)`)
+}
+
+// 面板上那两句提示: 默认与上滑后各一句 (图里是"松手发送", 这一层松手是进草稿, 所以照实写)
+//
+// 上一版这里跑的是"按住 说话"那颗大钮的三态文案 (`voiceLabel`); 长按改成当场开录之后那颗钮没有了,
+// 判据跟着搬到这里 —— 钉的是同一件事: 面板上永远有一句说清"现在松手会怎样"
+const recHints = /var REC_HINT = '([^']+)'[\s\S]*?var REC_HINT_CANCEL = '([^']+)'/u.exec(client)
+if (recHints !== null && recHints[1] === '松手转写，上滑取消' && recHints[2] === '松开取消') {
+  notes.push('ok   录音面板的两句提示: 默认「松手转写, 上滑取消」/ 上滑后「松开取消」')
+} else {
+  failures.push(`录音面板的提示不对: ${JSON.stringify(recHints?.slice(1) ?? null)}`)
+}
+
+// ④ 「同步」→「终端」: 两份 strings 里两个字面量都换了, 技术提法没被误伤
+// (stringsZh / stringsEn 在本文件前面就读过了: 一份文件只读一次)
+const zhMenu = /<string name="menu_sync">([^<]*)<\/string>/u.exec(stringsZh)?.[1] ?? ''
+const enMenu = /<string name="menu_sync">([^<]*)<\/string>/u.exec(stringsEn)?.[1] ?? ''
+const zhSection = /<string name="settings_section_sync">([^<]*)<\/string>/u.exec(stringsZh)?.[1] ?? ''
+const enSection = /<string name="settings_section_sync">([^<]*)<\/string>/u.exec(stringsEn)?.[1] ?? ''
+if (zhMenu === '终端' && zhSection === '终端') notes.push('ok   zh: 球菜单那一行与设置段名都叫「终端」')
+else failures.push(`zh 里还叫「${zhMenu}」/「${zhSection}」(应当是「终端」)`)
+if (enMenu === 'Terminal' && enSection === 'Terminal') notes.push('ok   en: 同一个名字是 Terminal')
+else failures.push(`en 里还叫「${enMenu}」/「${enSection}」`)
+// 电脑上那个插件与那份基线仍按技术名叫「同步」—— 改名不误伤它们
+if (stringsZh.includes('<string name="settings_sync_plugin">电脑上的同步插件</string>')) {
+  notes.push('ok   「电脑上的同步插件」保留原名 (那是插件本身, 不是这个入口)')
+} else {
+  failures.push('zh: 「电脑上的同步插件」被一起改了名 —— 那说的是插件, 不是入口')
+}
+if (stringsZh.includes('session-sync.json') && stringsZh.includes('luwi-sync://')) {
+  notes.push('ok   文件名与配对前缀一个字没动')
+} else {
+  failures.push('zh: session-sync.json / luwi-sync:// 被改掉了 (那是磁盘与协议上的名字)')
+}
+
+// ── 二十五、门户换的模型 = 新会话的模型 (2026-11-20) ──────────────────────────
+//
+// 主人: "我在门户里改的模型要作为默认模型, 新开会话都要用门户中设置的模型"。dsh 那条 `selectModel`
+// 会把选择同时落成宿主默认, 但新对话复用的是**工作区里那张空白场**, 它早先记过的 `model/selection`
+// 会把新会话按老模型发出去 —— 而且门户 chip 取的 `projected.next ?? catalog.default` 也停在旧值。
+// 这里钉三件: ① 那条判定的纯函数真跑 ② `loadModel` 落地之后真的会去问宿主默认 ③ 非空白场一次都不拨
+
+const blankModelSource = takeFunction('blankModelNeedsDefault')
+const modelFollowSource = takeFunction('followDefaultModel')
+if (blankModelSource === '' || modelFollowSource === '') {
+  failures.push('client.js: 抽不出 blankModelNeedsDefault / followDefaultModel (空白场跟默认那条链断了)')
+} else {
+  const needs = new Function(`${blankModelSource}\nreturn blankModelNeedsDefault`)()
+  const selected = { provider: 'tokenhub', model: 'hy4-flash', reasoningEffort: 'high' }
+  const other = { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'low' }
+  const cases = [
+    ['空白场 + 默认不同 → 拨', needs(selected, other, true), true],
+    ['空白场 + 默认相同 → 不拨', needs(selected, { ...selected }, true), false],
+    ['非空白场 + 默认不同 → 不拨', needs(selected, other, false), false],
+    ['空白场 + 这一场没有选择 → 不拨', needs(null, other, true), false],
+    ['空白场 + 拿不到默认 → 不拨', needs(selected, null, true), false],
+    ['空白场 + 只差推理档 → 拨', needs({ ...selected, reasoningEffort: 'low' }, selected, true), true],
+    ['空白场 + 默认没有推理档 → 拨', needs(selected, { provider: 'tokenhub', model: 'hy4-flash' }, true), true],
+    ['空白场 + blank 不是 true → 不拨', needs(selected, other, undefined), false],
+  ]
+  for (const [label, got, want] of cases) {
+    if (got === want) notes.push(`ok   blankModelNeedsDefault: ${label}`)
+    else failures.push(`blankModelNeedsDefault: ${label} —— 得到 ${String(got)}`)
+  }
+
+  if (modelFollowSource.includes('modelCatalog') && modelFollowSource.includes('.select(')) {
+    notes.push('ok   空白场那条链: 问 remote.session.modelCatalog() 拿默认, 与这一场的 current 比过再 select')
+  } else {
+    failures.push('client.js: followDefaultModel 里没有"问 modelCatalog + select"那条链')
+  }
+  if (modelFollowSource.includes('summary.blank !== true) return')) {
+    notes.push('ok   非空白场在那条链的第一道闸就被挡下 (那一场自己的选择不动)')
+  } else {
+    failures.push('client.js: followDefaultModel 没有按 blank 挡下非空白场')
+  }
+  const modelLoadSource = takeFunction('loadModel')
+  if (modelLoadSource.includes('followDefaultModel()')) {
+    notes.push('ok   loadModel 落地之后会判一次"空白场要不要跟默认" (换场 / 新建都走到)')
+  } else {
+    failures.push('client.js: loadModel 没有接 followDefaultModel (换场之后不会拨默认)')
+  }
+  const modelPickSource = takeFunction('pickModel')
+  if (modelPickSource.includes('modelDirectory.select') && modelLoadSource.includes('watchModelDirectory')) {
+    notes.push('ok   模型 chip: 换模型走 directory.select, chip 名字跟目录的 store 走')
+  } else {
+    failures.push('client.js: 模型 chip 那两条 (select / 目录订阅) 少了一条')
+  }
+  // 换场必须把"这一档问过没有"作废: 否则默认在别处改过之后, 再回到这张空白场永远不会再问一次
+  const adoptSource = takeFunction('adopt')
+  if (adoptSource.includes("modelDefaultChecked = ''")) {
+    notes.push('ok   换场会把"这一档问过没有"作废 (默认在别处改过还会再问一次)')
+  } else {
+    failures.push('client.js: 换场没清 modelDefaultChecked —— 默认改了也不会再问')
+  }
+  if (modelFollowSource.includes("[luwi-portal] model default unavailable")) {
+    notes.push('ok   拿不到宿主默认时留一句日志 (不静默)')
+  } else {
+    failures.push('client.js: 拿不到宿主默认那条路静默收手了 (日志里查不到原因)')
+  }
+}
+
+// ── 二十六、后台 dsh 发的图在门户上也画真图 (2026-11-20) ──────────────────────
+//
+// 主人: "这个在后台dsh内发送的图要求也要在门户上显示"。后台发的图不经门户 `lw-in` 那条 stash,
+// 落盘只剩 `{type:'image', attachment:{attachmentId,…}}`; 门户要拿 `uiConversation.imageUrl` 取回
+// 那张 blob URL 再画, 取不到才留「图没取到」/「（图）」—— 不许静默, 也不许假装贴过
+
+const refsSource = takeFunction('imageAttachmentsOf')
+const bubbleSource = takeFunction('durableImageBubble')
+if (refsSource === '' || bubbleSource === '') {
+  failures.push('client.js: 抽不出 imageAttachmentsOf / durableImageBubble (附件图那条链断了)')
+} else {
+  const refsOf = new Function(`${refsSource}\nreturn imageAttachmentsOf`)()
+  const real = refsOf([
+    { type: 'image', attachment: { attachmentId: 'sha256:aa', mediaType: 'image/png', width: 10, height: 20, bytes: 99, name: 'a.png' } },
+    { type: 'text', text: '看图' },
+  ])
+  const unnamed = refsOf([{ type: 'image', attachment: { attachmentId: 'sha256:bb' } }])
+  const refsCases = [
+    ['图块 → 一条引用 (宽高/名字都带上)', real.length === 1 && real[0].attachmentId === 'sha256:aa'
+      && real[0].width === 10 && real[0].height === 20 && real[0].name === 'a.png'],
+    ['没有 attachmentId 的图块 → 不认 (交给「（图）」兜底)', refsOf([{ type: 'image' }]).length === 0],
+    ['只有 attachmentId → 也认 (宽高缺就是 0)', unnamed.length === 1 && unnamed[0].width === 0 && unnamed[0].name === ''],
+    ['文本块 → 不算图', refsOf([{ type: 'text', text: 'x' }]).length === 0],
+    ['不是数组 → 空表', refsOf(null).length === 0],
+  ]
+  for (const [label, ok] of refsCases) {
+    if (ok) notes.push(`ok   imageAttachmentsOf: ${label}`)
+    else failures.push(`imageAttachmentsOf: ${label} 不成立`)
+  }
+
+  for (const [label, needle] of [
+    ['尺寸从 attachment.width/height 钉住比例', 'aspectRatio'],
+    ['取不到写「图没取到」', "'图没取到'"],
+    ['有一档 blob URL 的预览 (点一下进预览窗)', 'openPreview({ src: url'],
+  ]) {
+    if (bubbleSource.includes(needle)) notes.push(`ok   durableImageBubble: ${label}`)
+    else failures.push(`durableImageBubble: ${label} 那一段没了 (找 ${needle})`)
+  }
+  // 取图那两条各自在 helper 里: `imageUrl` 读字节生成 blob URL, `peekImageUrl` 命中就不必等
+  const peekSource = takeFunction('peekDurableImage')
+  const loadImageSource = takeFunction('loadDurableImage')
+  if (peekSource.includes('peekImageUrl(sessionId, ref)') && loadImageSource.includes('imageUrl(sessionId, ref)')) {
+    notes.push('ok   durableImageBubble: 先问 peekImageUrl, 再走 uiConversation.imageUrl')
+  } else {
+    failures.push('client.js: 附件图没有先问 peekImageUrl / 没走 uiConversation.imageUrl')
+  }
+
+  const rowSource = takeFunction('buildRow')
+  if (rowSource.includes('durableImageBubble(') && rowSource.includes('item.images')) {
+    notes.push('ok   buildRow: user 那一行有图引用就画真图')
+  } else {
+    failures.push('client.js: buildRow 的 user 分支没有接 durableImageBubble')
+  }
+  if (rowSource.includes('MAX_DURABLE_IMAGES') && rowSource.includes("'+' + String(refs.length - shownRefs)")) {
+    notes.push('ok   一条消息里最多画 4 张, 多出来的写「+N 张图」')
+  } else {
+    failures.push('client.js: 单条多图那道上限 / 「+N 张图」没了')
+  }
+  if (rowSource.includes('!drew && item.hasImage')) {
+    notes.push('ok   「（图）」只在一条引用都没有的旧消息上留 (有引用就不该再画占位)')
+  } else {
+    failures.push('client.js: 「（图）」兜底那条闸不见了 / 改成无条件画了')
+  }
+  const keySource = takeFunction('itemKey')
+  if (keySource.includes('item.images')) {
+    notes.push('ok   itemKey: attachmentId 进了身份 (图块补上那一拍这一行才重建)')
+  } else {
+    failures.push('client.js: itemKey 没带图引用 —— 图补上时那一行不会重建')
+  }
+  const previewSource = takeFunction('openPreview')
+  if (previewSource.includes('file.src')) {
+    notes.push('ok   openPreview: 多一档 `src` (附件图那张 blob URL 直接进预览窗)')
+  } else {
+    failures.push('client.js: openPreview 没有 `src` 那一档 (点附件图打不开)')
+  }
+}
+
+// ── 二十七、终端那一页 (2026-11-21, 落实表 #48) ───────────────────────────────
+//
+// 四条验收全在这里: ① 纯函数真跑 (影子根判据 / 电脑那几场 / 弹窗四档) ② 两端历史互不串
+// ③ 页面那几个入口与皮肤都在 ④ 原生那一半 (黑底 / 扫码 / 返回键 / 推终端)
+{
+  const note = (text) => notes.push(`ok   ${text}`)
+  const fail = (text) => failures.push(text)
+
+  // ① 纯函数: 抽出来真跑 (与 historyRows 同一套 takeFunction)
+  const normalizeCwdPath = new Function(`${takeFunction('normalizeCwdPath')}\nreturn normalizeCwdPath`)()
+  const underShadow = new Function(
+    'normalizeCwdPath',
+    `${takeFunction('underShadow')}\nreturn underShadow`,
+  )(normalizeCwdPath)
+  const historyRows = new Function(
+    'underShadow',
+    `${takeFunction('historyRows')}\nreturn historyRows`,
+  )(underShadow)
+  const terminalRows = new Function(
+    'historyRows',
+    'TERMINAL_HISTORY_MAX',
+    'normalizeCwdPath',
+    `${takeFunction('terminalRows')}\nreturn terminalRows`,
+  )(historyRows, 20, normalizeCwdPath)
+  const terminalGateState = new Function(
+    `${takeFunction('terminalGateState')}\nreturn terminalGateState`,
+  )()
+
+  const shadowRoot = '/data/user/0/app/files/dsh-home/lw/peer-workspaces'
+  const peerSnapshot = {
+    byId: {
+      s_local: { id: 's_local', displayTitle: '本机的', updatedAt: 30, blank: false, cwd: '/sdcard/DSH/Luwi' },
+      s_pc1: { id: 's_pc1', displayTitle: '电脑-1', updatedAt: 50, blank: false, cwd: `${shadowRoot}/PC/DSH` },
+      // 同一个根的另一种写法 (/data/data): 归一之后必须认出来
+      s_pc2: { id: 's_pc2', displayTitle: '电脑-2', updatedAt: 40, blank: false, cwd: '/data/data/app/files/dsh-home/lw/peer-workspaces/PC/DSH2' },
+      s_pc_blank: { id: 's_pc_blank', displayTitle: '', updatedAt: 60, blank: true, cwd: `${shadowRoot}/PC/x` },
+      s_prefix: { id: 's_prefix', displayTitle: '前缀陷阱', updatedAt: 70, blank: false, cwd: `${shadowRoot}x/PC` },
+    },
+  }
+
+  if (underShadow(`${shadowRoot}/PC/DSH`, shadowRoot) === true
+    && underShadow('/data/data/app/files/dsh-home/lw/peer-workspaces/PC', '/data/user/0/app/files/dsh-home/lw/peer-workspaces') === true
+    && underShadow(`${shadowRoot}x/PC`, shadowRoot) === false
+    && underShadow('', shadowRoot) === false
+    && underShadow('/sdcard/DSH/Luwi', '') === false) {
+    note('underShadow: 影子根底下算电脑那几场 (两种 /data 写法都认), 前缀相似的目录与空根都不算')
+  } else {
+    fail('underShadow 判错了: 影子根 / 数据目录两种写法 / 前缀陷阱 / 空根')
+  }
+
+  const terminalIds = terminalRows(peerSnapshot, '', null, shadowRoot, 20).map((row) => row.id)
+  if (JSON.stringify(terminalIds) === JSON.stringify(['s_pc1', 's_pc2'])) {
+    note('terminalRows: 只留电脑那几场, 新到旧, 空白场不进 (最近那些)')
+  } else {
+    fail(`terminalRows 挑错了: ${JSON.stringify(terminalIds)}`)
+  }
+  if (terminalRows(peerSnapshot, '', null, shadowRoot, 1).length === 1
+    && terminalRows(peerSnapshot, '', null, '', 20).length === 0) {
+    note('terminalRows: 上限生效; 没有影子根时一场都不认 (不假装连上了)')
+  } else {
+    fail('terminalRows: 上限或空根那一档不对')
+  }
+
+  const allIds = historyRows(peerSnapshot, '', null, { mode: 'all', shadowRoot }).map((row) => row.id)
+  const onlyPeer = historyRows(peerSnapshot, '', null, { mode: 'terminal', shadowRoot }).map((row) => row.id)
+  const unfiltered = historyRows(peerSnapshot, '', null).map((row) => row.id)
+  if (!allIds.includes('s_pc1') && !allIds.includes('s_pc2') && allIds.includes('s_local')) {
+    note('historyRows(all): 普通历史里看不到电脑那几场 (互不串的一半)')
+  } else {
+    fail(`historyRows(all) 把电脑那几场也列了: ${JSON.stringify(allIds)}`)
+  }
+  if (JSON.stringify(onlyPeer) === JSON.stringify(['s_pc1', 's_pc2'])) {
+    note('historyRows(terminal): 终端里只列电脑那几场 (互不串的另一半)')
+  } else {
+    fail(`historyRows(terminal) 混进了本机场: ${JSON.stringify(onlyPeer)}`)
+  }
+  if (unfiltered.length === 4) {
+    note('historyRows: 没给影子根时不做任何过滤 (老调用方一个字节不变)')
+  } else {
+    fail(`historyRows 三参调用被过滤了: ${JSON.stringify(unfiltered)}`)
+  }
+
+  const unpaired = terminalGateState(null, { ok: false, busy: false, why: '', at: 0 })
+  const off = terminalGateState({ paired: true, syncOn: false, terminalReady: true }, { ok: false, busy: false, why: '', at: 0 })
+  const legacy = terminalGateState({ paired: true, syncOn: true, terminalReady: false }, { ok: false, busy: false, why: '', at: 0 })
+  const probing = terminalGateState({ paired: true, syncOn: true, terminalReady: true }, { ok: false, busy: true, why: '', at: 0 })
+  const offline = terminalGateState({ paired: true, syncOn: true, terminalReady: true }, { ok: false, busy: false, why: '网络不通', at: 1 })
+  const online = terminalGateState({ paired: true, syncOn: true, terminalReady: true }, { ok: true, busy: false, why: '', at: 2 })
+  if (unpaired.state === 'unpaired' && off.state === 'off' && legacy.state === 'offline'
+    && probing.state === 'probing' && offline.state === 'offline' && online.state === '') {
+    note('terminalGateState: 六档分开 (没配对 / 终端关着 / 配对码没配好 / 探测中 / 连不上 / 在线不弹)')
+  } else {
+    fail(`terminalGateState 分档不对: ${JSON.stringify([unpaired.state, off.state, legacy.state, probing.state, offline.state, online.state])}`)
+  }
+  if (offline.note.includes('网络不通') && unpaired.body.includes('配对码')) {
+    note('terminalGateState: 每一档都给一句能照着做的人话 (原因也带出来)')
+  } else {
+    fail('terminalGateState: 那一句人话没给 / 原因没带出来')
+  }
+
+  // ② 页面: 皮肤 / 两扇历史 / 身份 / 新建 / 发送闸
+  expect('client.js', client, '#lwp-root[data-mode="terminal"]{background:#000}')
+  expect('client.js', client, "els.termGate.id = 'lwp-term-gate'")
+  expect('client.js', client, "els.termPair = h('button', null, '扫码配对')")
+  expect('client.js', client, "els.termExit = h('button', null, '返回')")
+  expect('client.js', client, "els.termPair.onclick = function () { call('portalTerminalPair') }")
+  expect('client.js', client, "call('portalTerminalVisible', true)")
+  expect('client.js', client, "call('portalTerminalVisible', false)")
+  expect('client.js', client, 'function applyTerminalMode')
+  expect('client.js', client, 'root.setAttribute(\'data-mode\', \'terminal\')')
+  expect('client.js', client, 'if (terminalMode) {')
+  expect('client.js', client, 'name = TERMINAL_TITLE')
+  expect('client.js', client, "var TERMINAL_TITLE = 'luwi终端'")
+  expect('client.js', client, 'function terminalNew')
+  expect('client.js', client, 'function ensureTerminalWorkspace')
+  expect('client.js', client, "var TERMINAL_KEY = 'dsh.luwi.portal.terminal'")
+  expect('client.js', client, 'readStored(TERMINAL_KEY)')
+  expect('client.js', client, 'function terminalBack')
+  expect('client.js', client, "'电脑上的对话'")
+  expect('client.js', client, "'在电脑上开一场新对话'")
+  expect('client.js', client, 'if (terminalMode) {\n          terminalNew()')
+  expect('client.js', client, 'if (!terminalMode) call(\'portalBind\', sessionId)')
+  expect('client.js', client, 'if (terminalMode && !isTerminalSession(ledger && ledger.id))')
+  expect('client.js', client, 'terminal: setTerminal')
+  expect('client.js', client, 'back: terminalBack')
+  expect('client.js', client, 'terminal: function (open) { portal.terminal(open) }')
+  expect('client.js', client, 'back: function () { return portal.back() }')
+  expect('client.js', client, 'function pickSync')
+  // 那一颗现在打开终端页, 不再翻开关
+  expect('client.js', client, 'openTerminal()\n        // 顺手把原生清单的文案对齐一次')
+
+  // ③ 原生那一半
+  const portalTerminalKt = read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalTerminal.kt')
+  expect('PortalTerminal.kt', portalTerminalKt, 'var open by mutableStateOf(false)')
+  expect('PortalTerminal.kt', portalTerminalKt, 'fun status(context: Context): String')
+  expect('PortalTerminal.kt', portalTerminalKt, '"shadowRoot"')
+  expect('PortalTerminal.kt', portalTerminalKt, 'window.__LUWI_PORTAL__.terminal(true)')
+  expect('PortalBridge.kt', portalBridge, 'fun portalTerminal(): String = PortalTerminal.status(context)')
+  expect('PortalBridge.kt', portalBridge, 'fun portalTerminalVisible(open: Boolean): String')
+  expect('PortalBridge.kt', portalBridge, 'fun portalTerminalPair(): String')
+  expect('HostScreen.kt', hostScreen, 'if (PortalTerminal.open) Color.Black else Color.Transparent')
+  expect('HostScreen.kt', hostScreen, 'preview != null && !windowHidden && !PortalTerminal.open')
+  expect('HostScreen.kt', hostScreen, 'PortalAsk.Target.PAIR -> {')
+  expect('HostScreen.kt', hostScreen, 'QrScanDialog(')
+  expect('HostScreen.kt', hostScreen, 'SyncSetting.applyPairing(context, payload)')
+  expect('HostScreen.kt', hostScreen, 'PortalTerminal.open(context)')
+  expect('HostScreen.kt', hostScreen, 'window.__LUWI_PORTAL__.terminal(true)')
+  expect('HostScreen.kt', hostScreen, "portal.back() === 'closed'")
+  expect('PortalTerminal.kt', portalTerminalKt, 'private const val OPEN_SCRIPT')
+  // 原生那一份读数里不许有口令
+  if (!/put\("(token|peerToken)"|sync\.peerToken/u.test(portalTerminalKt)) {
+    note('PortalTerminal：读数里没有口令 (页面一个字节都拿不到)')
+  } else {
+    fail('PortalTerminal: status 里把口令写出去了')
   }
 }
 

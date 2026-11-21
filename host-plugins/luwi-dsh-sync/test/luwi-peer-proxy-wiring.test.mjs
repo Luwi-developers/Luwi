@@ -134,7 +134,9 @@ function makeReq({ method = 'GET', url = '/', body } = {}) {
   return {
     method,
     url,
-    headers: {},
+    // 2026-11-21: /luwi-sync/send 只认回环, 这个字段就是判据
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3080' },
     async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk },
   }
 }

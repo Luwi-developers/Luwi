@@ -101,13 +101,10 @@ class SimSettingTest {
         )
 
         // 留下来的那几格照读
-        assertEquals(SimSetting.MODE_ACTIVE, plan.wake.mode)
         assertEquals(120_000L, plan.wake.gapMinMs)
         assertEquals(180_000L, plan.wake.gapMaxMs)
         assertEquals(0L, plan.wake.preSleepWaitMs)
-        assertFalse(plan.wake.quietEnabled)
-        assertEquals("01:00", plan.wake.quietFrom)
-        assertEquals("02:00", plan.wake.quietTo)
+        // 2026-11-20 撤掉的那几格 (mode / quiet*) 与群味那几段一样: 当没有, 也不崩
         // 撤掉的那几段不参与, 也不该把这一份读崩
         assertEquals(SimSetting.Send(), plan.send)
         assertEquals(SimSetting.Router(), plan.router)
@@ -124,12 +121,16 @@ class SimSettingTest {
             "context", "wakeMessageLimit", "wakeMaxChars",
             // 2026-11-10: 这两把尺子搬去 router.json, sim.json 不再写
             "gameMinutes", "wishDays",
+            // 2026-11-20: 潜水 / 活跃那一格与静默那三格都搬走 / 删掉, 这一份不再写
+            "mode", "quietEnabled", "quietFrom", "quietTo",
+            // 2026-11-20: 三格只有数字、没有读者的开口设置
+            "maxMessageChars", "maxPerMinute", "maxPerHour",
         )
         for (key in gone) {
             assertFalse("写盘里还有群味老键 $key", text.contains("\"$key\":"))
         }
         // 四段与主动场那一档都还在
-        listOf("\"wake\"", "\"send\"", "\"router\"", "\"proactive\"", "\"sticker\"", "\"quietFrom\"").forEach {
+        listOf("\"wake\"", "\"send\"", "\"router\"", "\"proactive\"", "\"sticker\"").forEach {
             assertTrue("写盘里缺 $it", text.contains(it))
         }
     }

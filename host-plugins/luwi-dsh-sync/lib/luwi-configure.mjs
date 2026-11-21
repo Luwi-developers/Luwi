@@ -36,6 +36,8 @@ export const KEYS = Object.freeze({
   PAIRING: 'pairing',
   WORKSPACE: 'workspace',
   SESSIONS: 'sessions',
+  // Luwi 加 (2026-11-21 终端): 这一台是哪一侧 (`phone` = 手机/控制器, `pc` = 被管的电脑)
+  ROLE: 'role',
 })
 
 /** 配对段里的键 */
@@ -252,6 +254,15 @@ export async function applyConfigure(file, patch) {
     const problem = applyPairing(tree, patch.pairing)
     if (problem !== null) return { ok: false, changed, error: problem }
     changed.push(patch.pairing === null ? 'pairing = (cleared)' : `pairing.id = ${patch.pairing.id}`)
+  }
+
+  // 2026-11-21 终端: 这一台是哪一侧。面板保存/重新配对时写 `pc` —— 手机那一侧由 App 扫码时写 `phone`
+  // (不能拿 `pairing` 判: 电脑生成码时也写那份)
+  if (Object.prototype.hasOwnProperty.call(patch, 'role')) {
+    const value = String(patch.role ?? '').trim().toLowerCase()
+    if (value !== 'pc' && value !== 'phone') return { ok: false, changed, error: 'role must be "pc" or "phone"' }
+    tree[KEYS.ROLE] = value
+    changed.push(`role = ${value}`)
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, 'on')) {

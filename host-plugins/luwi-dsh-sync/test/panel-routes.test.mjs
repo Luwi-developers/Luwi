@@ -123,6 +123,10 @@ function makePanel(opts = {}) {
 function fakeRequest(text, extra = {}) {
   return {
     method: 'POST',
+    // 2026-11-21: 写面 (op) 与终端 (term) 只认回环, 判据读的就是这个字段; 默认按本机浏览器发
+    socket: { remoteAddress: '127.0.0.1' },
+    // Host 头也要是回环 (2026-11-21: 挡 DNS rebinding 与同机反代)
+    headers: { host: '127.0.0.1:3080' },
     async *[Symbol.asyncIterator]() {
       if (text !== null) yield Buffer.from(text, 'utf8')
     },
@@ -415,6 +419,18 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   await panelRoute.handler(fakeRequest(null, { method: 'GET' }), snap)
   assert.equal(snap.statusCode, 200)
   assert.equal(JSON.parse(snap.body).handshake, PANEL_HANDSHAKE)
+
+  // 2026-11-21 终端口径: 局域网里别的机器打过来的写面与终端一律 403 (控制面只认回环)
+  const lanOp = fakeResponse()
+  await op.handler(fakeRequest(
+    '{"op":"push","target":"sessions","confirm":true}',
+    { socket: { remoteAddress: '192.168.1.20' } },
+  ), lanOp)
+  assert.equal(lanOp.statusCode, 403)
+  assert.match(JSON.parse(lanOp.body).error, /loopback-only/)
+  const lanTerm = fakeResponse()
+  await term.handler(fakeRequest('{"command":"id"}', { socket: { remoteAddress: '192.168.1.20' } }), lanTerm)
+  assert.equal(lanTerm.statusCode, 403)
 })
 
 test('routes: /term 的 status / run / interrupt 三档 (2.8.0 #32)', async () => {

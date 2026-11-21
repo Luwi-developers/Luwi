@@ -80,6 +80,10 @@ async function startBridge(answer) {
 function fakeRequest(text, extra = {}) {
   return {
     method: 'POST',
+    // 2026-11-21: /term 只认回环, 判据读的就是这个字段 (按本机浏览器发)
+    socket: { remoteAddress: '127.0.0.1' },
+    // 2026-11-21: 回环闸还看 Host 头 (挡 DNS rebinding 与同机反代)
+    headers: { host: '127.0.0.1:3080' },
     async *[Symbol.asyncIterator]() {
       if (text !== null) yield Buffer.from(text, 'utf8')
     },
@@ -310,6 +314,50 @@ if (sh === null) {
     stdout.includes('__CODE__137'),
     Number.isFinite(ms) && ms < 5_000,
   ], [true, true, true])
+}
+
+/* ── 终端口径: 只由手机管电脑 (2026-11-21, 落实表 #48) ─────────────────── */
+
+{
+  const loopback = await read('host-plugins/luwi-dsh-sync/lib/loopback.mjs')
+  const peerRuntime = await read('host-plugins/luwi-dsh-sync/lib/luwi-peer-runtime.mjs')
+  const peerSource = await read('host-plugins/luwi-dsh-sync/lib/luwi-peer.mjs')
+  const directionTest = await read('host-plugins/luwi-dsh-sync/test/terminal-direction.test.mjs')
+  const { LOOPBACK_ADDRESSES, isLoopbackAddress, isLoopbackRequest } = await import(
+    new URL('host-plugins/luwi-dsh-sync/lib/loopback.mjs', root)
+  )
+  const { resolvePeerSpec } = await import(
+    new URL('host-plugins/luwi-dsh-sync/lib/luwi-peer.mjs', root)
+  )
+
+  check('回环判据只在四个本机写法上放行', [
+    LOOPBACK_ADDRESSES.every((address) => isLoopbackAddress(address)),
+    isLoopbackAddress('192.168.1.20'),
+    isLoopbackAddress(undefined),
+    isLoopbackRequest({ socket: { remoteAddress: '::1' } }),
+    isLoopbackRequest({ method: 'POST' }),
+  ], [true, false, false, true, false])
+
+  check('角色派生: 手机不听不收指令, 电脑照旧', [
+    resolvePeerSpec({ token: 'x'.repeat(24) }, { controller: true }).listen,
+    resolvePeerSpec({ token: 'x'.repeat(24) }, { controller: true }).acceptSend,
+    resolvePeerSpec({ token: 'x'.repeat(24) }).listen,
+    resolvePeerSpec({ token: 'x'.repeat(24) }).acceptSend,
+  ], [false, false, true, true])
+
+  check('面板写面 / 终端 / 本机发送 / peer-live 四条都过那道闸', [
+    /LOOPBACK_ONLY_ERROR/u.test(loopback),
+    (routes.match(/isLocalRequest\(req\)/gu) ?? []).length >= 2,
+    (peerRuntime.match(/isLocalRequest\(req\)/gu) ?? []).length >= 2,
+    /spec\.acceptSend !== true/u.test(peerRuntime),
+    /acceptSend: mode === 'queue'/u.test(peerSource),
+  ], [true, true, true, true, true])
+
+  check('那份行为断言真能跑 (terminal-direction 六个用例)', [
+    (directionTest.match(/^test\(/gmu) ?? []).length,
+    directionTest.includes('does not accept cross-device commands'),
+    directionTest.includes('loopback-only'),
+  ], [6, true, true])
 }
 
 /* ── 结果 ─────────────────────────────────────────────────────────────── */

@@ -36,9 +36,13 @@ const UNSAFE_NAME_RE = /[\u0000-\u001f/\\:*?"<>|]/gu
  * 都到不了运行时。**令牌空 = 通道关**, 不是"匿名放开": 一个能被对端调用的路由必须是
  * 带令牌的, 没令牌就没有这条通道
  * @param {unknown} [config] `$DSH_HOME/lw/session-sync.json` 的 peer 段。
+ * @param {{controller?: boolean}} [role] 这一台是"手机/控制器"还是被管的那一侧:
+ *   `controller` 缺省 false。控制器的缺省是**不听、不收指令** (2026-11-21 终端口径: 只由手机管电脑),
+ *   被管那一侧的缺省仍是原来的听 + 收。
  * @returns {object|null} 规格; 关掉时 null。
  */
-export function resolvePeerSpec(config) {
+export function resolvePeerSpec(config, role = {}) {
+  const controller = role?.controller === true
   if (config === undefined || config === null) return null
   if (typeof config !== 'object' || Array.isArray(config)) {
     throw badConfig('peer config must be an object')
@@ -96,10 +100,21 @@ export function resolvePeerSpec(config) {
   }
   return {
     enabled: true,
+    // 这一台在两端里的角色 (2026-11-21): `controller` = 扫过配对码的手机, 它管电脑; false = 被管的电脑
+    controller,
     // mode: 'queue' 时出站只写队列、也不接对端调用 (listen 跟着强制 false)
     mode,
     // listen: 本机接不接受对端调用 (关掉只影响进来那半, 出去那半照旧)
-    listen: mode === 'queue' ? false : (typeof raw.listen === 'boolean' ? raw.listen : true),
+    // 控制器缺省不听: 电脑不能再读手机这边的东西 (2026-11-21)
+    listen: mode === 'queue'
+      ? false
+      : (typeof raw.listen === 'boolean' ? raw.listen : !controller),
+    // acceptSend: 接不接受对端**下发的指令** (peer/send). 与 listen 分两档是因为
+    // "只读一次对话" 与 "在我这里跑一句话" 是两件事 —— 2026-11-21 起电脑那一侧照旧收,
+    // 手机那一侧一律拒 (显式写 true 才放开, 配对时由 app 写 false)
+    acceptSend: mode === 'queue'
+      ? false
+      : (typeof raw.acceptSend === 'boolean' ? raw.acceptSend : !controller),
     // proxy: 要不要为对端工作区建影子目录与投影会话 (关掉 = 回到逐字节取回)
     proxy: typeof raw.proxy === 'boolean' ? raw.proxy : true,
     token,
@@ -109,6 +124,28 @@ export function resolvePeerSpec(config) {
     maxShadows,
     maxProxies,
   }
+}
+
+/**
+ * 这一台在终端里是哪一侧 (2026-11-21)
+ *
+ * 判据三条, 顺序就是优先级:
+ *   ① 显式 `role` (`phone` / `pc`) —— 手机扫码时由 App 写, 电脑面板保存/重新配对时写 `pc`
+ *   ② 老配置没有 role: **有 pairing 且 `peer.url` 非空** = 手机 (手机记着电脑的地址; 电脑那一侧
+ *      通常没有 `peer.url` —— 它是被连的那一头)
+ *   ③ 其余 = 电脑 (被管的那一侧; 行为与 2026-11-21 之前一个字节不变)
+ *
+ * 为什么不能只看 `pairing`: 电脑生成配对码时**也**会写一份 `pairing` (面板保存仓库时顺手写),
+ * 拿它判角色会把电脑也关成不听不收, 手机反而连不上它
+ * @param {{role?: unknown, paired?: boolean, peerUrl?: unknown}} [input] 配置层的三个事实。
+ * @returns {'phone'|'pc'} 角色。
+ */
+export function resolveRole(input = {}) {
+  const declared = typeof input.role === 'string' ? input.role.trim().toLowerCase() : ''
+  if (declared === 'phone') return 'phone'
+  if (declared === 'pc') return 'pc'
+  const peerUrl = typeof input.peerUrl === 'string' ? input.peerUrl.trim() : ''
+  return input.paired === true && peerUrl !== '' ? 'phone' : 'pc'
 }
 
 /**

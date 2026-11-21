@@ -7,11 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import io.github.yuloong07star.luwi.automation.AutomationRule
-import io.github.yuloong07star.luwi.automation.AutomationStore
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.voice.VoiceInbox
-import io.github.yuloong07star.luwi.wake.PowerWindow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -262,13 +260,12 @@ internal object ProactiveSchedule {
     /**
      * 静默时段 (B4-b ⑨): 落在里面就回那一句, 不在就 null
      *
-     * 窗口与自动指令是同一份 (`automations/settings.json` 的 `quiet.enabled` / `quiet.window`, 缺省
-     * 23:00-07:00) —— 主动排期没有"这条规则要不要静默"的那一栏, 所以只看总开关
+     * **2026-11-20 起只有一份真源** ([QuietHours]): `automations/settings.json` 的
+     * `quiet.enabled` / `quiet.window` (缺省 23:00-07:00) —— 活动那一页的静默三行写的也是它,
+     * 判断层读的也是它。以前这一条读自动指令那一份、判断层读 `sim.json` 那一份, 两边会漂
      */
-    fun quietWhy(context: Context, now: Long, zone: ZoneId = ZoneId.systemDefault()): String? {
-        val on = AutomationStore.settings(context)
-        return quietWhy(on.quietEnabled, on.quietWindow, now, zone)
-    }
+    fun quietWhy(context: Context, now: Long, zone: ZoneId = ZoneId.systemDefault()): String? =
+        QuietHours.why(context, now, zone)
 
     /**
      * 纯函数那一半 (单测钉着): 开关关着 / 窗口认不出来 / 空窗都不算静默
@@ -281,12 +278,7 @@ internal object ProactiveSchedule {
         window: String?,
         now: Long,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): String? {
-        if (!enabled) return null
-        val parsed = window?.let { PowerWindow.parse(it) }?.takeIf { !it.empty } ?: return null
-        if (!PowerWindow.inside(PowerWindow.minutesOfDay(now, zone), parsed)) return null
-        return "静默时段 (${PowerWindow.describe(parsed)})"
-    }
+    ): String? = QuietHours.why(enabled, window, now, zone)
 
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
     fun ensure(context: Context) {

@@ -161,7 +161,6 @@ const send = {
   longGapProbability: defaults.longGapProbability,
   longGapMinMs: defaults.longGapMinMs,
   longGapMaxMs: defaults.longGapMaxMs,
-  maxMessageChars: 600,
 }
 
 // 方案 §3.3 那组数就是"缺省参数下的真值": 3 字 1060 / 12 字 1240 / 表情 0 字 1000

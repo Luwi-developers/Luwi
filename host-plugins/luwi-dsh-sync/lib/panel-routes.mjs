@@ -22,6 +22,8 @@ import { join } from 'node:path'
 
 import { sanitizeRemote } from './sanitize.mjs'
 import { messageOf } from './errors.mjs'
+// 2026-11-21 终端口径: 写面 (op) 与终端 (term) 只认本机回环, 见 lib/loopback.mjs
+import { LOOPBACK_ONLY_ERROR, isLocalRequest } from './loopback.mjs'
 
 /** 路由前缀 (webserver 的 path 不带尾斜杠)。 */
 export const PANEL_PREFIX = '/luwi-sync'
@@ -633,6 +635,12 @@ export function createPanel(deps) {
       kind: 'exact',
       path: `${PANEL_PREFIX}/panel`,
       handler: async (req, res) => {
+        // 2026-11-21 终端: **整块面板只认本机** —— 读面也带设备名与地址读数, 开着 --allow-lan 时
+        // 局域网里任何人打过来都该 403 (写面的闸在下面各自那一处, 这里先把三条读面收进来)
+        if (!isLocalRequest(req)) {
+          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
+          return
+        }
         try {
           // 快照要跑两根镜像的 status (只读 git), 面板每 5 s 拉一次 —— 这个频率下它够快
           sendJson(res, 200, await snapshot())
@@ -645,6 +653,12 @@ export function createPanel(deps) {
       kind: 'exact',
       path: `${PANEL_PREFIX}/doctor`,
       handler: async (req, res) => {
+        // 2026-11-21 终端: **整块面板只认本机** —— 读面也带设备名与地址读数, 开着 --allow-lan 时
+        // 局域网里任何人打过来都该 403 (写面的闸在下面各自那一处, 这里先把三条读面收进来)
+        if (!isLocalRequest(req)) {
+          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
+          return
+        }
         try {
           sendJson(res, 200, { ok: true, action: PANEL_OPS.DOCTOR, report: await deps.collectDoctor() })
         } catch (thrown) {
@@ -656,6 +670,11 @@ export function createPanel(deps) {
       kind: 'exact',
       path: `${PANEL_PREFIX}/peers`,
       handler: async (req, res) => {
+        // 2026-11-21 终端: 读面也只认本机 (名片里带设备名与地址)
+        if (!isLocalRequest(req)) {
+          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
+          return
+        }
         try {
           const read = await deps.readPeers()
           sendJson(res, 200, { ok: true, action: PANEL_OPS.PEERS, cards: read.cards, broken: read.broken ?? 0 })
@@ -670,6 +689,12 @@ export function createPanel(deps) {
       handler: async (req, res) => {
         if (req.method !== 'POST') {
           sendJson(res, 405, { ok: false, error: `${PANEL_PREFIX}/op is POST-only` })
+          return
+        }
+        // 2026-11-21 终端口径: 写配置 / 拉 / 推 / 清理这些动作只认本机回环。
+        // host 一旦 --allow-lan, 局域网里别的机器的浏览器也能 POST 到这里 —— 那就是"电脑控制手机"
+        if (!isLocalRequest(req)) {
+          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
           return
         }
         let body
@@ -693,6 +718,12 @@ export function createPanel(deps) {
       handler: async (req, res) => {
         if (req.method !== 'POST') {
           sendJson(res, 405, { ok: false, error: `${PANEL_PREFIX}/term is POST-only` })
+          return
+        }
+        // 2026-11-21 终端口径: 在手机的沙盒里跑命令只认本机回环 —— 电脑的浏览器打过来一律 403,
+        // 这条正是"电脑控制手机"最直接的那一扇门
+        if (!isLocalRequest(req)) {
+          sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
           return
         }
         let body

@@ -31,6 +31,13 @@
 - 那一步由应用自己做（`app/src/main/java/.../host/CustomPresets.kt` 的 `PRESET_ROWS`）：host spawn 之前把本目录 `cordis.patch.yml` 那段 `- insert:` 按行 id 追加进 profile patch；随 host 树走的那一份在 `lw-presets/proactive.patch.yml`，由 `tools/pack-host.mjs` 拷进去。
 - 也支持作为 bundle 安装（`dsh.bundle.patch` 已声明）。
 
+## 本次消息快照（2.8.1 #36，2026-11-20）
+
+- 每一场开场正文里多一段**「本次消息快照」**：门户当前那一场（`voice/session.json` 账本指的那一场）的最近 **20 条**，**由新到旧**，带 `HH:mm` 与说话人。
+- 两个来源：他的话取 dsh 会话的 `user` 节点（`snapshotEvents` + `deriveEventMessage`，时间取事件那一刻）；她的话取 `$DSH_HOME/lw/out/<id>.jsonl`。**assistant 正文不取** —— 门户也不画正文。
+- 附件：她的图与文件先复制到 `<工作区>/.lw-snapshot/<id>/`，快照行里给工作区相对路径，主动场的 `read` / `read_image` 直接能用；他的附件本来就在工作区（`lw-in/`、`.lw-inbox/`），路径已在正文里。
+- 预算：单条 200 字、整段 4000 字（从最旧开始丢）；没有可说的就**整段不出现**。开场照旧发得出去 —— 快照读不到只记一行 warn。
+
 ## 卸载回滚
 
 把 profile patch 里 `- id: preset-proactive` 所在的 `- insert:` 整段删掉即可。`$DSH_HOME/lw/proactive-schedule.json` 与 `proactive.json` 都是普通文件，删不删不影响预设本身。

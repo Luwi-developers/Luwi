@@ -33,10 +33,6 @@ internal object SimSetting {
     const val DIRECTORY = "lw"
     const val FILE = "sim.json"
 
-    /** 潜水的意思是不主动唤醒; 活跃的意思是到点就唤醒 (与 tick.enabled 任一为开都算开) */
-    const val MODE_DIVING = "diving"
-    const val MODE_ACTIVE = "active"
-
     /**
      * 主动场能做什么 (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`)
      *
@@ -91,7 +87,6 @@ internal object SimSetting {
 
     /** 每一档的缺省值 (与 `qq-bridge/config.json` 的 `socialV2` 对齐, 见 `tools/check-sim.mjs`) */
     object Default {
-        const val WAKE_MODE = MODE_DIVING
         const val WAKE_GAP_MIN_MS = 1_500_000L
         const val WAKE_GAP_MAX_MS = 3_300_000L
         const val PRE_SLEEP_WAIT_MS = 300_000L
@@ -102,9 +97,6 @@ internal object SimSetting {
         const val LONG_GAP_PROBABILITY = 0.2f
         const val LONG_GAP_MIN_MS = 5_000L
         const val LONG_GAP_MAX_MS = 10_000L
-        const val MAX_MESSAGE_CHARS = 600
-        const val MAX_SEND_PER_MINUTE = 7
-        const val MAX_SEND_PER_HOUR = 60
         const val COOLDOWN_MS = 1_800_000L
         const val CHAT_CHANCE = 0.35f
         /**
@@ -125,8 +117,6 @@ internal object SimSetting {
         const val GAME_COST = 2
         const val CALL_COST = 3
         const val RECENT_COST = 1
-        const val QUIET_FROM = "23:00"
-        const val QUIET_TO = "07:00"
         const val ACTING = ACTING_REMIND
         const val STICKER_MAX_MB = 2
         const val STICKER_MAX_COUNT = 200
@@ -135,21 +125,22 @@ internal object SimSetting {
 
     /**
      * 主动程度 (2026-11-10 改名, 原「潜水与唤醒」; 2026-11-10 去群味: 群里那 9 条"什么算一次唤醒"
-     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"她多主动、隔多久唤醒一次"
+     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"隔多久唤醒一次")
+     *
+     * **2026-11-20 两处搬走**:
+     * - `mode` (潜水 / 活跃) 整格删掉 —— 它唯一的作用是 `RouterTick.enabled()` 的"或", 而界面上那一行
+     *   读起来像"她多主动", 实际只是判断层闹钟的第二个开关; 现在判断层只有 `router.json` 的
+     *   `tick.enabled` 一个来源 (老 `sim.json` 里还写着 `mode: active` 的由 `RouterTick.migrateMode` 搬过去)
+     * - `quiet*` 搬进 [QuietHours] —— 与自动指令那一份 (`automations/settings.json`) 是同一个接口,
+     *   两个开关以前各管一半 (到点主动场认自动指令那一份, 判断层认这一份)
      */
     data class Wake(
-        val mode: String = Default.WAKE_MODE,
         val gapMinMs: Long = Default.WAKE_GAP_MIN_MS,
         val gapMaxMs: Long = Default.WAKE_GAP_MAX_MS,
         val preSleepWaitMs: Long = Default.PRE_SLEEP_WAIT_MS,
-        val quietEnabled: Boolean = true,
-        val quietFrom: String = Default.QUIET_FROM,
-        val quietTo: String = Default.QUIET_TO,
-    ) {
-        val active: Boolean get() = mode == MODE_ACTIVE
-    }
+    )
 
-    /** 开口节奏与分条 */
+    /** 开口节奏与分条 (2026-11-20: 「一条最多几个字」「一分钟/一小时最多几条」三格删掉 —— 它们只写盘, 没有任何读者) */
     data class Send(
         val burstEnabled: Boolean = true,
         val burstMaxMessages: Int = Default.SEND_BURST_MAX,
@@ -159,9 +150,6 @@ internal object SimSetting {
         val longGapProbability: Float = Default.LONG_GAP_PROBABILITY,
         val longGapMinMs: Long = Default.LONG_GAP_MIN_MS,
         val longGapMaxMs: Long = Default.LONG_GAP_MAX_MS,
-        val maxMessageChars: Int = Default.MAX_MESSAGE_CHARS,
-        val maxPerMinute: Int = Default.MAX_SEND_PER_MINUTE,
-        val maxPerHour: Int = Default.MAX_SEND_PER_HOUR,
     )
 
     /**
@@ -249,14 +237,9 @@ internal object SimSetting {
         val gapMax = wake.long("gapMaxMs", Default.WAKE_GAP_MAX_MS, GAP_RANGE)
         return Plan(
             wake = Wake(
-                mode = wake.text("mode", Default.WAKE_MODE).takeIf { it == MODE_DIVING || it == MODE_ACTIVE }
-                    ?: Default.WAKE_MODE,
                 gapMinMs = minOf(gapMin, gapMax),
                 gapMaxMs = maxOf(gapMin, gapMax),
                 preSleepWaitMs = wake.long("preSleepWaitMs", Default.PRE_SLEEP_WAIT_MS, PRE_SLEEP_RANGE),
-                quietEnabled = wake.bool("quietEnabled", true),
-                quietFrom = wake.text("quietFrom", Default.QUIET_FROM),
-                quietTo = wake.text("quietTo", Default.QUIET_TO),
             ),
             send = Send(
                 burstEnabled = send.bool("burstEnabled", true),
@@ -267,9 +250,6 @@ internal object SimSetting {
                 longGapProbability = send.float("longGapProbability", Default.LONG_GAP_PROBABILITY, 0f..1f),
                 longGapMinMs = send.long("longGapMinMs", Default.LONG_GAP_MIN_MS, BURST_GAP_RANGE),
                 longGapMaxMs = send.long("longGapMaxMs", Default.LONG_GAP_MAX_MS, BURST_GAP_RANGE),
-                maxMessageChars = send.int("maxMessageChars", Default.MAX_MESSAGE_CHARS, 60..4_000),
-                maxPerMinute = send.int("maxPerMinute", Default.MAX_SEND_PER_MINUTE, 1..60),
-                maxPerHour = send.int("maxPerHour", Default.MAX_SEND_PER_HOUR, 1..600),
             ),
             router = Router(
                 cooldownMs = router.long("cooldownMs", Default.COOLDOWN_MS, 60_000L..86_400_000L),
@@ -320,13 +300,9 @@ internal object SimSetting {
     fun toJson(plan: Plan): JsonObject = buildJsonObject {
         put("v", 1)
         put("wake", buildJsonObject {
-            put("mode", plan.wake.mode)
             put("gapMinMs", plan.wake.gapMinMs)
             put("gapMaxMs", plan.wake.gapMaxMs)
             put("preSleepWaitMs", plan.wake.preSleepWaitMs)
-            put("quietEnabled", plan.wake.quietEnabled)
-            put("quietFrom", plan.wake.quietFrom)
-            put("quietTo", plan.wake.quietTo)
         })
         put("send", buildJsonObject {
             put("burstEnabled", plan.send.burstEnabled)
@@ -337,9 +313,6 @@ internal object SimSetting {
             put("longGapProbability", plan.send.longGapProbability)
             put("longGapMinMs", plan.send.longGapMinMs)
             put("longGapMaxMs", plan.send.longGapMaxMs)
-            put("maxMessageChars", plan.send.maxMessageChars)
-            put("maxPerMinute", plan.send.maxPerMinute)
-            put("maxPerHour", plan.send.maxPerHour)
         })
         put("router", buildJsonObject {
             put("cooldownMs", plan.router.cooldownMs)
@@ -362,45 +335,6 @@ internal object SimSetting {
             put("maxCount", plan.sticker.maxCount)
             put("everyN", plan.sticker.everyN)
         })
-    }
-
-    /**
-     * 只改 `wake.mode` 这一个键 (2026-11-15)
-     *
-     * 门户「判断」抽屉那颗「关掉唤醒」走这里: 那一行的开关态是 `router.json` 的 `tick.enabled` **与**
-     * 这一格的合成值 ([RouterTick.enabled]), 只写前者的话"活跃"那一档还在, 于是按了关不掉 —— 屏上
-     * 看起来就是"按钮点不动" (方案 2026-11-15)
-     *
-     * **为什么不复用 [save]**: 它按 [Plan] 整份 encode, 会抹掉将来版本加的键与主人手改的未知键;
-     * 这一趟只动一格, 其余的读回来原样搬回去 (与 `RouterTick.setEnabled` 同一个写法)
-     * @param mode 只有 [MODE_ACTIVE] 与 [MODE_DIVING] 两种, 别的字面量按潜水算
-     * @returns 写进去了没有
-     */
-    fun setWakeMode(context: Context, mode: String): Boolean {
-        val wanted = if (mode == MODE_ACTIVE) MODE_ACTIVE else MODE_DIVING
-        val target = file(context)
-        val root = runCatching {
-            target.takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it) as? JsonObject }
-        }.getOrNull() ?: JsonObject(emptyMap())
-        val wake = root["wake"] as? JsonObject ?: JsonObject(emptyMap())
-        val payload = buildJsonObject {
-            root.forEach { (key, value) -> if (key != "wake") put(key, value) }
-            put("wake", buildJsonObject {
-                wake.forEach { (key, value) -> if (key != "mode") put(key, value) }
-                put("mode", wanted)
-            })
-        }
-        return runCatching {
-            target.parentFile?.mkdirs()
-            val text = json.encodeToString(JsonObject.serializer(), payload) + "\n"
-            val temporary = File(target.parentFile, "${target.name}.tmp")
-            temporary.writeText(text)
-            if (!temporary.renameTo(target)) {
-                target.writeText(text)
-                temporary.delete()
-            }
-            true
-        }.getOrDefault(false)
     }
 
     fun save(context: Context, plan: Plan): Boolean {

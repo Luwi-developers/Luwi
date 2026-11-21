@@ -58,6 +58,26 @@ internal object SyncSetting {
     const val PEER_TOKEN_KEY = "token"
     const val PEER_URL_KEY = "url"
 
+    /**
+     * 对端**指令**那一档 (2026-11-21, 终端口径)
+     *
+     * 与 `peer.listen` 是两件事: listen 管"接不接受对端来读", acceptSend 管"接不接受对端下发的
+     * 一句话". 手机 (扫过配对码的这一台) 两个都写 false —— 电脑不能再控制它; 电脑那一侧由它自己的
+     * 面板写 true (缺省也是 true, 见插件的 `resolvePeerSpec`)
+     */
+    const val PEER_ACCEPT_SEND_KEY = "acceptSend"
+
+    /**
+     * 这一台在终端里是哪一侧 (2026-11-21, 终端的角色标记)
+     *
+     * **不能拿 `pairing` 判**: 生成配对码的电脑那一侧也会写一份 `pairing` (保存仓库时顺手写),
+     * 于是"有 pairing = 手机"在电脑上同样成立, 会把电脑也关成不听不收。所以由两侧各写一个显式的
+     * `role`: 手机扫码写 `phone`, 电脑面板生成码时写 `pc`; 老配置没有这个键时, 插件退回
+     * "有 pairing 且有对端地址 (`peer.url`) = 手机"那一条 (见 `index.mjs` 的角色派生)
+     */
+    const val ROLE_KEY = "role"
+    const val ROLE_PHONE = "phone"
+
     // --- 扫码配对留下的那一段 (2026-10-20, 键名与插件 `lib/luwi-configure.mjs` 的 PAIRING_KEYS 一致) --
     //
     // 扫一次码就把上面那些值全写好了, 而这一段记的是"这一台手机是被哪一张配对码配过来的" —— 界面靠它
@@ -132,6 +152,8 @@ internal object SyncSetting {
         val peerOn: Boolean = false,
         val peerListen: Boolean = true,
         val peerProxy: Boolean = true,
+        /** 接不接受电脑下发的指令 (2026-11-21: 手机这一侧恒 false, 老配置读不到时按"已配对 = false"推) */
+        val peerAcceptSend: Boolean = false,
         val peerUrl: String = "",
         val peerToken: String = "",
         /** `lw` 段里存着的上一次填过的地址 (关掉同步之后还回得来) */
@@ -163,6 +185,15 @@ internal object SyncSetting {
 
         /** 对端通道能不能真的跑起来 (开着 + 有口令) */
         val peerReady: Boolean get() = peerOn && peerToken.isNotBlank()
+
+        /**
+         * 终端能不能连上电脑 (2026-11-21)
+         *
+         * 三件都要: 扫过配对码、通道开着、有口令。**不看 `peerUrl`** —— 配对码里的地址可以空
+         * (插件那时按对端名片找地址, 启动行写 `url=card`), 拿它当闸会把这种正常配置判成"缺地址";
+         * "到底通不通"由页面探一次 `/luwi-sync/peer-live` 决定
+         */
+        val terminalReady: Boolean get() = paired && peerOn && peerToken.isNotBlank()
     }
 
     /** 界面的重画记号 (与 LockSetting 同一个做法: 存完 +1, 那一段 remember 它) */
@@ -234,6 +265,10 @@ internal object SyncSetting {
         val lw = root[LW_KEY] as? JsonObject
         val pairing = root[PAIRING_KEY] as? JsonObject
         val remote = text(root, SESSION_REMOTE_KEY)
+        val pairedId = pairing?.let { text(it, PAIRING_ID_KEY) } ?: ""
+        // 2026-11-21: 老配置里没有 listen / acceptSend 这两个键 (配对码是上一版生成的) ——
+        // 那一档按"已配对 = 手机"推: 不听、不收指令. 电脑那一侧自己写 true, 于是两侧各按各的角色走
+        val paired = pairedId.isNotBlank()
         Snapshot(
             sessionRemote = remote,
             branch = text(root, BRANCH_KEY),
@@ -245,12 +280,13 @@ internal object SyncSetting {
             workspaceOn = workspace?.let { flag(it, WORKSPACE_ENABLED_KEY) ?: text(it, WORKSPACE_REMOTE_KEY).isNotBlank() } ?: false,
             workspaceRemote = workspace?.let { text(it, WORKSPACE_REMOTE_KEY) } ?: "",
             peerOn = peer?.let { flag(it, PEER_ENABLED_KEY) ?: text(it, PEER_TOKEN_KEY).isNotBlank() } ?: false,
-            peerListen = peer?.let { flag(it, PEER_LISTEN_KEY) ?: true } ?: true,
+            peerListen = peer?.let { flag(it, PEER_LISTEN_KEY) ?: !paired } ?: !paired,
             peerProxy = peer?.let { flag(it, PEER_PROXY_KEY) ?: true } ?: true,
+            peerAcceptSend = peer?.let { flag(it, PEER_ACCEPT_SEND_KEY) ?: !paired } ?: !paired,
             peerUrl = peer?.let { text(it, PEER_URL_KEY) } ?: "",
             peerToken = peer?.let { text(it, PEER_TOKEN_KEY) } ?: "",
             savedRemote = lw?.let { text(it.toMap(), SAVED_REMOTE_KEY) } ?: "",
-            pairedId = pairing?.let { text(it, PAIRING_ID_KEY) } ?: "",
+            pairedId = pairedId,
             pairedFrom = pairing?.let { text(it, PAIRING_FROM_KEY) } ?: "",
             pairedAt = pairing?.let { (it[PAIRING_AT_KEY] as? JsonPrimitive)?.longOrNull } ?: 0,
             repoHost = remoteHostOf(remote),
@@ -299,9 +335,19 @@ internal object SyncSetting {
                 next[PULL_INTERVAL_KEY] = JsonPrimitive(0)
             }
             if (lw.isEmpty()) next.remove(LW_KEY) else next[LW_KEY] = JsonObject(lw)
+            // 2026-11-21 终端口径: 打开终端**永远**不带工作区镜像 —— luwi 的工作区不再同步到电脑,
+            // 老配置里开过的那一根也在这一下里关掉 (workspace.remote 留着, 只是不启用)
+            next[WORKSPACE_KEY] = workspaceOff(next[WORKSPACE_KEY])
             write(file, JsonObject(next))
             null
         }.getOrElse { "写入失败: ${it.message}" }
+    }
+
+    /** 把 `workspace.enabled` 写成 false, 别的键一个字节都不动 (顶层那棵树是可变副本) */
+    private fun workspaceOff(current: JsonElement?): JsonObject {
+        val section = (current as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+        section[WORKSPACE_ENABLED_KEY] = JsonPrimitive(false)
+        return JsonObject(section)
     }
 
     /**
@@ -315,10 +361,16 @@ internal object SyncSetting {
             val root = readOf(file).toMutableMap()
             root[SESSION_REMOTE_KEY] = JsonPrimitive(payload.remote)
             root[BRANCH_KEY] = JsonPrimitive(payload.branch.ifBlank { "main" })
-            // 对端那一段: 别的键 (listen / sendTimeoutMs / …) 都留着, 只改这三件
+            // 对端那一段: 别的键 (sendTimeoutMs / …) 都留着, 只改这几件
+            //
+            // **角色由配对决定** (2026-11-21 终端口径): 扫了电脑的配对码 = 这一台是手机 (控制器),
+            // 于是不听对端的调用、不收对端的指令 —— 只由手机管电脑, 电脑不能再控制手机。
+            // `peer.proxy` 仍留 true: 投影会话 (电脑的对话在本机的那一场) 是终端那一页要看的东西
             val peer = (root[PEER_KEY] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
             peer[PEER_ENABLED_KEY] = JsonPrimitive(true)
             peer[PEER_PROXY_KEY] = JsonPrimitive(true)
+            peer[PEER_LISTEN_KEY] = JsonPrimitive(false)
+            peer[PEER_ACCEPT_SEND_KEY] = JsonPrimitive(false)
             if (payload.peerUrl.isNotEmpty()) peer[PEER_URL_KEY] = JsonPrimitive(payload.peerUrl)
             if (payload.peerToken.isNotEmpty()) peer[PEER_TOKEN_KEY] = JsonPrimitive(payload.peerToken)
             root[PEER_KEY] = JsonObject(peer)
@@ -338,6 +390,12 @@ internal object SyncSetting {
             if ((number(root, PULL_INTERVAL_KEY) ?: 0) == 0) {
                 root[PULL_INTERVAL_KEY] = JsonPrimitive(DEFAULT_PULL_INTERVAL)
             }
+            // 2026-11-21 终端口径: 配对那一刻就把工作区镜像钉死成关。这一版起电脑只把**对话**同步
+            // 过来, luwi 的工作区不再同步到电脑 (远端地址留着, 只是不启用)
+            root[WORKSPACE_KEY] = workspaceOff(root[WORKSPACE_KEY])
+            // 角色: 扫过码的这一台是**手机** (控制器)。电脑那一侧由它自己的面板写 `pc` ——
+            // 不能靠 `pairing` 推 (电脑生成码时也会写 pairing, 见 ROLE_KEY 的注释)
+            root[ROLE_KEY] = JsonPrimitive(ROLE_PHONE)
             write(file, JsonObject(root))
             null
         }.getOrElse { "写入失败: ${it.message}" }

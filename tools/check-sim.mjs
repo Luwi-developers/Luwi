@@ -32,6 +32,9 @@ const host = await read('host-plugin/index.mjs')
 const persona = await read('presets/explore/cordis.patch.yml')
 const zh = await read('app/src/main/res/values-zh/strings.xml')
 const en = await read('app/src/main/res/values/strings.xml')
+const quietHours = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/QuietHours.kt')
+const portal = await read('presets/luwi-portal/lib/client.js')
+const bridge = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalBridge.kt')
 
 let failures = 0
 let count = 0
@@ -66,9 +69,6 @@ const expected = {
   LONG_GAP_PROBABILITY: 0.2, // send.longGapProbability
   LONG_GAP_MIN_MS: 5_000, // send.longGapMinMs
   LONG_GAP_MAX_MS: 10_000, // send.longGapMaxMs
-  MAX_MESSAGE_CHARS: 600, // send.maxMessageChars
-  MAX_SEND_PER_MINUTE: 7, // send.maxPerMinute
-  MAX_SEND_PER_HOUR: 60, // send.maxPerHour
   COOLDOWN_MS: 1_800_000, // ROUTER_DEFAULTS.cooldownMs
   CHAT_CHANCE: 0.35, // ROUTER_DEFAULTS.chatChance
   CHAT_CHANCE_STEP: 0.2, // ROUTER_DEFAULTS.chatChanceStep (2.8.1 #11)
@@ -83,12 +83,6 @@ check('缺省值逐个与 QQ 桥接 socialV2 对齐', Object.fromEntries(
   Object.keys(expected).map((name) => [name, kotlinConst(sim, name)]),
 ), expected)
 
-check('潜水/活跃两个档名就是 diving 与 active, 缺省是潜水', [
-  sim.includes('const val MODE_DIVING = "diving"'),
-  sim.includes('const val MODE_ACTIVE = "active"'),
-  sim.includes('const val WAKE_MODE = MODE_DIVING'),
-], [true, true, true])
-
 check('宿主的 ROUTER_DEFAULTS 与这一页同一套数', [
   /cooldownMs: 30 \* 60 \* 1000,/.test(host),
   /chatChance: 0\.35,/.test(host),
@@ -97,6 +91,45 @@ check('宿主的 ROUTER_DEFAULTS 与这一页同一套数', [
   /ignoredCooldownMs: 24 \* 60 \* 60 \* 1000,/.test(host),
   /preSleepWaitMs: 5 \* 60 \* 1000,/.test(host),
 ], [true, true, true, true, true, true])
+
+/* ── 一之一、2026-11-20 删掉的那几格 (只写不读 / 名不符实) ──────────────── */
+
+/*
+ * 主人 2026-11-20: 「一条最多几个字」「一分钟最多说几条」「一小时最多说几条」三行删掉 —— 它们
+ * 只进 `sim.json`, 宿主读出 `maxMessageChars` 却没有任何截断点, 另外两格连读者都没有;
+ * 「她现在的状态 (潜水 / 活跃)」也删掉 —— 那一格唯一的作用是 `RouterTick.enabled()` 的第二个来源,
+ * 界面上写着"到点就看一眼"而代码里没有这件事。这一节钉住负方向: 数据层 / 页面 / 宿主都别再长回来
+ */
+check('三格只有数字的开口设置删干净了 (数据层 / 页面 / 宿主都不再有)', [
+  !/MAX_MESSAGE_CHARS|MAX_SEND_PER_MINUTE|MAX_SEND_PER_HOUR/.test(sim),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(sim),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(page),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(host),
+  !/name="settings_sim_max_chars"/.test(zh) && !/name="settings_sim_max_chars"/.test(en),
+  !/name="settings_sim_send_per_minute"/.test(zh) && !/name="settings_sim_send_per_minute"/.test(en),
+  !/name="settings_sim_send_per_hour"/.test(zh) && !/name="settings_sim_send_per_hour"/.test(en),
+], [true, true, true, true, true, true, true])
+
+check('「她现在的状态」那一格删干净了 (数据层 / 页面 / 门户都不再有)', [
+  !/MODE_DIVING|MODE_ACTIVE|WAKE_MODE/.test(sim),
+  !/wake\.mode/.test(sim),
+  !/setWakeMode/.test(sim),
+  !/settings_sim_mode/.test(page),
+  !/name="settings_sim_mode"/.test(zh) && !/name="settings_sim_mode"/.test(en),
+  !/bySim/.test(host) && !/bySim/.test(portal),
+], [true, true, true, true, true, true])
+
+check('静默只有一份真源: sim.json 的 wake.quiet* 退役, 宿主只读 automations/settings.json', [
+  !/val quietEnabled|val quietFrom|val quietTo/.test(sim),
+  !/sim\?\.wake\?\.quietFrom/.test(host),
+  !/sim\?\.wake\?\.quietTo/.test(host),
+  /const quiet = \{ enabled: settings\?\.quiet\?\.enabled === true, from, to \}/.test(host),
+  /object QuietHours/.test(quietHours),
+  /base\.copy\(quietEnabled = plan\.enabled, quietWindow = window\)/.test(quietHours),
+  // 门户读数那一处也算读者 (2026-11-20 差点漏掉的那一个): 走同一个接口, 不再自己解 sim.json
+  /QuietHours\.read\(context\)/.test(bridge) && !/wake\?\.optString\("quietFrom"\)/.test(bridge),
+], [true, true, true, true, true, true, true])
+
 
 /* ── 一之二、每错过一次加 20% 那一格 (2.8.1 #11) ────────────────────────── */
 
@@ -263,8 +296,6 @@ check('唤醒的间隔读 sim.json (不传就用原来那 25~55 分钟)', [
   /plan\?\.gapMaxMs \?: MAX_GAP_MS/.test(tick),
 ], [true, true, true])
 
-check('活跃那一档也算开 (mode = active)', /SimSetting\.plan\(context\)\.wake\.active/.test(tick), true)
-
 check('分条的停顿与条数读 sim.json', [
   /fun limitOf\(send: SimSetting\.Send\): Int/.test(outbox),
   /fun gapFor\(\s*text: String,\s*send: SimSetting\.Send = SimSetting\.Send\(\),\s*roll: Float = 0f,\s*\): Long/.test(outbox),
@@ -379,8 +410,8 @@ check('这一页的文案里没有 Diving and waking 那种群味长句', [
   !simLines(en).includes('Diving and waking'),
   zh.includes('<string name="settings_sim_wake_group">主动程度</string>'),
   en.includes('<string name="settings_sim_wake_group">How active she is</string>'),
-  zh.includes('<string name="settings_activity_more_summary">潜水 / 节奏 / 判断层 / 表情</string>'),
-  en.includes('<string name="settings_activity_more_summary">Diving, pacing, decision layer, stickers</string>'),
+  zh.includes('<string name="settings_activity_more_summary">节奏 / 静默 / 判断层 / 表情</string>'),
+  en.includes('<string name="settings_activity_more_summary">Pacing, quiet hours, decision layer, stickers</string>'),
 ], [true, true, true, true, true])
 
 // 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount` / `everyN`,
@@ -484,12 +515,14 @@ check('设置页段数没变 (活动段还是那一段, 新的是一页而不是
   'app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt',
 )).includes('key = "activity"'), true)
 
-// 2026-11-14: 一场主动对话的条数上限由 `send.burstMaxMessages` 定, 宿主那侧写死了同一个上界 ——
-// 两边漂开就是"设置能选 6, 宿主只肯发 3"这种没人看得懂的现象
-check('宿主那侧的条数上界与 SEND_BURST_MAX 同数', [
+// 2026-11-14: 一场主动对话的条数上限由 `send.burstMaxMessages` 定;
+// **2026-11-20**: `lw_say` 那一侧也真的按它切了 (以前写死 6, 于是设置里拨到 3 只有球认, 门户照旧 6 个气泡)
+check('一次最多几条真的接到 lw_say 上 (宿主按 send.burstMaxMessages 切, 上界仍是 6)', [
   host.includes('Math.min(6, Math.max(1, wanted))'),
+  /const cap = Math\.min\(6, Math\.max\(1, Number\(send\.burstMaxMessages\) \|\| 6\)\)/.test(host)
+    && /texts = texts\.slice\(0, cap\)/.test(host),
   kotlinConst(sim, 'SEND_BURST_MAX'),
-], [true, 6])
+], [true, true, 6])
 
 console.log(`\n${count - failures} / ${count} checks passed`)
 if (failures > 0) process.exit(1)

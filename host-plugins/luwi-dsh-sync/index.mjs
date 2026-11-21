@@ -117,7 +117,7 @@ import { encodePairing, pairingPayloadFromConfig, pairingSummary, remoteHostOf }
 import { qrSvg } from './lib/qr-svg.mjs'
 import { materializeSyncShadows, readWorkspaceCards, writeWorkspaceCard } from './lib/luwi-sync-shadow.mjs'
 // Luwi 加 (G1-2 对端): 通道的配置面 (peer/live 两段)、投影算术与运行时
-import { resolveLiveSpec, resolvePeerSpec, annotateWorkspaceNames, shadowDirName } from './lib/luwi-peer.mjs'
+import { resolveLiveSpec, resolvePeerSpec, resolveRole, annotateWorkspaceNames, shadowDirName } from './lib/luwi-peer.mjs'
 import { condense, liveSnapshot, LIVE_SNAPSHOT_VERSION, LIVE_SNAPSHOT_VERSION_LEGACY } from './lib/luwi-live.mjs'
 import { appendTranscriptEntries, transcriptDir } from './lib/luwi-transcript.mjs'
 import { createPeerRuntime } from './lib/luwi-peer-runtime.mjs'
@@ -1116,6 +1116,11 @@ function applyInner(ctx, config = {}) {
   // Luwi 加 (P2P T2): p2p 段与 peer/live 同一个形制 (主要住 JSON 层)
   if (config.p2p !== undefined) merged.p2p = config.p2p
   else if (fileLayer.p2p !== undefined) merged.p2p = fileLayer.p2p
+  // Luwi 加 (2026-11-21 终端): 角色是**顶层字符串键** (`phone` / `pc`), 与 peer/live 同一个形制 ——
+  // 它不在 CONFIG_KEYS 里, 所以必须在这里显式并进来, 否则下面那条 `merged.role` 永远读到 undefined
+  // (那样显式的 role 成了死代码, 只能靠 pairing + peer.url 回退, 两端都会误判)
+  if (config.role !== undefined) merged.role = config.role
+  else if (fileLayer.role !== undefined) merged.role = fileLayer.role
 
   const logger = ctx.logger(PLUGIN_NAME)
   const warn = (message) => logger.warn(message)
@@ -1367,6 +1372,20 @@ function applyInner(ctx, config = {}) {
     warn('luwi-dsh-sync: the pairing section is malformed, this host stays in legacy full-mirror mode')
   }
   const currentWindowMinutes = readCurrentWindowMinutes(merged.sessions)
+  // 2026-11-21 终端口径: **谁扫了配对码, 谁就是控制器 (手机)**。判据不能只看 `pairing` 段 ——
+  // 生成配对码的电脑那一侧保存仓库时也会写一份 `pairing` (见 configureFromPanel), 于是"有 pairing"
+  // 在两端都成立。所以按三条走:
+  //   ① 显式 `role` (`phone` / `pc`) —— 2026-11-21 起两侧各写一个 (App 扫码写 phone, 电脑面板保存写 pc)
+  //   ② 老配置没有 role: 有 `pairing` **且** `peer.url` 非空 = 手机 (手机记着电脑的地址;
+  //      电脑那一侧通常没有 peer.url —— 它是被连的那一头)
+  //   ③ 其余 = 电脑 (被管的那一侧, 行为与以前一个字节不变)
+  // 判定本体在 `lib/luwi-peer.mjs` 的 `resolveRole` —— 纯函数, 单测直接量 (2026-11-21 审查:
+  // 原来这段写在这里, 判据只能读源码文本, 是"假绿")
+  const legacyPeerUrl = merged.peer !== null && typeof merged.peer === 'object' && !Array.isArray(merged.peer)
+    ? String(merged.peer.url ?? '').trim()
+    : ''
+  const role = resolveRole({ role: merged.role, paired: pairing !== null, peerUrl: legacyPeerUrl })
+  const controller = role === 'phone'
   // Luwi 加 (2026-10-20): 工作区源 —— 每台设备一根 (host 的 cwd), 仓库里按设备分命名空间
   // (两台设备的同名工作区不合并; 手机侧仍然是 dsh（PC）这种带设备名的分组)
   let workspaceSources = []
@@ -1381,7 +1400,10 @@ function applyInner(ctx, config = {}) {
       lwRoot: join(dirname(sessionRoot), 'lw'),
       titleFor: (root) => workspaceTitleOf(root),
     })
-    workspaceSources = resolvedSources.sources
+    workspaceSources = controller ? [] : resolvedSources.sources
+    if (controller) {
+      logger.info('sync: controller role (this host scanned a computer pairing code) — the workspace mirror stays off')
+    }
     for (const problem of resolvedSources.problems) warn(`luwi-dsh-sync: ${problem}`)
   } catch (error) {
     warn(`luwi-dsh-sync: workspace config rejected, the workspace mirror stays off: ${messageOf(error)}`)
@@ -1400,7 +1422,7 @@ function applyInner(ctx, config = {}) {
   let liveSpec = resolveLiveSpec(undefined)
   if (merged.peer !== undefined) {
     try {
-      peerSpec = resolvePeerSpec(merged.peer)
+      peerSpec = resolvePeerSpec(merged.peer, { controller })
     } catch (error) {
       warn(`luwi-dsh-sync: peer config rejected, the cross-device channel stays off: ${messageOf(error)}`)
     }
@@ -1420,7 +1442,7 @@ function applyInner(ctx, config = {}) {
   // 对端那一段的启动读数 (与前面两个字段同一纪律: 地址里可能有凭据, 只报形态)
   const peerLine = peerSpec === null
     ? 'peer=off'
-    : `peer=on mode=${peerSpec.mode} listen=${peerSpec.listen ? 'on' : 'off'} proxy=${peerSpec.proxy ? 'on' : 'off'} url=${peerSpec.url === '' ? 'card' : 'set'} live=${liveSpec.enabled ? 'on' : 'off'}`
+    : `peer=on role=${peerSpec.controller ? 'controller' : 'peer'} mode=${peerSpec.mode} listen=${peerSpec.listen ? 'on' : 'off'} accept=${peerSpec.acceptSend ? 'on' : 'off'} proxy=${peerSpec.proxy ? 'on' : 'off'} url=${peerSpec.url === '' ? 'card' : 'set'} live=${liveSpec.enabled ? 'on' : 'off'}`
   ctx.effect(() => {
     globalThis[MOUNT_KEY] = `${PLUGIN_NAME}@${PLUGIN_VERSION}`
     return () => {
@@ -1590,15 +1612,19 @@ function applyInner(ctx, config = {}) {
     // Luwi 加 (2026-10-20): 顺手写"我这台设备有哪些工作区"的名片 —— 对端拉取之后靠它
     // 把 `workspaces/<设备名>/<工作区名>/` 物化到自己的影子目录里。fail-soft: 一张卡不该让同步变红
     let wroteWorkspace = false
-    try {
-      wroteWorkspace = await writeWorkspaceCard({
-        repoDir,
-        deviceId: peerIdentity.deviceId,
-        name: resolved.deviceName,
-        workspaces: workspaceCardEntries(),
-      })
-    } catch (error) {
-      warn(`luwi-dsh-sync: writing the workspace card failed: ${messageOf(error)}`)
+    // 2026-11-21 终端口径: 控制器 (手机) 不报工作区名片 —— 报了电脑那边就会为手机建影子分组与物化目录,
+    // 那是"工作区同步到电脑"的另一半
+    if (!controller) {
+      try {
+        wroteWorkspace = await writeWorkspaceCard({
+          repoDir,
+          deviceId: peerIdentity.deviceId,
+          name: resolved.deviceName,
+          workspaces: workspaceCardEntries(),
+        })
+      } catch (error) {
+        warn(`luwi-dsh-sync: writing the workspace card failed: ${messageOf(error)}`)
+      }
     }
     return wroteCard || wroteWorkspace
   }
@@ -2674,6 +2700,8 @@ function applyInner(ctx, config = {}) {
   //   ② 把**别的设备**的工作区命名空间物化到影子目录 —— 手机上的 `dsh（PC）` 那一组里因此
   //     既有投影会话、也能看见 PC 那边的工作区文件 (本机工作区一个字节都不动)
   async function materializeSyncShadowsFor(context) {
+    // 2026-11-21: 控制器 (手机) 只收对话, 不把电脑那边的工作区文件搬到自己身上
+    if (controller) return { workspaces: [], brought: 0, updated: 0, trashed: 0, failed: 0, skipped: 'controller' }
     const read = await readWorkspaceCards(repoDir)
     if (read.broken > 0) warn(`luwi-dsh-sync: ${read.broken} workspace card(s) in the mirror are unreadable`)
     if (read.cards.length === 0) return { workspaces: [], brought: 0, updated: 0, trashed: 0, failed: 0 }
@@ -3255,9 +3283,15 @@ function applyInner(ctx, config = {}) {
     }
     /** 本机会话 id -> 它的 cwd (下面两个判据都要看"这个路径在本机存不存在") */
     const cwdById = new Map()
+    // 2026-11-21 终端: 扫把要放过"刚在影子工作区里开的那一场" (见下面 SHADOW_GRACE_MS)
+    const freshById = new Map()
+    const blankById = new Map()
     for (const item of listed) {
       const id = String(item?.sessionId ?? '')
-      if (id !== '') cwdById.set(id, String(item?.cwd ?? ''))
+      if (id === '') continue
+      cwdById.set(id, String(item?.cwd ?? ''))
+      freshById.set(id, Number(item?.updatedAt ?? 0))
+      blankById.set(id, item?.blank === true)
     }
     projectionsSwept = true
     let hidden = 0
@@ -3269,6 +3303,12 @@ function applyInner(ctx, config = {}) {
         // 无主的投影: 影子目录底下的本机会话, 而它已经不在追读的账上 —— 隐掉 (老版本只把记录
         // 摘掉, 行留在列表里; 2026-10-14 真机上量到 64 行)
         if (proxyLocalIds.has(id)) continue
+        // 2026-11-21 终端: **刚开的那一场别扫** —— 门户「新建」在影子工作区里立刻起一场本机会话,
+        // 而它要等第一句话转发成功才登记进 proxyLocalIds, 中间这一拍扫把一收就成了"刚开的对话
+        // 当场从历史里消失"。判据用两条便宜的: 空白场 / 两小时内动过
+        if (blankById.get(id) === true) continue
+        const touchedAt = Number(freshById.get(id) ?? 0)
+        if (touchedAt > 0 && Date.now() - touchedAt < 2 * 60 * 60 * 1000) continue
         if (await archiveLocalSession(id, '')) hidden += 1
         continue
       }
@@ -4231,7 +4271,7 @@ function applyInner(ctx, config = {}) {
    */
   async function configureFromPanel(request) {
     const patch = {}
-    for (const key of ['remote', 'remoteToken', 'branch', 'publicUrl', 'autoPullOnStart', 'autoPushOnTurnEnd', 'pullIntervalMinutes', 'on', 'workspace', 'sessions']) {
+    for (const key of ['remote', 'remoteToken', 'branch', 'publicUrl', 'autoPullOnStart', 'autoPushOnTurnEnd', 'pullIntervalMinutes', 'on', 'workspace', 'sessions', 'role']) {
       if (request[key] !== undefined) patch[key] = request[key]
     }
     const current = await readSyncTree(syncConfigFile)
@@ -4243,6 +4283,9 @@ function applyInner(ctx, config = {}) {
     if (nextRemote !== '' && (request.pairing === true || request.repair === true || nextRemote !== currentRemote || nextToken !== (typeof current.remoteToken === 'string' ? current.remoteToken : '') || !hasPairing)) {
       patch.pairing = { v: 1, id: randomUUID(), at: Date.now(), from: resolved.deviceName }
     }
+    // 2026-11-21 终端: 只要有仓库地址, 这一台就是**被管的电脑** —— 角色显式落盘, 而且不限于
+    // "重写 pairing"那一支 (老电脑只改令牌/分支/开关时也得补上, 否则它只能靠 peer.url 为空回退)
+    if (nextRemote !== '' && patch.role === undefined) patch.role = 'pc'
     // 2026-10-20: 保存仓库 (pairing) 这一下就把 PC 这一侧也设成"该自动的自动" —— 与手机扫码
     // 写进去的那一组同值, 否则 PC 只会在手动点推送时才动
     if (request.pairing === true || request.repair === true) {

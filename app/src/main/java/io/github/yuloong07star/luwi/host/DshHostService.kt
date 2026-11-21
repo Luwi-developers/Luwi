@@ -27,6 +27,7 @@ import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OutNotify
 import io.github.yuloong07star.luwi.tool.ProactiveSchedule
+import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.UsageLedger
 
@@ -65,6 +66,13 @@ class DshHostService : Service() {
         // 排期按主人设的那个时刻排上 (关着就撤) —— 它与宿主的存活无关, 但到点那一下要宿主在跑
         ExploreTask.ensure(this)
         ExploreSchedule.ensure(this)
+        // 老配置的一次性搬家 (2026-11-20): `sim.json` 的 `mode = active` → `router.json` 的
+        // `tick.enabled`; `sim.json` 的 `wake.quiet*` → `automations/settings.json` 的 `quiet` 段。
+        // 两件都幂等, 宿主起来这一下跑一次就够 —— 界面那一侧删掉的格子不能"删了连行为一起没了"
+        runCatching {
+            if (RouterTick.migrateMode(this)) Log.i(TAG, "the old sim mode became router.json tick.enabled")
+            if (QuietHours.migrateLegacy(this)) Log.i(TAG, "the old sim quiet hours moved to automations/settings.json")
+        }.onFailure { Log.w(TAG, "the old sim settings were not migrated: ${it.message}") }
         // 主动对话的排期 (2.8.0 B4-a): 与探索那一句并排 —— 宿主起来就按主人定的几个时刻排上
         // (关着就撤), 到点先拉宿主再投 `source:"proactive"` 那一行
         ProactiveSchedule.ensure(this)

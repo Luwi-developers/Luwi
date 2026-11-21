@@ -30,6 +30,7 @@ import io.github.yuloong07star.luwi.scaffolds.ArrowSlider
 import io.github.yuloong07star.luwi.scaffolds.LazyColumn
 import io.github.yuloong07star.luwi.scaffolds.SectionSmallTitle
 import io.github.yuloong07star.luwi.scaffolds.SuperTextField
+import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.SimSetting
 import io.github.yuloong07star.luwi.util.Capability
@@ -41,7 +42,6 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles
@@ -102,7 +102,13 @@ fun SimSettingsDialog(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    // 老配置搬家 (2026-11-20): 第一次进这一页就顺带搬一次 —— 宿主起来那一路也会搬, 谁先到都行,
+    // 两处都是幂等的 (搬完 `sim.json` 里就没有那几个键了)
+    remember { QuietHours.migrateLegacy(context) }
     var plan by remember { mutableStateOf(SimSetting.plan(context)) }
+    // 静默三行 (2026-11-20): 与「自动指令」段是同一份 (`automations/settings.json`), 所以不在
+    // `SimSetting.Plan` 里, 单独一处 state 与一处写入口
+    var quiet by remember { mutableStateOf(QuietHours.read(context)) }
     var checks by remember { mutableStateOf(RouterChecks.list(context)) }
     var message by remember { mutableStateOf<String?>(null) }
     var editingFrom by remember { mutableStateOf(false) }
@@ -119,6 +125,16 @@ fun SimSettingsDialog(
             context.getString(R.string.settings_sim_saved)
         } else {
             context.getString(R.string.settings_sim_failed)
+        }
+    }
+
+    /** 静默三行的写入口: 失败 (时间认不出来 / 写盘失败) 就原样留着, 由那一句解释 */
+    fun saveQuiet(next: QuietHours.Plan) {
+        if (QuietHours.save(context, next)) {
+            quiet = next
+            message = context.getString(R.string.settings_sim_saved)
+        } else {
+            message = context.getString(R.string.settings_sim_quiet_bad)
         }
     }
 
@@ -184,24 +200,6 @@ fun SimSettingsDialog(
             item {
                 Card {
                     Column {
-                        OverlayDropdownPreference(
-                            title = stringResource(R.string.settings_sim_mode),
-                            summary = stringResource(R.string.settings_sim_mode_summary),
-                            items = listOf(
-                                stringResource(R.string.settings_sim_mode_diving),
-                                stringResource(R.string.settings_sim_mode_active),
-                            ),
-                            selectedIndex = if (plan.wake.active) 1 else 0,
-                            onSelectedIndexChange = { index ->
-                                commit(
-                                    plan.copy(
-                                        wake = plan.wake.copy(
-                                            mode = if (index == 1) SimSetting.MODE_ACTIVE else SimSetting.MODE_DIVING,
-                                        ),
-                                    ),
-                                )
-                            },
-                        )
                         NumberRow(
                             title = stringResource(R.string.settings_sim_gap_min),
                             summary = stringResource(R.string.settings_sim_gap_min_summary, plan.wake.gapMinMs / 60_000),
@@ -232,17 +230,18 @@ fun SimSettingsDialog(
                             onChange = { plan = plan.copy(wake = plan.wake.copy(preSleepWaitMs = it * 60_000L)) },
                             onCommit = { commit() },
                         )
+                        // 静默那三行 (2026-11-20): 读写的是 `automations/settings.json` 那一份 ——
+                        // 与「自动指令」段同一个文件同一个键, 于是到点主动场 / 判断层 / 自动指令
+                        // 三处认得的是同一段窗口
                         SwitchPreference(
                             title = stringResource(R.string.settings_sim_quiet),
                             summary = stringResource(R.string.settings_sim_quiet_summary),
-                            checked = plan.wake.quietEnabled,
-                            onCheckedChange = { on ->
-                                commit(plan.copy(wake = plan.wake.copy(quietEnabled = on)))
-                            },
+                            checked = quiet.enabled,
+                            onCheckedChange = { on -> saveQuiet(quiet.copy(enabled = on)) },
                         )
                         TwoTimes(
-                            from = plan.wake.quietFrom,
-                            to = plan.wake.quietTo,
+                            from = quiet.from,
+                            to = quiet.to,
                             onFrom = {
                                 haptic.contextClick()
                                 editingFrom = true
@@ -356,40 +355,6 @@ fun SimSettingsDialog(
                             display = { it / 10f },
                             unit = stringResource(R.string.settings_sim_unit_seconds),
                             onChange = { plan = plan.copy(send = plan.send.copy(longGapMaxMs = it * 100L)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_max_chars),
-                            summary = stringResource(R.string.settings_sim_max_chars_summary, plan.send.maxMessageChars),
-                            value = plan.send.maxMessageChars,
-                            range = 60..2000,
-                            step = 20,
-                            unit = stringResource(R.string.settings_sim_unit_chars),
-                            onChange = { plan = plan.copy(send = plan.send.copy(maxMessageChars = it)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_send_per_minute),
-                            summary = stringResource(
-                                R.string.settings_sim_send_per_minute_summary,
-                                plan.send.maxPerMinute,
-                            ),
-                            value = plan.send.maxPerMinute,
-                            range = 1..60,
-                            unit = stringResource(R.string.settings_sim_unit_messages),
-                            onChange = { plan = plan.copy(send = plan.send.copy(maxPerMinute = it)) },
-                            onCommit = { commit() },
-                        )
-                        NumberRow(
-                            title = stringResource(R.string.settings_sim_send_per_hour),
-                            summary = stringResource(
-                                R.string.settings_sim_send_per_hour_summary,
-                                plan.send.maxPerHour,
-                            ),
-                            value = plan.send.maxPerHour,
-                            range = 1..600,
-                            unit = stringResource(R.string.settings_sim_unit_messages),
-                            onChange = { plan = plan.copy(send = plan.send.copy(maxPerHour = it)) },
                             onCommit = { commit() },
                         )
                     }
@@ -650,14 +615,14 @@ fun SimSettingsDialog(
     if (editingFrom) {
         TimeTextDialog(
             title = stringResource(R.string.settings_sim_quiet_from),
-            initial = plan.wake.quietFrom,
+            initial = quiet.from,
             onDismiss = { editingFrom = false },
             onSave = { text ->
                 editingFrom = false
                 if (AutomationRule.minutesOf(text) == null) {
                     message = context.getString(R.string.settings_sim_quiet_bad)
                 } else {
-                    commit(plan.copy(wake = plan.wake.copy(quietFrom = text.trim())))
+                    saveQuiet(quiet.copy(from = text.trim()))
                 }
             },
         )
@@ -665,14 +630,14 @@ fun SimSettingsDialog(
     if (editingTo) {
         TimeTextDialog(
             title = stringResource(R.string.settings_sim_quiet_to),
-            initial = plan.wake.quietTo,
+            initial = quiet.to,
             onDismiss = { editingTo = false },
             onSave = { text ->
                 editingTo = false
                 if (AutomationRule.minutesOf(text) == null) {
                     message = context.getString(R.string.settings_sim_quiet_bad)
                 } else {
-                    commit(plan.copy(wake = plan.wake.copy(quietTo = text.trim())))
+                    saveQuiet(quiet.copy(to = text.trim()))
                 }
             },
         )

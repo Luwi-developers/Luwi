@@ -161,6 +161,17 @@ function putCard(home, text) {
   check('已有的卡不被播种覆盖', a.readPersonaCard(), '主人改过的')
 }
 
+// ── 7. 默认卡那份正文 ──────────────────────────────────────────────────────
+{
+  // 2026-11-20: 语气那一条从主动场提示词 (persona 第 14 条) 搬进了人格卡 —— 卡里必须在
+  const card = readFileSync(join(root, 'presets', 'luwi', 'persona', 'xiaojingyu.md'), 'utf8')
+  check('默认卡里有语气那一条 (从主动场提示词搬过来的)', [
+    card.includes('- **语气柔和客气**: 不催他, 不哄他, 不煽情, 也别连着发好几条'),
+    card.includes('他要是不想理会, 也不会觉得被催'),
+  ], [true, true])
+  check('默认卡还写着"先像人, 再像小鲸鱼" (最高原则没被搬动)', card.includes('先像人, 再像小鲸鱼'), true)
+}
+
 // 自取自清: 临时目录全在 `.lwtmp` 下, 跑完删掉 (失败也删, 报告先打)
 for (const dir of made.reverse()) await rm(dir, { recursive: true, force: true })
 

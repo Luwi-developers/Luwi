@@ -233,9 +233,15 @@ check(
 const sliceStart = host.indexOf('const LW_TTS_ROUTE')
 const sliceEnd = host.indexOf('/** 图: `Content-Type`')
 if (sliceStart < 0 || sliceEnd < 0) throw new Error('the DeepSeek TTS route is not in host-plugin/index.mjs')
+// 认证头那道分档 (账号令牌走 `x-dsh-auth-token`) 写在 TTS 段之外, 所以单独取一段拼进来 ——
+// 少了它整段抽出来的路由会 ReferenceError, 而那会被路由自己的 catch 吞成 502
+const authStart = host.indexOf('function lwToolsAuthHeader')
+const authEnd = authStart < 0 ? -1 : host.indexOf('\n}\n', authStart)
+if (authStart < 0 || authEnd < 0) throw new Error('lwToolsAuthHeader is missing from host-plugin/index.mjs')
+const authHelper = host.slice(authStart, authEnd + 3)
 const route = new Function(
   'ACCOUNT_SEAM', 'LW_ACCOUNT_KEY_REF', 'warn', 'lwLoopback',
-  `${host.slice(sliceStart, sliceEnd)}; return { serveLwTts, LW_TTS_ENDPOINT, LW_TTS_ROUTE }`,
+  `${authHelper}\n${host.slice(sliceStart, sliceEnd)}; return { serveLwTts, LW_TTS_ENDPOINT, LW_TTS_ROUTE }`,
 )(
   'deepseekAccount',
   'DEEPSEEK_API_KEY',
@@ -309,17 +315,19 @@ const signed = await callRoute(
   { body: JSON.stringify({ text: '你好', voice_id: 'tide' }) },
 )
 check(
-  '登录了就用账号令牌打官方那一条, 字段与正文都对',
+  '登录了就用账号令牌打官方那一条, 字段与正文都对 (账号令牌走 dsh 那个头)',
   [
     signed.status,
     signed.headers['Content-Type'],
     [...Buffer.from(signed.body)].join(','),
     seen.length,
     seen[0]?.url,
+    seen[0]?.options.headers['x-dsh-auth-token'],
+    // 账号那条**不许**再塞 Authorization: 平台令牌在那个头上一直是 401
     seen[0]?.options.headers.Authorization,
     JSON.parse(seen[0]?.options.body),
   ],
-  [200, 'audio/wav', '82,73,70,70', 1, route.LW_TTS_ENDPOINT, 'Bearer tok-123',
+  [200, 'audio/wav', '82,73,70,70', 1, route.LW_TTS_ENDPOINT, 'tok-123', undefined,
     { text: '你好', voice_id: 'tide', format: 'wav', filter_markdown: true }],
 )
 check('回执带上令牌来源 (读数用)', signed.headers['X-Lw-Token-Source'], 'account')
