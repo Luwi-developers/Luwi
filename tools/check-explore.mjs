@@ -73,9 +73,10 @@ const section = host.slice(start, end)
 const EVENT_BEFORE_DEFAULT = 15
 
 /**
- * 点按效果那两样也在那一段外面 (落实表 #32: 账与"连着几条算停"写在点按那一层), 同样手递
+ * 点按效果那几样也在那一段外面 (落实表 #32 / #37: 账与"连着几条算停"写在点按那一层), 同样手递
  *
- * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发".
+ * #37 起它数的是连着几条 `recover=giveup` (不再是 unchanged), 刹车那一档仍数 unchanged
  */
 const TAP_EFFECT_STREAK = 2
 
@@ -1114,19 +1115,24 @@ const effectEnd = host.indexOf('/** A report a model can read, with the structur
 if (effectStart < 0 || effectEnd < 0 || effectEnd < effectStart) {
   throw new Error('the tap effect section is not in host-plugin/index.mjs')
 }
+/** 这一节假设备的树 (`call('ui')` 答的那一份): 换 `tapUiAnswer` 就是换一屏 */
+let tapUiAnswer = null
+
 const tapApi = new Function(
-  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect',
+  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect', 'squashText',
   `${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
-    + ' TAP_EFFECT_WAIT_MS, tapEffectFingerprint, tapEffectOf, tapEffectTail, tapEffectStreak,'
-    + ' tapEffectBrake, formatTapEffect }',
+    + ' TAP_EFFECT_WAIT_MS, TAP_MIN_SIDE, TAP_SCORE_GAP, tapEffectSnapshot, tapEffectFingerprint,'
+    + ' tapEffectOf, tapEffectTail, tapEffectStreak, tapEffectBrake, formatTapEffect,'
+    + ' tapNameMatches, tapPrecheckGeometry, tapPrecheck, tapAnchorMismatch, tapEffectRecover }',
 )(
-  async () => null,
+  async () => tapUiAnswer,
   (promise) => promise,
   (lines, _wanted, limit) => lines.slice(0, limit).map((line) => ({
     text: line.text, score: 1, bbox: line.box,
   })),
   3,
   (left, right) => JSON.stringify(left) === JSON.stringify(right),
+  (value) => String(value ?? '').toLowerCase().replace(/\s+/gu, ''),
 )
 
 check('两处那个"连着几条算停"是同一个数 (2)', [
@@ -1226,11 +1232,127 @@ check('有一份读不到时判 unknown (不把"核不了"说成"没变")', [
   /effect=unknown/u.test(tapApi.formatTapEffect('unknown', null, null, [])),
 ], ['unknown', 'unknown', true])
 
-check('exploreEffectReason: 连着两条 unchanged 报 effect-missing', [
-  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
-  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'changed' }]),
+/* ── 九、按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ───────────────── */
+
+/**
+ * 三道前置校验与三档恢复都是纯函数 (恢复只多读一次树), 所以在这一侧也能量, 不必起设备
+ *
+ * 端到端那一份 (触摸次数 = 0 / 1) 在 `check-phone-actions` 第八节
+ */
+const SETTINGS_TREE = [
+  { text: '设置', bounds: [40, 300, 900, 380] },
+  { text: '蓝牙', bounds: [40, 400, 900, 480] },
+]
+const uiTree = (rows) => ({
+  enabled: true,
+  displayId: 0,
+  label: 'Settings',
+  width: 1080,
+  height: 2400,
+  nodes: rows.map((row, depth) => ({ text: row.text, bounds: row.bounds, clickable: true, depth })),
+})
+
+tapUiAnswer = uiTree(SETTINGS_TREE)
+const tapScreen = await tapApi.tapEffectSnapshot(0)
+
+check('前置校验: 名字对得上的子节点被外面那格包住时只算一处', (() => {
+  const nested = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380] },
+      { label: '设置', bounds: [60, 310, 300, 370] },
+    ],
+  }
+  return tapApi.tapNameMatches(nested, '设置').length
+})(), 1)
+
+check('前置校验: 短边 < TAP_MIN_SIDE → small, 整格出屏 → occluded, 正常格放行', [
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 338])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 3000, 900, 3080])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 380]),
+  tapApi.TAP_MIN_SIDE,
+], ['small', 'occluded', null, 48])
+
+check('前置校验: 要按的那一点被另一个能按的控件盖住 → occluded, 并说清是谁', (() => {
+  const covered = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '广告弹窗', bounds: [200, 320, 600, 360], target: [200, 320, 600, 360], clickable: true },
+    ],
+  }
+  const skip = tapApi.tapPrecheck(covered, covered.nodes[0])
+  return [skip?.skip, /广告弹窗/u.test(skip?.why ?? '')]
+})(), ['occluded', true])
+check('前置校验: 同一格里换了个名字 (子节点按下去仍落在那一行) 不算盖住', (() => {
+  const same = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '存储', bounds: [200, 320, 600, 360], target: [40, 300, 900, 380], clickable: true },
+    ],
+  }
+  return tapApi.tapPrecheck(same, same.nodes[0])
+})(), null)
+
+check('前置校验: expect 对不上时报出点上实测的那个标签, 对得上时放行', [
+  tapApi.tapAnchorMismatch(tapScreen, '蓝牙', 500, 340)?.found,
+  tapApi.tapAnchorMismatch(tapScreen, '设置', 500, 340),
+], ['设置', null])
+
+/** 恢复那一档会读一次树: 把它的 stdout 收起来, 免得三行读数混进判据表里 */
+const quiet = async (run) => {
+  const keep = console.log
+  try {
+    console.log = () => {}
+    return await run()
+  } finally {
+    console.log = keep
+  }
+}
+const recoverOn = async (answer, effect, { wanted = '设置', after = tapScreen } = {}) => {
+  tapUiAnswer = answer
+  return quiet(() => tapApi.tapEffectRecover({
+    before: tapScreen, after, effect, wanted, displayId: 0,
+  }))
+}
+
+const late = await recoverOn(uiTree([...SETTINGS_TREE, { text: '已连接', bounds: [40, 700, 900, 780] }]), 'unchanged')
+check('恢复 ①: 重读那一屏变了 → reread (没有重放那一下)', late.recover, 'reread')
+
+const anchor = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged')
+check('恢复 ②: 屏没变而目标还在 → reanchor, 交回它现在的中心', [
+  anchor.recover,
+  /centre 470,340/u.test(anchor.text),
+], ['reanchor', true])
+
+const blind = await recoverOn(null, 'unknown', { after: null })
+check('恢复 ②b: 重读读不回来 → reanchor 用按之前那一份, 并说清这次没读到', [
+  blind.recover,
+  /could not be read back/u.test(blind.text),
+], ['reanchor', true])
+
+const nowhere = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged', { wanted: '' })
+check('恢复 ③: 屏上哪儿都不是目标 (按在空白处) → giveup', nowhere.recover, 'giveup')
+
+check('lw_tap 的账里带 recover 那一格, 而且三档各有一行 stdout 读数', [
+  /const recovery = await tapEffectRecover\(/u.test(host),
+  /recover: recovery\.recover,/u.test(host),
+  /LwTap: recover=reread/u.test(host) && /LwTap: recover=reanchor/u.test(host)
+    && /LwTap: recover=giveup/u.test(host),
+], [true, true, true])
+
+check('exploreEffectReason: 连着两条 recover=giveup 才停 (2.8.1 落实表 #37)', [
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'giveup' }]),
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'reanchor' }]),
+  api.exploreEffectReason([{ recover: 'reread' }, { recover: 'giveup' }]),
   api.exploreEffectReason([]),
-], ['effect-missing', '', ''])
+], ['giveup', '', '', ''])
+check('exploreEffectReason: 连着两条 unchanged 不再算停 (effect 判定不回归, 停判只认 giveup)', [
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reanchor' },
+    { effect: 'unchanged', recover: 'reanchor' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
+], ['', ''])
 check('exploreEffectsFor 只挑这一场, 别的会话点的不算', [
   api.exploreEffectsFor([
     { session: 'a', effect: 'unchanged' },

@@ -507,13 +507,19 @@ await new Promise((listening) => effectChannel.listen(0, '127.0.0.1', listening)
 process.env.LW_CHANNEL_ENDPOINT = `127.0.0.1:${effectChannel.address().port}`
 process.env.LW_CHANNEL_TOKEN = 'check-phone-actions'
 
-/** 按一下, 顺手把这一次的 stdout 收下来 (读数那一行认它) */
-async function press(args) {
+/**
+ * 按一下, 顺手把这一次的 stdout 收下来 (读数那一行认它)
+ *
+ * 给了 `session` 就以那一场会话的身份按: 效果那本账按场次分开记, 那一脚刹车只数同一场里连着没
+ * 变的那几下, 于是各节各条互不串账
+ */
+async function press(args, options = {}) {
   const lines = []
   const keep = console.log
+  const context = options.session === undefined ? undefined : { agent: { id: options.session } }
   try {
     console.log = (...parts) => { lines.push(parts.join(' ')) }
-    const answer = await tapTool.execute({ note: 'check-phone-actions', ...args })
+    const answer = await tapTool.execute({ note: 'check-phone-actions', ...args }, context)
     return { answer, logged: lines }
   } finally {
     console.log = keep
@@ -637,6 +643,254 @@ check.run(
 )
 
 effectChannel.close()
+delete process.env.LW_CHANNEL_ENDPOINT
+delete process.env.LW_CHANNEL_TOKEN
+
+/* ── 八、按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ─────────────────── */
+
+/**
+ * 这一节量的是 `lw_tap` 的**动作前置校验**与**定点恢复**, 一条都不需要设备
+ *
+ * 六条真值:
+ *   ① 按点按带 expect, 点上却是别的控件 → 一次触摸都不发 (anchor-mismatch + 实测标签 + 最近控件的中心)
+ *   ② 同一个点 expect 对得上 → 恰好一次触摸, 回 anchor=confirmed
+ *   ③ `verify:"off"` → 即使 expect 对不上也照发 (与 #32 那档"逐字退回"同一条)
+ *   ④ 按名字同名分不开 → 回候选, 一次触摸都不发 (skip=ambiguous)
+ *   ⑤ 命中区短边 < 48px → skip=small; 被别的控件盖住 → skip=occluded, 两次都不发触摸
+ *   ⑥ 失败后的三档恢复: `recover=reread|reanchor|giveup` 各一行读数, 而且**只按过一次**
+ */
+
+/** 一棵树 (只有这几格有名字, 都画在 1080x2400 上) */
+const treeOf = (rows) => rows.map((row) => ({
+  className: 'android.widget.TextView',
+  text: row.text,
+  bounds: row.bounds,
+  clickable: row.clickable !== false,
+}))
+
+const SETTINGS_ROWS = [
+  { text: '设置', bounds: [40, 300, 900, 380] },
+  { text: '蓝牙', bounds: [40, 400, 900, 480] },
+  { text: '位置信息', bounds: [40, 500, 900, 580] },
+]
+
+/** 假设备的屏: 这一节按顺序改它 */
+let preRows = SETTINGS_ROWS
+let preLines = []
+/** 树读不回来那一档 (恢复的 giveup 用) */
+let preTreeReadable = true
+/** 设备的触摸次数: `tap` 一定算, `tapText` 只有真的按下去 (clicked) 才算 */
+let preTouches = 0
+/** 按下那一拍设备会顺手做的事 (改屏 / 约一个晚到的变化) */
+let preOnPress = null
+
+const preAnswer = (request) => {
+  if (request.method === 'ui') {
+    if (!preTreeReadable) return { enabled: false, error: 'the accessibility service went away' }
+    return {
+      enabled: true,
+      displayId: 0,
+      label: 'Settings',
+      width: 1080,
+      height: 2400,
+      nodes: treeOf(preRows).map((node, depth) => ({ ...node, target: node.bounds, depth })),
+    }
+  }
+  if (request.method === 'ocr') {
+    return { displayId: 0, screen: 'on', lines: preLines, backend: 'cpu', engine: 'local' }
+  }
+  const runPress = () => {
+    const change = preOnPress
+    preOnPress = null
+    if (typeof change === 'function') change()
+  }
+  if (request.method === 'tapText') {
+    const hit = preRows.find((row) => row.text === request.text)
+    if (hit === undefined) {
+      runPress()
+      return { clicked: false, outcome: 'none', via: 'a11y', displayId: 0, matches: [] }
+    }
+    preTouches += 1
+    runPress()
+    return {
+      clicked: true,
+      outcome: 'clicked',
+      via: 'a11y',
+      displayId: 0,
+      holdMs: request.holdMs ?? 0,
+      long: false,
+      matches: [{ ...hit, target: hit.bounds }],
+    }
+  }
+  if (request.method === 'tap') {
+    preTouches += 1
+    runPress()
+    return { tapped: true, displayId: 0, x: request.x, y: request.y, screen: 'on' }
+  }
+  return { displayId: 0, screen: 'on', lines: [] }
+}
+
+const preChannel = createServer((socket) => {
+  socket.setEncoding('utf8')
+  let buffer = ''
+  socket.on('data', (chunk) => {
+    buffer += chunk
+    const end = buffer.indexOf('\n')
+    if (end < 0) return
+    const request = JSON.parse(buffer.slice(0, end))
+    socket.write(`${JSON.stringify({ ok: true, result: preAnswer(request) })}\n`)
+  })
+})
+await new Promise((listening) => preChannel.listen(0, '127.0.0.1', listening))
+process.env.LW_CHANNEL_ENDPOINT = `127.0.0.1:${preChannel.address().port}`
+process.env.LW_CHANNEL_TOKEN = 'check-phone-actions'
+
+/** 答案尾巴上那段机器可读的 JSON (与前面几节同一个认法) */
+const replyOf = (answer) => {
+  const start = answer.indexOf('\n{\n')
+  if (start < 0) return {}
+  try {
+    return JSON.parse(answer.slice(start + 1))
+  } catch {
+    return {}
+  }
+}
+
+// ① 按点按带 expect, 点上却是"设置"
+preRows = SETTINGS_ROWS
+preLines = []
+preTouches = 0
+const mismatch = await press({ displayId: 0, x: 500, y: 340, expect: '蓝牙' }, { session: 'pre-mismatch' })
+check.run(
+  '前置校验: 按点按带 expect 而点上是别的控件 → 一次触摸都不发',
+  preTouches === 0,
+  `got ${preTouches} touch(es) for ${JSON.stringify(mismatch.answer.split('\n')[0])}`,
+)
+check.run(
+  '前置校验: 对不上时报 reason=anchor-mismatch, 并说清点上实际是什么',
+  /reason=anchor-mismatch/u.test(mismatch.answer) && /"设置"/u.test(mismatch.answer),
+  mismatch.answer.split('\n').slice(0, 2).join(' / '),
+)
+check.run(
+  '前置校验: 答案带最近控件的 bbox 中心 (下一次按落在那里), JSON 里也有一份',
+  /centre 470,440/u.test(mismatch.answer)
+    && replyOf(mismatch.answer).reason === 'anchor-mismatch'
+    && replyOf(mismatch.answer).found === '设置'
+    && JSON.stringify(replyOf(mismatch.answer).closest?.center) === JSON.stringify({ x: 470, y: 440 }),
+  `json ${JSON.stringify(replyOf(mismatch.answer).closest ?? null)}`,
+)
+
+// ② 同一个点, expect 对得上
+preTouches = 0
+const confirmed = await press({ displayId: 0, x: 500, y: 340, expect: '设置' }, { session: 'pre-confirmed' })
+check.run(
+  '前置校验: expect 对得上时恰好一次触摸, 回 anchor=confirmed',
+  preTouches === 1 && /anchor=confirmed/u.test(confirmed.answer),
+  `got ${preTouches} touch(es), ${JSON.stringify(confirmed.answer.split('\n')[0])}`,
+)
+
+// ③ verify=off: 与今天逐字相同的那条路, expect 不参与
+preTouches = 0
+const off = await press({ displayId: 0, x: 500, y: 340, expect: '蓝牙', verify: 'off' }, { session: 'pre-off' })
+check.run(
+  '前置校验: verify=off 时 expect 对不上也照发 (逐字退回 #32 之前那条路)',
+  preTouches === 1 && !/anchor=/u.test(off.answer) && !/reason=anchor-mismatch/u.test(off.answer),
+  `got ${preTouches} touch(es), ${JSON.stringify(off.answer.split('\n')[0])}`,
+)
+
+// ④ 按名字: 同名三行、分数分不开 → 回候选, 不点
+preRows = []
+preLines = [
+  { text: '设置', score: 0.90, box: [100, 300, 460, 360], center: [280, 330] },
+  { text: '设置', score: 0.88, box: [100, 500, 460, 560], center: [280, 530] },
+  { text: '设置', score: 0.86, box: [100, 700, 460, 760], center: [280, 730] },
+]
+preTouches = 0
+const ambiguous = await press({ source: 'ocr', text: '设置', displayId: 0 }, { session: 'pre-ambiguous' })
+check.run(
+  '前置校验: 同名分不开时一次触摸都不发, 答案说清 skip=ambiguous',
+  preTouches === 0 && /skip=ambiguous/u.test(ambiguous.answer),
+  `got ${preTouches} touch(es), ${JSON.stringify(ambiguous.answer.split('\n')[0])}`,
+)
+check.run(
+  '前置校验: 分不开时按 #27 的三候选格式回三条, 每项 text / score / bbox / center',
+  (() => {
+    const candidates = replyOf(ambiguous.answer).candidates ?? []
+    return candidates.length === 3 && candidates.every((one) => typeof one.text === 'string'
+      && typeof one.score === 'number'
+      && Array.isArray(one.bbox) && one.bbox.length === 4
+      && typeof one.center?.x === 'number' && typeof one.center?.y === 'number')
+  })(),
+  `got ${JSON.stringify(replyOf(ambiguous.answer).candidates ?? null)}`,
+)
+
+// ⑤ 命中区短边 < 48 → skip=small (小图标那一档); 被别的控件盖住 → skip=occluded
+preRows = [{ text: '设置', bounds: [40, 300, 80, 340] }]
+preLines = []
+preTouches = 0
+const small = await press({ text: '设置', displayId: 0 }, { session: 'pre-small' })
+check.run(
+  '前置校验: 命中区 40x40 < TAP_MIN_SIDE → skip=small, 不发触摸',
+  preTouches === 0 && /skip=small/u.test(small.answer) && replyOf(small.answer).skip === 'small',
+  `got ${preTouches} touch(es), ${JSON.stringify(small.answer.split('\n')[0])}`,
+)
+
+preRows = [...SETTINGS_ROWS, { text: '广告弹窗', bounds: [200, 320, 600, 360] }]
+preLines = []
+preTouches = 0
+const covered = await press({ text: '设置', displayId: 0 }, { session: 'pre-covered' })
+check.run(
+  '前置校验: 要按的那一点上盖着别的控件 → skip=occluded, 不发触摸',
+  preTouches === 0 && /skip=occluded/u.test(covered.answer)
+    && /"广告弹窗"/u.test(covered.answer)
+    && replyOf(covered.answer).skip === 'occluded',
+  `got ${preTouches} touch(es), ${JSON.stringify(covered.answer.split('\n')[0])}`,
+)
+
+// ⑥ 失败后的三档恢复: reread / reanchor / giveup, 每档一行 `LwTap: recover=`, 而且只按过一次
+preRows = SETTINGS_ROWS
+preLines = []
+preTreeReadable = true
+preTouches = 0
+preOnPress = () => {
+  // 晚到的一拍: 按下 300ms 那一刻还没变, 恢复的重读 (600ms) 才看得见
+  setTimeout(() => { preRows = [...SETTINGS_ROWS, { text: '已连接', bounds: [40, 700, 900, 780] }] }, 400)
+}
+const reread = await press({ text: '设置', displayId: 0 }, { session: 'pre-reread' })
+check.run(
+  '恢复 ①: 慢一拍的界面 → recover=reread (再看一眼就认了), 没有第二次触摸',
+  /recover=reread/u.test(reread.answer)
+    && reread.logged.some((line) => line.includes('LwTap: recover=reread'))
+    && preTouches === 1,
+  `got ${preTouches} touch(es), ${JSON.stringify(reread.logged.slice(-3))}`,
+)
+
+preRows = SETTINGS_ROWS
+preOnPress = null
+preTouches = 0
+const reanchor = await press({ text: '设置', displayId: 0 }, { session: 'pre-reanchor' })
+check.run(
+  '恢复 ②: 屏没变但目标还在 → recover=reanchor, 交回它现在的中心, 不重放',
+  /recover=reanchor/u.test(reanchor.answer)
+    && /centre 470,340/u.test(reanchor.answer)
+    && reanchor.logged.some((line) => line.includes('LwTap: recover=reanchor'))
+    && preTouches === 1,
+  `got ${preTouches} touch(es), ${JSON.stringify(reanchor.logged.slice(-3))}`,
+)
+
+preRows = SETTINGS_ROWS
+preOnPress = null
+preTouches = 0
+const giveup = await press({ displayId: 0, x: 540, y: 1600 }, { session: 'pre-giveup' })
+check.run(
+  '恢复 ③: 空白处按了一下、屏没变也没有可重锚的目标 → recover=giveup',
+  /recover=giveup/u.test(giveup.answer)
+    && giveup.logged.some((line) => line.includes('LwTap: recover=giveup'))
+    && preTouches === 1,
+  `got ${preTouches} touch(es), ${JSON.stringify(giveup.logged.slice(-3))}`,
+)
+
+preChannel.close()
 delete process.env.LW_CHANNEL_ENDPOINT
 delete process.env.LW_CHANNEL_TOKEN
 
