@@ -584,6 +584,14 @@
   = 没重载
 - **出包前先删旧 APK**: `app/build/outputs/apk/<变体>/app-<变体>.apk` (发布包是 `release/app-release.apk`) ——
   打包任务会在旧包上原地改写留空洞
+- **新建的 git worktree 里 `jniLibs` 是空的** (2026-11-21 踩到): 24 个 `.so` (含 65 MB `libnode.so`) 是未跟踪的本地文件,
+  只存在于别的检出里; 不补这一目录, `:app:assembleDebug` 照样 BUILD SUCCESSFUL, 但 APK 里没有 `libnode.so`,
+  装机后 host 报 `node runtime is missing at …/lib/libnode.so`、整包起不来. 判据 `unzip -l <apk> | findstr libnode`
+- **工位里的 dsh 子模块与 `luwi-plugins` 要自己备** (2026-11-21): `git -c protocol.file.allow=always submodule update
+  --init third_party/deepseek-harness` (从别的检出 clone), 再在子模块里
+  `pnpm install --frozen-lockfile --config.registry=https://registry.npmjs.org --config.node-linker=hoisted`
+  (少了它会 `tsx` 找不到 `esbuild` / `tsc` 报 TS2554 退出); `copySeedAssets` 按「仓库根上级」找
+  `luwi-plugins/packages/*.lwp`, 工位不在 `D:\apk` 底下时用 `mklink /J` 补一个
 - **`packHostTree` 偶发原生崩溃**: `Client bundle` 那一步整个进程退 `3221226505` (`0xC0000409`), 那是原生
   bundler 一次从零打三百多个包时的偶发事 —— 同一棵树重跑就绿 (`run-gates` 10/10, 第二趟只补剩下的);
   `tools/pack-host.mjs` 只在原生崩溃码 / 信号上自动补跑一次, 脚本自己退的 1 不重试 (真红不许盖)
