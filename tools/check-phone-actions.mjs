@@ -301,8 +301,13 @@ check.run(
 /* ── 五、提示词: 固定优先级 (⑪) ─────────────────────────────────────────── */
 
 const phone = source('../app/src/main/assets/modes/phone.md')
-/** 只看"十二、手机直连的固定优先级"那一节: 别处的行内工具清单不算优先级 */
-const priority = phone.slice(phone.indexOf('十二、手机直连的固定优先级'))
+/**
+ * 只看"手机直连的固定优先级"那一节: 别处的行内工具清单不算优先级
+ *
+ * 锚点只认那半句标题, **不认前面的序号** —— 2026-11-17 插进「手机应用工坊」之后它从十二变成
+ * 十三, 认序号的写法当场把这一条判红而正文一个字没动
+ */
+const priority = phone.slice(phone.indexOf('手机直连的固定优先级'))
 const order = ['原生 API', 'Intent / deep link', '无障碍树', '虚拟屏', 'unsupported']
 const positions = order.map((word) => priority.indexOf(word))
 
@@ -427,5 +432,212 @@ check.run(
     && /score/i.test(tapTool.description),
   '说明里不写, 模型下一次还是只会重读整屏',
 )
+
+/* ── 七、按完这一下先验一次 (2.8.1 落实表 #32) ───────────────────────────── */
+
+/**
+ * 这一节量的是 `lw_tap` 的**动作效果核对**: 按下前后各读一次树, 比文本集合与目标那一格的位置
+ *
+ * 三条真值三种性格, 都要在不接设备的时候量得到:
+ *   ① 树一动不动 → `effect=unchanged` 且带三个候选 (刚按过的那一格排掉)
+ *   ② 树多了一行   → `effect=changed`, 差额里就是那一行
+ *   ③ `verify:"off"` → 与今天**逐字相同** (一个字都不多, 也没有 effect 那一段)
+ * 外加那一脚刹车: 同一屏连着两下没变之后, 第三下**不发出去** (设备的 tapText 调用数不涨)
+ */
+
+/** 一块"设置"屏: 四行字, 按的是第一行 */
+const SETTINGS_SCREEN = [
+  { className: 'android.widget.TextView', text: '设置', bounds: [40, 300, 900, 380], clickable: true },
+  { className: 'android.widget.TextView', text: '蓝牙', bounds: [40, 400, 900, 480], clickable: true },
+  { className: 'android.widget.TextView', text: '位置信息', bounds: [40, 500, 900, 580], clickable: true },
+  { className: 'android.widget.TextView', text: '设备连接', bounds: [40, 600, 900, 680], clickable: true },
+]
+
+/** 假设备的屏: 这一节按顺序改它, 改完再按一次就是那几种结局 */
+let effectScreen = SETTINGS_SCREEN
+let effectTaps = 0
+
+/** 按下那一拍屏幕会变成什么 (null = 一动不动): 只有"按下之后才变"才算 changed */
+let onPress = null
+
+const effectAnswer = (request) => {
+  if (request.method === 'tapText') {
+    effectTaps += 1
+    const hit = effectScreen.find((node) => node.text === request.text)
+    const answer = {
+      clicked: true,
+      outcome: 'clicked',
+      via: 'a11y',
+      displayId: 0,
+      holdMs: request.holdMs ?? 0,
+      long: false,
+      matches: hit === undefined ? [] : [{ ...hit, target: hit.bounds }],
+    }
+    const change = onPress
+    onPress = null
+    if (typeof change === 'function') change()
+    return answer
+  }
+  if (request.method === 'ui') {
+    return {
+      enabled: true,
+      displayId: 0,
+      label: 'Settings',
+      package: 'com.android.settings',
+      width: 1080,
+      height: 2400,
+      nodes: effectScreen.map((node, depth) => ({ ...node, target: node.bounds, depth })),
+    }
+  }
+  return { displayId: 0, screen: 'on', lines: [] }
+}
+
+const effectChannel = createServer((socket) => {
+  socket.setEncoding('utf8')
+  let buffer = ''
+  socket.on('data', (chunk) => {
+    buffer += chunk
+    const end = buffer.indexOf('\n')
+    if (end < 0) return
+    const request = JSON.parse(buffer.slice(0, end))
+    socket.write(`${JSON.stringify({ ok: true, result: effectAnswer(request) })}\n`)
+  })
+})
+await new Promise((listening) => effectChannel.listen(0, '127.0.0.1', listening))
+process.env.LW_CHANNEL_ENDPOINT = `127.0.0.1:${effectChannel.address().port}`
+process.env.LW_CHANNEL_TOKEN = 'check-phone-actions'
+
+/** 按一下, 顺手把这一次的 stdout 收下来 (读数那一行认它) */
+async function press(args) {
+  const lines = []
+  const keep = console.log
+  try {
+    console.log = (...parts) => { lines.push(parts.join(' ')) }
+    const answer = await tapTool.execute({ note: 'check-phone-actions', ...args })
+    return { answer, logged: lines }
+  } finally {
+    console.log = keep
+  }
+}
+
+/** 答案里 `effect=` 那一段之后的三行候选 */
+const candidatesOf = (answer) => answer.split('\n')
+  .map((line) => /^- "(.+)" at \[(-?\d+,-?\d+,-?\d+,-?\d+)\] score (\d+\.\d+)$/u.exec(line))
+  .filter((hit) => hit !== null)
+  .map((hit) => ({ text: hit[1], bbox: hit[2], score: Number(hit[3]) }))
+
+check.run(
+  '插件: lw_tap 有 verify 参数, 只有 auto / off 两档 (缺省 auto)',
+  JSON.stringify(tapTool?.parameters?.properties?.verify?.enum) === JSON.stringify(['auto', 'off']),
+  `got ${JSON.stringify(tapTool?.parameters?.properties?.verify?.enum)}`,
+)
+check.run(
+  '插件: lw_tap 的说明里念到 effect=unchanged 与那一脚刹车 (两件都不许静默)',
+  typeof tapTool?.description === 'string'
+    && /effect=unchanged/u.test(tapTool.description)
+    && /effect=changed/u.test(tapTool.description)
+    && /reason=effect-missing/u.test(tapTool.description),
+  '说明里不写, 模型读到 unchanged 也不知道该换一条路',
+)
+
+// ① 树一动不动: 按出去的那一刻与回读那一刻屏幕一样
+const still = await press({ text: '设置', displayId: 0 })
+check.run(
+  'lw_tap: 树不变 → effect=unchanged, 并且说了"别按同一个地方"',
+  /effect=unchanged/u.test(still.answer) && /exactly as it was/u.test(still.answer),
+  still.answer.split('\n').slice(-4).join(' / '),
+)
+check.run(
+  'lw_tap: unchanged 时带三个候选, 每项 text / score / bbox, 按分数降序',
+  candidatesOf(still.answer).length === 3
+    && candidatesOf(still.answer).every((item, index) => index === 0
+      || item.score <= candidatesOf(still.answer)[index - 1].score)
+    && candidatesOf(still.answer).every((item) => item.bbox.split(',').length === 4),
+  `got ${JSON.stringify(candidatesOf(still.answer))}`,
+)
+check.run(
+  'lw_tap: 候选里没有刚按过的那一格 (再按同一个地方正是要治的病)',
+  candidatesOf(still.answer).every((item) => item.text !== '设置'),
+  `got ${JSON.stringify(candidatesOf(still.answer).map((item) => item.text))}`,
+)
+check.run(
+  'lw_tap 把核对结果写进日志 (真机 stdout 认这一行)',
+  still.logged.some((line) => line.includes('lw_tap: effect=unchanged candidates=3')),
+  `logged ${JSON.stringify(still.logged)}`,
+)
+
+// ② 树多了一行: 差额里出现的就是那一行 (变化发生在按下那一拍, 不是按之前)
+effectScreen = SETTINGS_SCREEN
+onPress = () => {
+  effectScreen = [...SETTINGS_SCREEN, {
+    className: 'android.widget.TextView', text: '已连接', bounds: [40, 700, 900, 780], clickable: false,
+  }]
+}
+const moved = await press({ text: '设置', displayId: 0 })
+check.run(
+  'lw_tap: 树变一行 → effect=changed, 差额里就是那一行',
+  /effect=changed/u.test(moved.answer)
+    && moved.answer.split('\n').filter((line) => /^ {2}\+ /u.test(line)).length === 1
+    && /^ {2}\+ "已连接"$/mu.test(moved.answer),
+  moved.answer.split('\n').slice(-3).join(' / '),
+)
+
+// ③ verify=off: 与今天逐字相同 (回执一个 effect 字都没有)
+effectScreen = SETTINGS_SCREEN
+const plain = await press({ text: '设置', displayId: 0, verify: 'off' })
+check.run(
+  'lw_tap: verify=off 与今天逐字相同 (一个字都不多)',
+  plain.answer === 'pressed android.widget.TextView "设置" on displayId 0 by its own click action'
+    + ' - "check-phone-actions"',
+  `got ${JSON.stringify(plain.answer)}`,
+)
+check.run(
+  'lw_tap: verify=off 不记那一笔账 (日志里没有 effect=)',
+  plain.logged.every((line) => !line.includes('lw_tap: effect=')),
+  `logged ${JSON.stringify(plain.logged)}`,
+)
+
+// ④ 那一脚刹车: 同一屏连着两下没变, 第三下不发出去
+effectScreen = SETTINGS_SCREEN
+onPress = null
+const tapsBefore = effectTaps
+const first = await press({ text: '设置', displayId: 0 })
+const second = await press({ text: '设置', displayId: 0 })
+const third = await press({ text: '设置', displayId: 0 })
+check.run(
+  'lw_tap: 连着两下 unchanged 之后第三下不发 (设备那一侧 tapText 调用数只涨 2)',
+  effectTaps - tapsBefore === 2
+    && /effect=unchanged/u.test(first.answer)
+    && /effect=unchanged/u.test(second.answer),
+  `got ${effectTaps - tapsBefore} press(es)`,
+)
+check.run(
+  'lw_tap: 第三下回 reason=effect-missing, 并给出换一条路的那三个候选',
+  /reason=effect-missing/u.test(third.answer)
+    && /not pressed/u.test(third.answer)
+    && candidatesOf(third.answer).length === 3,
+  third.answer.split('\n').slice(0, 2).join(' / '),
+)
+check.run(
+  'lw_tap: 屏真的变了就放行 (刹车不会把一场探索关死)',
+  await (async () => {
+    // 屏幕先换一屏 (应用自己更新了), 再按下时又变了一次
+    effectScreen = [...SETTINGS_SCREEN, {
+      className: 'android.widget.TextView', text: '好了', bounds: [40, 800, 900, 880], clickable: true,
+    }]
+    onPress = () => {
+      effectScreen = [...effectScreen, {
+        className: 'android.widget.TextView', text: '已同步', bounds: [40, 900, 900, 980], clickable: false,
+      }]
+    }
+    const answer = await press({ text: '设置', displayId: 0 })
+    return /effect=changed/u.test(answer.answer) && !/reason=effect-missing/u.test(answer.answer)
+  })(),
+  '屏幕换了一屏之后, 下一次按就照常发出去并核对',
+)
+
+effectChannel.close()
+delete process.env.LW_CHANNEL_ENDPOINT
+delete process.env.LW_CHANNEL_TOKEN
 
 if (!check.done()) process.exit(1)

@@ -72,18 +72,26 @@ const section = host.slice(start, end)
  */
 const EVENT_BEFORE_DEFAULT = 15
 
+/**
+ * 点按效果那两样也在那一段外面 (落实表 #32: 账与"连着几条算停"写在点按那一层), 同样手递
+ *
+ * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ */
+const TAP_EFFECT_STREAK = 2
+
 const api = new Function(
   'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm',
-  'ROUTER_EVENT_BEFORE_DEFAULT',
+  'ROUTER_EVENT_BEFORE_DEFAULT', 'TAP_EFFECT_STREAK', 'tapEffectLog',
   `${section}\nreturn { exploreBudget, exploreClamp, exploreSummaryName, exploreStartLine,`
     + ' exploreCheckRow, EXPLORE_CARD_TAIL,'
     + ' EXPLORE_MINUTES_DEFAULT, EXPLORE_MINUTES_RANGE,'
     + ' EXPLORE_STEPS_DEFAULT, EXPLORE_STEPS_RANGE, EXPLORE_SUMMARY_CHARS,'
     + ' EXPLORE_SUMMARIES_KEPT, EXPLORE_TICK_MS, EXPLORE_WORKSPACE_NAME,'
-    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE }',
+    + ' EXPLORE_PRESET, EXPLORE_TASK_FILE, EXPLORE_TASK_CHARS, EXPLORE_STATE_FILE,'
+    + ' EXPLORE_EFFECTS_KEPT, exploreEffectsFor, exploreEffectReason }',
 )(
   () => '', async () => [], () => '', () => '', async () => {}, async () => {}, async () => {},
-  async () => {}, EVENT_BEFORE_DEFAULT,
+  async () => {}, EVENT_BEFORE_DEFAULT, TAP_EFFECT_STREAK, [],
 )
 
 check('event 缺省 15 分钟, 这一侧与宿主那一个数一致', [
@@ -1040,12 +1048,12 @@ process.env.DSH_HOME = checksHome
 function checksBook() {
   return new Function(
     'readFile', 'readdir', 'join', 'dirname', 'mkdir', 'writeFile', 'rename', 'rm', 'temporaryName',
-    'ROUTER_EVENT_BEFORE_DEFAULT',
+    'ROUTER_EVENT_BEFORE_DEFAULT', 'TAP_EFFECT_STREAK', 'tapEffectLog',
     `${section}\nreturn { exploreRecordChecks, exploreFinishFromRecord, exploreStateRestore,`
       + ' streakOf: () => exploreChecksStreak, lastFinishOf: () => exploreLastFinish }',
   )(
     readFile, readdir, join, dirname, mkdir, writeFile, rename, rm,
-    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT,
+    (path) => `${path}.check.tmp`, EVENT_BEFORE_DEFAULT, TAP_EFFECT_STREAK, [],
   )
 }
 
@@ -1089,6 +1097,155 @@ check('那一笔读数形状不对就当没有 (设置页少一行, 不显示编
 await rm(checksHome, { recursive: true, force: true })
 if (previousChecksHome === undefined) delete process.env.DSH_HOME
 else process.env.DSH_HOME = previousChecksHome
+
+/* ── 八、按完先验一次: 连着两下没变就停 (2.8.1 落实表 #32) ───────────────── */
+
+/**
+ * 点按效果那一小段在探索那一段外面 (`lw_tap` 那一侧): 抽出来真跑, 不复制第二份
+ *
+ * 只递它真正用到的那几个名字 —— `call` / `withTimeout` 在这里一次都不会被调到 (它们只服务真按下去
+ * 的那条路), `closestReadLines` 给一个同形状的替身 (真正的打分由 `check-phone-actions` 端到端量)
+ */
+const effectStart = host.indexOf('/* ── 按完这一下先验一次')
+const effectEnd = host.indexOf('/** A report a model can read, with the structured answer kept underneath it */')
+if (effectStart < 0 || effectEnd < 0 || effectEnd < effectStart) {
+  throw new Error('the tap effect section is not in host-plugin/index.mjs')
+}
+const tapApi = new Function(
+  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect',
+  `${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
+    + ' TAP_EFFECT_WAIT_MS, tapEffectFingerprint, tapEffectOf, tapEffectTail, tapEffectStreak,'
+    + ' tapEffectBrake, formatTapEffect }',
+)(
+  async () => null,
+  (promise) => promise,
+  (lines, _wanted, limit) => lines.slice(0, limit).map((line) => ({
+    text: line.text, score: 1, bbox: line.box,
+  })),
+  3,
+  (left, right) => JSON.stringify(left) === JSON.stringify(right),
+)
+
+check('两处那个"连着几条算停"是同一个数 (2)', [
+  tapApi.TAP_EFFECT_STREAK,
+  new RegExp(`const TAP_EFFECT_STREAK = ${TAP_EFFECT_STREAK}\\b`, 'u').test(host),
+], [TAP_EFFECT_STREAK, true])
+
+/** 一块屏的快照 (与 `tapEffectSnapshot` 同一个形状), 只给得出字的那几格 */
+const screenOf = (labels) => ({
+  displayId: 0,
+  label: 'Settings',
+  nodes: labels.map((label, index) => ({
+    label,
+    bounds: [40, 300 + index * 100, 900, 380 + index * 100],
+  })),
+  texts: [...labels],
+})
+
+/**
+ * 与 `lw_tap` 同一个次序走三步: 先读一次树 → 看刹车 → 决定发不发 → 记一条
+ *
+ * 屏幕一动不动, 于是三下都是 unchanged: 前两下发出去, 第三下被拦在原地
+ */
+const runPresses = (howMany) => {
+  const log = []
+  const screen = screenOf(['设置', '蓝牙', '位置信息', '设备连接'])
+  const sent = []
+  let blocked = null
+  for (let step = 1; step <= howMany; step += 1) {
+    const brake = tapApi.tapEffectBrake(log, 'explore-1', screen, '设置')
+    if (brake !== null) {
+      sent.push(false)
+      blocked = brake
+      continue
+    }
+    sent.push(true)
+    log.push({
+      step,
+      effect: 'unchanged',
+      displayId: 0,
+      at: 0,
+      fingerprint: tapApi.tapEffectFingerprint(screen),
+      session: 'explore-1',
+    })
+  }
+  return { sent, blocked, log }
+}
+
+const pressed = runPresses(3)
+check('连着两下 unchanged 之后第三次 tap 一次都不发 (发出去的是前两下)', pressed.sent, [true, true, false])
+check('第三次被拦下来时报 reason=effect-missing', pressed.blocked?.reason, 'effect-missing')
+check('拦下来那一下给三个候选 (text / score / bbox)', [
+  pressed.blocked?.candidates.length,
+  pressed.blocked?.candidates.every((one) => typeof one.text === 'string'
+    && typeof one.score === 'number'
+    && Array.isArray(one.bbox) && one.bbox.length === 4),
+], [3, true])
+check('候选里没有刚按过的那一格', pressed.blocked?.candidates.map((one) => one.text).includes('设置'), false)
+
+check('中间有一条 changed 就重新算 (不让刹车越界到下一屏)', (() => {
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: 'f', session: 'explore-1' },
+    { effect: 'changed', displayId: 0, fingerprint: '', session: 'explore-1' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', screenOf(['设置', '蓝牙']), '设置')
+})(), null)
+check('别的会话 (或别的屏) 的账不算到这一场上', (() => {
+  const screen = screenOf(['设置', '蓝牙'])
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(screen), session: 'someone-else' },
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(screen), session: 'someone-else' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', screen, '设置')
+})(), null)
+check('屏真的变了就放行 (指纹对不上就不拦)', (() => {
+  const before = screenOf(['设置', '蓝牙'])
+  const now = screenOf(['设置', '蓝牙', '位置信息'])
+  const log = [
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(before), session: 'explore-1' },
+    { effect: 'unchanged', displayId: 0, fingerprint: tapApi.tapEffectFingerprint(before), session: 'explore-1' },
+  ]
+  return tapApi.tapEffectBrake(log, 'explore-1', now, '设置')
+})(), null)
+
+check('两棵树一样时判 unchanged, 差一行时判 changed 并只列那一行', [
+  tapApi.tapEffectOf(screenOf(['设置', '蓝牙']), screenOf(['设置', '蓝牙']), '设置'),
+  tapApi.tapEffectOf(screenOf(['设置', '蓝牙']), screenOf(['设置', '蓝牙', '已连接']), '设置'),
+  tapApi.formatTapEffect('changed', screenOf(['设置']), screenOf(['设置', '已连接'])).split('\n'),
+], [
+  'unchanged',
+  'changed',
+  ['effect=changed: the screen answered the press', '  + "已连接"'],
+])
+check('有一份读不到时判 unknown (不把"核不了"说成"没变")', [
+  tapApi.tapEffectOf(null, screenOf(['设置']), '设置'),
+  tapApi.tapEffectOf(screenOf(['设置']), null, '设置'),
+  /effect=unknown/u.test(tapApi.formatTapEffect('unknown', null, null, [])),
+], ['unknown', 'unknown', true])
+
+check('exploreEffectReason: 连着两条 unchanged 报 effect-missing', [
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'changed' }]),
+  api.exploreEffectReason([]),
+], ['effect-missing', '', ''])
+check('exploreEffectsFor 只挑这一场, 别的会话点的不算', [
+  api.exploreEffectsFor([
+    { session: 'a', effect: 'unchanged' },
+    { session: 'b', effect: 'unchanged' },
+    { session: 'a', effect: 'changed' },
+  ], 'a'),
+  api.exploreEffectsFor([{ session: 'a' }], ''),
+], [[{ session: 'a', effect: 'unchanged' }, { session: 'a', effect: 'changed' }], []])
+check('status 的 `effects` 只留最近 20 条', [
+  api.EXPLORE_EFFECTS_KEPT,
+  api.exploreEffectsFor(Array.from({ length: 25 }, (_, index) => ({ session: 'a', step: index })), 'a').length,
+], [20, 20])
+
+check('lw_explore op=status 里带 effects 与 reason (读数与文本两处都在)', [
+  /effects,\n {4}effectReason: exploreEffectReason\(effects\)/u.test(host),
+  /press effects: \$\{readings\.effects\.length\} recorded this run/u.test(host),
+  /reason=\$\{readings\.effectReason\}/u.test(host),
+], [true, true, true])
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */
 
