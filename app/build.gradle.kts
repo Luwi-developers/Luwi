@@ -360,8 +360,11 @@ android {
         // 问答工具不挂 / 取消选图不报错 / 头像与背景都过裁剪窗 (双指放大缩小, 没有固定像素档)。
         // **签名不动** (仍是那把旧 debug key), 于是 2.7.10 与 r3 都能直接覆盖安装, 会话与凭据都不丢;
         // 彻底换签名留到 2.8.1
-        versionCode = 20
-        versionName = "2.8.0"
+        // 2.8.1 (2026-11-21): 整合线 `agent/2.8.1-all` 的第一版 —— 门户发送看得见结果 (#33)、
+        // 唤醒开场句主动找话题 (#31)、拖文件进输入区 (#34)、终端=手机管电脑 (#48)、排期场并入探索 (#49),
+        // 加上 dsh 那条 refusal 停止原因不再报成协议错误; 先抬版本号, 与已装的 2.8.0 区分得开
+        versionCode = 21
+        versionName = "2.8.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

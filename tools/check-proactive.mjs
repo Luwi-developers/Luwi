@@ -48,6 +48,7 @@ const schedule = await read('app/src/main/java/io/github/yuloong07star/luwi/tool
 const gateKotlin = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveGate.kt')
 const engine = await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationEngine.kt')
 const exploreSchedule = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/ExploreSchedule.kt')
+const quietHours = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/QuietHours.kt')
 const inbox = await read('app/src/main/java/io/github/yuloong07star/luwi/voice/VoiceInbox.kt')
 const service = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
 const manifest = await read('app/src/main/AndroidManifest.xml')
@@ -73,7 +74,10 @@ const api = new Function(
     + ' PROACTIVE_ACTING_REMIND, PROACTIVE_ACTING_ACT, PROACTIVE_ACTING_FULL,'
     + ' PROACTIVE_ACTING_TIERS, PROACTIVE_ACTING_CACHE_MS, PROACTIVE_AUDIT_FILE,'
     + ' PROACTIVE_STATE_FILE, PROACTIVE_WORKSPACE_NAME, PROACTIVE_START_MARK,'
-    + ' PROACTIVE_ASK_DEFAULT, PROACTIVE_BANNED_OPENERS, PROACTIVE_START_VOICE }',
+    + ' PROACTIVE_ASK_DEFAULT, PROACTIVE_BANNED_OPENERS, PROACTIVE_START_VOICE,'
+    + ' proactiveSnapshotBlock, snapshotText, snapshotClock, snapshotMessageText,'
+    + ' PROACTIVE_SNAPSHOT_ROWS, PROACTIVE_SNAPSHOT_MAX_CHARS, PROACTIVE_SNAPSHOT_HEAD,'
+    + ' PROACTIVE_SNAPSHOT_TAIL, PROACTIVE_SNAPSHOT_DIR }',
 )(
   () => '', async () => [], join, () => '', async () => {}, async () => {}, async () => {}, async () => {},
   readFileSync, statSync, appendFile,
@@ -140,7 +144,8 @@ check('精确档拿不到时退 setAndAllowWhileIdle (与另外两个闹钟同�
   /setExactAndAllowWhileIdle/u.test(schedule),
   /setAndAllowWhileIdle/u.test(schedule),
 ], [true, true])
-check('宿主服务起来就排上 (关着就撤)', /ProactiveSchedule\.ensure\(this\)/u.test(service), true)
+// 2026-11-21: 按时间的排期场已撤 —— 宿主服务起来不再排那个闹钟, 主动开口改由判断层挑时机
+check('排期闹钟不再注册 (主动开口改由判断层挑时机)', /ProactiveSchedule\.ensure\(this\)/u.test(service), false)
 check('清单里那个接收器 exported=false', new RegExp(
   '<receiver\\s+android:name="\\.tool\\.ProactiveAlarmReceiver"\\s+android:exported="false"\\s*/>',
 ).test(manifest), true)
@@ -186,11 +191,14 @@ check('静默时段保留在排期那一侧, 到点先看它再看宿主 (B4-b �
   schedule.indexOf('val quiet = quietWhy') < schedule.indexOf('ExploreSchedule.wakeHost(context, onStarted = release)'),
 ], [true, true, true])
 
-check('静默窗口读的是自动指令那一份设置 (缺省 23:00-07:00, 同一个解析器)', [
-  /AutomationStore\.settings\(context\)/u.test(schedule),
-  /PowerWindow\.parse\(it\)/u.test(schedule),
-  /PowerWindow\.inside\(PowerWindow\.minutesOfDay\(now, zone\), parsed\)/u.test(schedule),
-], [true, true, true])
+// 2026-11-20: 静默只剩一份真源 (`automations/settings.json`), 解析搬进 `QuietHours` —— 到点那一场
+// 与判断层、自动指令读的是同一个接口, 这里钉的是"schedule 走它, 解析器只有一处"
+check('静默窗口走统一接口 (QuietHours, 缺省 23:00-07:00, 同一个解析器)', [
+  /QuietHours\.why\(context, now, zone\)/u.test(schedule),
+  /AutomationStore\.settings\(context\)/u.test(quietHours),
+  /PowerWindow\.parse\(it\)/u.test(quietHours),
+  /PowerWindow\.inside\(PowerWindow\.minutesOfDay\(now, zone\), parsed\)/u.test(quietHours),
+], [true, true, true, true])
 
 check('30 分钟闸挡住时也记 skipped 与那一句读数', [
   /ProactiveGate\.blockedReason\(lastSpoken, now\)/u.test(schedule),
@@ -208,7 +216,38 @@ check('收件箱那条 `source:proactive` 支排在命令表之前', [
   host.indexOf("line.source === 'proactive'") > 0,
   host.indexOf("line.source === 'proactive'") < host.indexOf('const automated = line.source'),
 ], [true, true])
-check('那一条支走 startProactive, 不碰命令表', /if \(line\.source === 'proactive'\) \{\s*return startProactive\(ctx, \{ text: line\.text, via: 'inbox' \}\)/u.test(host), true)
+// 2026-11-21: 排期场撤了 —— 老 `source:proactive` 行只是丢掉, 不再 startProactive
+check('那条支只丢弃老行, 不再走 startProactive', [
+  /if \(line\.source === 'proactive'\) \{\s*return \{ skipped: true/u.test(host),
+  /if \(line\.source === 'proactive'\) \{\s*return startProactive/u.test(host),
+], [true, false])
+
+/* ── 二·五、2026-11-21: 判断层开口双发 + 探索收尾顺带说 ───────────────── */
+
+const routerTickBody = host.slice(
+  host.indexOf('async function routerTick(ctx)'),
+  host.indexOf('/* ── 点「唤醒一下」那一下'),
+)
+check('判断层开口在场写 lw/out (门户+浮标同一份), 不再只发球的 reportSay', [
+  /if \(inBall\) \{[\s\S]{0,300}lwOutAppend\(voiceDelivery\.current, \{ kind: 'text', text: line \}\)/u.test(routerTickBody),
+  /reportSay\(line\)/u.test(routerTickBody),
+], [true, false])
+check('球不在场时开一场只按步数的探索, 收尾顺带说那句', [
+  /await startExplore\(ctx, \{ via: 'router', speakOnFinish: line \|\| opening \}\)/u.test(routerTickBody),
+], [true])
+const finishBody = host.slice(
+  host.indexOf('async function finishExplore('),
+  host.indexOf('/** 这一档现在什么样 (给 `lw_explore op=status`) */'),
+)
+check('探索收尾把判断层挑的那句写进本场 lw/out', [
+  /const speak = exploreRun\.speakOnFinish/u.test(finishBody),
+  /lwOutAppend\(finishing, \{ kind: 'text', text: speak \}\)/u.test(finishBody),
+], [true, true])
+check('speakOnFinish 跟着 run 落盘 / 恢复 / 复位', [
+  /exploreRun\.speakOnFinish = typeof options\?\.speakOnFinish === 'string'/u.test(host),
+  /exploreRun\.speakOnFinish = typeof run\.speakOnFinish === 'string'/u.test(host),
+  /exploreRun\.speakOnFinish = ''/u.test(host),
+], [true, true, true])
 
 /* ── 三、主动场固定新开 ───────────────────────────────────────────────── */
 
@@ -257,6 +296,77 @@ check('卡是空的时候也有一段缺省正文', (() => {
   return [line.includes('最新探索摘要'), line.includes('还没有')]
 })(), [true, true])
 
+/* ── 本次消息快照 (2.8.1 #36, 2026-11-20) ─────────────────────────────── */
+
+const SNAP_BASE = 1_700_000_000_000
+const SNAP_ROWS = Array.from({ length: 25 }, (_, index) => ({
+  at: SNAP_BASE + index * 60_000,
+  who: index % 2 === 0 ? 'he' : 'her',
+  text: `第 ${index + 1} 句`,
+}))
+const snapBlock = api.proactiveSnapshotBlock(SNAP_ROWS)
+
+check('快照: 头一行是那句固定话 + 段尾有隐私闸', [
+  snapBlock.split('\n')[0],
+  snapBlock.includes(api.PROACTIVE_SNAPSHOT_TAIL),
+], [api.PROACTIVE_SNAPSHOT_HEAD, true])
+check('快照: 最多 20 条, 由新到旧 (第 1 行是最新那句)', (() => {
+  const lines = snapBlock.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length, lines[0].includes('第 25 句'), lines[19].includes('第 6 句')]
+})(), [20, true, true])
+check('快照: 单条超过 200 字截断, 且不影响别人', (() => {
+  const long = api.proactiveSnapshotBlock([
+    { at: SNAP_BASE, who: 'he', text: 'x'.repeat(500) },
+    { at: SNAP_BASE + 1, who: 'her', text: '短句' },
+  ])
+  const lines = long.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length, lines[1].includes('…'), lines[1].length < 260, lines[0].includes('短句')]
+})(), [2, true, true, true])
+check('快照: 没有行 / 全是空白时整段回空串 (不留空标题)', [
+  api.proactiveSnapshotBlock([]),
+  api.proactiveSnapshotBlock([{ at: 0, who: 'he', text: '   ' }]),
+  api.proactiveSnapshotBlock(null),
+], ['', '', ''])
+check('快照: 预算从最新那条往回累加, 超了丢最旧', (() => {
+  const capped = api.proactiveSnapshotBlock(SNAP_ROWS, { maxChars: 200 })
+  const lines = capped.split('\n').filter((one) => /^\d+\. /u.test(one))
+  return [lines.length < 20, lines[0].includes('第 25 句')]
+})(), [true, true])
+check('快照: 附件那一段带工作区路径 (.lw-snapshot/<id>/<名字>)', (() => {
+  const block = api.proactiveSnapshotBlock([
+    { at: SNAP_BASE, who: 'her', text: '', marks: [`图 ${api.PROACTIVE_SNAPSHOT_DIR}/20261120-ab12cd/1-a.jpg`] },
+  ])
+  return [block.includes(`[图 ${api.PROACTIVE_SNAPSHOT_DIR}/`), block.includes('1-a.jpg')]
+})(), [true, true])
+check('快照: 一条消息里的正文 (parts / 字符串 / 只有图) 都认得', [
+  api.snapshotMessageText({ content: [{ type: 'text', text: '你好' }] }),
+  api.snapshotMessageText({ content: '直接是字符串' }),
+  api.snapshotMessageText({ content: [{ type: 'image' }] }),
+  api.snapshotMessageText({ content: [] }),
+], ['你好', '直接是字符串', '[图 1 张]', ''])
+check('开场正文: 带快照时那一整段在里面', api.proactiveStartLine(
+  '看看今天', '/x.md', 'remind', snapBlock,
+).includes(api.PROACTIVE_SNAPSHOT_HEAD), true)
+check('开场正文: 不带快照时一个字节不多 (2 参 / 3 参 / 空串)', [
+  api.proactiveStartLine('看看今天', '/x.md').includes('本次消息快照'),
+  api.proactiveStartLine('看看今天', '/x.md', 'remind').includes('本次消息快照'),
+  api.proactiveStartLine('看看今天', '/x.md', 'remind', '').includes('本次消息快照'),
+], [false, false, false])
+check('开场正文: 快照排在权限那一段前面 (先看对话再读档位)', (() => {
+  const line = api.proactiveStartLine('看看今天', '/x.md', 'remind', snapBlock)
+  return [line.indexOf(api.PROACTIVE_SNAPSHOT_HEAD) < line.indexOf('这一场只提醒')]
+})(), [true])
+check('startProactive 里真的接上了快照 (buildPortalSnapshot -> 开场正文)', [
+  /await buildPortalSnapshot\(ctx, workspace\?\.path/u.test(startBody),
+  // 2026-11-20 (方案 §7.3): 第 5 参是那一场的状态 / 策略 / 记着的事 —— 空串时整块不出现
+  /proactiveStartLine\(options\?\.text, summaryPath, acting, snapshot, mood\?\.block \?\? ''\)/u.test(startBody),
+  /the portal snapshot was not built/u.test(startBody),
+], [true, true, true])
+check('startProactive 里那一场先算状态, 再把整段交给开场正文 (方案 §7.3)', [
+  /await affectSnapshotNow\(\{ cue: String\(options\?\.text \?\? ''\)\.trim\(\) \}\)/u.test(startBody),
+  /the affect block was not built/u.test(startBody),
+], [true, true])
+
 /* ── 四、三张表 × 三档的硬闸 (2026-11-10) ────────────────────────────── */
 
 check('startProactive 里没有一条建屏 / 选屏的路', [
@@ -272,11 +382,16 @@ check('旧名字 (proactiveScreenGate) 还留着, 不引新代码去挂它', [
 ], [true, false])
 check('三张表都在 (A 屏 / B 写动 / C 命令)', [
   api.PROACTIVE_SCREEN_DENIED.size,
-  api.PROACTIVE_ACT_TABLE.size, // 23 + lw_persona (2026-11-10) = 24
+  // 23 + lw_persona (2026-11-10) + lw_forge (2.8.1 工坊) + lw_memory (2026-11-20 方案 §6.2) = 26
+  api.PROACTIVE_ACT_TABLE.size,
   api.PROACTIVE_COMMAND_DENIED.has('lw_linux'),
   api.PROACTIVE_COMMAND_DENIED.has('bash'),
   api.PROACTIVE_COMMAND_DENIED.has('pwsh'),
-], [21, 24, true, true, true])
+], [21, 26, true, true, true])
+check('lw_memory 只放读那一面 (缺省那一档只能想, 不能记)', [
+  api.PROACTIVE_ACT_TABLE.has('lw_memory'),
+  [...(api.PROACTIVE_ACT_TABLE.get('lw_memory') ?? [])].sort(),
+], [true, ['list', 'status']])
 check('三档字面量与设置页 / SimSetting 同一套', [
   api.PROACTIVE_ACTING_REMIND, api.PROACTIVE_ACTING_ACT, api.PROACTIVE_ACTING_FULL,
   api.PROACTIVE_ACTING_CACHE_MS,

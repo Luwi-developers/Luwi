@@ -73,9 +73,10 @@ const section = host.slice(start, end)
 const EVENT_BEFORE_DEFAULT = 15
 
 /**
- * 点按效果那两样也在那一段外面 (落实表 #32: 账与"连着几条算停"写在点按那一层), 同样手递
+ * 点按效果那几样也在那一段外面 (落实表 #32 / #37: 账与"连着几条算停"写在点按那一层), 同样手递
  *
- * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发".
+ * #37 起它数的是连着几条 `recover=giveup` (不再是 unchanged), 刹车那一档仍数 unchanged
  */
 const TAP_EFFECT_STREAK = 2
 
@@ -328,7 +329,7 @@ check('工具说明里写清"宿主自己按排期开, 这条工具不开"', [
   toolFace.includes('never starts one') || toolFace.includes('never starts'),
   toolFace.includes('daily start time'),
 ], [true, true])
-check('工具数的下限抬到 66', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 66)
+check('工具数的下限抬到 67 (2.8.1 #45 加了 lw_memory)', Number(/(?:const FLOOR = )(\d+)/.exec(await read('tools/check-host-plugin.mjs'))[1]), 67)
 
 /* ── 八、文件与键名 ───────────────────────────────────────────────────── */
 
@@ -533,22 +534,18 @@ check('投出去之后按会话锁 (熄屏 CPU 不 suspend, 那一场才跑得�
   /current\.minutes \* 60_000L \+ LwSessionLock\.SLACK_MS/.test(schedule),
 ], [true, true, true, true, true])
 
-check('心跳里自愈 + 收尾放锁 (闹钟丢了自己补排, 一场跑完就放手)', [
-  /fun ensureIfStale\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
-  /if \(armedAt == next\) return/.test(schedule),
+// 2026-11-21: 探索不再按时间自愈/补跑闹钟 (改由判断层挑时机), 心跳只留会话锁收尾
+check('心跳只收尾会话锁, 不再自愈/补排探索闹钟', [
   /ExploreSchedule\.ensureIfStale\(context, now\)/.test(engine),
-  /LwSessionLock\.reconcile\(/.test(engine),
-], [true, true, true, true])
-
-check('错过那一场能补跑 (八小时窗口, last 之后没跑过才算漏)', [
-  /const val CATCH_UP_WINDOW_MS = 8 \* 60 \* 60_000L/.test(schedule),
-  /fun catchUpLateMs\(/.test(schedule),
-  /if \(lastAt >= dueAt\) return null/.test(schedule),
-  /lateMs\?\.let \{ "补跑/.test(schedule),
-  // 补跑挂在心跳上: 漏掉的那一次不会再有闹钟来叫 (只写在 fire 里等于永远轮不到)
-  /fun ensureCatchUp\(context: Context, now: Long = System\.currentTimeMillis\(\)\)/.test(schedule),
   /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
-], [true, true, true, true, true, true])
+  /LwSessionLock\.reconcile\(/.test(engine),
+], [false, false, true])
+
+// 2026-11-21: 补跑那套纯函数留着不删 (死代码无害), 但不再挂心跳 —— 没有闹钟要补了
+check('错过那一场不再补跑 (探索改由判断层触发, 没有固定闹钟)', [
+  /ExploreSchedule\.ensureCatchUp\(context, now\)/.test(engine),
+  /ExploreSchedule\.ensure\(this\)/.test(engine),
+], [false, false])
 
 check('宿主停掉时把会话锁放掉 (onTaskRemoved 顺手校一遍两个闹钟)', [
   /LwSessionLock\.releaseAll\(\)/.test(service),
@@ -559,22 +556,25 @@ check('接收器在清单里且 exported=false', [
   /<receiver\s+android:name="\.tool\.ExploreAlarmReceiver"\s+android:exported="false" \/>/u.test(manifest),
 ], [true])
 
-check('宿主起来时两个 ensure 都调', [
+// 2026-11-21: 探索不再按时间排闹钟 —— 宿主起来只 ensure 任务卡, 不再 ensure 探索闹钟
+check('宿主起来只 ensure 探索任务卡, 不再排探索/主动对话闹钟', [
   /ExploreTask\.ensure\(this\)/.test(service),
   /ExploreSchedule\.ensure\(this\)/.test(service),
-], [true, true])
+  /ProactiveSchedule\.ensure\(this\)/.test(service),
+], [true, false, false])
 
-check('设置页那段: 开关 / 时刻 / 卡 / 读数, 没有手动开始, 也不再挂每日上限 (2026-11-07 起这一段并进「活动」)', [
+check('设置页那段: 开关 / 卡 / 读数, 不再有时刻 / 分钟 / 手动开始 (2026-11-21 改由判断层触发)', [
   /settingsSection\(\s*key = "activity"/u.test(screen),
   screen.includes('R.string.settings_explore_toggle'),
-  screen.includes('R.string.settings_explore_at'),
+  screen.includes('R.string.settings_explore_by_router'),
   screen.includes('R.string.settings_explore_card'),
   screen.includes('ExploreSchedule.save('),
   screen.includes('ExploreTask.write('),
+  !screen.includes('R.string.settings_explore_at'),
+  !screen.includes('R.string.settings_explore_minutes'),
   !screen.includes('settings_explore_start'),
-  !screen.includes('settings_explore_said_title'),
   !screen.includes('saidLimit'),
-], [true, true, true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true, true, true])
 
 check('构建把初始卡拷进 assets', (await read('app/build.gradle.kts')).includes('projectDirectory.file("explore-card.md")'), true)
 
@@ -639,18 +639,22 @@ check('老行没有这两个键时仍落 30 / 60', [
 
 const exploreItems = screen.slice(
   screen.indexOf('fun ExploreItems()'),
-  screen.indexOf('private fun ExploreTimeDialog'),
+  screen.indexOf('private fun ExploreCardDialog'),
 )
-check('设置页那两条在 (分钟用滑块 / 步数用档位), 仍然没有手动开始', [
-  exploreItems.includes('R.string.settings_explore_minutes'),
+// 2026-11-21: 预算只留步数 (时间那一路撤了), 没有时刻 / 分钟 / 手动开始
+check('设置页只剩步数那一条 (分钟/时刻已撤), 仍然没有手动开始', [
+  !exploreItems.includes('R.string.settings_explore_minutes'),
   exploreItems.includes('R.string.settings_explore_steps'),
   exploreItems.includes('ArrowSlider('),
   exploreItems.includes('ExploreSchedule.clamp('),
-  exploreItems.includes('plan.copy(minutes ='),
   exploreItems.includes('plan.copy(steps ='),
+  !exploreItems.includes('plan.copy(minutes ='),
   !exploreItems.includes('settings_explore_start'),
 ], [true, true, true, true, true, true, true])
-check('段首那句读数带上预算 (分 / 步)', screen.includes('R.string.settings_explore_budget'), true)
+check('段首那句读数改成判断层触发, 不再带分/步预算那句', [
+  screen.includes('R.string.settings_explore_by_router'),
+  !screen.includes('R.string.settings_explore_budget'),
+], [true, true])
 
 /* ── 十四、工作区与读数 (2.7.9 T5) ─────────────────────────────────────── */
 
@@ -1111,19 +1115,24 @@ const effectEnd = host.indexOf('/** A report a model can read, with the structur
 if (effectStart < 0 || effectEnd < 0 || effectEnd < effectStart) {
   throw new Error('the tap effect section is not in host-plugin/index.mjs')
 }
+/** 这一节假设备的树 (`call('ui')` 答的那一份): 换 `tapUiAnswer` 就是换一屏 */
+let tapUiAnswer = null
+
 const tapApi = new Function(
-  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect',
+  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect', 'squashText',
   `${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
-    + ' TAP_EFFECT_WAIT_MS, tapEffectFingerprint, tapEffectOf, tapEffectTail, tapEffectStreak,'
-    + ' tapEffectBrake, formatTapEffect }',
+    + ' TAP_EFFECT_WAIT_MS, TAP_MIN_SIDE, TAP_SCORE_GAP, tapEffectSnapshot, tapEffectFingerprint,'
+    + ' tapEffectOf, tapEffectTail, tapEffectStreak, tapEffectBrake, formatTapEffect,'
+    + ' tapNameMatches, tapPrecheckGeometry, tapPrecheck, tapAnchorMismatch, tapEffectRecover }',
 )(
-  async () => null,
+  async () => tapUiAnswer,
   (promise) => promise,
   (lines, _wanted, limit) => lines.slice(0, limit).map((line) => ({
     text: line.text, score: 1, bbox: line.box,
   })),
   3,
   (left, right) => JSON.stringify(left) === JSON.stringify(right),
+  (value) => String(value ?? '').toLowerCase().replace(/\s+/gu, ''),
 )
 
 check('两处那个"连着几条算停"是同一个数 (2)', [
@@ -1223,11 +1232,127 @@ check('有一份读不到时判 unknown (不把"核不了"说成"没变")', [
   /effect=unknown/u.test(tapApi.formatTapEffect('unknown', null, null, [])),
 ], ['unknown', 'unknown', true])
 
-check('exploreEffectReason: 连着两条 unchanged 报 effect-missing', [
-  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
-  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'changed' }]),
+/* ── 九、按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ───────────────── */
+
+/**
+ * 三道前置校验与三档恢复都是纯函数 (恢复只多读一次树), 所以在这一侧也能量, 不必起设备
+ *
+ * 端到端那一份 (触摸次数 = 0 / 1) 在 `check-phone-actions` 第八节
+ */
+const SETTINGS_TREE = [
+  { text: '设置', bounds: [40, 300, 900, 380] },
+  { text: '蓝牙', bounds: [40, 400, 900, 480] },
+]
+const uiTree = (rows) => ({
+  enabled: true,
+  displayId: 0,
+  label: 'Settings',
+  width: 1080,
+  height: 2400,
+  nodes: rows.map((row, depth) => ({ text: row.text, bounds: row.bounds, clickable: true, depth })),
+})
+
+tapUiAnswer = uiTree(SETTINGS_TREE)
+const tapScreen = await tapApi.tapEffectSnapshot(0)
+
+check('前置校验: 名字对得上的子节点被外面那格包住时只算一处', (() => {
+  const nested = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380] },
+      { label: '设置', bounds: [60, 310, 300, 370] },
+    ],
+  }
+  return tapApi.tapNameMatches(nested, '设置').length
+})(), 1)
+
+check('前置校验: 短边 < TAP_MIN_SIDE → small, 整格出屏 → occluded, 正常格放行', [
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 338])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 3000, 900, 3080])?.skip,
+  tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 380]),
+  tapApi.TAP_MIN_SIDE,
+], ['small', 'occluded', null, 48])
+
+check('前置校验: 要按的那一点被另一个能按的控件盖住 → occluded, 并说清是谁', (() => {
+  const covered = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '广告弹窗', bounds: [200, 320, 600, 360], target: [200, 320, 600, 360], clickable: true },
+    ],
+  }
+  const skip = tapApi.tapPrecheck(covered, covered.nodes[0])
+  return [skip?.skip, /广告弹窗/u.test(skip?.why ?? '')]
+})(), ['occluded', true])
+check('前置校验: 同一格里换了个名字 (子节点按下去仍落在那一行) 不算盖住', (() => {
+  const same = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380], target: [40, 300, 900, 380], clickable: true },
+      { label: '存储', bounds: [200, 320, 600, 360], target: [40, 300, 900, 380], clickable: true },
+    ],
+  }
+  return tapApi.tapPrecheck(same, same.nodes[0])
+})(), null)
+
+check('前置校验: expect 对不上时报出点上实测的那个标签, 对得上时放行', [
+  tapApi.tapAnchorMismatch(tapScreen, '蓝牙', 500, 340)?.found,
+  tapApi.tapAnchorMismatch(tapScreen, '设置', 500, 340),
+], ['设置', null])
+
+/** 恢复那一档会读一次树: 把它的 stdout 收起来, 免得三行读数混进判据表里 */
+const quiet = async (run) => {
+  const keep = console.log
+  try {
+    console.log = () => {}
+    return await run()
+  } finally {
+    console.log = keep
+  }
+}
+const recoverOn = async (answer, effect, { wanted = '设置', after = tapScreen } = {}) => {
+  tapUiAnswer = answer
+  return quiet(() => tapApi.tapEffectRecover({
+    before: tapScreen, after, effect, wanted, displayId: 0,
+  }))
+}
+
+const late = await recoverOn(uiTree([...SETTINGS_TREE, { text: '已连接', bounds: [40, 700, 900, 780] }]), 'unchanged')
+check('恢复 ①: 重读那一屏变了 → reread (没有重放那一下)', late.recover, 'reread')
+
+const anchor = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged')
+check('恢复 ②: 屏没变而目标还在 → reanchor, 交回它现在的中心', [
+  anchor.recover,
+  /centre 470,340/u.test(anchor.text),
+], ['reanchor', true])
+
+const blind = await recoverOn(null, 'unknown', { after: null })
+check('恢复 ②b: 重读读不回来 → reanchor 用按之前那一份, 并说清这次没读到', [
+  blind.recover,
+  /could not be read back/u.test(blind.text),
+], ['reanchor', true])
+
+const nowhere = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged', { wanted: '' })
+check('恢复 ③: 屏上哪儿都不是目标 (按在空白处) → giveup', nowhere.recover, 'giveup')
+
+check('lw_tap 的账里带 recover 那一格, 而且三档各有一行 stdout 读数', [
+  /const recovery = await tapEffectRecover\(/u.test(host),
+  /recover: recovery\.recover,/u.test(host),
+  /LwTap: recover=reread/u.test(host) && /LwTap: recover=reanchor/u.test(host)
+    && /LwTap: recover=giveup/u.test(host),
+], [true, true, true])
+
+check('exploreEffectReason: 连着两条 recover=giveup 才停 (2.8.1 落实表 #37)', [
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'giveup' }]),
+  api.exploreEffectReason([{ recover: 'giveup' }, { recover: 'reanchor' }]),
+  api.exploreEffectReason([{ recover: 'reread' }, { recover: 'giveup' }]),
   api.exploreEffectReason([]),
-], ['effect-missing', '', ''])
+], ['giveup', '', '', ''])
+check('exploreEffectReason: 连着两条 unchanged 不再算停 (effect 判定不回归, 停判只认 giveup)', [
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reanchor' },
+    { effect: 'unchanged', recover: 'reanchor' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
+], ['', ''])
 check('exploreEffectsFor 只挑这一场, 别的会话点的不算', [
   api.exploreEffectsFor([
     { session: 'a', effect: 'unchanged' },

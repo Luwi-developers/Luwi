@@ -66,9 +66,12 @@ test('a valid peer section carries defaults for listen, proxy, timeout, poll and
   const spec = resolvePeerSpec({ token: TOKEN, url: 'http://100.64.0.7:3080' })
   assert.deepEqual(spec, {
     enabled: true,
+    // 2026-11-21 终端口径: 没有控制器身份时按"电脑"那一侧算 —— 照旧听、照旧收指令
+    controller: false,
     mode: 'auto',
     listen: true,
-    proxy: true,
+    acceptSend: true,
+    proxy: false,
     token: TOKEN,
     url: 'http://100.64.0.7:3080',
     sendTimeoutMs: 20000,
@@ -83,6 +86,16 @@ test('a valid peer section carries defaults for listen, proxy, timeout, poll and
   assert.equal(narrowed.pollSeconds, 10)
   assert.equal(narrowed.maxShadows, 4)
   assert.equal(narrowed.maxProxies, 8)
+  // 控制器 (手机) 的缺省: 不听、不收指令; 显式写才放开。投影照旧建 (PC -> Luwi 那一条)
+  const controller = resolvePeerSpec({ token: TOKEN }, { controller: true })
+  assert.equal(controller.controller, true)
+  assert.equal(controller.listen, false)
+  assert.equal(controller.acceptSend, false)
+  assert.equal(controller.proxy, true)
+  assert.equal(resolvePeerSpec({ token: TOKEN, acceptSend: true }, { controller: true }).acceptSend, true)
+  // 2026-11-21 单向口径: 电脑那一侧一律不建手机会话的投影 (proxy 恒 false), 收指令照旧
+  assert.equal(resolvePeerSpec({ token: TOKEN, proxy: true }).proxy, false)
+  assert.equal(resolvePeerSpec({ token: TOKEN, acceptSend: true }).acceptSend, true)
 })
 
 // ---------------------------------------------------------------------------

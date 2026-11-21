@@ -5,11 +5,28 @@
 // 或 containment 检查（路径越界 = PATH_UNSAFE 响亮失败，绝不静默）。
 
 import path from 'node:path'
+import os from 'node:os'
 import { FORK_NAME_RE, MIRROR_DIR } from './constants.mjs'
 import { badConfig, pathUnsafe } from './errors.mjs'
 
 /**
- * 解析会话存储根：配置为空时取 $DSH_HOME/sessions；两者皆缺 → 响亮失败。
+ * `$DSH_HOME`; 环境里没有时退 `~/.dsh`。
+ *
+ * 2026-11-21 深夜真机事故: 桌面宿主 (Electron main) 里 `process.env.DSH_HOME` 在插件装载那一刻
+ * **还没设上**, 于是 `resolveSessionRoot` 直接抛"sessionRoot is empty and $DSH_HOME is not set",
+ * 插件在启动那一趟整个停用 —— 侧边栏没有 `luwi终端`、`/luwi-sync/*` 全 404, 而且没人看得见;
+ * 等用户再手动重挂就正常了 (那时 env 已经设好)。dsh 桌面版的 home 恒为 `~/.dsh`, 这一档兜得住
+ * @param {string|undefined} dshHome - 环境里那个值 (测试可注入)。
+ * @returns {string} 绝对路径; 连家目录都拿不到时回 ''。
+ */
+function dshHomeOf(dshHome) {
+  if (typeof dshHome === 'string' && dshHome.length > 0) return dshHome
+  const home = os.homedir()
+  return typeof home === 'string' && home.length > 0 ? path.join(home, '.dsh') : ''
+}
+
+/**
+ * 解析会话存储根：配置为空时取 $DSH_HOME/sessions (缺 $DSH_HOME 退 ~/.dsh/sessions)。
  * 目录是否真实存在由消费方（镜像/状态）处理；这里只做路径层面的解析。
  * @param {string} configured - Config.sessionRoot（'' = 默认）。
  * @param {string|undefined} [dshHome] - 环境 $DSH_HOME（测试注入）。
@@ -19,14 +36,13 @@ export function resolveSessionRoot(configured, dshHome = process.env.DSH_HOME) {
   if (typeof configured === 'string' && configured.length > 0) {
     return path.resolve(configured)
   }
-  if (typeof dshHome === 'string' && dshHome.length > 0) {
-    return path.join(dshHome, 'sessions')
-  }
+  const home = dshHomeOf(dshHome)
+  if (home !== '') return path.join(home, 'sessions')
   throw badConfig('sessionRoot is empty and $DSH_HOME is not set; run under dsh or set sessionRoot explicitly')
 }
 
 /**
- * 解析同步仓库工作树根：配置为空时取 $DSH_HOME/dsh-session-sync/repo。
+ * 解析同步仓库工作树根：配置为空时取 $DSH_HOME/dsh-session-sync/repo (缺 $DSH_HOME 退 ~/.dsh 下同一条)。
  * @param {string} configured - Config.repoDir（'' = 默认）。
  * @param {string|undefined} [dshHome] - 环境 $DSH_HOME（测试注入）。
  * @returns {string} 绝对路径。
@@ -35,9 +51,8 @@ export function resolveRepoDir(configured, dshHome = process.env.DSH_HOME) {
   if (typeof configured === 'string' && configured.length > 0) {
     return path.resolve(configured)
   }
-  if (typeof dshHome === 'string' && dshHome.length > 0) {
-    return path.join(dshHome, 'dsh-session-sync', 'repo')
-  }
+  const home = dshHomeOf(dshHome)
+  if (home !== '') return path.join(home, 'dsh-session-sync', 'repo')
   throw badConfig('repoDir is empty and $DSH_HOME is not set; run under dsh or set repoDir explicitly')
 }
 

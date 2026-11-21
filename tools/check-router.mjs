@@ -1016,5 +1016,63 @@ check('这笔账在 lw_router op=status 里看得见, 工具描述也说了它 (
   host.includes('(heldBack: what, how costly, why)'),
 ], [true, true])
 
+/* ── 唤醒那一下的候选必须带 source 且不吃判断闸 (2.8.1 #31) ─────────────── */
+
+// 「唤醒一下」是主人亲手点的, 但它挑的话来自同一批判断层候选 (检测项 / 未了的事)。这里抽那一段纯
+// 函数真跑: 三条候选的 `source` 各是一次 (`usage` / `schedule` / `wish`), 连点三下都不是被动式,
+// 候选空了才走主动开场那一池
+const wakeAt = host.indexOf('const ROUTER_WAKE_TOPICS')
+const wakeEnd = host.indexOf('async function routerWakeNow', wakeAt)
+if (wakeAt < 0 || wakeEnd < 0) {
+  console.error('FAIL the wake block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const wakeSlice = host.slice(wakeAt, wakeEnd)
+const {
+  wakeTopicFor, isPassiveOpener, ROUTER_WAKE_TOPICS, ROUTER_WAKE_FALLBACK, ROUTER_WAKE_RESELECT_MAX,
+} = new Function('routerDayKey', `${wakeSlice}\nreturn { wakeTopicFor, isPassiveOpener, ROUTER_WAKE_TOPICS,`
+  + ' ROUTER_WAKE_FALLBACK, ROUTER_WAKE_RESELECT_MAX }')(routerDayKey)
+
+const wakeNow = Date.parse('2026-11-19T21:00:00+08:00')
+const wakeState = {
+  checks: [
+    { id: 'c1', what: '打游戏太久', when: { kind: 'usage', minutes: 120 }, enabled: true },
+    { id: 'c2', what: '开会前提醒', when: { kind: 'event', beforeMinutes: 30 }, enabled: true },
+  ],
+  checksSaid: {},
+}
+const wakeWishes = [{ id: 'w1', what: '考四级', said: [] }]
+const wakePicks = []
+let wakeCursor = 0
+for (let i = 0; i < 3; i += 1) {
+  const one = wakeTopicFor(wakeState, wakeWishes, wakeNow, wakeCursor)
+  wakePicks.push(one)
+  wakeCursor = one.cursor
+}
+check('连点三次都要开口, 且 source 三种各一次 (usage / schedule / wish)', (() => {
+  return [wakePicks.length, wakePicks.map((one) => one.source), wakePicks.map((one) => one.opener)]
+})(), [3, ['usage', 'schedule', 'wish'], ['active', 'active', 'active']])
+check('三次都不是被动式 (不是「怎么了」「嗯?」那一类)', wakePicks.map((one) => isPassiveOpener(one.text)),
+  [false, false, false])
+check('三次的话都带判断层里那件事的原话', wakePicks.map((one) => one.text.includes('「')),
+  [true, true, true])
+check('判断层空了才回主动开场池, 且不是被动式', (() => {
+  const one = wakeTopicFor({}, [], wakeNow, 0)
+  return [one.source, ROUTER_WAKE_TOPICS.includes(one.text), isPassiveOpener(one.text)]
+})(), ['fallback', true, false])
+check('台词闸: 被动应答语 / 短问句判被动, 带话题的长句放行', [
+  isPassiveOpener('怎么了?'),
+  isPassiveOpener('嗯? 叫我?'),
+  isPassiveOpener('在吗'),
+  isPassiveOpener('今天怎么样?'),
+  isPassiveOpener('今天过得怎么样呀'),
+  isPassiveOpener(ROUTER_WAKE_FALLBACK),
+  ROUTER_WAKE_RESELECT_MAX,
+], [true, true, true, true, false, false, 3])
+check('唤醒那一支不吃判断闸 (人点了就必须出声)', [
+  wakeSlice.includes('judgeRouter') === false,
+  /quiet|cooldown|preSleep/.test(wakeSlice) === false,
+], [true, true])
+
 console.log(`\n${checks - failures}/${checks} checks passed`)
 if (failures > 0) process.exit(1)

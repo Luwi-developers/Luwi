@@ -82,6 +82,68 @@ class SimSettingTest {
         assertEquals("2", sticker["maxMb"].toString())
     }
 
+    /** 2026-11-20 (方案 §9.2): 情绪与关系那五格, 缺键 / 越界 / 坏值都落到缺省或范围里 */
+    @Test
+    fun `没有 affect 段时回 1 / 0 / 1 / 2 / 1`() {
+        val affect = SimSetting.planFrom(root("""{"v":1}""")).affect
+
+        assertEquals(SimSetting.Affect(), affect)
+        assertEquals(1, affect.baseline)
+        assertEquals(0, affect.empathy)
+        assertEquals(1, affect.boundary)
+        assertEquals(2, affect.recall)
+        assertEquals(1, affect.honesty)
+    }
+
+    @Test
+    fun `五格都读得回来`() {
+        val affect = SimSetting.planFrom(
+            root("""{"affect":{"baseline":2,"empathy":2,"boundary":0,"recall":3,"honesty":0}}"""),
+        ).affect
+
+        assertEquals(2, affect.baseline)
+        assertEquals(2, affect.empathy)
+        assertEquals(0, affect.boundary)
+        assertEquals(3, affect.recall)
+        assertEquals(0, affect.honesty)
+    }
+
+    @Test
+    fun `五格的越界夹进范围, 坏值回缺省`() {
+        assertEquals(2, SimSetting.planFrom(root("""{"affect":{"baseline":9}}""")).affect.baseline)
+        assertEquals(0, SimSetting.planFrom(root("""{"affect":{"boundary":-3}}""")).affect.boundary)
+        assertEquals(3, SimSetting.planFrom(root("""{"affect":{"recall":99}}""")).affect.recall)
+        assertEquals(1, SimSetting.planFrom(root("""{"affect":{"honesty":"很透明"}}""")).affect.honesty)
+    }
+
+    @Test
+    fun `affect 段本身坏掉时也回缺省`() {
+        assertEquals(SimSetting.Affect(), SimSetting.planFrom(root("""{"affect":"nope"}""")).affect)
+    }
+
+    @Test
+    fun `五个范围就是 0到2 三次, 0到3 一次, 再一个 0到2`() {
+        assertEquals(0..2, SimSetting.AFFECT_BASELINE_RANGE)
+        assertEquals(0..2, SimSetting.AFFECT_EMPATHY_RANGE)
+        assertEquals(0..2, SimSetting.AFFECT_BOUNDARY_RANGE)
+        assertEquals(0..3, SimSetting.AFFECT_RECALL_RANGE)
+        assertEquals(0..2, SimSetting.AFFECT_HONESTY_RANGE)
+    }
+
+    @Test
+    fun `五格都会落盘 (toJson 的 affect 段)`() {
+        val plan = SimSetting.Plan(
+            affect = SimSetting.Affect(baseline = 0, empathy = 1, boundary = 2, recall = 3, honesty = 0),
+        )
+        val affect = SimSetting.toJson(plan)["affect"] as JsonObject
+
+        assertEquals("0", affect["baseline"].toString())
+        assertEquals("1", affect["empathy"].toString())
+        assertEquals("2", affect["boundary"].toString())
+        assertEquals("3", affect["recall"].toString())
+        assertEquals("0", affect["honesty"].toString())
+    }
+
     @Test
     fun `带全 14 个群味老键的 sim 文件也读得回来 (不认识的就当没有)`() {
         val plan = SimSetting.planFrom(
@@ -101,13 +163,10 @@ class SimSettingTest {
         )
 
         // 留下来的那几格照读
-        assertEquals(SimSetting.MODE_ACTIVE, plan.wake.mode)
         assertEquals(120_000L, plan.wake.gapMinMs)
         assertEquals(180_000L, plan.wake.gapMaxMs)
         assertEquals(0L, plan.wake.preSleepWaitMs)
-        assertFalse(plan.wake.quietEnabled)
-        assertEquals("01:00", plan.wake.quietFrom)
-        assertEquals("02:00", plan.wake.quietTo)
+        // 2026-11-20 撤掉的那几格 (mode / quiet*) 与群味那几段一样: 当没有, 也不崩
         // 撤掉的那几段不参与, 也不该把这一份读崩
         assertEquals(SimSetting.Send(), plan.send)
         assertEquals(SimSetting.Router(), plan.router)
@@ -124,12 +183,16 @@ class SimSettingTest {
             "context", "wakeMessageLimit", "wakeMaxChars",
             // 2026-11-10: 这两把尺子搬去 router.json, sim.json 不再写
             "gameMinutes", "wishDays",
+            // 2026-11-20: 潜水 / 活跃那一格与静默那三格都搬走 / 删掉, 这一份不再写
+            "mode", "quietEnabled", "quietFrom", "quietTo",
+            // 2026-11-20: 三格只有数字、没有读者的开口设置
+            "maxMessageChars", "maxPerMinute", "maxPerHour",
         )
         for (key in gone) {
             assertFalse("写盘里还有群味老键 $key", text.contains("\"$key\":"))
         }
         // 四段与主动场那一档都还在
-        listOf("\"wake\"", "\"send\"", "\"router\"", "\"proactive\"", "\"sticker\"", "\"quietFrom\"").forEach {
+        listOf("\"wake\"", "\"send\"", "\"router\"", "\"proactive\"", "\"sticker\"").forEach {
             assertTrue("写盘里缺 $it", text.contains(it))
         }
     }

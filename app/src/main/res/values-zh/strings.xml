@@ -575,9 +575,9 @@
     <string name="settings_activity_knows_detail">到 %1$s</string>
     <string name="settings_activity_knows_detail_none">没定期限</string>
     <string name="settings_activity_more">更多设置</string>
-    <string name="settings_activity_more_summary">潜水 / 节奏 / 判断层 / 表情</string>
+    <string name="settings_activity_more_summary">节奏 / 静默 / 判断层 / 表情</string>
     <string name="settings_sim_title">更多设置</string>
-    <string name="settings_sim_note">这一页写的是 lw/sim.json, 改完立刻生效; 唤醒之后看什么由探索每天自己加, 这里只列出来</string>
+    <string name="settings_sim_note">这一页写的是 lw/sim.json (静默那三行写 automations/settings.json), 改完立刻生效; 唤醒之后看什么由探索每天自己加, 这里只列出来</string>
     <string name="settings_sim_saved">已保存</string>
     <string name="settings_sim_failed">没写进去 (文件不可写)</string>
     <string name="settings_sim_save">保存</string>
@@ -585,10 +585,6 @@
     <string name="settings_sim_wake_group">主动程度</string>
     <string name="settings_sim_send_group">开口节奏与分条</string>
     <string name="settings_sim_router_group">判断层</string>
-    <string name="settings_sim_mode">她现在的状态</string>
-    <string name="settings_sim_mode_summary">潜水 = 不主动唤醒, 活跃 = 到点就看一眼</string>
-    <string name="settings_sim_mode_diving">潜水</string>
-    <string name="settings_sim_mode_active">活跃</string>
     <string name="settings_sim_gap_min">唤醒的最短间隔</string>
     <string name="settings_sim_gap_min_summary">两次之间至少 %1$d 分钟</string>
     <string name="settings_sim_gap_max">唤醒的最长间隔</string>
@@ -596,7 +592,7 @@
     <string name="settings_sim_pre_sleep">沉睡前等多久</string>
     <string name="settings_sim_pre_sleep_summary">你上一条说完还没到 %1$d 分钟, 她这一拍就不唤醒</string>
     <string name="settings_sim_quiet">静默时段</string>
-    <string name="settings_sim_quiet_summary">这一段里照常唤醒, 只是不开口</string>
+    <string name="settings_sim_quiet_summary">与自动指令那一段是同一份, 两处都能改</string>
     <string name="settings_sim_quiet_from">从几点开始</string>
     <string name="settings_sim_quiet_to">到几点结束</string>
     <string name="settings_sim_quiet_hint">写成 23:00 这样</string>
@@ -617,12 +613,6 @@
     <string name="settings_sim_long_gap_min_summary">至少 %1$s 秒</string>
     <string name="settings_sim_long_gap_max">长停顿最长</string>
     <string name="settings_sim_long_gap_max_summary">最多 %1$s 秒</string>
-    <string name="settings_sim_max_chars">一条最多几个字</string>
-    <string name="settings_sim_max_chars_summary">超过 %1$d 字就截断</string>
-    <string name="settings_sim_send_per_minute">一分钟最多说几条</string>
-    <string name="settings_sim_send_per_minute_summary">每分钟 %1$d 条</string>
-    <string name="settings_sim_send_per_hour">一小时最多说几条</string>
-    <string name="settings_sim_send_per_hour_summary">每小时 %1$d 条</string>
     <string name="settings_sim_router_cooldown">两次开口最短间隔</string>
     <string name="settings_sim_router_cooldown_summary">至少 %1$d 分钟</string>
     <string name="settings_sim_router_chance">随口问一句的概率</string>
@@ -664,11 +654,41 @@
     <string name="settings_sim_sticker_every">多久贴一张</string>
     <string name="settings_sim_sticker_every_summary">大约每 %1$d 条话贴一张 (0 = 不贴)</string>
     <string name="settings_sim_sticker_note">她自己攒的表情 (lw_sticker op=fetch) 与你在门户里加的都按这两条; 超过的单张, 或者多出来的那一张, 都会被拒</string>
+    <string name="settings_sim_affect_group">情绪与关系</string>
+    <string name="settings_sim_affect_baseline">情绪基调</string>
+    <string name="settings_sim_affect_baseline_summary">她平时的温度, 拨到右边更热络</string>
+    <string name="settings_sim_affect_baseline_l0">冷静</string>
+    <string name="settings_sim_affect_baseline_l1">温和</string>
+    <string name="settings_sim_affect_baseline_l2">偏暖</string>
+    <string name="settings_sim_affect_empathy">先陪还是先给办法</string>
+    <string name="settings_sim_affect_empathy_summary">平时开口时, 她先接住人还是先给办法</string>
+    <string name="settings_sim_affect_empathy_l0">先陪</string>
+    <string name="settings_sim_affect_empathy_l1">看情况</string>
+    <string name="settings_sim_affect_empathy_l2">先给办法</string>
+    <string name="settings_sim_affect_boundary">边界严格度</string>
+    <string name="settings_sim_affect_boundary_summary">他没回、他说不想聊时, 她收得多紧</string>
+    <string name="settings_sim_affect_boundary_l0">松</string>
+    <string name="settings_sim_affect_boundary_l1">正常</string>
+    <string name="settings_sim_affect_boundary_l2">严</string>
+    <string name="settings_sim_affect_recall">提旧事的频率</string>
+    <string name="settings_sim_affect_recall_summary">每一场最多想起几件旧事 (0 / 2 / 4 / 6 条)</string>
+    <string name="settings_sim_affect_recall_l0">不提</string>
+    <string name="settings_sim_affect_recall_l1">偶尔</string>
+    <string name="settings_sim_affect_recall_l2">经常</string>
+    <string name="settings_sim_affect_recall_l3">能提就提</string>
+    <string name="settings_sim_affect_honesty">透明程度</string>
+    <string name="settings_sim_affect_honesty_summary">提旧事时, 她要不要说明这是记得的哪一句</string>
+    <string name="settings_sim_affect_honesty_l0">不说来路</string>
+    <string name="settings_sim_affect_honesty_l1">点到</string>
+    <string name="settings_sim_affect_honesty_l2">明说</string>
+    <string name="settings_sim_affect_honesty_muted">提旧事关掉了, 这一格暂时不生效</string>
+    <string name="settings_sim_affect_note">这五格只改"她怎么陪", 不改她说什么; 拨完下一场主动开口就生效</string>
     <string name="settings_explore_off">还没开</string>
     <string name="settings_explore_next">下一次 %1$s</string>
+    <string name="settings_explore_by_router">由她自己挑时机开</string>
     <string name="settings_explore_running">现在在跑 (到 %1$s 结束)</string>
-    <string name="settings_explore_toggle">按时间自己探索</string>
-    <string name="settings_explore_toggle_summary">到点自己开一场, 不用手动点</string>
+    <string name="settings_explore_toggle">允许她自己探索</string>
+    <string name="settings_explore_toggle_summary">她挑时机自己开一场, 不用手动点</string>
     <string name="settings_explore_at">每天几点开始</string>
     <string name="settings_explore_at_summary">每天 %1$s</string>
     <string name="settings_explore_at_dialog_summary">一天一次, 填 HH:mm (例如 03:00)</string>
@@ -749,7 +769,7 @@
     <string name="settings_proactive_rule_off">关着</string>
     <string name="settings_proactive_rules_blocked">最近被拦 (自动指令): %1$s · %2$s</string>
     <string name="settings_proactive_explore">下一次探索 %1$s · 上一次 %2$s</string>
-    <string name="settings_proactive_note">排期在 proactive-schedule.json, 改完立刻重排; 规则的正文在「自动指令」那一段改</string>
+    <string name="settings_proactive_note">主动开口由判断层挑时机, 不再按排期; 规则的正文在「自动指令」那一段改</string>
 
     <string name="settings_section_automation">自动指令</string>
     <string name="settings_section_automation_summary">满足条件就做一件事</string>
@@ -812,7 +832,7 @@
     <string name="settings_automation_place_meters">位置至少移动多远</string>
     <string name="settings_automation_place_meters_summary">移动不到就不算换地方</string>
     <string name="settings_automation_quiet">静默时段</string>
-    <string name="settings_automation_quiet_summary">只判不响; 静默时段以活动里的为准</string>
+    <string name="settings_automation_quiet_summary">只判不响; 与活动里那一份是同一段窗口</string>
     <string name="settings_automation_quiet_title">静默时段</string>
     <string name="settings_automation_quiet_dialog_summary">写成 23:00-07:00; 跨零点也认, 起止相同=不静默</string>
     <string name="settings_automation_quiet_hint">例如: 23:00-07:00</string>
@@ -921,17 +941,17 @@
     <string name="settings_linux_remove_dialog_summary">删掉整个 rootfs 与里面装的包, 没有回收站; 再装只有随包那一份</string>
     <string name="settings_linux_remove_dialog_ok">删掉</string>
 
-    <string name="settings_section_sync">同步</string>
-    <string name="settings_section_sync_summary">电脑面板扫码配对, 会话在两台机之间走</string>
-<string name="settings_sync_note">同步首次拉取耗时较长, 需在电脑上安装同步插件, 扫码即可配对</string>
+    <string name="settings_section_sync">终端</string>
+    <string name="settings_section_sync_summary">手机管电脑: 电脑只把最近的对话同步过来</string>
+<string name="settings_sync_note">终端只由手机管电脑: 电脑把最近的对话同步过来, 手机开的新对话发到电脑上执行; 工作区不再同步到电脑, 电脑也不能再操作这台手机。第一次拉取耗时较长, 先在电脑上的 dsh 里装同步插件, 扫码即可配对</string>
 <string name="settings_sync_plugin">电脑上的同步插件</string>
 <string name="settings_sync_plugin_summary">在电脑 dsh 里装它再扫码</string>
-    <string name="settings_sync_master">同步</string>
-    <string name="settings_sync_master_on">开着: 会话按 git 在两台机器之间走</string>
+    <string name="settings_sync_master">终端</string>
+    <string name="settings_sync_master_on">开着: 手机能管电脑, 电脑只把最近的对话同步过来</string>
     <string name="settings_sync_master_off">关着: 不拉不推, 后台一趟都不跑 (默认)</string>
     <string name="settings_sync_master_need_pair">先在 PC 面板生成二维码, 再点下面扫码配对</string>
-    <string name="settings_sync_switched_on">同步已打开, 正在重启 DSH host…</string>
-    <string name="settings_sync_switched_off">同步已关闭, 正在重启 DSH host…</string>
+    <string name="settings_sync_switched_on">终端已打开, 正在重启 DSH host…</string>
+    <string name="settings_sync_switched_off">终端已关闭, 正在重启 DSH host…</string>
     <string name="settings_sync_pair">扫码配对</string>
     <string name="settings_sync_pair_unpaired">未配对</string>
     <string name="settings_sync_pair_paired">已配对：%1$s</string>
@@ -1093,18 +1113,17 @@
     <string name="settings_tavern_plan_action">去签到</string>
     <string name="settings_tavern_notice">酒馆需要登录并有有效的服务时长, 在官网酒馆页签到或购买。\n\n酒馆只提供框架, 不提供免费模型, 模型要自己配; 本弹窗仅出现这一次</string>
     <string name="settings_tavern_notice_once">不再提醒</string>
-    <string name="menu_sync">同步</string>
-    <string name="menu_sync_on">已打开</string>
-    <string name="menu_sync_off">已关闭</string>
+    <string name="menu_sync">终端</string>
     <string name="menu_sync_need_remote">未配对</string>
-    <string name="menu_sync_switched_on">同步已打开, 正在重启 DSH host…</string>
-    <string name="menu_sync_switched_off">同步已关闭, 正在重启 DSH host…</string>
+    <string name="menu_sync_paired">已配对：%1$s</string>
+    <string name="terminal_pair_done">配对完成, 正在重启 DSH host…</string>
+    <string name="terminal_pair_other_pc">已经和另一台电脑配过对：换电脑重新配对会重置同步基线, 请到 设置 → 终端 里换</string>
     <string name="settings_sync_interval">周期拉取</string>
     <string name="settings_sync_interval_summary">%1$d 分钟一次; 0 = 关</string>
     <string name="settings_sync_interval_dialog">0 - 60 分钟 (0 = 关)</string>
-    <string name="settings_sync_status_off">同步现在关着: 用上面那个开关打开, 关着的时候一个字节都不动</string>
+    <string name="settings_sync_status_off">终端现在关着: 用上面那个开关打开, 关着的时候一个字节都不动</string>
     <string name="settings_sync_status_paired">已配对：%1$s · 仓库 %2$s · 分支 %3$s · 每 %4$d 分钟拉一次</string>
-    <string name="settings_sync_status_unpaired">还没配对: 配对之后再打开同步, 没配对时仓库地址是空的</string>
+    <string name="settings_sync_status_unpaired">还没配对: 配对之后再打开终端, 没配对时仓库地址是空的</string>
     <string name="settings_sync_show">看当前配置</string>
     <string name="settings_sync_show_summary">只读看一眼 session-sync.json</string>
     <string name="settings_sync_show_dialog">这一段写的那份文件 (口令已打码)</string>

@@ -7,7 +7,7 @@ import androidx.compose.runtime.setValue
 /**
  * "回应用"要落到哪一场对话上
  *
- * 主人 2026-10-06 的口径: **回应用时回到最近的浮标对话** —— 浮标的对话有它自己那一场 (在 `dsh-ball`
+ * 主人 2026-10-06 的口径: **回应用时回到最近的浮标对话** —— 浮标的对话有它自己那一场 (在 `Luwi`, 2026-11-20 之前是 `dsh-ball`
  * 那个工作区里, 见 host-plugin 的 `ensureBallWorkspace` 与 `voiceTargetSession`), 而会话界面自己记着
  * "正在看哪一场"(它在浏览器 localStorage 里), 它本来**不会**跟着浮标走 —— 所以"把界面放到前面"这件事
  * 与"让界面切到那一场"是两件不同的事, 后者要有人把会话 id 交给页面 ([HostScreen] 那一段 JS)

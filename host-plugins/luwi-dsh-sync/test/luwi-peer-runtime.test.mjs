@@ -27,12 +27,14 @@ function makeRoot(prefix) {
 }
 
 /** 一个能当 req 用的最小对象 (readJsonBody 要的可异步迭代体) */
-function makeReq({ method = 'GET', url = '/', token, body } = {}) {
+function makeReq({ method = 'GET', url = '/', token, body, remoteAddress = '127.0.0.1' } = {}) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
   return {
     method,
     url,
-    headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
+    // 2026-11-21: 本机控制面 (send / peer-live) 只认回环, 判据读的就是这个字段
+    socket: { remoteAddress },
+    headers: { host: '127.0.0.1:3080', ...(token === undefined ? {} : { authorization: `Bearer ${token}` }) },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -72,7 +74,7 @@ async function callRoute(runtime, path, options = {}) {
 function makeDeps(root, overrides = {}) {
   const calls = { delivered: [], pushes: 0, state: { delivered: [] } }
   const deps = {
-    spec: { enabled: true, listen: true, proxy: true, token: TOKEN, url: '', sendTimeoutMs: 1000, pollSeconds: 3 },
+    spec: { enabled: true, controller: false, listen: true, acceptSend: true, proxy: true, token: TOKEN, url: '', sendTimeoutMs: 1000, pollSeconds: 3 },
     live: { enabled: true, maxEntries: 40, maxChars: 16000, keepMinutes: 30 },
     repoDir: root,
     ownDeviceId: () => 'dev-me',
@@ -156,7 +158,7 @@ test('peer/info and peer/send answer the method they own', async () => {
     const runtime = createPeerRuntime(deps)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/info', { method: 'POST', token: TOKEN })).status, 405)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/send', { method: 'GET', token: TOKEN })).status, 405)
-    assert.equal((await callRoute(runtime, '/luwi-sync/send', { method: 'GET' })).status, 405)
+    assert.equal(runtime.routes().some(route => route.path === '/luwi-sync/send'), false, '面板发送路 2026-11-21 起整条下线')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

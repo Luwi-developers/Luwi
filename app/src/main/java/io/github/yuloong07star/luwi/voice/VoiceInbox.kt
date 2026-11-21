@@ -125,7 +125,7 @@ internal object VoiceInbox {
      *
      * 与 [SOURCE_ROUTER] 分开是刻意的: 那一条是闹钟投的"该看一眼了", 静默时段 / 冷却 / 沉睡前
      * 等待 / "没什么值得说的"每一道都能把它吃掉; 而这一条是**主人当面戳了一下** —— 宿主看到它就
-     * 一道闸都不看, 直接开一场主动对话并先应一声 (`host-plugin` 的 `routerWakeNow`)。混用同一个
+     * 一道闸都不看, 直接开一场主动对话并先开口找话题 (`host-plugin` 的 `routerWakeNow`)。混用同一个
      * 记号的话, "点了却没出声"会原样回来
      */
     const val SOURCE_WAKE = "wake"
