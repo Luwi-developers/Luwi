@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
 
     /** 开关: `on` / `off`; 关掉之后右下角留一个小圆点可以再打开 */
     var SWITCH = 'dsh.luwi.portal'
-    /** 账本轮询间隔: 球的 10 分钟窗口一过就会换场, 门户要跟过去 */
+    /** 账本轮询间隔: 球的 30 分钟窗口一过就会换场, 门户要跟过去 */
     var LEDGER_POLL = 3000
     /** 重绘节流: 流式期间快照会连着变 */
     var RENDER_MS = 120
@@ -69,8 +69,8 @@ window.__ModuleLoader__.load({
     /**
      * 打开门户这一刻, 主动场那一场多久之内还算"最新的消息" (2026-11-12 #38)
      *
-     * 与球那本账同一个 10 分钟 (`voice/session.json` 的复用窗口): 刚醒过来说完话就打开应用,
-     * 落的应该是那一句; 更早的就是上一次开机的事, 门户照旧落回"上次画的那一场"
+     * **与球那本账不是同一个数**: 那本账 2026-11-20 起是 30 分钟 (复用窗口), 这里问的是"刚才那一下
+     * 说完没", 10 分钟够; 更长会把上一次开机的话也拽进来
      */
     var RECENT_PROACTIVE_MS = 10 * 60 * 1000
     /**
@@ -80,6 +80,221 @@ window.__ModuleLoader__.load({
      * 把它抬到本场之上 —— 同一轮里"她后说的"就该排在后面, 也不会顶到本场已有的那几句前面
      */
     var ECHO_SEQ_BASE = 1000 * 1000
+
+    /**
+     * 输入框那行灰字 (2026-11-20 主人: "发消息或长按说话")
+     *
+     * **这句话就是发现长按的唯一入口**: 输入卡上没有麦克风图标, 语音态靠"按住空输入框"或头栏那颗
+     * 「语音」叫出来, 所以灰字必须把那个动作说出来
+     */
+    var VOICE_HINT = '发消息或长按说话'
+    /** 按住输入框多久算"我要说话" (再短就是点了一下, 留给光标) */
+    var VOICE_LONG_PRESS_MS = 450
+    /** 一次最多录 60 s: 16 kHz 单声道 PCM16 约 1.92 MB, 与宿主 `PortalVoice.MAX_BYTES` 同一档 */
+    var VOICE_MAX_MS = 60 * 1000
+    /** 短于 0.5 s 当作误触: 不送转写, 只说一句"太短了" */
+    var VOICE_MIN_MS = 500
+    /** 转写等太久的那道闸 (原生没回推时把"正在识别…"收回 idle, 免得永远停在那儿) */
+    var VOICE_WATCH_MS = 45 * 1000
+    /** 头栏那颗「终端」在原生清单拿不到时的退路 (正常文案来自 `menu_sync` 那一句) */
+    var SYNC_TITLE = '终端'
+    /**
+     * 终端那一页 (2026-11-21, 落实表 #48) 的几个常量
+     *
+     * `TERMINAL_TITLE` 是**强制**的名字: 主人要的是"名称强行改成 luwi终端", 于是外观里改了昵称
+     * 也不影响这一页; `TERMINAL_KEY` 让它扛得住页面重载 (配对要重启 host, 回来还是终端)
+     */
+    var TERMINAL_TITLE = 'luwi终端'
+    var TERMINAL_KEY = 'dsh.luwi.portal.terminal'
+    /** 终端里点头像列几场 (主人: "只显示最近pc会话") */
+    var TERMINAL_HISTORY_MAX = 20
+    /** 探一次对端最多等这么久 / 弹窗开着时多久再探一次 */
+    var TERMINAL_PROBE_MS = 6000
+    var TERMINAL_POLL_MS = 5000
+    /** 电脑那几场会话的 cwd 的根 (`$DSH_HOME/lw/peer-workspaces`), 由原生报上来 */
+    var TERMINAL_ROOT_KEY = 'shadowRoot'
+    /**
+     * 进终端时"最近那一场"的窗口 = 1 小时 (2026-11-21 主人: "进入终端时打开1h内最近终端对话, 没有要新建")
+     *
+     * 只决定**自动**落哪一场: 窗口外的那几场仍在终端历史里, 点一下照样接着聊
+     */
+    var TERMINAL_RECENT_MS = 60 * 60 * 1000
+    /** 自动进终端那一趟之间至少隔这么久 (建不出来时别每个探测拍都重试一趟, 新建那条一等就是 10 秒) */
+    var TERMINAL_ENTER_COOLDOWN_MS = 20 * 1000
+    /**
+     * 终端里"还没落到电脑那一场"时 `#lwp-flow` 的内容签名 (2026-11-21 主人: "进入终端时门户的对话仍显示在终端")
+     *
+     * 记一个正常签名撞不上的值: 清空之后走到这里, 换场那一下内容一变签名自然不同, 于是自己重画;
+     * 不带这个记号的话 `resetFlow()` 之后签名是空内容那一份, 再来一次同样的对话就判成"画过了"
+     */
+    var TERMINAL_HIDDEN_SIG = '\u0000terminal-hidden'
+
+    /**
+     * 把页面收到的采样封成 16 kHz 单声道 PCM16 WAV (纯函数, 判据真跑)
+     *
+     * 宿主那条链只认这个形状 (`LwSpeech` 按 16 kHz 单声道解 wav), 而 WebView 的 `AudioContext`
+     * 通常给 48 kHz —— 所以先按线性插值降到 16 kHz 再封头
+     * @param chunks 每块都是 Float32Array (`ScriptProcessor` 一帧一块)
+     * @param rate 采样率 (拿不到 / 不是正数就按 16000)
+     * @returns 44 字节头 + 采样的 WAV 字节 (没有采样时只有头)
+     */
+    function wavOf(chunks, rate) {
+      var parts = []
+      var total = 0
+      var list = Array.isArray(chunks) ? chunks : []
+      for (var i = 0; i < list.length; i += 1) {
+        var chunk = list[i]
+        if (!chunk || typeof chunk.length !== 'number' || chunk.length === 0) continue
+        parts.push(chunk)
+        total += chunk.length
+      }
+      var samples = new Float32Array(total)
+      var at = 0
+      for (var j = 0; j < parts.length; j += 1) {
+        samples.set(parts[j], at)
+        at += parts[j].length
+      }
+      var source = Number(rate)
+      if (!(source > 0)) source = 16000
+      var out = samples
+      if (source !== 16000 && samples.length > 1) {
+        var length = Math.max(1, Math.floor(samples.length * 16000 / source))
+        out = new Float32Array(length)
+        var step = source / 16000
+        for (var k = 0; k < length; k += 1) {
+          var pos = k * step
+          var base = Math.floor(pos)
+          var frac = pos - base
+          var first = base < samples.length ? samples[base] : 0
+          var second = base + 1 < samples.length ? samples[base + 1] : first
+          out[k] = first + (second - first) * frac
+        }
+      }
+      var bytes = new Uint8Array(44 + out.length * 2)
+      var view = new DataView(bytes.buffer)
+      var ascii = function (offset, text) {
+        for (var n = 0; n < text.length; n += 1) bytes[offset + n] = text.charCodeAt(n)
+      }
+      ascii(0, 'RIFF')
+      view.setUint32(4, 36 + out.length * 2, true)
+      ascii(8, 'WAVE')
+      ascii(12, 'fmt ')
+      view.setUint32(16, 16, true)
+      view.setUint16(20, 1, true)
+      view.setUint16(22, 1, true)
+      view.setUint32(24, 16000, true)
+      view.setUint32(28, 16000 * 2, true)
+      view.setUint16(32, 2, true)
+      view.setUint16(34, 16, true)
+      ascii(36, 'data')
+      view.setUint32(40, out.length * 2, true)
+      for (var m = 0; m < out.length; m += 1) {
+        var clamped = out[m] > 1 ? 1 : (out[m] < -1 ? -1 : out[m])
+        view.setInt16(44 + m * 2, Math.round(clamped * 32767), true)
+      }
+      return bytes
+    }
+
+    /** 字节 → base64 (分段拼, 一次 `apply` 十万个参数会炸栈) */
+    function base64Of(bytes) {
+      var text = ''
+      var step = 0x8000
+      for (var i = 0; i < bytes.length; i += step) {
+        text += String.fromCharCode.apply(null, bytes.subarray(i, i + step))
+      }
+      return btoa(text)
+    }
+
+    /* ── 录音波形那四个纯函数 (判据真跑, 2026-11-20 重做) ──────────────────────
+     *
+     * 做法照业界那套 (wavesurfer 的 `scrollingWaveform`): **走带窗口 + 峰值保持 + 归一化**。
+     * 上一版是 `rms × 4` 配一条写死的正弦包络, 那是"假波形" —— 小声是一条直线, 大声糊顶,
+     * 且永远中间高两边低, 一眼假
+     */
+
+    /** 条宽 / 间距 / 圆角帽 / 最小高 (px): wavesurfer 的 `barWidth 2 / barGap 1 / barRadius 2`,
+     *  tapbeats 那份文档给的也是 2 / 1 / 1 */
+    var REC_BAR_W = 2
+    var REC_BAR_GAP = 1
+    var REC_BAR_R = 1
+    var REC_BAR_MIN = 2
+    /** 每多少毫秒折一列, 一共留多少列 (3.2 s 的窗口) */
+    var REC_SAMPLE_MS = 40
+    var REC_COLS = 80
+    /** 峰值保持的衰减 (每列一次) */
+    var REC_HOLD_DECAY = 0.995
+    /** 低于这个峰值就当静音: 一排点, 不是一条噪声 */
+    var REC_SILENT = 0.02
+
+    /**
+     * 这一拍的电平 (RMS → 0~1): 对数感压缩, 说话与收音距离的差别不至于一条平线
+     * @param rms `onaudioprocess` 算出来的均方根 (0~1)
+     */
+    function recLevelOf(rms) {
+      var value = typeof rms === 'number' && isFinite(rms) ? Math.abs(rms) : 0
+      var scaled = value * 6
+      return scaled > 1 ? 1 : scaled
+    }
+
+    /** 峰值保持: 新的高就抬上去, 否则慢慢落 (安静时 hold 不塌成 0, 否则下一句会被放大成糊) */
+    function recNextHold(hold, peak) {
+      var kept = typeof hold === 'number' && isFinite(hold) ? hold : 0
+      var next = typeof peak === 'number' && isFinite(peak) ? Math.abs(peak) : 0
+      var decayed = kept * REC_HOLD_DECAY
+      return next > decayed ? next : decayed
+    }
+
+    /**
+     * 归一化: 峰值 / 保持值, 再开 0.6 次方 —— 小声 (峰值只有保持值的一成) 也能到三成高度
+     * @param peak 这一列的峰值
+     * @param hold 窗口内的峰值保持
+     */
+    function recNormalise(peak, hold) {
+      var top = typeof hold === 'number' && isFinite(hold) ? hold : 0
+      var value = typeof peak === 'number' && isFinite(peak) ? Math.abs(peak) : 0
+      if (top < REC_SILENT || value < REC_SILENT) return 0
+      var ratio = value / top
+      if (ratio > 1) ratio = 1
+      if (ratio < 0) ratio = 0
+      return Math.pow(ratio, 0.6)
+    }
+
+    /**
+     * 一排竖条的几何 (纯函数, 判据真跑): 走带式 —— 最新的那一列贴右边, 旧的往左排,
+     * 装不下的从左边丢; 上下镜像于中线, 静音留 `REC_BAR_MIN` 的点
+     * @param levels 从旧到新的电平 (0~1)
+     * @param width 画布宽 (CSS px)
+     * @param height 画布高 (CSS px)
+     * @returns `[{x, y, w, h, r}]`
+     */
+    function recWaveRects(levels, width, height) {
+      var list = Array.isArray(levels) ? levels : []
+      var boxWidth = typeof width === 'number' && width > 0 ? width : 1
+      var boxHeight = typeof height === 'number' && height > 0 ? height : 1
+      var step = REC_BAR_W + REC_BAR_GAP
+      var fit = Math.max(1, Math.floor((boxWidth + REC_BAR_GAP) / step))
+      var shown = list.length > fit ? list.slice(list.length - fit) : list
+      var pad = list.length > fit ? 0 : fit - shown.length
+      var mid = boxHeight / 2
+      var tallest = Math.max(REC_BAR_MIN, boxHeight - 8)
+      var out = []
+      for (var i = 0; i < fit; i += 1) {
+        // 前 `pad` 格是"还没录到"的空档: 也画最小高的点, 整排因此从头就是一条基线
+        var level = i < pad ? 0 : shown[i - pad]
+        var value = typeof level === 'number' && isFinite(level) ? level : 0
+        if (value < 0) value = 0
+        if (value > 1) value = 1
+        var barHeight = value <= 0 ? REC_BAR_MIN : Math.max(REC_BAR_MIN, tallest * value)
+        out.push({
+          x: boxWidth - (fit - i) * step,
+          y: mid - barHeight / 2,
+          w: REC_BAR_W,
+          h: barHeight,
+          r: REC_BAR_R,
+        })
+      }
+      return out
+    }
 
     /**
      * `+` 上那个加号: dsh 的 `IconPlusOutlineMedium` 就这两笔 —— 与 `presets/ui-fix` 同一条分寸
@@ -95,6 +310,13 @@ window.__ModuleLoader__.load({
       ' stroke-width="1.5" aria-hidden="true">',
       '<path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6"',
       ' stroke="currentColor"></path></svg>',
+    ].join('')
+
+    /** 录音面板上滑取消时那枚向下的箭头 (2026-11-20): 两笔, 与 `⋯` / `＋` 同一档粗细 */
+    var ARROW_DOWN_ICON = [
+      '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">',
+      '<path d="M8 3.2v9.4M4.2 8.8L8 12.6l3.8-3.8" stroke="currentColor" stroke-width="1.5"',
+      ' stroke-linecap="round" stroke-linejoin="round"/></svg>',
     ].join('')
 
     /** 发送钮的两副面孔: 箭头与转圈 (dsh 的 `.primary` 用的就是这两条 path) */
@@ -126,6 +348,31 @@ window.__ModuleLoader__.load({
       ' stroke-width="1.4" stroke-linecap="round"/>',
       '<circle cx="6.1" cy="6.5" r="0.85" fill="currentColor"/>',
       '<circle cx="9.9" cy="6.5" r="0.85" fill="currentColor"/></svg>',
+    ].join('')
+
+    /**
+     * 头栏那颗自动朗读的两副图标 (2026-11-20 主人给的三张官方手机端截图)
+     *
+     * 图 1 (关) 是**喇叭带一道斜杠**, 图 2 (开) 是**喇叭带两道声波** —— 差别在形状, 不在颜色,
+     * 所以按状态换 `innerHTML`, `data-on` 只留底色与无障碍。笔画照 `+` / 发送那一档:
+     * `viewBox 0 0 16 16` / `stroke-width 1.3` / `currentColor` / `fill=none`。
+     * 喇叭本体两根: 声音从锥口进来 (左边的方块 + 向右张开的锥), 右边再挂两道弧
+     */
+    var SPEAKER_ON_ICON = [
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"',
+      ' stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">',
+      '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z"></path>',
+      '<path d="M10.7 5.6C11.75 6.3 12.35 7.1 12.35 8s-.6 1.7-1.65 2.4" stroke-linecap="round"></path>',
+      '<path d="M12.15 3.75C13.85 4.95 14.75 6.4 14.75 8s-.9 3.05-2.6 4.25" stroke-linecap="round"></path>',
+      '</svg>',
+    ].join('')
+
+    var SPEAKER_OFF_ICON = [
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"',
+      ' stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">',
+      '<path d="M2.2 6.15h2.05L8.6 3.15v9.7L4.25 9.85H2.2z"></path>',
+      '<path d="M11 6.3l3.6 3.6M14.6 6.3L11 9.9" stroke-linecap="round"></path>',
+      '</svg>',
     ].join('')
 
     /** 预览窗右上那颗关闭: 两笔交叉, 与 dsh 的 `IconCloseOutlineMedium` 同一分寸 */
@@ -607,20 +854,21 @@ window.__ModuleLoader__.load({
 
       '#lwp-head{position:relative;z-index:1;display:flex;align-items:center;gap:8px;padding:8px 14px;',
       'border-bottom:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.1));flex:none}',
-      // 左边那一块 = 身份 (2026-11-10 主人: "右上角 luwi 图标和 luwi 名可在外观设置中修改" +
-      // 本轮定下的布局 B: 身份在左、按钮在右). 整块仍可点 = 开一场新对话
-      '#lwp-brand{display:flex;align-items:center;gap:9px;flex:1;min-width:0;appearance:none;',
-      'border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:4px 6px;',
-      'margin-left:-6px;border-radius:14px;cursor:pointer;',
-      'transition:background-color .15s ease,transform .15s ease}',
-      '#lwp-brand:active{background:rgba(1,180,255,.1);transform:scale(.98)}',
-      '@media (hover:hover){#lwp-brand:hover{background:rgba(1,180,255,.08)}}',
+      // 左边 = 头像 (2026-11-10 主人: "右上角 luwi 图标和 luwi 名可在外观设置中修改")
+      // **2026-11-19 改口径** (主人: "点击头像开新对话改为打开历史" + "生效范围缩小到头像大小"):
+      // 这颗钮只有头像那么大 (28x28 的圆钮, 热区就是头像), 点它开历史窗; 昵称搬到旁边当标识, 点不动
+      '#lwp-brand{display:block;flex:none;width:28px;height:28px;padding:0;margin:0;appearance:none;',
+      'border:0;background:transparent;color:inherit;line-height:0;border-radius:999px;cursor:pointer;',
+      'transition:transform .15s ease}',
+      '#lwp-brand:active{transform:scale(.94)}',
+      '@media (hover:hover){#lwp-brand:hover{background:rgba(1,180,255,.12)}}',
       '#lwp-brand:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3964fe);outline-offset:2px}',
-      '#lwp-brand .lwp-mark{position:relative;flex:none;width:28px;height:28px;display:grid;place-items:center}',
+      '#lwp-brand .lwp-mark{position:relative;flex:none;width:28px;height:28px;display:block}',
       // 头像换成自定义那张时可能是方图: 圆裁 + 铺满, 28px 的框不变 (布局不跟着图抖)
       '#lwp-brand .lwp-mark img{display:block;width:28px;height:28px;border-radius:999px;object-fit:cover}',
-      '#lwp-brand .lwp-brand-text{display:flex;flex-direction:column;min-width:0;gap:1px}',
-      '#lwp-brand .lwp-brand-name{font-size:15px;font-weight:600;line-height:1.15;letter-spacing:.01em;',
+      // 昵称与读数在头栏只是标识 (2026-11-19: 搬出按钮, 于是点那两个字什么都不发生)
+      '#lwp-head .lwp-brand-text{display:flex;flex-direction:column;min-width:0;gap:1px}',
+      '#lwp-head .lwp-brand-name{font-size:15px;font-weight:600;line-height:1.15;letter-spacing:.01em;',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:34vw}',
       '#lwp-head .lwp-meta{display:none}',
       // 「正在做」那颗点 (2026-11-10 主人: "正在做的标识改成右上角加黄色点表示" +
@@ -634,14 +882,21 @@ window.__ModuleLoader__.load({
       '@keyframes lwp-pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.42)}',
       '50%{box-shadow:0 0 0 5px rgba(245,158,11,0)}}',
       '@media (prefers-reduced-motion:reduce){#lwp-busy[data-state="busy"]{animation:none}}',
-      // 右边那两颗: 历史 / 更多. 类名而不是 `#lwp-head > button` —— 后者特异性比 `#lwp-brand` 高,
-      // 会把品牌按钮也套进"圆角描边小按钮"那一套里 (2026-11-08 预览里就是一颗白胶囊)
+      // 右边那一簇: 语音 / 终端 / 更多。**「历史」那颗已撤** (2026-11-19: 入口并进左边那颗头像)。
+      // 类名而不是 `#lwp-head > button` —— 后者特异性比 `#lwp-brand` 高,
+      // 会把头像也套进"圆角描边小按钮"那一套里 (2026-11-08 预览里就是一颗白胶囊)
       '#lwp-head .lwp-tab{appearance:none;border:1px solid var(--dsw-alias-border-l1,rgba(15,23,42,.12));',
       'background:transparent;color:inherit;border-radius:999px;padding:4px 10px;font:inherit;font-size:12px;',
       'line-height:1.5;flex:none}',
       '#lwp-head .lwp-tab[data-on="on"]{background:var(--dsw-alias-button-info-fill,#3b82f6);color:#fff;border-color:transparent}',
+      // 三颗装成一簇 (2026-11-20 主人: "都要放在靠近更多按钮的位置, 向右对齐"): `margin-left:auto`
+      // 挂在簇上, 昵称那一段因此只占左边剩下的宽度
+      '#lwp-tabs{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}',
       // `⋯` 那顆比文字按钮宽一点, 点起来才不憋
       '#lwp-head .lwp-tab.lwp-more{padding:4px 11px;font-size:15px}',
+      // 语音那颗只有图标 (官方那枚麦克风): 30x28 的圆钮, 字形跟 `+` / 表情同一档
+      '#lwp-head .lwp-tab.lwp-tab-icon{display:grid;place-items:center;width:30px;height:28px;padding:0}',
+      '#lwp-head .lwp-tab-icon svg{display:block}',
 
       /* ── 历史记录窗 (2026-11-10 主人: "左边再加上历史记录 … 弹窗显示, 上方显示搜索框") ────
        *
@@ -718,6 +973,8 @@ window.__ModuleLoader__.load({
       '.lwp-row[data-who="assistant"] .lwp-bubble{border-bottom-left-radius:6px}',
       '.lwp-row[data-who="error"] .lwp-bubble{color:var(--dsw-alias-state-error-primary,#b91c1c);',
       'background:linear-gradient(0deg,rgba(220,38,38,.1),rgba(220,38,38,.1)),var(--lwp-glass-fill)}',
+      // 本机占位那一行 (2.8.1 #33): 要淡一点, 与真落盘的那条分得开
+      '.lwp-row[data-pending="on"] .lwp-bubble{opacity:.6}',
       // 老 WebView 不认 backdrop-filter: 退回一块更实的底, 免得字压在照片上看不清
       '@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){',
       '.lwp-bubble{background:rgba(252,253,254,.92)}',
@@ -908,15 +1165,63 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary,#6b7280);background:rgba(15,23,42,.045);',
       '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}',
       '@media (prefers-color-scheme:dark){.lwp-sep span{color:#9aa1ab;background:rgba(255,255,255,.07)}}',
-      // 开新对话之后那 3 秒的退路: 是流里的一块 (不是浮在消息上), 收起时 display:none 不占高度
-      '#lwp-undo{align-self:center;flex:none;display:flex;align-items:center;gap:8px;margin:8px 0 0;',
-      'padding:6px 10px 6px 12px;border-radius:999px;font-size:12px;',
+      // 「已开新对话」那颗读数 (2026-11-19 主人: "新对话的提示弹窗要单独一层, 否则会导致中间的图文
+      // 受弹窗影响下移, 弹窗消失后又上移"): **absolute 的一层, 不参与排版** —— 出现与收起都不改
+      // #lwp-flow 的高度, 中间那张脸与对话一个字都不动; `top` 由 showUndo 按头栏实际高度写
+      '#lwp-undo{position:absolute;left:50%;transform:translateX(-50%);z-index:2;pointer-events:none;',
+      'display:flex;align-items:center;gap:8px;padding:6px 10px 6px 12px;border-radius:999px;font-size:12px;',
       'color:var(--dsw-alias-label-primary,#18181b);background:var(--dsw-specific-menu,var(--lwp-glass-fill));',
       '-webkit-backdrop-filter:var(--lwp-glass-blur);backdrop-filter:var(--lwp-glass-blur);',
       '--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent)}',
       '#lwp-undo[hidden]{display:none}',
       // 空态那颗「开一场」撤了 (2026-11-09 主人: "不需要用户手动点击开一场, 新界面里自动开始新对话")
       // —— 进来就自己开一场, 这一层不再摆一颗要人按的按钮
+
+      // ── 终端那一页 (2026-11-21, 落实表 #48): 门户整页变黑 + 那扇「扫码配对 / 返回」 ──────────
+      // 只改`#lwp-root` 这一棵树: 底下的 dsh 页面本来就藏起来了 (shellRoot 的 visibility),
+      // 所以"全变黑"不需要动任何原生尺寸, K 键盘那一段 (`--lwp-ime`) 也照旧
+      '#lwp-root[data-mode="terminal"]{background:#000}',
+      '#lwp-root[data-mode="terminal"] #lwp-wall{display:none}',
+      '#lwp-root[data-mode="terminal"] #lwp-head{color:#e6e6e6}',
+      '#lwp-root[data-mode="terminal"] .lwp-brand-name{color:#e6e6e6}',
+      '#lwp-root[data-mode="terminal"] .lwp-meta{display:none}',
+      '#lwp-root[data-mode="terminal"] #lwp-tabs .lwp-tab{color:#cfcfcf;',
+      'border-color:rgba(255,255,255,.18);background:transparent}',
+      '#lwp-term-back{appearance:none;border:0;background:transparent;color:#cfcfcf;font-size:15px;',
+      'line-height:1;padding:4px 6px 4px 2px;margin-right:2px}',
+      '#lwp-term-back[hidden]{display:none}',
+      '#lwp-root[data-mode="terminal"] #lwp-flow{color:#d8d8d8}',
+      // 终端里还没落到电脑那一场 (`data-term-session` 不是 on) 时, 门户那几条对话一条都不给看 (2026-11-21 主人:
+      // "进入终端时, 门户的对话仍显示在终端, 进入终端时应当不显示") —— `visibility` 而不是 `display`,
+      // 排版尺寸照旧, 换场之后不用重排; JS 那一半见 `renderFlow` 的闸与 `markTerminalSession`
+      '#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}',
+      '#lwp-root[data-mode="terminal"] .lwp-bubble{background:rgba(255,255,255,.07);color:#e8e8e8;',
+      'box-shadow:none}',
+      '#lwp-root[data-mode="terminal"] .lwp-row[data-who="user"] .lwp-bubble{background:rgba(120,200,160,.16)}',
+      '#lwp-root[data-mode="terminal"] .lwp-row[data-who="error"] .lwp-bubble{background:rgba(255,120,120,.18)}',
+      '#lwp-root[data-mode="terminal"] .lwp-sep span{color:#9a9a9a;background:rgba(255,255,255,.08)}',
+      '#lwp-root[data-mode="terminal"] #lwp-card{background:#151515;border:1px solid rgba(255,255,255,.12);',
+      'box-shadow:none}',
+      '#lwp-root[data-mode="terminal"] #lwp-input{color:#eaeaea}',
+      '#lwp-root[data-mode="terminal"] #lwp-input::placeholder{color:#8a8a8a}',
+      '#lwp-root[data-mode="terminal"] .lwp-hero-name{color:#e6e6e6}',
+      '#lwp-root[data-mode="terminal"] .lwp-working{color:#9a9a9a;background:rgba(255,255,255,.06)}',
+      '#lwp-term-gate{position:fixed;inset:0;z-index:30;display:flex;align-items:center;',
+      'justify-content:center;padding:0 24px;background:rgba(0,0,0,.72)}',
+      '#lwp-term-gate[hidden]{display:none}',
+      '#lwp-term-gate .lwp-term-card{width:100%;max-width:360px;border-radius:20px;padding:20px 18px 16px;',
+      'background:#111;border:1px solid rgba(255,255,255,.14);color:#e8e8e8;',
+      'box-shadow:0 18px 60px rgba(0,0,0,.6)}',
+      '#lwp-term-gate .lwp-term-title{font-size:15px;font-weight:600;line-height:22px;margin-bottom:8px}',
+      '#lwp-term-gate .lwp-term-body{font-size:12.5px;line-height:20px;color:#b9b9b9;margin-bottom:16px;',
+      'white-space:pre-wrap}',
+      '#lwp-term-gate .lwp-term-row{display:flex;flex-direction:column;gap:8px}',
+      '#lwp-term-gate button{appearance:none;width:100%;border-radius:14px;padding:11px 14px;font-size:14px;',
+      'line-height:20px;border:1px solid rgba(255,255,255,.18);background:transparent;color:#e8e8e8}',
+      '#lwp-term-gate button[data-primary="on"]{background:#e8e8e8;color:#111;',
+      'border-color:transparent;font-weight:600}',
+      '#lwp-term-gate .lwp-term-note{font-size:11.5px;line-height:18px;color:#8f8f8f;margin-top:10px;',
+      'text-align:center}',
 
       // ── 输入区: 照 dsh 的 InputBar (`packages/client/ui-conversation/.../InputBar.module.css`) ──
       // 卡片 28px 圆角 / input-major 的实底 / soft elevation; 工具行左预设 chip、右 34px 圆钮
@@ -950,6 +1255,76 @@ window.__ModuleLoader__.load({
       'font-family:var(--dsw-font-family);font-size:inherit;line-height:inherit;',
       'color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary)}',
       '#lwp-input::placeholder{color:var(--dsw-alias-label-caption)}',
+      // ── 长按说话那条录音条 (2026-11-20 三次改口径: 面积 = 输入框 1.5 倍, 边缘渐变) ──
+      //
+      // 不再是盖住半屏的大面板: 它就是**输入卡那一块地 + 半个卡高** —— 左右各 12px、底 12px
+      // (与 `#lwp-dock` 的 `0 12px 12px` 对齐), 高度由 JS 按 `#lwp-card` 实测 × 1.5 写进 style。
+      // **不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上, 抬手与上滑都得照旧落在它那一侧。
+      // 材质: 蓝渐变 + 顶部径向柔光 + 上沿 1px 内高光 + 3.5% 噪点; **上沿 22px 用 mask 淡出** ——
+      // 与页面之间没有硬接缝 (真渐变), 代价是外投影一起被裁掉, 所以只留内高光
+      '#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;box-sizing:border-box;',
+      'height:148px;padding:16px 18px 14px;display:flex;flex-direction:column;gap:10px;',
+      'pointer-events:none;overflow:hidden;border-radius:28px;',
+      'background:linear-gradient(180deg,#5b7cff 0%,#3f6bff 54%,#2f5cff 100%);',
+      'box-shadow:inset 0 1px 0 rgba(255,255,255,.24);',
+      '-webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);',
+      'mask-image:linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.72) 10px,#000 22px);',
+      'opacity:0;transform:translateY(14px) scale(.99);',
+      'transition:opacity .16s ease,transform .24s cubic-bezier(.32,.72,0,1),background .18s ease}',
+      '#lwp-rec[data-on="on"]{opacity:1;transform:translateY(0) scale(1)}',
+      // 上滑到"松开取消"那一档: 整块往下沉一点、颜色退成中性灰 —— 读起来是"这块要丢掉", 不是"变暗了"
+      '#lwp-rec[data-cancel="on"]{transform:translateY(8px) scale(.988);',
+      'background:linear-gradient(180deg,#8b93a3 0%,#6f7686 54%,#5d6472 100%)}',
+      // 顶部柔光: 一块很轻的径向光, 不是一条色带
+      '#lwp-rec::before{content:"";position:absolute;left:-10%;right:-10%;top:-40%;height:86%;',
+      'pointer-events:none;background:radial-gradient(62% 52% at 50% 40%,rgba(255,255,255,.14),rgba(255,255,255,0) 72%)}',
+      // 噪点: 2x2 的一张, 摆着不动 (只画一次, 不占每帧)
+      '#lwp-rec::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.035;',
+      'background-image:url("data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'2\' height=\'2\'><rect width=\'1\' height=\'1\' fill=\'white\'/><rect x=\'1\' y=\'1\' width=\'1\' height=\'1\' fill=\'white\'/></svg>")}',
+      // 第一行: 左提示, 右计时胶囊 (矮条里它们必须同一行)
+      '#lwp-rec-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;',
+      'height:20px}',
+      '#lwp-rec[data-busy="on"] .lwp-rec-wave{opacity:0;height:0;flex:none}',
+      // 红点归动画管 (`animation` 会盖住普通的 `opacity`), 所以要连 animation 一起停
+      '#lwp-rec[data-busy="on"] .lwp-rec-dot{animation:none;opacity:0}',
+      // 一行提示: 录制中点一颗会呼吸的红点, 上滑后浮出一枚向下箭头
+      '.lwp-rec-hint{display:flex;align-items:center;gap:6px;min-width:0;font-size:12.5px;line-height:18px;',
+      'font-weight:500;letter-spacing:.02em;color:rgba(255,255,255,.94);',
+      'transition:opacity .16s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.lwp-rec-dot{width:6px;height:6px;border-radius:999px;flex:none;background:#ff5d5d;',
+      'box-shadow:0 0 0 3px rgba(255,93,93,.22);animation:lwp-rec-breath 1.6s ease-in-out infinite;',
+      'transition:opacity .16s ease}',
+      '@keyframes lwp-rec-breath{0%,100%{opacity:.55;box-shadow:0 0 0 3px rgba(255,93,93,.16)}',
+      '50%{opacity:1;box-shadow:0 0 0 5px rgba(255,93,93,.28)}}',
+      '.lwp-rec-arrow{width:13px;height:13px;flex:none;opacity:0;transform:translateY(-4px);',
+      'transition:opacity .18s ease,transform .18s cubic-bezier(.23,1,.32,1)}',
+      '#lwp-rec[data-cancel="on"] .lwp-rec-arrow{opacity:1;transform:translateY(0)}',
+      // 波形: 走带 (新的从右边进); **左右两端各自 9% 淡出** —— 条子进出声都不硬切
+      '.lwp-rec-wave{display:block;width:100%;flex:1;min-height:0;',
+      '-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
+      'mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
+      'transition:opacity .18s ease;opacity:1}',
+      // 转写中的三个点: 只动 transform; 平时不占位, 转写时接管波形那一行的空间
+      '.lwp-rec-dots{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;',
+      'min-height:0;height:0;opacity:0;transition:opacity .18s ease}',
+      '#lwp-rec[data-busy="on"] .lwp-rec-dots{flex:1;height:auto;opacity:1}',
+      '.lwp-rec-dots i{width:5px;height:5px;border-radius:999px;background:rgba(255,255,255,.92);',
+      'animation:lwp-rec-bounce 1.1s ease-in-out infinite}',
+      '.lwp-rec-dots i:nth-child(2){animation-delay:.12s}',
+      '.lwp-rec-dots i:nth-child(3){animation-delay:.24s}',
+      '@keyframes lwp-rec-bounce{0%,80%,100%{transform:translateY(0);opacity:.5}',
+      '40%{transform:translateY(-4px);opacity:1}}',
+      // 计时胶囊: 在第一行右边, 不再绝对定位贴底
+      '.lwp-rec-time{flex:none;padding:2px 9px;border-radius:999px;background:rgba(255,255,255,.16);',
+      'box-shadow:inset 0 1px 0 rgba(255,255,255,.28);',
+      'font-size:10.5px;line-height:15px;letter-spacing:.04em;color:rgba(255,255,255,.88);',
+      'font-variant-numeric:tabular-nums}',
+      // 动效敏感的人: 只留淡入, 位移与呼吸全关
+      '@media (prefers-reduced-motion:reduce){',
+      '#lwp-rec{transform:none;transition:opacity .12s linear}',
+      '#lwp-rec[data-on="on"],#lwp-rec[data-cancel="on"]{transform:none}',
+      '.lwp-rec-dot,.lwp-rec-dots i{animation:none}',
+      '.lwp-rec-arrow{transform:none}}',
       '#lwp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 8px 6px;',
       'min-width:0}',
       '#lwp-tools{display:flex;align-items:center;gap:8px;flex:1;min-width:0}',
@@ -1066,7 +1441,6 @@ window.__ModuleLoader__.load({
       // 「虚拟屏」那一项的二级项: 原生清单里的一项带 children 时暂存在这里, 抽屉切进 `screen` 态再画
       var screenItems = []
       var sending = false
-      var bound = ''
       /**
        * 键盘那一格 (px): 宿主推过来的高度, 只在门户盖着时才有值 (2026-11-09)
        *
@@ -1086,6 +1460,31 @@ window.__ModuleLoader__.load({
       var historyOpen = false
       var historyUnsub = null
       var historyQuery = ''
+      /* ── 终端 (2026-11-21, 落实表 #48) ────────────────────────────────────────────
+       *
+       * 口径: 终端 = **手机管电脑**. 这一层只做界面那半边 —— 整页变黑、那扇「扫码配对 / 返回」、
+       * 头像与名字强制、历史只列电脑那几场、新建只建与电脑连的场; 真正"发到电脑上执行"的是
+       * 插件 (`agent/pre-step` 那条归属方闸把影子会话里的一句话转给电脑)
+       *
+       * 开没开由**这一层**说了算 (`terminalMode`), 原生只镜像 (`portalTerminalVisible`) ——
+       * 页面重载 / 返回键 / 配对重启 host 之后两边都按页面说的那一个走
+       */
+      var terminalMode = false
+      /** `portalTerminal()` 交回来的那份读数 (影子根 / 配没配对 / 通道开没开); 取不到时 null */
+      var terminalInfo = null
+      /** 探测对端那一拍: `{at, ok, busy, why}` */
+      var terminalProbe = { at: 0, ok: false, busy: false, why: '' }
+      /** 弹窗现在为什么开着: '' 关着 | 'unpaired' | 'off' | 'offline' */
+      var terminalGate = ''
+      /** 进终端之前那一场 (`{id}`), 退出回它; 也写进 `TERMINAL_KEY` 的 `back`, 页面重载之后回得去 */
+      var terminalReturn = null
+      /** 上一次自动进终端 (挑场或新建) 的时刻: 冷却用, 见 [TERMINAL_ENTER_COOLDOWN_MS] */
+      var terminalAutoAt = 0
+      /** 上一句"终端里出了什么事"是什么时候 / 说的是哪一句: 同一句一分钟最多说一次, 换一句就当场说 */
+      var terminalNotedAt = 0
+      var terminalNotedKey = ''
+      /** 终端里正在等的那个探测计时器 */
+      var terminalProbeTimer = null
       var noteTimer = null
       /**
        * 屏幕上那一颗提示 (2.8.1 #12)
@@ -1304,6 +1703,29 @@ window.__ModuleLoader__.load({
        * turn-error 同一档), **不进 dsh 的会话账**: 这是本机的现场, 不是要发给模型的内容
        */
       var imageFails = []
+      /**
+       * 本机那几条「这句没发出去」 (2.8.1 #33): `{id, at, text}` —— 与 [imageFails] 同一档
+       * (`who:'error'`, 红字玻璃气泡), 画在门户自己的时间线上, **不进 dsh 的会话账**
+       *
+       * 主人报的是"点发送只有按钮变色, 正文没发出去, 过一会又恢复原状": 那时 `prompt()` 拒答只有一行
+       * `console.log`, 而门户盖着 dsh 自己的错误节点 —— 屏上就等于什么都没发生
+       */
+      var sendFails = []
+      /** 发送钮按住多久算长按 (长按 = steer, 轻点 = queue; 见 [sendGesture]) */
+      var SEND_HOLD_MS = 550
+      /**
+       * 这一次投递还没落进 dsh 快照时, 屏上先占那一行 (2.8.1 #33)
+       *
+       * dsh 的回显要等 Host 收下 prompt 才进快照 (`pendingSubmissions` 只装 accepted 的那几条),
+       * 于是"点了发送, 时间线上什么都没有"最长能空好几拍。这里先按本机这一份画一条半透明的行,
+       * 落盘那条 user 节点一出现就让位 (判据见 [pendingEchoState])
+       * `{id, at, text, attach}`; null = 没有欠着的那一行
+       */
+      var pendingEcho = null
+      /** 本机那条占位最多占多久: dsh 那边一直不认就撤, 免得屏上留一条永远不落地的气泡 */
+      var PENDING_ECHO_MS = 15000
+      /** 占位的序号 (同一条正文连发两次也不撞 id) */
+      var pendingSeq = 0
       /** 点 `+` 那一下的计时器 (宿主一回调就撤) */
       var pickWatch = null
       /** 这一趟选图还欠宿主一个回话 (`picked` / `empty` / `none` 里任意一个到了才算还清) */
@@ -1312,6 +1734,11 @@ window.__ModuleLoader__.load({
       var pickHeld = false
       /** 表情那个方框的边长 (px): 与 CSS `.lwp-sticker img` 里的 120 是同一个数, 改一处就得改另一处 */
       var STICKER_BOX = 120
+      /**
+       * 一条消息里最多画几张 dsh 附件图 (2026-11-20): 多出来的只写「+N 张图」——
+       * 一次贴十几张时, 解码与滚动都不该被后半截拖住
+       */
+      var MAX_DURABLE_IMAGES = 4
       /**
        * 自动开新对话试过没有 (2026-11-09 主人: "不需要用户手动点击开一场")
        *
@@ -1368,15 +1795,23 @@ window.__ModuleLoader__.load({
         chatTarget = null
         sessionId = id
         // 画到哪一场就记住哪一场: 下次挂载先回到这里, 而不是落在 dsh 顺手开的那张空白
-        rememberSession(id)
+        // **电脑那几场不记** (2026-11-21): 记了之后重载 / 退出门户再进来, 门户自己会停在电脑那一场 ——
+        // 那是终端里头的事, 没进终端的门户不该看见它
+        if (!isTerminalSession(id)) rememberSession(id)
         if (!same) {
           streamKey = ''
+          // 换场就把"这一档问过没有"作废 (2026-11-20): 默认值可能在别处改过, 而这一场
+          // 上一次落在这里时记下的那一档已经旧了 —— 不清就永远不会再问一次
+          modelDefaultChecked = ''
           // 她说的话: 换会话就**重取全量** (一次画完、不排队), 上一场没上屏的条一条都不带过来
           clearOut('the conversation changed')
           // 草稿里那张图也不带过去 (它挂在上一场的会话 id 上)
           clearAttach()
           // 上一场那几条「图片发送失败」也不带过去 (落实表 #35): 它们是这一场的现场
           imageFails = []
+          // 上一场那几条「这句没发出去」与还没落地的占位同样不带过去 (2.8.1 #33)
+          sendFails = []
+          pendingEcho = null
           userKey = ''
           loadOut(true)
         }
@@ -1535,7 +1970,13 @@ window.__ModuleLoader__.load({
         workspaceTry.id = owner
         workspaceTry.at = Date.now()
         try {
-          ctx.uiWorkspace.openWorkspace(owner)
+          var opening = ctx.uiWorkspace.openWorkspace(owner)
+          // 这是一条"顺手"的路 (给 [follow] 的 catch 兜底): 返回值没人等, 但也别留 unhandled rejection
+          if (opening && typeof opening.catch === 'function') {
+            opening.catch(function (reason) {
+              console.log('[luwi-portal] openWorkspace failed: ' + describeError(reason))
+            })
+          }
         } catch (_cannotOpen) {
           console.log('[luwi-portal] openWorkspace failed: ' + describeError(_cannotOpen))
         }
@@ -1702,7 +2143,19 @@ window.__ModuleLoader__.load({
           console.log('[luwi-portal] record not carried: no user node yet (users=' + String(lastUsers) + ')')
           return
         }
-        carried = mergeTimeline(carried, items)
+        // **本机画的那几行不抄** (2.8.1 #33 审查): 半透明占位行与两条本机失败行都不在 dsh 的账里,
+        // 抄进记录就撤不掉了 —— 换回来会多一条永远淡着的气泡 (真节点 id 不同, 去重也去不掉),
+        // 或者把上一场的「图片没发出去」捎到这一场
+        var keep = []
+        for (var i = 0; i < items.length; i += 1) {
+          var one = items[i]
+          if (one.pending === true) continue
+          if (one.fail === true) continue
+          if (String(one.id || '').indexOf('sendfail\u0001') === 0) continue
+          keep.push(one)
+        }
+        if (keep.length === 0) return
+        carried = mergeTimeline(carried, keep)
       }
 
       /**
@@ -1910,7 +2363,6 @@ window.__ModuleLoader__.load({
           var same = prev !== null && prev === id
           // 三件套的第二件: 让 dsh 的 mainView 也搬到这一场 (source 'new' 自带 align)
           switchTo(id, 'new')
-          bound = id
           call('portalBind', id)
           ledgerHoldUntil = Date.now() + 15000
           renderMeta()
@@ -1929,9 +2381,15 @@ window.__ModuleLoader__.load({
        * **不做「撤销」** (2026-11-08 真机定): 上一场在切走后会被 dsh 卸载, 回来要重新 `openSession`,
        * 而 `sessions.retain` 只认当前工作区里还挂着的会话 —— 实测 `unknown session`, 重试 3.2 s 也
        * 救不回来。摆一颗按下去只回一句"打不开了"的按钮, 比没有这颗按钮更糟
+       *
+       * **它是浮层** (2026-11-19 主人: "提示弹窗要单独一层, 否则中间的图文受弹窗影响下移, 弹窗消失
+       * 后又上移"): `#lwp-undo` 是 `position:absolute`, 这里只把 `top` 顶到头栏下面 —— 流里的高度
+       * 一个像素都不占, 出现/收起都不重排对话区
        */
       function showUndo() {
         if (!els.undo) return
+        var headHeight = els.head ? els.head.offsetHeight : 0
+        els.undo.style.top = String((headHeight > 0 ? headHeight : 53) + 6) + 'px'
         els.undo.hidden = false
         if (undoTimer !== null) clearTimeout(undoTimer)
         undoTimer = setTimeout(hideUndo, 8000)
@@ -2044,6 +2502,17 @@ window.__ModuleLoader__.load({
           id: 'out\u0001' + String(line.seq),
           kind: kind,
           text: typeof line.text === 'string' ? line.text : '',
+        }
+        // 2.8.1 #31: 「唤醒一下」那句带着宿主挑信号的来处 (`usage` / `schedule` / `check` / `wish` /
+        // `fallback`). 只进元数据 (`meta.topicSource`), 气泡上不加字 —— 历史与排障看得出就够了
+        var topicSource = typeof line.topicSource === 'string' ? line.topicSource : ''
+        if (topicSource !== '') item.meta = { topicSource: topicSource }
+        // 透明引用 (2026-11-20, 方案 §8.3): 这一句引的是哪一条记忆 (`episodes.jsonl` 的 id).
+        // 只进元数据 (`meta.memoryRef` → 行的 `data-ref`), 气泡上不加字 —— 她要能"被查", 不是"被看着"
+        var memoryRef = typeof line.memoryRef === 'string' ? line.memoryRef : ''
+        if (memoryRef !== '') {
+          item.meta = item.meta || {}
+          item.meta.memoryRef = memoryRef
         }
         if (kind === 'sticker') {
           item.sticker = typeof line.sticker === 'string' ? line.sticker : ''
@@ -2226,6 +2695,56 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 一条消息里的**耐久图引用** (2026-11-20 主人: "这个在后台dsh内发送的图要求也要在门户上显示")
+       *
+       * 后台 dsh 那边 (浮球 / 原生会话界面) 发的图不经门户 `lw-in` stash 那一条路, 落盘后只剩
+       * `{type:'image', attachment:{attachmentId, mediaType, width, height, bytes, name}}` —— 字节在
+       * dsh 的附件仓里, 由 `ctx.uiConversation.imageUrl()` 取回 (见 [durableImageBubble])
+       * 这里只挑"真能拿回来"的那些: 没有 `attachmentId` 的块交给 [hasImageBlock] 那条「（图）」兜底
+       * @param {object[]} blocks user/message 的 content
+       * @returns {object[]} `{attachmentId, mediaType, width, height, bytes, name}`
+       */
+      function imageAttachmentsOf(blocks) {
+        var out = []
+        if (!Array.isArray(blocks)) return out
+        for (var i = 0; i < blocks.length; i += 1) {
+          var block = blocks[i]
+          if (!block || typeof block !== 'object') continue
+          var kind = typeof block.type === 'string' ? block.type : block.kind
+          if (kind !== 'image') continue
+          var attachment = block.attachment
+          if (!attachment || typeof attachment !== 'object') continue
+          var id = typeof attachment.attachmentId === 'string' ? attachment.attachmentId : ''
+          if (id === '') continue
+          out.push({
+            attachmentId: id,
+            mediaType: typeof attachment.mediaType === 'string' ? attachment.mediaType : '',
+            width: Number(attachment.width) || 0,
+            height: Number(attachment.height) || 0,
+            bytes: Number(attachment.bytes) || 0,
+            name: typeof attachment.name === 'string' ? attachment.name : '',
+          })
+        }
+        return out
+      }
+
+      /**
+       * 本机占位那一行 (2.8.1 #33) —— 与真落盘那条 user 同一个形状, 只是多一位 `pending`
+       * @returns 能直接交给 [orderTimeline] 的一项
+       */
+      function pendingEchoItem() {
+        return {
+          who: 'user',
+          id: pendingEcho.id,
+          time: pendingEcho.at,
+          text: pendingEcho.text,
+          attach: pendingEcho.attach,
+          hasImage: false,
+          pending: true,
+        }
+      }
+
+      /**
        * 当前这一场的消息: user 节点 + 她说的话那份 jsonl, **按轮**合并 (2026-11-10)
        *
        * 两路流只按墙上时钟合并不够 (缺时间 / 同毫秒 / 宿主补句晚写都会把两条排反) —— 这里先把它们
@@ -2235,7 +2754,10 @@ window.__ModuleLoader__.load({
         // 这一场的节点还没到 (刚换场 / 场景还没恢复): 门户记录照画, 屏上不清空 (2026-11-12 #38)
         if (chatTarget === null) {
           lastUsers = 0
-          return carried.slice()
+          var before = carried.slice()
+          // 刚点过发送、这一场还没挂上: 本机那一行先占着, 屏上不是空的 (见 [pendingEcho])
+          if (pendingEcho !== null && sending) before.push(pendingEchoItem())
+          return before
         }
         var snapshot
         try {
@@ -2322,6 +2844,8 @@ window.__ModuleLoader__.load({
               text: split.main,
               attach: split.names,
               hasImage: hasImageBlock(node.content),
+              // dsh 那边发的图 (见 [imageAttachmentsOf]): 有引用就画真图, 不再只剩「（图）」
+              images: imageAttachmentsOf(node.content),
             })
             fingerprint.push(node.seq)
             userSeqs.push(node.seq)
@@ -2416,8 +2940,42 @@ window.__ModuleLoader__.load({
             diag: imageFails[f].diag,
           })
         }
+        // 本机那几条「这句没发出去」 (2.8.1 #33): 与图片失败同一档, 按它自己那一刻归轮
+        for (var sf = 0; sf < sendFails.length; sf += 1) {
+          extras.push({
+            who: 'error',
+            id: sendFails[sf].id,
+            time: sendFails[sf].at,
+            text: sendFails[sf].text,
+          })
+        }
+        // dsh 自己记下的那一条 prompt 拒答: 门户盖着它自己那块错误条, 这里补画一行
+        // (本机已经按同一句话记过的那条就不重复画 —— 两处说的是同一件事)
+        var rejected = promptErrorText(snapshot.promptError)
+        if (rejected !== '') {
+          var rejectedKnown = false
+          for (var rf = 0; rf < sendFails.length; rf += 1) {
+            if (sendFails[rf].text === rejected) rejectedKnown = true
+          }
+          if (!rejectedKnown) {
+            extras.push({ who: 'error', id: 'prompt-error\u0001' + rejected, time: 0, text: rejected })
+          }
+        }
+        // 本机那条占位: 落盘的 user 节点到了就让位, 失败 / 等太久就撤 (见 [pendingEchoState])
+        if (pendingEcho !== null) {
+          var holdNow = pendingEchoState(pendingEcho, users, sending, Date.now(), PENDING_ECHO_MS)
+          if (holdNow === 'done') {
+            console.log('[luwi-portal] pending echo landed: ' + String(pendingEcho.id))
+            pendingEcho = null
+          } else if (holdNow === 'drop') {
+            console.log('[luwi-portal] pending echo gave up: ' + String(pendingEcho.id))
+            pendingEcho = null
+          }
+        }
         // 记下这一拍读到了几个 user 节点 (给 [carryRecord] 当闸门, 见 [lastUsers])
         lastUsers = users.length
+        // 这一句还没进 dsh 的快照: 先按本机这一份占一行 (半透明), 点完发送屏上立刻有东西
+        if (pendingEcho !== null) users.push(pendingEchoItem())
         // 排好之后与门户记录**按时间**合成一条 (落实表 #38): 换场带过来那一段不再盲接在头上
         // (2026-11-14: 主人报的"她的话整组压在我的消息上面"就是那条盲拼接造成的)
         return mergeTimeline(carried, orderTimeline(users, rows, extras))
@@ -2713,6 +3271,88 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 会话里那张耐久图怎么拿回来 (2026-11-20)
+       *
+       * `ctx.uiConversation.imageUrl(sessionId, attachment)` 读 `session.readAttachment` 生成同一份
+       * blob URL 并按会话缓存 (`peekImageUrl` 命中就不必等); 会话绑定释放时会回收 —— 于是取不到时
+       * 这一格照实说一句, 不静默. 门户自己没有这条路时 (老宿主) 回 null / reject, 交给「（图）」兜底
+       */
+      function conversationFace() {
+        try {
+          return ctx.uiConversation && typeof ctx.uiConversation.imageUrl === 'function' ? ctx.uiConversation : null
+        } catch (_noFace) {
+          return null
+        }
+      }
+
+      /** 已经缓存好的那张 URL (同步; 没有就 undefined) */
+      function peekDurableImage(ref) {
+        var face = conversationFace()
+        if (face === null || typeof face.peekImageUrl !== 'function' || sessionId === null) return undefined
+        try {
+          return face.peekImageUrl(sessionId, ref)
+        } catch (_noPeek) {
+          return undefined
+        }
+      }
+
+      /** 取回那一张 (异步; 失败 reject) */
+      function loadDurableImage(ref) {
+        var face = conversationFace()
+        if (face === null || sessionId === null) return Promise.reject(new Error('no conversation face'))
+        return face.imageUrl(sessionId, ref)
+      }
+
+      /**
+       * 一张 dsh 附件图: 先画出来再看字节, 取不到就「图没取到」
+       *
+       * 尺寸能从 `attachment.width/height` 拿到就先钉住比例 (解码前就有高度, 下面那条不会被顶一下);
+       * 点一下 = 预览窗 (与 `/lw-out` 那条同一扇窗, 这一档直接给 blob URL, 见 [openPreview])
+       * @param {object} ref `imageAttachmentsOf` 的一项
+       */
+      function durableImageBubble(ref) {
+        var wrap = h('div', 'lwp-image')
+        wrap.setAttribute('data-source', 'attachment')
+        var img = document.createElement('img')
+        img.alt = ''
+        if (ref.width > 0 && ref.height > 0) {
+          img.width = ref.width
+          img.height = ref.height
+          img.style.aspectRatio = String(ref.width) + ' / ' + String(ref.height)
+        }
+        if ('decoding' in img) img.decoding = 'async'
+        /** 画上这张 src; 之前说过「没取到」就把那句话换掉 */
+        var paint = function (url) {
+          if (typeof url !== 'string' || url === '') return false
+          if (!wrap.contains(img)) {
+            wrap.textContent = ''
+            wrap.appendChild(img)
+          }
+          wrap.removeAttribute('data-broken')
+          img.src = url
+          settleDecode(img)
+          var leaf = ref.name === '' ? '图片' : ref.name
+          wrap.onclick = function () {
+            openPreview({ src: url, name: leaf })
+          }
+          return true
+        }
+        var broke = function () {
+          wrap.setAttribute('data-broken', 'on')
+          wrap.textContent = '图没取到'
+          wrap.onclick = null
+        }
+        img.onerror = function () { broke() }
+        wrap.appendChild(img)
+        var cached = peekDurableImage(ref)
+        if (cached !== undefined) paint(cached)
+        settle(function () { return loadDurableImage(ref) }).then(function (url) {
+          if (!paint(url)) broke()
+        }).catch(function () { broke() })
+        return wrap
+      }
+
+      /**
        * 一份文件: **只写文件名** (2026-11-09 主人: "只显示文件名, 能打开的文件名都是蓝色的可以点击")
        *
        * `file.rel` 是 `/lw-out/` 后面那一段 (`assets/…` 是她递来的, `in/…` 是自己发上去的);
@@ -2752,13 +3392,25 @@ window.__ModuleLoader__.load({
       function openPreview(file) {
         if (!els.preview) return
         var rel = String(file && file.rel ? file.rel : '')
-        var name = String(file && file.name ? file.name : '文件')
+        // `src` 那一档 (2026-11-20): dsh 附件图是会话绑定的 blob URL, 不走 `/lw-out` 那条路由
+        var src = String(file && file.src ? file.src : '')
+        var name = String(file && file.name ? file.name : (src === '' ? '文件' : '图片'))
         var bytes = Number(file && file.bytes ? file.bytes : 0)
         els.previewName.textContent = name
         els.previewBody.textContent = ''
         // 上一份可能是 Office (那一档会改内边距); 换一档就把它摘掉
         els.previewBody.removeAttribute('data-kind')
-        if (rel === '') {
+        if (src !== '') {
+          var shown = document.createElement('img')
+          shown.alt = ''
+          shown.src = src
+          shown.onerror = function () {
+            els.previewBody.textContent = ''
+            els.previewBody.appendChild(h('div', 'lwp-preview-note', '这张图现在取不到'))
+          }
+          els.previewBody.appendChild(shown)
+          els.previewBody.setAttribute('data-kind', 'image')
+        } else if (rel === '') {
           els.previewBody.appendChild(h('div', 'lwp-preview-note', '这一份没有留下路径, 打不开'))
         } else if (isImageName(name)) {
           var img = document.createElement('img')
@@ -2888,12 +3540,16 @@ window.__ModuleLoader__.load({
        * @param {string|null} currentId 当前画着的那一场
        * @returns {{id: string, title: string, at: number, current: boolean, blank: boolean}[]}
        */
-      function historyRows(snapshot, query, currentId) {
+      function historyRows(snapshot, query, currentId, scope) {
         var byId = snapshot && typeof snapshot === 'object' && snapshot.byId ? snapshot.byId : {}
         var ids = Object.keys(byId)
         var needle = String(query === undefined || query === null ? '' : query).trim().toLowerCase()
         /** 只有搜索框空着时才把当前那场钉在最前 */
         var pinCurrent = needle === ''
+        // 2026-11-21 终端: 影子根底下的那些是"电脑那几场", 两端互不串.
+        // 没给 shadowRoot 时不做任何过滤 (老调用方 / 老读数一个字节不变)
+        var root = scope && typeof scope.shadowRoot === 'string' ? scope.shadowRoot : ''
+        var terminalOnly = !!(scope && scope.mode === 'terminal')
         var rows = []
         for (var i = 0; i < ids.length; i += 1) {
           var summary = byId[ids[i]]
@@ -2902,6 +3558,10 @@ window.__ModuleLoader__.load({
           var current = id === currentId
           var blank = summary.blank === true
           if (blank && !current) continue
+          if (root !== '') {
+            var onPeer = underShadow(summary.cwd, root)
+            if (terminalOnly !== onPeer) continue
+          }
           var title = typeof summary.displayTitle === 'string' ? summary.displayTitle.trim() : ''
           if (title === '') title = blank ? '空白对话' : '新对话'
           if (needle !== '') {
@@ -2947,11 +3607,14 @@ window.__ModuleLoader__.load({
         } catch (_noList) {
           snapshot = null
         }
-        var rows = historyRows(snapshot, historyQuery, sessionId)
+        // 终端里只列电脑那几场 (最近的那些), 普通模式下把那些排除掉 (2026-11-21)
+        var rows = terminalMode
+          ? terminalRows(snapshot, historyQuery, sessionId, terminalRoot(), TERMINAL_HISTORY_MAX)
+          : historyRows(snapshot, historyQuery, sessionId, { mode: 'all', shadowRoot: terminalRoot() })
         els.historyList.textContent = ''
         if (rows.length === 0) {
           els.historyList.appendChild(h('div', 'lwp-history-empty', historyQuery.trim() === ''
-            ? '还没有历史对话'
+            ? (terminalMode ? '电脑那边还没有对话' : '还没有历史对话')
             : '没有匹配的对话'))
           return
         }
@@ -2963,6 +3626,11 @@ window.__ModuleLoader__.load({
         historyOpen = true
         historyQuery = ''
         if (els.historyQuery) els.historyQuery.value = ''
+        // 终端里那一窗是"电脑上的对话", 底部那颗按钮建出来的是与电脑连的一场 (2026-11-21)
+        if (els.historyTitle) els.historyTitle.textContent = terminalMode ? '电脑上的对话' : '历史对话'
+        if (els.historyNew) {
+          els.historyNew.textContent = terminalMode ? '在电脑上开一场新对话' : '开始新的对话'
+        }
         els.history.hidden = false
         renderHistory()
         // 列表是活的: 会话表一变 (新开一场 / 别处发了一句) 就重画, 关窗时退订
@@ -3098,7 +3766,7 @@ window.__ModuleLoader__.load({
        *
        * 首启 / 这一场落不下去时唯一的入口: 备好 -> 落进去, **全程不弹任何窗**。没成只留一句提示,
        * 并排一次 15 s 的补试 (只一次; 之后由账本 / 会话表推着走)
-       * @param {string} from 谁触发的 (start / retry / again, 只进日志)
+       * @param {string} from 谁触发的 (start / retry / again / back, 只进日志)
        */
       function landInDefaultWorkspace(from) {
         if (entering) return
@@ -3161,7 +3829,6 @@ window.__ModuleLoader__.load({
           entering = false
           // 自动落位这一条也要让 dsh 的 mainView 一起过去 (source 'new' 自带 align)
           switchTo(id, 'new')
-          bound = id
           call('portalBind', id)
           ledgerHoldUntil = Date.now() + 15000
           renderMeta()
@@ -3170,9 +3837,20 @@ window.__ModuleLoader__.load({
         setTimeout(look, 150)
       }
 
-      /** 底部那颗「开始新的对话」: 与头栏那块身份同一个入口 */
+      /**
+       * 底部那颗「开始新的对话」
+       *
+       * **2026-11-19 起这是新对话的两条入口之一** (另一条是首启的 [autoStart]): 头栏那颗头像
+       * 改去开历史窗了, 所以"开一场新的"收敛到这一颗 —— 先关窗, 再走 [newConversation]
+       */
       function startFromHistory() {
         closeHistory()
+        // 2026-11-21 终端: 这一颗在终端里建的是**与电脑连的那一场** (影子工作区里的新会话),
+        // 不是本地那场普通对话
+        if (terminalMode) {
+          terminalNew()
+          return
+        }
         newConversation()
       }
 
@@ -3636,9 +4314,15 @@ window.__ModuleLoader__.load({
           item.image || '', item.sticker || '',
           item.file ? String(item.file.name) + '|' + String(item.file.rel) : '',
           item.attach ? item.attach.join(',') : '',
+          // dsh 那边发的图 (2026-11-20): 身份里带 attachmentId, 图块补上那一拍这一行才会重建
+          item.images && item.images.length > 0
+            ? item.images.map(function (one) { return String(one.attachmentId || '') }).join(',')
+            : '',
           item.hasImage ? '1' : '', item.fallback ? '1' : '',
           // 有四行诊断才画「复制诊断」, 这一位也进身份: 少了它, 诊断补上那一拍不会重建那一行
           item.diag ? '1' : '',
+          // 本机占位那一行 (2.8.1 #33): 它变成真的那条时身份也换了, 那一行才重画一次
+          item.pending ? '1' : '',
         ].join('\u0001')
       }
 
@@ -3651,27 +4335,47 @@ window.__ModuleLoader__.load({
       function buildRow(item) {
         var row = h('div', 'lwp-row')
         row.setAttribute('data-who', item.who)
+        // 一句气泡从哪条信号来的 (2.8.1 #31): 值就是 `meta.topicSource`, 老行没有这一格就不写
+        if (item.meta && item.meta.topicSource) row.setAttribute('data-topic', item.meta.topicSource)
+        // 这一句引的是哪条记忆 (2026-11-20, 方案 §8.3): 值就是 `meta.memoryRef` —— 排障时顺着它
+        // 去 `lw/memory/episodes.jsonl` 查原话
+        if (item.meta && item.meta.memoryRef) row.setAttribute('data-ref', item.meta.memoryRef)
+        // 本机占位那一行 (2.8.1 #33): 还欠 dsh 一条落盘的 user 节点, 画淡一点 —— 人一眼看得出"还在送"
+        if (item.pending) row.setAttribute('data-pending', 'on')
         if (item.who === 'user' && item.hasImage && !(item.attach && item.attach.length > 0)) {
-          // 有图块却没有落盘那份 (stash 失败 / 旧消息): 补一行「（图）」, 不假装贴过也不整条丢掉
+          // 有图块却一份落盘都没有 (stash 失败 / 旧消息): 补一行「（图）」, 不假装贴过也不整条丢掉
+          // (后台 dsh 发的那种落盘只剩 attachmentId, 有 attach 或有引用时走下面那一支画真图)
           var lostOnly = h('div', 'lwp-image', '（图）')
           lostOnly.setAttribute('data-broken', 'on')
           row.appendChild(lostOnly)
           if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
-        } else if (item.attach && item.attach.length > 0) {
-          // 自己发过的图与文件 (2026-11-09): 字节落在工作区 `lw-in/`, 名字在正文那一段里。
-          // **话在上、附件在下** (与她那侧同一条): 先说的话, 再是图与文件
+        } else if (item.who === 'user') {
+          // user 那一侧: 话在上, 附件在下 (2026-11-09 的口径不变); 附件两路并存 ——
+          // ① 门户 `+` 发的图与文件 (字节落在工作区 `lw-in/`, 名字在正文那一段里)
+          // ② 后台 dsh 那边发的图 (落盘只剩 attachmentId, 走 [durableImageBubble] 取真图) (2026-11-20)
           if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
           var drew = false
-          for (var a = 0; a < item.attach.length; a += 1) {
-            var attached = item.attach[a]
+          var listed = Array.isArray(item.attach) ? item.attach : []
+          for (var a = 0; a < listed.length; a += 1) {
+            var attached = listed[a]
             if (isImageName(attached)) {
               row.appendChild(imageBubble({ image: 'in/' + encodeURIComponent(attached) }))
-              drew = true
             } else {
               row.appendChild(fileChip({ rel: 'in/' + encodeURIComponent(attached), name: attached }, 'in'))
             }
+            drew = true
           }
-          // 有图块却没有落盘那份 (旧消息 / 存不下): 补一行「（图）」, 不假装贴过
+          var refs = Array.isArray(item.images) ? item.images : []
+          var shownRefs = 0
+          for (var r = 0; r < refs.length && shownRefs < MAX_DURABLE_IMAGES; r += 1) {
+            row.appendChild(durableImageBubble(refs[r]))
+            shownRefs += 1
+            drew = true
+          }
+          if (refs.length > shownRefs) {
+            row.appendChild(h('div', 'lwp-bubble', '+' + String(refs.length - shownRefs) + ' 张图'))
+          }
+          // 有图块却一条引用都没有 (旧消息 / stash 失败): 补一行「（图）」, 不假装贴过也不整条丢掉
           if (!drew && item.hasImage) {
             var lost = h('div', 'lwp-image', '（图）')
             lost.setAttribute('data-broken', 'on')
@@ -3797,6 +4501,16 @@ window.__ModuleLoader__.load({
         if (!els.flow) return
         // 每画一次流就顺手对一次那颗点: "正在做…"那一行与它是同一个判据, 不该一个亮一个不亮
         renderMeta()
+        // 终端里还没落到电脑那一场: 门户的对话一格都不上屏 (2026-11-21 主人原话) ——
+        // `openTerminal` 到 `terminalEnter` 落场之间有几百毫秒 (离线时是整个门牌期), 那一段 `sessionId`
+        // 还是门户那一场, 照常画就等于把"我的对话"贴在黑底上; 落到电脑那一场之后签名一变自己重画
+        if (terminalMode && !isTerminalSession(sessionId)) {
+          if (flowSig !== TERMINAL_HIDDEN_SIG) {
+            resetFlow()
+            flowSig = TERMINAL_HIDDEN_SIG
+          }
+          return
+        }
         var items = nodesOf()
         var shown = []
         for (var i = 0; i < items.length; i++) {
@@ -3903,6 +4617,9 @@ window.__ModuleLoader__.load({
 
       function renderMeta() {
         updateBusy()
+        // 终端那身皮上的"落到电脑那一场没有"跟着每一次重画对一次 (见 [markTerminalSession]):
+        // 终端里的对话该不该上屏就认这个记号, `renderFlow` 的闸也在同一拍里读它
+        markTerminalSession()
         // 旧元素留着但不进屏 (样式里 `display:none`): 有几条判据还认 `lwp-meta` 这个名字
         if (els.meta) els.meta.textContent = ''
       }
@@ -4033,6 +4750,12 @@ window.__ModuleLoader__.load({
           avatar = data.avatar
           writeStored(AVATAR_CACHE, { ver: avatarVer, url: avatar })
         }
+        // 2026-11-21 终端: 这一页里名字与头像**强制**——外观里改过的昵称与自选头像都不进终端
+        // (主人: "头像强行改成luwi头像, 名称强行改成「luwi终端」")
+        if (terminalMode) {
+          name = TERMINAL_TITLE
+          avatar = ''
+        }
         var src = avatar === '' ? MARK_PNG : avatar
         if (els.brandName) els.brandName.textContent = name
         if (els.markImg) els.markImg.src = src
@@ -4056,6 +4779,13 @@ window.__ModuleLoader__.load({
 
       var modelDirectory = null
       var modelState = null
+      /** 正在把哪一场的模型拨回宿主默认 (避开同一场连着叫几遍, 见 [followDefaultModel]) */
+      var modelDefaultPending = null
+      /** 上一次已经问过宿主默认的那一档 (id + provider/model/effort), 同一档不再问第二遍 */
+      var modelDefaultChecked = ''
+      /** 目录订阅: 目录一响 chip 就跟着改 (见 [watchModelDirectory]) */
+      var modelDirSource = null
+      var modelDirUnsub = null
       /** 已经拨过完全权限的那几场 (每场只拨一次, 之后主人自己选的档不被改回来) */
       var permsEnsured = {}
       var menuKind = ''
@@ -4115,10 +4845,37 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * 目录一响就跟着改 (2026-11-20): 门户原来只在 `loadModel` 那一拍取一次快照, 于是这一场里
+       * 别处换了模型 (原生界面 / 拨默认) 之后 chip 会停在旧名字 —— 现在挂在目录的 store 上,
+       * 它一变就重画, 并再判一次"空白场要不要跟默认"
+       * @param {string|null} id 订阅所属的那一场 (换场之后旧订阅一律不再动手)
+       */
+      function watchModelDirectory(id) {
+        if (modelDirSource === modelDirectory) return
+        if (modelDirUnsub !== null) {
+          try { modelDirUnsub() } catch (_noUnsub) { /* 订阅已经不在了, 无所谓 */ }
+          modelDirUnsub = null
+        }
+        modelDirSource = modelDirectory
+        if (modelDirectory === null || typeof modelDirectory.store.subscribe !== 'function') return
+        try {
+          modelDirUnsub = modelDirectory.store.subscribe(function () {
+            if (sessionId !== id || modelDirectory === null) return
+            modelState = modelDirectory.store.getSnapshot()
+            renderModel()
+            followDefaultModel()
+          })
+        } catch (_noSubscribe) {
+          modelDirUnsub = null
+        }
+      }
+
       function loadModel() {
         if (sessionId === null) {
           modelDirectory = null
           modelState = null
+          watchModelDirectory(null)
           renderModel()
           return
         }
@@ -4126,6 +4883,7 @@ window.__ModuleLoader__.load({
         if (!service || typeof service.directoryFor !== 'function') {
           modelDirectory = null
           modelState = null
+          watchModelDirectory(null)
           renderModel()
           return
         }
@@ -4134,6 +4892,7 @@ window.__ModuleLoader__.load({
         } catch (_noDirectory) {
           modelDirectory = null
         }
+        watchModelDirectory(sessionId)
         if (modelDirectory === null) {
           modelState = null
           renderModel()
@@ -4142,10 +4901,92 @@ window.__ModuleLoader__.load({
         settle(function () { return modelDirectory.load() }).then(function (state) {
           modelState = state
           renderModel()
+          // 空白场跟宿主默认 (2026-11-20): 换场 / 新建 / 投影后到都会走到这里
+          followDefaultModel()
         }).catch(function () {
           modelState = null
           renderModel()
         })
+      }
+
+      /**
+       * 空白场要不要把模型拨回宿主默认 (2026-11-20 主人: "我在门户里改的模型要作为默认模型,
+       * 新开会话都要用门户中设置的模型")
+       *
+       * 只回答"拨不拨": 非空白场**永远不拨** (那一场自己选过的模型归它自己); 两边缺一个都不拨;
+       * 已经一致也不拨. 纯函数, 判据 `check-luwi-portal.mjs` 抽出来真跑
+       * @param {object|null} current 这一场现在那份 `{provider, model, reasoningEffort?}`
+       * @param {object|null} hostDefault 宿主 `modelCatalog().default`
+       * @param {boolean} blank 这一场是不是还没发过话
+       * @returns {boolean} true = 把默认拨给这一场
+       */
+      function blankModelNeedsDefault(current, hostDefault, blank) {
+        if (blank !== true) return false
+        if (current === null || current === undefined) return false
+        if (hostDefault === null || hostDefault === undefined) return false
+        if (typeof hostDefault.provider !== 'string' || typeof hostDefault.model !== 'string') return false
+        if (typeof current.provider !== 'string' || typeof current.model !== 'string') return false
+        if (current.provider !== hostDefault.provider) return true
+        if (current.model !== hostDefault.model) return true
+        var was = current.reasoningEffort === undefined ? '' : String(current.reasoningEffort)
+        var want = hostDefault.reasoningEffort === undefined ? '' : String(hostDefault.reasoningEffort)
+        return was !== want
+      }
+
+      /**
+       * 空白场把模型拨回宿主默认 (见 [blankModelNeedsDefault])
+       *
+       * **只对空白场做**, 同一场一次只跑一趟 (`modelDefaultPending` 就是那道闸, 换场 / 投影后到 /
+       * 拨完再 load 会连着叫几遍); 拿不到默认、拨不动都安静收手 —— chip 维持现状, 不编造
+       */
+      function followDefaultModel() {
+        var id = sessionId
+        if (id === null || modelState === null || modelDirectory === null) return
+        if (modelDefaultPending === id) return
+        var summary = summaryOf(id)
+        if (!summary || summary.blank !== true) return
+        var current = modelState.current
+        var key = id + '\u0001' + (current
+          ? String(current.provider) + '/' + String(current.model) + '/'
+            + (current.reasoningEffort === undefined ? '' : String(current.reasoningEffort))
+          : '')
+        // 这一档已经问过一遍了 (拨回之后 current 会变, key 也就变了, 于是只多问那一次)
+        if (modelDefaultChecked === key) return
+        var remote = remoteOf()
+        if (remote === null) return
+        modelDefaultChecked = key
+        modelDefaultPending = id
+        settle(function () { return remote.session.modelCatalog() }).then(function (result) {
+          if (modelDefaultPending === id) modelDefaultPending = null
+          if (id !== sessionId) return
+          if (!result || result.ok === false || !result.value) {
+            // **不静默**: 拿不到宿主默认就说明白, 否则"新会话还是老模型"只能靠猜
+            var why = result && result.error ? String(result.error.message || result.error.code) : 'no catalog'
+            console.log('[luwi-portal] model default unavailable: ' + why)
+            return
+          }
+          if (!blankModelNeedsDefault(modelState && modelState.current, result.value.default, true)) return
+          return settle(function () { return modelDirectory.select(result.value.default) }).then(function (picked) {
+            if (picked && picked.ok === false) {
+              var refused = picked.error && picked.error.message ? picked.error.message : 'select refused'
+              console.log('[luwi-portal] model default not applied: ' + String(refused))
+              return
+            }
+            loadModel()
+          })
+        }).catch(function (error) {
+          if (modelDefaultPending === id) modelDefaultPending = null
+          console.log('[luwi-portal] model default check failed: ' + String(error && error.message ? error.message : error))
+        })
+      }
+
+      /** dsh 的 remote 面 (取宿主默认模型用; 没有就 null) */
+      function remoteOf() {
+        try {
+          return ctx.remote && ctx.remote.session ? ctx.remote : null
+        } catch (_noRemote) {
+          return null
+        }
       }
 
       /** chip 上那个名字: 目录里查得到就用它的名字, 查不到就用模型 id */
@@ -4245,11 +5086,634 @@ window.__ModuleLoader__.load({
       }
 
 
-      /** 发送钮的两副面孔 (空草稿时是四成透明的那颗, 与 dsh 的 `.primary` 同一个读数) */
+      // ── 语音 (2026-11-20 主人给的三张官方手机端截图) ─────────────────────────────
+      //
+      // 两件互不相干的事挤在这一段里, 别混着改:
+      //
+      // 1. **语音输出** = 自动朗读开关 —— 就是 设置 → 说话 → 「朗读回答」那一格
+      //    (`SpeakSettings.readAloud`), 一处状态两处界面; 喇叭两副图标与两句 Toast 照图 1 / 图 2
+      // 2. **语音输入** = 长按空输入框**当场开录** (没有中间态), 松手转写进草稿, 上滑取消;
+      //    录音面板是那块蓝色渐变 + 一排随声音跳动的竖条 (照图 3)
+
+      /** 自动朗读现在开着没有 (头栏那颗喇叭的图标形状与亮灯都看它) */
+      var speakOn = false
+
+      /** 头栏那颗喇叭: 两副图标 / 亮灯 / 无障碍名字一起换 */
+      function applySpeakStatus(status) {
+        if (!els.speakButton) return
+        speakOn = !!(status && status.readAloud === true)
+        els.speakButton.innerHTML = speakOn ? SPEAKER_ON_ICON : SPEAKER_OFF_ICON
+        els.speakButton.setAttribute('data-on', speakOn ? 'on' : 'off')
+        els.speakButton.setAttribute('aria-pressed', speakOn ? 'true' : 'false')
+        var label = speakOn ? '已开启自动朗读' : '已关闭自动朗读'
+        els.speakButton.title = label
+        els.speakButton.setAttribute('aria-label', label)
+      }
+
+      /** 挂上来 / 从设置页回来时对一次表 (设置页那一格与这颗是同一个开关) */
+      function refreshSpeak() {
+        applySpeakStatus(call('portalSpeak', JSON.stringify({ op: 'status' })))
+      }
+
+      /**
+       * 点一下那颗喇叭: 翻的是 设置 → 说话 里那同一个开关
+       *
+       * 宿主每轮念之前都会问一次 `speak op=status`, 所以**不用重启 host**, 下一轮就按新值走
+       */
+      function toggleSpeak() {
+        var answer = call('portalSpeak', JSON.stringify({ op: 'toggle' }))
+        if (answer === null || answer.ok !== true) {
+          toast('这一版宿主还不支持', true)
+          return
+        }
+        applySpeakStatus(answer)
+        // 这两句与官方手机端图上那两句逐字相同
+        toast(speakOn ? '已开启自动朗读' : '已关闭自动朗读')
+      }
+
+      // ── 语音输入 (长按当场开录) ───────────────────────────────────────────────
+      /** `idle` / `press` / `recording` / `working` */
+      var voiceState = 'idle'
+      /** 这一趟的编号: 原生回推时用它认人, 换一趟就抬一格, 过期的那份直接丢 */
+      var voiceId = 0
+      var voiceStartedAt = 0
+      var voiceTimer = null
+      var voiceTicker = null
+      var voiceWatch = null
+      var voiceStream = null
+      var voiceStreamAsk = null
+      var voiceContext = null
+      var voiceProcessor = null
+      var voiceChunks = null
+      var voiceSourceRate = 0
+      /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
+      var pressTimer = null
+      /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
+      var pressStartX = 0
+      var pressStartY = 0
+      /** 手指还按着: 要到麦克风是异步的, 抬手可能发生在流回来之前 */
+      var voiceHeld = false
+      /** 这一趟已经上滑到"松开就取消" */
+      var recCancel = false
+      /** 起手那一点的 Y: 上滑量按它算 */
+      var recStartY = 0
+      /** 波形那一帧的号与"这一列攒到哪儿了" */
+      var recFrame = 0
+      var recLastSample = 0
+      /** 这一列里见过的最大峰值 (`onaudioprocess` 每拍更新) */
+      var recPeak = 0
+      /** 窗口内的峰值保持 (归一化的分母) */
+      var recHold = 0
+      /** 起落平滑后的这一列电平 (快起慢落) */
+      var recShown = 0
+      /** 走带历史: 从旧到新, 最多 `REC_COLS` 列 */
+      var recHist = []
+      /** 缓存的竖直渐变 (尺寸变了才重建) */
+      var recGradient = null
+      var recGradientHeight = 0
+      /** 面板上那两句提示 (图 3 的「松手发送，上滑取消」; 这一层松手是"进草稿", 所以照实写) */
+      var REC_HINT = '松手转写，上滑取消'
+      var REC_HINT_CANCEL = '松开取消'
+      var REC_HINT_BUSY = '正在转写…'
+      /** 上滑多少像素算取消 */
+      var REC_CANCEL_PX = 56
+      /** 录音条的高度 = 输入卡实测高 × 这个倍数 (主人 2026-11-20: "比输入框高1.5倍即可") */
+      var REC_PANEL_RATIO = 1.5
+      var REC_PANEL_FALLBACK = 148
+      var REC_PANEL_MIN = 120
+      var REC_PANEL_MAX = 210
+
+      /** 蓝色录音面板升起来 (长按 450 ms 那一刻) */
+      function showRecPanel() {
+        recCancel = false
+        recPeak = 0
+        recHold = 0
+        recShown = 0
+        recHist = []
+        recLastSample = 0
+        recGradient = null
+        fitRecPanel()
+        if (els.rec) {
+          els.rec.setAttribute('data-on', 'on')
+          els.rec.setAttribute('data-cancel', 'off')
+          els.rec.setAttribute('data-busy', 'off')
+        }
+        if (root) root.setAttribute('data-rec', 'on')
+        setRecHint(REC_HINT)
+        paintRecTime()
+        paintRecWave()
+        // **不在这里起帧**: 这一刻 `voiceState` 还是 `press` (麦克风还没到手), 起帧会第一帧就退出、
+        // 之后再也没人重画 —— 那条就这么"不动"了 (2026-11-20 主人: "那个条没有波动")
+      }
+
+      /**
+       * 量一下输入卡, 把这条的高度定成它的 1.5 倍 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
+       *
+       * 卡片里带附件行时会更高: 一样按 1.5 倍跟, 但封顶 `REC_PANEL_MAX`, 免得表情九宫格把条顶上天
+       */
+      function fitRecPanel() {
+        if (!els.rec) return
+        var cardHeight = 0
+        if (els.card && typeof els.card.getBoundingClientRect === 'function') {
+          var box = els.card.getBoundingClientRect()
+          cardHeight = box && isFinite(box.height) ? box.height : 0
+        }
+        var wanted = cardHeight > 0 ? Math.round(cardHeight * REC_PANEL_RATIO) : REC_PANEL_FALLBACK
+        if (wanted > REC_PANEL_MAX) wanted = REC_PANEL_MAX
+        if (wanted < REC_PANEL_MIN) wanted = REC_PANEL_MIN
+        els.rec.style.height = String(wanted) + 'px'
+        recGradient = null
+        // 一行读数: 卡多高、条多高 (真机验收要的就是这个比例, 也方便日后查"条怎么又高了")
+        console.log('[luwi-portal] rec bar ' + wanted + 'px (card ' + Math.round(cardHeight) + 'px)')
+      }
+
+      /** 帧循环: 只在真的在录的时候跑 (由 `startRecording` 的 `begin()` 拉起来) */
+      function startRecPump() {
+        if (recFrame !== 0) return
+        var pump = function () {
+          recFrame = 0
+          if (voiceState !== 'recording') return
+          sampleRecColumn(false)
+          paintRecWave()
+          paintRecTime()
+          recFrame = requestAnimationFrame(pump)
+        }
+        recFrame = requestAnimationFrame(pump)
+      }
+
+      /** 面板落下去, 波形停 */
+      function hideRecPanel() {
+        recCancel = false
+        recPeak = 0
+        recHold = 0
+        recShown = 0
+        recHist = []
+        recLastSample = 0
+        if (recFrame !== 0) {
+          try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
+          recFrame = 0
+        }
+        if (els.rec) {
+          els.rec.setAttribute('data-on', 'off')
+          els.rec.setAttribute('data-cancel', 'off')
+          els.rec.setAttribute('data-busy', 'off')
+        }
+        if (root) root.setAttribute('data-rec', 'off')
+        // 长按那一下关掉过的 `touch-action` 要还回去 (选区与滚动靠它)
+        if (els.input) els.input.style.touchAction = ''
+        clearRecWave()
+      }
+
+      /**
+       * 折一列进走带历史 (每 `REC_SAMPLE_MS` 一次)
+       *
+       * 顺序是: 峰值保持 → 归一化 → 快起慢落 → 入历史; `force` 用来在开录 / 收尾时补一列空的
+       * @param force true = 不等节拍, 立刻记一列
+       */
+      function sampleRecColumn(force) {
+        var now = Date.now()
+        if (!force && recLastSample !== 0 && now - recLastSample < REC_SAMPLE_MS) return
+        if (force && recLastSample !== 0 && now - recLastSample < REC_SAMPLE_MS) return
+        recLastSample = now
+        recHold = recNextHold(recHold, recPeak)
+        var target = recNormalise(recPeak, recHold)
+        // 快起 (0.6) 慢落 (0.12): 说话时立刻抬起来, 停顿时慢慢落, 不是一根根跳
+        recShown = target > recShown ? target * 0.6 + recShown * 0.4 : target * 0.12 + recShown * 0.88
+        recPeak = 0
+        recHist.push(recShown)
+        while (recHist.length > REC_COLS) recHist.shift()
+      }
+
+      /** 右下角那一行 `0:03 / 1:00` */
+      function paintRecTime() {
+        if (!els.recTime) return
+        var seconds = voiceStartedAt === 0 ? 0 : Math.floor((Date.now() - voiceStartedAt) / 1000)
+        if (seconds < 0) seconds = 0
+        var whole = Math.floor(VOICE_MAX_MS / 1000)
+        var mm = String(Math.floor(whole / 60))
+        var ss = whole % 60
+        els.recTime.textContent = '0:' + (seconds < 10 ? '0' : '') + String(seconds)
+          + ' / ' + mm + ':' + (ss < 10 ? '0' : '') + String(ss)
+      }
+
+      /**
+       * 画那一排竖条 (2026-11-20 重做)
+       *
+       * 几何全在 `recWaveRects` 里 (纯函数, 判据真跑): 走带右对齐 / 2 px 条 + 1 px 缝 + 1 px 圆角帽 /
+       * 静音留 2 px 的点。这里只负责上色:
+       * 一条竖直渐变 (上白下淡) + **旧的往左淡出** + 右端一枚柔光点当"录音笔头"
+       */
+      function paintRecWave() {
+        var canvas = els.recWave
+        if (!canvas || typeof canvas.getContext !== 'function') return
+        var ctx2d = canvas.getContext('2d')
+        if (!ctx2d) return
+        var dpr = window.devicePixelRatio || 1
+        var width = canvas.clientWidth || 320
+        var height = canvas.clientHeight || 96
+        var pxWidth = Math.max(1, Math.round(width * dpr))
+        var pxHeight = Math.max(1, Math.round(height * dpr))
+        if (canvas.width !== pxWidth || canvas.height !== pxHeight) {
+          canvas.width = pxWidth
+          canvas.height = pxHeight
+          recGradient = null
+        }
+        ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx2d.clearRect(0, 0, width, height)
+        if (recGradient === null || recGradientHeight !== height) {
+          recGradient = ctx2d.createLinearGradient(0, 0, 0, height)
+          recGradient.addColorStop(0, 'rgba(255,255,255,.98)')
+          recGradient.addColorStop(0.55, 'rgba(255,255,255,.9)')
+          recGradient.addColorStop(1, 'rgba(255,255,255,.62)')
+          recGradientHeight = height
+        }
+        var rects = recWaveRects(recHist, width, height)
+        ctx2d.fillStyle = recGradient
+        var rounded = typeof ctx2d.roundRect === 'function'
+        for (var i = 0; i < rects.length; i += 1) {
+          var rect = rects[i]
+          // 旧的往左淡出: 越靠左越淡, 读起来像"声音从右边流进来"
+          var t = rects.length < 2 ? 1 : i / (rects.length - 1)
+          ctx2d.globalAlpha = 0.35 + 0.65 * t
+          if (rounded) {
+            ctx2d.beginPath()
+            ctx2d.roundRect(rect.x, rect.y, rect.w, rect.h, rect.r)
+            ctx2d.fill()
+          } else {
+            ctx2d.fillRect(rect.x, rect.y, rect.w, rect.h)
+          }
+        }
+        ctx2d.globalAlpha = 1
+        // 右端那枚柔光点: 只在真的有声音时露头
+        if (recHold >= REC_SILENT) {
+          var glow = ctx2d.createRadialGradient(width - 2, height / 2, 0, width - 2, height / 2, 16)
+          glow.addColorStop(0, 'rgba(255,255,255,.55)')
+          glow.addColorStop(1, 'rgba(255,255,255,0)')
+          ctx2d.fillStyle = glow
+          ctx2d.fillRect(width - 18, height / 2 - 16, 18, 32)
+        }
+      }
+
+      /** 把波形擦干净 (面板收起 / 正在转写时) */
+      function clearRecWave() {
+        var canvas = els.recWave
+        if (!canvas || typeof canvas.getContext !== 'function') return
+        var ctx2d = canvas.getContext('2d')
+        if (!ctx2d) return
+        ctx2d.setTransform(1, 0, 0, 1, 0, 0)
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height)
+      }
+
+      /**
+       * 长按 450 ms 到点: **当场开录**
+       *
+       * 面板从底部升起来 + 挂抬手 / 上滑那两个监听 —— 手指还压在原来的输入框上, 所以面板
+       * `pointer-events:none`, 事件照旧落在输入框那一侧 (换 DOM 会把抬手事件吞掉)
+       */
+      function beginHoldRecording() {
+        if (voiceState === 'recording' || voiceState === 'working') return
+        if (els.input) {
+          try { els.input.blur() } catch (_noBlur) { /* 没收键盘也不算错 */ }
+        }
+        closeMenu()
+        closeStickerPanel()
+        closeFileMenu()
+        recStartY = 0
+        voiceHeld = true
+        showRecPanel()
+        window.addEventListener('pointermove', onRecMove, { passive: true })
+        // 手指那一路要 `touchmove` 再挡一次: `pointerdown` 里改 `touch-action` 对**这一趟手势**
+        // 已经晚了 (Chromium 在 touchstart 那一刻就定了这一趟是不是 pan), 只有现场
+        // `preventDefault()` 才拦得住"上滑被当成滚动, 然后丢一发 pointercancel"
+        window.addEventListener('touchmove', onRecTouch, { passive: false })
+        window.addEventListener('pointerup', onRecRelease, { once: true })
+        window.addEventListener('pointercancel', onRecRelease, { once: true })
+        window.addEventListener('touchend', onRecRelease, { once: true })
+        startRecording()
+      }
+
+      /** 手指那一路的上滑量: 拦下滚动 + 同一套阈值 */
+      function onRecTouch(event) {
+        if (voiceState !== 'recording') return
+        if (event && event.cancelable) event.preventDefault()
+        var touch = event && event.touches && event.touches[0]
+        var y = touch ? Number(touch.clientY) : NaN
+        if (!isFinite(y)) return
+        applyRecDrag(y)
+      }
+
+      /** 手指往上挪过阈值 = 这一趟不要了 (提示换成「松开取消」, 面板压暗一点) */
+      function onRecMove(event) {
+        if (voiceState !== 'recording') return
+        var y = Number(event && event.clientY)
+        if (!isFinite(y)) return
+        applyRecDrag(y)
+      }
+
+      /** 上滑量的那一处算术 (手与笔两路共用) */
+      function applyRecDrag(y) {
+        if (recStartY === 0) recStartY = y
+        var over = (y - recStartY) <= -REC_CANCEL_PX
+        if (over === recCancel) return
+        recCancel = over
+        setRecHint(over ? REC_HINT_CANCEL : REC_HINT)
+        if (els.rec) els.rec.setAttribute('data-cancel', over ? 'on' : 'off')
+      }
+
+      /** 面板上那行字 (点 / 箭头 / 文本是一行里的三样, 文字换在 span 上) */
+      function setRecHint(text) {
+        if (!els.recText) return
+        if (els.recText.textContent === text) return
+        els.recText.textContent = text
+      }
+
+      /** 抬手 (或系统把这一趟收走): 按上滑量决定转写还是丢掉 */
+      function onRecRelease() {
+        dropRecListeners()
+        if (voiceState === 'recording') {
+          stopRecording(recCancel)
+          return
+        }
+        // 还在等麦克风时抬手: 这一趟从没开始, 面板收起就行
+        if (voiceState === 'press') {
+          voiceHeld = false
+          voiceState = 'idle'
+          hideRecPanel()
+        }
+      }
+
+      /** 抬手 / 上滑那几个监听一次性的, 收尾时全部摘掉 */
+      function dropRecListeners() {
+        window.removeEventListener('pointermove', onRecMove)
+        window.removeEventListener('touchmove', onRecTouch)
+        window.removeEventListener('pointerup', onRecRelease)
+        window.removeEventListener('pointercancel', onRecRelease)
+        window.removeEventListener('touchend', onRecRelease)
+      }
+
+      /** 按住那一刻要麦克风: 到手就留着这一趟用, 松手时由 [releaseVoiceCapture] 还回去 */
+      function openVoiceStream() {
+        if (voiceStream !== null || voiceStreamAsk !== null) return
+        var media = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
+        if (!media || typeof media.getUserMedia !== 'function') {
+          toast('这一版 WebView 拿不到麦克风', true)
+          return
+        }
+        voiceStreamAsk = media.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        }).then(function (stream) {
+          voiceStreamAsk = null
+          if (!voiceHeld) {
+            stream.getTracks().forEach(function (track) { track.stop() })
+            return null
+          }
+          voiceStream = stream
+          return stream
+        }).catch(function (error) {
+          voiceStreamAsk = null
+          var name = error && error.name ? String(error.name) : ''
+          toast(name === 'NotAllowedError' ? '麦克风权限没给: 去设置 → 权限里打开' : '麦克风起不来: ' + name, true)
+          return null
+        })
+      }
+
+      /** 把录音那几件 (处理器 / 上下文 / 流) 全部放掉 */
+      function releaseVoiceCapture() {
+        if (voiceProcessor !== null) {
+          try { voiceProcessor.disconnect() } catch (_noDisc) { /* 已经断了 */ }
+          try { voiceProcessor.onaudioprocess = null } catch (_noHandler) { /* 老 WebView */ }
+          voiceProcessor = null
+        }
+        if (voiceContext !== null) {
+          try { voiceContext.close() } catch (_noClose) { /* 已经关了 */ }
+          voiceContext = null
+        }
+        if (voiceStream !== null) {
+          try {
+            voiceStream.getTracks().forEach(function (track) { track.stop() })
+          } catch (_noTracks) { /* 流已经被系统收了 */ }
+          voiceStream = null
+        }
+        voiceStreamAsk = null
+        voiceChunks = null
+        voiceSourceRate = 0
+        if (voiceTicker !== null) clearInterval(voiceTicker)
+        voiceTicker = null
+      }
+
+      /** 要麦克风 + 开录: 从这一刻起音频就在往 `voiceChunks` 里走 */
+      function startRecording() {
+        if (voiceState === 'recording' || voiceState === 'working') return
+        voiceState = 'press'
+        var begin = function (stream) {
+          if (!stream) {
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          // 抬手发生在流回来之前: 那时候**不开始录** —— 否则这一趟会一直录到 60 s
+          if (!voiceHeld) {
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          var Ctor = window.AudioContext || window.webkitAudioContext
+          if (typeof Ctor !== 'function') {
+            toast('这一版 WebView 录不了音', true)
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          try {
+            voiceContext = new Ctor()
+          } catch (_noContext) {
+            voiceContext = null
+          }
+          if (voiceContext === null || typeof voiceContext.createScriptProcessor !== 'function') {
+            toast('录音起不来', true)
+            voiceState = 'idle'
+            hideRecPanel()
+            return
+          }
+          voiceSourceRate = voiceContext.sampleRate
+          voiceChunks = []
+          recPeak = 0
+          recHold = 0
+          recShown = 0
+          recHist = []
+          recLastSample = 0
+          voiceProcessor = voiceContext.createScriptProcessor(4096, 1, 1)
+          voiceProcessor.onaudioprocess = function (event) {
+            if (voiceChunks === null) return
+            var channel = event.inputBuffer.getChannelData(0)
+            voiceChunks.push(new Float32Array(channel))
+            // 波形要的是"这一块里最响的那一下": 峰值比 RMS 更贴耳朵, 也不会把一串辅音抹平
+            // (归一化与起落平滑在 [sampleRecColumn] 里, 这里只记原始峰值)
+            var peak = 0
+            for (var i = 0; i < channel.length; i += 1) {
+              var amplitude = channel[i] < 0 ? -channel[i] : channel[i]
+              if (amplitude > peak) peak = amplitude
+            }
+            var levelled = recLevelOf(peak)
+            if (levelled > recPeak) recPeak = levelled
+          }
+          var source = voiceContext.createMediaStreamSource(stream)
+          source.connect(voiceProcessor)
+          // 不接到目的地就收不到回调 (Chromium 的老规矩); 那头没有被写, 所以不出声
+          voiceProcessor.connect(voiceContext.destination)
+          voiceStartedAt = Date.now()
+          voiceState = 'recording'
+          // 帧循环从**这一刻**才开始: 上面那句之前 `voiceState` 还是 `press`, 早起的帧会立刻退出
+          startRecPump()
+          if (voiceTimer !== null) clearTimeout(voiceTimer)
+          voiceTimer = setTimeout(function () { voiceTimer = null; stopRecording(false) }, VOICE_MAX_MS)
+          if (voiceTicker !== null) clearInterval(voiceTicker)
+          voiceTicker = setInterval(paintRecTime, 200)
+        }
+        if (voiceStream !== null) {
+          begin(voiceStream)
+          return
+        }
+        openVoiceStream()
+        if (voiceStreamAsk === null) {
+          voiceState = 'idle'
+          hideRecPanel()
+          return
+        }
+        voiceStreamAsk.then(begin)
+      }
+
+      /**
+       * 松手: 收尾并送转写
+       * @param cancelled true = 上滑取消了 (这一趟丢掉)
+       */
+      function stopRecording(cancelled) {
+        if (voiceState !== 'recording') return
+        var elapsed = Date.now() - voiceStartedAt
+        voiceHeld = false
+        if (voiceTimer !== null) clearTimeout(voiceTimer)
+        voiceTimer = null
+        var chunks = voiceChunks || []
+        var rate = voiceSourceRate
+        releaseVoiceCapture()
+        voiceStartedAt = 0
+        voiceState = 'idle'
+        if (cancelled) {
+          voiceId += 1
+          call('portalVoice', JSON.stringify({ op: 'cancel' }))
+          hideRecPanel()
+          toast('已取消', false)
+          return
+        }
+        if (elapsed < VOICE_MIN_MS) {
+          hideRecPanel()
+          toast('太短了, 再说一句', false)
+          return
+        }
+        var wav = wavOf(chunks, rate)
+        if (wav.byteLength <= 44) {
+          hideRecPanel()
+          toast('没有录到声音', true)
+          return
+        }
+        voiceId += 1
+        var id = voiceId
+        voiceState = 'working'
+        // 转写这一段：面板留着但换成「正在转写…」+ 三个点，波形擦掉 —— 不然松手后屏上什么都没有
+        clearRecWave()
+        setRecHint(REC_HINT_BUSY)
+        if (els.rec) els.rec.setAttribute('data-busy', 'on')
+        var answer = call('portalVoice', JSON.stringify({
+          op: 'transcribe',
+          id: id,
+          data: base64Of(wav),
+          language: 'auto',
+        }))
+        if (answer === null || answer.ok !== true) {
+          voiceState = 'idle'
+          hideRecPanel()
+          toast('这一版宿主还不支持语音输入', true)
+          return
+        }
+        // 原生那边在别的线程认, 认完经 `__LUWI_PORTAL__.voice({id, ok, text})` 回推
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = setTimeout(function () {
+          voiceWatch = null
+          if (voiceState !== 'working') return
+          voiceState = 'idle'
+          hideRecPanel()
+          toast('这一句还没回来: 再按一次试试', true)
+        }, VOICE_WATCH_MS)
+      }
+
+      /** 把认出来的那一句接进草稿 (有字就空一格, 光标停在末尾) */
+      function insertDraft(text) {
+        if (!els.input) return
+        var current = String(els.input.value || '')
+        var next = current === '' ? text : current.replace(/\s+$/u, '') + ' ' + text
+        els.input.value = next
+        try {
+          els.input.dispatchEvent(new Event('input', { bubbles: true }))
+        } catch (_noEvent) {
+          updateSendGate()
+        }
+        try { els.input.setSelectionRange(next.length, next.length) } catch (_noSelection) { /* 老 WebView */ }
+        updateSendGate()
+      }
+
+      /**
+       * 原生回推的那一份 (`window.__LUWI_PORTAL__.voice`)
+       *
+       * 两种: `kind:'permission'` 是权限那一问的回执 (只改一句提示), 其余是转写结果 ——
+       * 编号对不上的直接丢掉 (上滑取消过 / 又按了一次之后, 旧的那趟不该再动草稿)
+       * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+       */
+      function voiceAnswer(payload) {
+        if (!payload || typeof payload !== 'object') return
+        if (payload.kind === 'permission') {
+          if (payload.mic === true) {
+            toast('麦克风给好了, 再长按一次', false)
+          } else {
+            toast('麦克风权限没给: 去设置 → 权限里打开', true)
+          }
+          return
+        }
+        if (typeof payload.id === 'number' && payload.id !== voiceId) return
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = null
+        if (payload.ok !== true) {
+          voiceState = 'idle'
+          hideRecPanel()
+          toast(payload.error ? String(payload.error) : '这一句没认出来', true)
+          return
+        }
+        var said = String(payload.text === undefined || payload.text === null ? '' : payload.text).trim()
+        voiceState = 'idle'
+        hideRecPanel()
+        if (said === '') {
+          toast('没有识别到内容', true)
+          return
+        }
+        insertDraft(said)
+        if (els.input) {
+          try { els.input.focus() } catch (_noFocus) { /* 页还没上屏时 focus 会抛, 忽略 */ }
+        }
+      }
+
+      /**
+       * 发送钮的两副面孔 (转圈 / 箭头)
+       *
+       * **只管图标与禁用** (2.8.1 #33): 草稿什么时候清、什么时候还, 由 [send] 自己决定 —— 以前两件事
+       * 混在 `sending` 一个记号上, 失败那一路"还了草稿还把按钮锁回去", 屏上就是"转一圈、什么都没发、
+       * 过会自己恢复原状"
+       */
       function setSendBusy(busy) {
         if (!els.send) return
         els.send.innerHTML = busy ? SPIN_ICON : SEND_ICON
-        els.send.disabled = busy
+        els.send.disabled = busy === true
+        els.send.setAttribute('data-busy', busy === true ? 'on' : 'off')
+        // 转完这一圈就按草稿重新判一次能不能点 (失败时草稿被还回来了, 那颗钮必须还能点)
+        if (busy !== true) updateSendGate()
       }
 
       /** 空草稿 / 没有会话时发送钮按不动 (带了一张传好的图时, 文字可以为空) */
@@ -4260,6 +5724,142 @@ window.__ModuleLoader__.load({
         // 没有会话时不再把发送钮锁上: 它的禁用态只是 0.4 透明度, 看着还能点, 点了又什么都没发生,
         // 于是用户以为界面坏了. 现在让它能点, 由 send() 用一句话说清"先开一场对话"
         els.send.disabled = text === '' && !ready
+      }
+
+      /**
+       * 一次投递被拒 / 抛错时的那句人话 (2.8.1 #33)
+       *
+       * 以前 `prompt()` 回 `{ok:false}` 只有一行 `console.log`: 门户盖着 dsh 自己的错误节点, 于是
+       * 屏上只剩"按钮转一圈又回来、草稿还在"。这句就是屏上那一行。**能拿到码与话就照抄**, 拿不到才用
+       * 兜底那句 —— 不在屏上写一句没人对得上的话
+       *
+       * @param reason `prompt()` 的 `result.error` / 抛出来的 Error / 一句现成的串
+       * @returns 直接能画的那一句
+       */
+      function sendFailText(reason) {
+        var prefix = '这句没发出去'
+        if (reason === undefined || reason === null) return prefix
+        if (typeof reason === 'string') {
+          var said = reason.trim()
+          return said === '' ? prefix : prefix + ': ' + said
+        }
+        var code = typeof reason.code === 'string' ? reason.code : ''
+        var message = typeof reason.message === 'string' ? reason.message : ''
+        if (code !== '' && message !== '') return prefix + ': ' + code + ': ' + message
+        if (message !== '') return prefix + ': ' + message
+        if (code !== '') return prefix + ': ' + code
+        return prefix + ': ' + describeError(reason)
+      }
+
+      /**
+       * dsh 自己记下的那一条 prompt 拒答 (`snapshot.promptError`) → 屏上那一句
+       *
+       * 快照上那一格是 dsh 的 object-layer 状态, 门户这一层看不见它自己那块错误条, 所以读出来自己画
+       * @param promptError `{op, error:{code, message}}` (没有就是 null)
+       * @returns 能画的那一句; 没有拒答回空串
+       */
+      function promptErrorText(promptError) {
+        if (!promptError || typeof promptError !== 'object') return ''
+        // 那一格也是「停那一轮」失败时的落点 (`op:'stop'`): 那不是"没发出去", 不在这条链上说
+        if (typeof promptError.op === 'string' && promptError.op !== 'send') return ''
+        var reason = promptError.error
+        if (!reason) return ''
+        return sendFailText(reason)
+      }
+
+      /**
+       * 记一条「这句没发出去」并当场重画 (2.8.1 #33)
+       *
+       * 与 [imageFail] 同一个写法: 只留最近三条, 连发失败十次不该把整段对话顶走
+       * @param text 要画的那一句 (屏上就是一整句, 不再拼别的)
+       */
+      function pushSendFail(text) {
+        var said = String(text === undefined || text === null ? '' : text).trim()
+        if (said === '') said = '这句没发出去'
+        var at = Date.now()
+        sendFails.push({
+          id: 'sendfail\u0001' + String(at) + '\u0001' + String(sendFails.length),
+          at: at,
+          text: said,
+        })
+        while (sendFails.length > 3) sendFails.shift()
+        console.log('[luwi-portal] send failed: ' + said)
+        renderFlow()
+      }
+
+      /**
+       * 屏上那条 user 行是不是"我刚发出去的那一句"
+       *
+       * dsh 的 user 节点晚一拍才到: 正文一样 (附件那一段已被 `splitAttach` 拆走) 而且时刻不早于本机
+       * 记下的那一拍, 才算同一条 —— 只比正文的话, 同一句话连发两次会把旧的那条当成新的
+       * @param hold [pendingEcho]
+       * @param one 快照里的一条 user (见 [nodesOf])
+       * @returns 同一条 = true
+       */
+      function pendingEchoSame(hold, one) {
+        if (!hold || !one || one.who !== 'user') return false
+        // 空白归一之后再比: dsh 那边可能把行尾 / 连着的空行收了一下, 那不该让占位多留一拍
+        var mineText = String(hold.text || '').replace(/\s+/g, ' ').trim()
+        var thatText = String(one.text || '').replace(/\s+/g, ' ').trim()
+        if (thatText !== mineText) return false
+        var names = Array.isArray(one.attach) ? one.attach.join(',') : ''
+        var mine = Array.isArray(hold.attach) ? hold.attach.join(',') : String(hold.attach || '')
+        if (names !== mine) return false
+        var when = Number(one.time) || 0
+        return when === 0 || when >= Number(hold.at) - 2000
+      }
+
+      /**
+       * 本机那条占位还要不要占着 (2.8.1 #33)
+       *
+       * 纯函数, 判据工具直接抽出来真跑 (check-luwi-portal §20)
+       * @param hold [pendingEcho]
+       * @param users 快照里这一场的 user 节点 (已拆过附件)
+       * @param busy 这一句还在投 (`sending`)
+       * @param now 现在 (毫秒)
+       * @param limit 最多占多久 (`PENDING_ECHO_MS`)
+       * @returns `keep` 继续占 / `done` 落盘那条到了 / `drop` 撤掉 (失败或等太久)
+       */
+      function pendingEchoState(hold, users, busy, now, limit) {
+        if (!hold) return 'drop'
+        var list = Array.isArray(users) ? users : []
+        for (var i = 0; i < list.length; i += 1) {
+          if (pendingEchoSame(hold, list[i])) return 'done'
+        }
+        if (busy === true) return 'keep'
+        var ttl = Number(limit)
+        if (!isFinite(ttl) || ttl <= 0) ttl = 15000
+        return now - Number(hold.at) > ttl ? 'drop' : 'keep'
+      }
+
+      /**
+       * 发送钮那一次按下的判据 (2.8.1 #33): 一次 pointerdown→pointerup 只投一次
+       *
+       * 纯函数, 判据工具直接抽出来真跑。轻点 = `queue`, 按住到点 = `steer`, 长按之后那次抬起
+       * **不再**投 queue —— 以前靠"计时器有没有被清掉"当记号, 多一根手指 (第二次 pointerdown 覆盖了
+       * 计时器 id) 就会变成两次投递
+       * @param state `{pressed, fired}` 上一拍的状态 (不改它)
+       * @param event `down` / `hold` / `up` / `cancel`
+       * @returns `{state, act}`; act: `arm` 挂计时器 / `hold` 投 steer / `tap` 投 queue / `disarm` 撤计时器 / `ignore`
+       */
+      function sendGesture(state, event) {
+        var pressed = state !== null && state !== undefined && state.pressed === true
+        var fired = state !== null && state !== undefined && state.fired === true
+        if (event === 'down') {
+          // 已经按着就不再挂第二个计时器 (第二根手指不许变成第二次投递)
+          if (pressed) return { state: { pressed: true, fired: fired }, act: 'ignore' }
+          return { state: { pressed: true, fired: false }, act: 'arm' }
+        }
+        if (event === 'hold') {
+          if (!pressed || fired) return { state: { pressed: pressed, fired: fired }, act: 'ignore' }
+          return { state: { pressed: true, fired: true }, act: 'hold' }
+        }
+        if (event === 'up') {
+          if (!pressed) return { state: { pressed: false, fired: false }, act: 'ignore' }
+          if (fired) return { state: { pressed: false, fired: false }, act: 'ignore' }
+          return { state: { pressed: false, fired: false }, act: 'tap' }
+        }
+        return { state: { pressed: false, fired: false }, act: pressed ? 'disarm' : 'ignore' }
       }
 
       function kv(key, value) {
@@ -4289,7 +5889,7 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(h('h3', null, '更多'))
         // 她自己的两张面板一直在最上面: 那是这一页的东西
         drawerRow('判断', '她什么时候开口那一套读数', '›', false, true, function () { openDrawer('router') })
-        drawerRow('探索', '探索排期与上一次摘要', '›', false, true, function () { openDrawer('work') })
+        drawerRow('探索', '她挑时机开的那一场与最近一份摘要', '›', false, true, function () { openDrawer('work') })
         // 2026-11-17 主人: 探索下面再来一行「开发」——点进去是这一页上的开发面板, 排法与判断 / 探索
         // / 虚拟屏同一套; 后台球菜单那一份仍是原生下拉 (那一层没有这一页可画)
         drawerRow('开发', '新建应用 / 工具链 / 打开开发台', '›', false, true, function () { openDrawer('dev') })
@@ -4298,8 +5898,15 @@ window.__ModuleLoader__.load({
         var menu = call('portalMenu')
         if (Array.isArray(menu) && menu.length > 0) {
           els.drawer.appendChild(h('div', 'lwp-menu-sep'))
-          for (var i = 0; i < menu.length; i += 1) portalRow(menu[i])
+          for (var i = 0; i < menu.length; i += 1) {
+            // 「终端」2026-11-20 上移到头栏 (夹在语音与 `⋯` 之间), 抽屉不再画它; 原生那份清单
+            // 一个字节没改 —— 后台球菜单仍是原生下拉, 那一行还在那儿 (改名对它生效)
+            if (menu[i] && menu[i].id === 'sync') continue
+            portalRow(menu[i])
+          }
         }
+        // 头栏那颗「终端」的文案与开关态跟着这份清单走 (每次开抽屉顺手对齐一次)
+        applySyncState(menu)
         drawerRow('收起', '', '', false, true, function () { openDrawer('') })
       }
 
@@ -4347,6 +5954,52 @@ window.__ModuleLoader__.load({
           // 开关那一拍要等主线程执行完: 隔一会儿再画一次, 状态就对上了
           setTimeout(function () { if (drawer !== '') renderDrawer() }, 160)
         })
+      }
+
+      /**
+       * 原生清单里 `sync` 那一项 (现在的名字是「终端」)
+       *
+       * 拿不到就回 null —— 老宿主没有这一项时按钮退回常量文案, 点了也只会说一句"还不支持"
+       * @param menu `portalMenu()` 交回来的那一份 (或 `portalMenuPick` 的回执)
+       * @returns 那一项, 没有就 null
+       */
+      function syncItemOf(menu) {
+        if (!Array.isArray(menu)) return null
+        for (var i = 0; i < menu.length; i += 1) {
+          if (menu[i] && menu[i].id === 'sync') return menu[i]
+        }
+        return null
+      }
+
+      /**
+       * 头栏那颗「终端」的文案 / 已打开态 / 无障碍名字全从原生清单来
+       *
+       * 文案与状态只有一处实现 (`PortalMenu.items()` 读 `menu_sync` 那两句), 页不抄第二份 ——
+       * 于是设置里改名、开与关的 summary 变化, 这颗钮自己就跟上了
+       * @param menu 一份新的清单
+       */
+      function applySyncState(menu) {
+        if (!els.syncButton) return
+        var item = syncItemOf(menu)
+        var title = item && typeof item.title === 'string' && item.title !== '' ? item.title : SYNC_TITLE
+        var summary = item && typeof item.summary === 'string' ? item.summary : ''
+        els.syncButton.textContent = title
+        els.syncButton.title = summary
+        els.syncButton.setAttribute('aria-label', summary === '' ? title : title + ': ' + summary)
+        els.syncButton.setAttribute('data-on', item && item.on === true ? 'on' : 'off')
+      }
+
+      /**
+       * 头栏那颗「终端」(2026-11-20 从 `⋯` 抽屉里搬上来)
+       *
+       * 2026-11-21 改了口径: 这一颗不再翻开关, 而是**打开终端那一页** (手机管电脑)。开关仍在
+       * 设置页那一段; 这颗钮的文案与"配没配对"仍从原生清单 (`portalMenu()`) 来 —— 一处 rename
+       * 两处跟着变, 页面不抄第二份
+       */
+      function pickSync() {
+        openTerminal()
+        // 顺手把原生清单的文案对齐一次 (它仍写着「已配对: 谁」/「未配对」)
+        setTimeout(function () { applySyncState(call('portalMenu')) }, 160)
       }
 
       /** 「虚拟屏」那一层: 屏列表 / 暂停接受控制 / 释放 / 显示隐藏窗口 */
@@ -4476,13 +6129,10 @@ window.__ModuleLoader__.load({
           ? Math.round(Number(router.rules.preSleepWaitMs) / 60000) + ' 分'
           : '—'))
         // 这一行叫「唤醒」: 2026-11-13 主人把叫法统一了, 与 `sim.json` 的 `wake` 段一个口径
-        // 2026-11-15: 开关态是 `router.json` 与 `sim.json` 的合成值, 从哪一侧来的也要说 —— 只说"开着"
-        // 时人分不清是这一页点开的, 还是「更多设置」里选的活跃
+        // 2026-11-20: `sim.json` 的「潜水 / 活跃」那一格删了, 开关态只剩 `router.json` 一个来源
+        // (页面不再有"更多设置里选的活跃"那种第二档说法)
         var tickOn = router.tick && router.tick.enabled === true
-        var tickBySim = router.tick && router.tick.bySim === true
-        els.drawer.appendChild(kv('唤醒', tickOn
-          ? (tickBySim ? '开着 (更多设置里选的活跃)' : '开着 (25-55 分一次)')
-          : '关着'))
+        els.drawer.appendChild(kv('唤醒', tickOn ? '开着 (25-55 分一次)' : '关着'))
         // 点了之后那一句回执: 判断在宿主那一侧异步跑, 不写一行的话按下去与"没接上"同形
         if (tickNote !== '') els.drawer.appendChild(kv('回执', tickNote))
 
@@ -4579,27 +6229,30 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 探索面板那几行读数 (纯函数, 2.8.1 #12)
+       * 探索面板那几行读数 (纯函数, 2.8.1 #12; 2026-11-21 二改)
        *
        * 之前这三行读的是 `explore.json` 里**从来没有**的键 (`nextTask` / `lastSummaryAt` / `schedule.time`),
-       * 于是面板永远写着「还没有排 / — / —」, 宿主写得再勤也不动。宿主现在报的是真的那三份: 任务卡
-       * (`lw/explore-card.md`) / 摘要目录里最新那份 / `explore-schedule.json`。行文只在这里拼一处,
+       * 于是面板永远写着「还没有排 / — / —」, 宿主写得再勤也不动。宿主现在报的是真的那几份: 任务卡
+       * (`lw/explore-card.md`) / 摘要目录里最新那份 / `explore-schedule.json` 的步数。行文只在这里拼一处,
        * 判据脚本真跑这张真值表 (`tools/check-luwi-portal.mjs` 第十九节)
+       *
+       * **排期撤了之后没有「探索时刻」这一行**: `schedule` / `enabled` / `nextAt` 三个读数一并删掉,
+       * 换成一格步数 —— 那是判断层每场开场真的读的东西
        */
       function workReading(explore) {
         var data = explore || {}
         var task = typeof data.nextTask === 'string' ? data.nextTask.trim() : ''
         var chars = Number(data.cardChars)
-        var next = task === '' ? '还没有排 (到点自由探索)' : task
+        var next = task === '' ? '还没有排 (开场会自由探索)' : task
         if (task !== '' && isFinite(chars) && chars > 0) next += ' (' + String(chars) + ' 字)'
         // 摘要那一行用 `stamp` 而不是 `clock`: 上一次可能是前天的, 只写 HH:MM 会被读成今天
         var last = Number(data.lastSummaryAt) > 0 ? stamp(data.lastSummaryAt) : '—'
-        var at = typeof data.schedule === 'string' ? data.schedule.trim() : ''
-        var when = at === '' ? '—' : at + (data.enabled === false ? ' (关着)' : ' (每天)')
+        var steps = Number(data.steps)
+        var budget = isFinite(steps) && steps > 0 ? '每场最多 ' + String(steps) + ' 步' : '—'
         return {
           next: next,
           last: last,
-          when: when,
+          budget: budget,
           running: data.running === true ? '正在跑' : '没在跑',
         }
       }
@@ -4607,7 +6260,7 @@ window.__ModuleLoader__.load({
       /** 那几行拼成一把键: 抽屉开着时只有盘上真的变了才重画 (见 `pollLedger`) */
       function workKey(explore) {
         var reading = workReading(explore)
-        return [reading.next, reading.last, reading.when, reading.running].join('\u0001')
+        return [reading.next, reading.last, reading.budget, reading.running].join('\u0001')
       }
 
       function renderWorkDrawer() {
@@ -4617,7 +6270,7 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(h('h3', null, '探索'))
         els.drawer.appendChild(kv('下一趟', reading.next))
         els.drawer.appendChild(kv('上次摘要', reading.last))
-        els.drawer.appendChild(kv('探索时刻', reading.when))
+        els.drawer.appendChild(kv('每场步数', reading.budget))
         els.drawer.appendChild(kv('这一趟', reading.running))
         var actions = h('div', 'lwp-actions')
         var start = h('button', null, '开始这一趟')
@@ -4659,6 +6312,10 @@ window.__ModuleLoader__.load({
         status = call('portalStatus')
         renderDrawer()
         renderMeta()
+        // 设置页里翻过「终端」那一开关之后回到前台, 头栏那颗的字与亮灯要跟着对上
+        applySyncState(call('portalMenu'))
+        // 设置 → 说话 里翻过「朗读回答」也一样: 那颗喇叭的两副图标与亮灯跟着换
+        refreshSpeak()
         if (mounted) renderFlow()
         return status
       }
@@ -5310,7 +6967,38 @@ window.__ModuleLoader__.load({
       function imageBlocks() {
         return []
       }
-      /** 交给 dsh 自己投递: 与输入框同一条路 (beginSubmission 的 echo 让"发送中"也能画) */
+      /**
+       * 这一次投递在本机上先占的那一行 (2.8.1 #33)
+       *
+       * 只记"人说的那部分" (`text`) 与附件名字: 附件那一段路径挂在 `text` 后面进的 prompt, 而
+       * `splitAttach` 会把落盘那一条的正文重新拆成同样两份, 两边才比得上 (见 [pendingEchoSame])
+       * @param text 人写的那一句 (可能为空 = 只发附件)
+       * @param items 待发附件 (`attach` 那一份)
+       * @returns [pendingEcho]
+       */
+      function pendingEchoStart(text, items) {
+        var names = []
+        for (var i = 0; i < items.length; i += 1) {
+          if (items[i] && typeof items[i].name === 'string' && items[i].name !== '') names.push(items[i].name)
+        }
+        pendingSeq += 1
+        var at = Date.now()
+        return {
+          id: 'pending\u0001' + String(at) + '\u0001' + String(pendingSeq),
+          at: at,
+          text: text,
+          attach: names,
+        }
+      }
+
+      /**
+       * 交给 dsh 自己投递: 与输入框同一条路 (beginSubmission 的 echo 让"发送中"也能画)
+       *
+       * 2.8.1 #33 起这一条链的规矩是**点一次必然看见结果**: 投出去先在时间线上占一行 (本机那一份,
+       * 见 [pendingEcho]); 落盘那条 user 节点到了就换成它; 被拒 / 抛错就换成一条红字 (`who:'error'`),
+       * 并且只在这一刻把草稿还回去 —— 以前 `{ok:false}` 只有一行 `console.log`, 屏上就是"按钮转一圈、
+       * 什么都没发出去、过一会自己恢复原状"
+       */
       function send(mode) {
         if (sending) return
         var text = String(els.input.value || '').trim()
@@ -5331,6 +7019,16 @@ window.__ModuleLoader__.load({
             return
           }
         } else if (text === '') {
+          // 空草稿: 以前是**静默 return** —— 按了 Enter (或那颗钮还能点) 时什么都不发生, 与"按钮变色"
+          // 分不开。说一句, 而且那颗钮本来就按不动 (见 [updateSendGate])
+          showNote('先写点什么, 再发', true)
+          return
+        }
+        // 2026-11-21 终端: 这一句要落到"电脑那一场"上. 当前不在电脑那几场里时先开一场 ——
+        // 草稿原样留在输入框 (下面那条 return 在清空之前), 开好了再发一次
+        if (terminalMode && !isTerminalSession(sessionId)) {
+          terminalNew()
+          showNote('正在电脑上开一场, 开好了再发这一句', true)
           return
         }
         var binding = bindingOf(sessionId)
@@ -5344,11 +7042,12 @@ window.__ModuleLoader__.load({
         sending = true
         setSendBusy(true)
         els.input.value = ''
-        // 第一句之后把这一场写进账本: 球接下来 10 分钟接的就是这一场
-        if (bound !== sessionId) {
-          bound = sessionId
-          call('portalBind', sessionId)
-        }
+        // 本机先占一行: dsh 的回显要等 Host 收下 prompt 才进快照, 这几拍屏上不该是空的
+        pendingEcho = pendingEchoStart(text, attach)
+        // 每发一句都把这一场写进账本 (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"):
+        // 只在第一句写的话, 门户里聊久了回浮标就换场了 —— 窗口是滑动的, 每一句都重算。
+        // **终端里不写** (2026-11-21): 那是电脑那一场, 球不该跟过去
+        if (!terminalMode) call('portalBind', sessionId)
         // 附件: 图片编成 prompt 里的 `image` 块 (与 dsh 的 encodeImage 同一个形状), 落盘的文件把路径
         // 写进正文 —— 她拿 fs 工具直接读那几条
         var full = text + attachLines()
@@ -5363,30 +7062,62 @@ window.__ModuleLoader__.load({
         } catch (_noEcho) {
           requestId = undefined
         }
-        var started = Promise.resolve(session.prompt(blocks, mode, undefined, requestId)).then(function (result) {
+        // 这一次没成的那一句 (空串 = 成了): `{ok:false}` 与抛错两条路都写进这里, 收尾只判它
+        var failed = ''
+        // **同步抛也算这一趟的失败**: `session.prompt()` 在桥断了的时候是同步抛的
+        // (`Promise.resolve(x())` 拦不住它) —— 那一下会把 `sending` 永远钉在 true, 按钮就一直转圈
+        var started
+        try {
+          started = Promise.resolve(session.prompt(blocks, mode, undefined, requestId))
+        } catch (error) {
+          started = Promise.reject(error)
+        }
+        started = started.then(function (result) {
           // `prompt()` 回的是 `{ ok, value | error }` —— 不看它就会**静默失败** (2026-11-08 真机上就是这么
           // "点了发送没反应"的: 图片块被拒, 而 Promise 照样 resolve)
           if (result && result.ok === false) {
-            var reason = result.error ? (result.error.code + ': ' + result.error.message) : '这一轮没被接受'
-            console.log('[luwi-portal] prompt rejected: ' + reason)
-            throw new Error(reason)
+            failed = sendFailText(result.error)
+            console.log('[luwi-portal] prompt rejected: ' + failed)
+            return result
           }
+          // 成了才把待发栏清掉: 失败那一趟那几张图还在栏里, 人改一改就能重发
           clearAttach()
           return result
         })
         started
           .catch(function (error) {
-            // 失败由会话自己的错误节点显示, 这里只把草稿还回去
+            // 抛错 (桥不在 / 传输断了): 与 `{ok:false}` 同一档说法, 屏上不静默
+            if (failed === '') failed = sendFailText(error)
             console.log('[luwi-portal] send failed: ' + describeError(error))
-            if (els.input && els.input.value === '') els.input.value = text
-            if (attach.length > 0) showNote('这些文件没发出去: ' + describeError(error), true)
           })
           .then(function () {
+            if (failed !== '') {
+              // 本机占位让给那一条错误 (它不是"发出去了")
+              pendingEcho = null
+              // dsh 自己把这条拒答记在快照的 `promptError` 上 (门户盖着它那块错误条, 见 [promptErrorText]);
+              // 快照里读得到就让它画, 读不到 (抛错那一路) 就本机记一条 —— 两条都在时间线上, 不会两份
+              if (promptErrorOf() === '') pushSendFail(failed)
+              showNote(failed, true)
+              // 草稿只在这一刻还回去 (成了就不还): 人接着改、接着发
+              if (els.input && els.input.value === '') els.input.value = text
+            }
             sending = false
             setSendBusy(false)
             updateSendGate()
             scheduleRender()
           })
+      }
+
+      /** dsh 快照里记着的那一条 prompt 拒答 → 屏上那一句 (读不到回空串) */
+      function promptErrorOf() {
+        if (chatTarget === null || typeof chatTarget.getSnapshot !== 'function') return ''
+        var snap
+        try {
+          snap = chatTarget.getSnapshot()
+        } catch (_noSnap) {
+          return ''
+        }
+        return promptErrorText(snap && snap.promptError)
       }
 
       /** 账本换了场就跟着走 (球超时另开一场时, 门户不该还停在旧的) */
@@ -5411,7 +7142,13 @@ window.__ModuleLoader__.load({
           renderMeta()
           return
         }
-        // 账本过期 (她 10 分钟没说话) 时也跟随一次: 打开应用是想看刚聊过的那一场, 不是想落在一张空 draft 上
+        // 2026-11-21 终端: 球那本账指的是手机这一侧的一场, 不该把终端从电脑那几场上拽走
+        // (终端里只跟"电脑那几场"的账本, 别的一律不动屏)
+        if (terminalMode && !isTerminalSession(ledger && ledger.id)) {
+          renderMeta()
+          return
+        }
+        // 账本过期 (她 30 分钟没说话) 时也跟随一次: 打开应用是想看刚聊过的那一场, 不是想落在一张空 draft 上
         // **跟成功才落记号** (2026-11-08 23:4x 真机: 落早了就只跟一次, 那一次正好赶上工作区还没开 → 永远空态)
         if (ledger && typeof ledger.id === 'string' && ledger.id !== '' && ledger.usable !== true && !staleFollowed) {
           // 先把它所在的工作区打开 —— dsh 只加载当前工作区, 别的工作区的场次连 binding 都拿不到,
@@ -5440,6 +7177,728 @@ window.__ModuleLoader__.load({
         renderMeta()
       }
 
+      /* ── 终端 (2026-11-21, 落实表 #48) ─────────────────────────────────────────────
+       *
+       * 主人四条:
+       *   ① 终端 = 手机管电脑; 门户点「终端」整页变黑, 没连上电脑时只有「扫码配对 / 返回」两颗钮
+       *   ② 终端里头像与名字是强制的 (`luwi` / `luwi终端`), 点头像只列**电脑那几场**会话
+       *   ③ 终端里「新建」只建与电脑连的那一场 (落在影子工作区, 第一句话由插件的归属方闸转给电脑)
+       *   ④ 终端历史与非终端历史**互不串**: 普通历史里看不到电脑那几场, 终端里也看不到别的
+       *
+       * 判据在 `check-luwi-portal.mjs` 第二十七节: [underShadow] / [terminalRows] /
+       * [terminalGateState] 都是纯函数, 由脚本抽出来真跑
+       */
+
+      /** 一个 cwd 的归一写法 (安卓上 `/data/data` 与 `/data/user/0` 指同一处; 尾部斜杠不算) */
+      function normalizeCwdPath(value) {
+        var text = String(value === undefined || value === null ? '' : value)
+        text = text.replace(/^\/data\/data\//u, '/data/user/0/')
+        return text.replace(/\/+$/u, '')
+      }
+
+      /**
+       * 这一条 cwd 在不在影子根底下 (纯函数)
+       *
+       * 影子根 = 原生报上来的 `$DSH_HOME/lw/peer-workspaces`; 电脑那几场会话的 cwd 都在这底下
+       * (投影会话由插件建在这里, 终端里"新建"的那一场也是)。根是空串时一律 false ——
+       * 取不到读数就不做任何过滤, 由调用方退回老行为
+       * @param {string} cwd 会话的 cwd
+       * @param {string} root 影子根
+       * @returns {boolean} 在里面就 true
+       */
+      function underShadow(cwd, root) {
+        var base = normalizeCwdPath(root)
+        if (base === '') return false
+        var path = normalizeCwdPath(cwd)
+        if (path === '') return false
+        return path === base || path.indexOf(base + '/') === 0
+      }
+
+      /**
+       * 电脑那几场会话 (纯函数)
+       *
+       * 与 [historyRows] 同一套排序口径 (当前置顶只在没搜索时, 其余按 updatedAt 倒序, 没时间的沉底),
+       * 但只留影子根底下的, 并截到 [TERMINAL_HISTORY_MAX] 条 —— 主人要的是"最近"那几场
+       * @param {object} snapshot `ctx.sessions.list.getSnapshot()`
+       * @param {string} query 搜索框里的字
+       * @param {string|null} currentId 当前画着的那一场
+       * @param {string} root 影子根
+       * @param {number} [cap] 最多几条
+       * @returns {{id: string, title: string, at: number, current: boolean, blank: boolean}[]}
+       */
+      function terminalRows(snapshot, query, currentId, root, cap) {
+        // 影子根都取不到 = 还没连上电脑, 那一档一场都不算 (否则"终端里"会把本机历史也列出来)
+        if (normalizeCwdPath(root) === '') return []
+        var rows = historyRows(snapshot, query, currentId, { mode: 'terminal', shadowRoot: root })
+        var limit = Number(cap)
+        if (!isFinite(limit) || limit <= 0) limit = TERMINAL_HISTORY_MAX
+        return rows.slice(0, limit)
+      }
+
+      /**
+       * 1 小时以内最近的那一场 (纯函数, 判据 `check-luwi-portal` 抽出来真跑)
+       *
+       * 2026-11-21 主人: "进入终端时打开1h内最近终端对话" —— 于是"最近"是三个条件一起: 有
+       * `updatedAt` (没时间的沉底, 不当"最近"), 落在窗口里 (恰好 1 小时算在里面), 取时间**最大**那个
+       * (不认数组顺序: [terminalRows] 那一列按"当前置顶"排过)
+       * @param {{id: string, at: number}[]} rows 电脑那几场 (`terminalRows` 的输出)
+       * @param {number} now 现在 (ms)
+       * @param {number} windowMs 窗口多宽 (无效 = 没有"最近"这一档, 一律 null)
+       * @returns {object|null} 挑中的那一行, 一场都没有就是 null (调用方据它去新建)
+       */
+      function terminalRecentRow(rows, now, windowMs) {
+        var at = Number(now)
+        var window = Number(windowMs)
+        if (!isFinite(at) || at <= 0) return null
+        if (!isFinite(window) || window <= 0) return null
+        var list = Array.isArray(rows) ? rows : []
+        var best = null
+        var bestAt = -1
+        for (var i = 0; i < list.length; i += 1) {
+          var row = list[i]
+          if (!row || typeof row !== 'object') continue
+          var when = Number(row.at) || 0
+          if (when <= 0) continue
+          if (at - when > window) continue
+          if (when <= bestAt) continue
+          best = row
+          bestAt = when
+        }
+        return best
+      }
+
+      /**
+       * 上次记下的"退出终端回哪儿"还认不认 (纯函数, 判据 `check-luwi-portal` 抽出来真跑)
+       *
+       * 页面重载 / 配对重启 host 之后 `TERMINAL_KEY` 里还留着上一次那个返回点, 但那一场可能已经不在了,
+       * 也可能本身就是电脑那一场 (老版本只记当前场, 在终端里重载就会记成电脑场) —— 后者不认, 否则
+       * "返回"等于没退
+       * @param {object|null} stored `readStored(TERMINAL_KEY)` 那一份 (`{on, back:{id}}`)
+       * @param {object|null} snapshot `ctx.sessions.list.getSnapshot()`
+       * @param {string} root 影子根
+       * @returns {{id: string}|null} 认就打这一场, 不认回 null (由调用方记当前这一场)
+       */
+      function terminalReturnOf(stored, snapshot, root) {
+        // 只有"终端还开着"那一份记录才带返回点 (退出时写的是 `{on: false}`, 整条被换掉)
+        if (!stored || typeof stored !== 'object' || stored.on !== true) return null
+        var back = stored.back
+        var id = back && typeof back === 'object' && typeof back.id === 'string' ? back.id : ''
+        if (id === '') return null
+        var byId = snapshot && typeof snapshot === 'object' && snapshot.byId ? snapshot.byId : {}
+        var summary = Object.prototype.hasOwnProperty.call(byId, id) ? byId[id] : null
+        // 快照里没有这一场时**信任**它 (与 [restore] 同一套宽松口径: 列表可能还在加载);
+        // 但认得出是电脑那一场就一定不认
+        if (summary && typeof summary === 'object' && underShadow(summary.cwd, root)) return null
+        return { id: id }
+      }
+
+      /**
+       * 进终端那一拍该记哪个返回点 (纯函数, 判据抽出来真跑)
+       *
+       * 三档: 屏上本来就不是电脑那一场 → 就记它; 屏上就是电脑那一场 (老记录没带 `back` / 在终端里重载
+       * 过来的) → 记门户自己记忆里那一场 (`SESSION_KEY`, 2026-11-21 起它不会记电脑那几场); 两样都没有 →
+       * 记空串, 由 [terminalRestore] 回门户那个默认工作区 —— **绝不能把电脑那一场本身记成返回点**
+       * @param {string|null} currentId 屏上这一场
+       * @param {string} remember `SESSION_KEY` 里那一场 (读不到就空串)
+       * @param {boolean} onPeer 屏上这一场是不是电脑那一场
+       * @param {boolean} rememberOnPeer `remember` 那场是不是电脑那一场
+       * @returns {{id: string}} 要记的返回点
+       */
+      function terminalReturnFor(currentId, remember, onPeer, rememberOnPeer) {
+        if (onPeer !== true && typeof currentId === 'string' && currentId !== '') return { id: currentId }
+        if (rememberOnPeer !== true && typeof remember === 'string' && remember !== '' && remember !== currentId) {
+          return { id: remember }
+        }
+        return { id: '' }
+      }
+
+      /**
+       * 返回门户那一场"到位了没有" (纯函数, 判据抽出来真跑)
+       *
+       * 光看 `switchTo` 的返回值不够: 它是"画得上" (`chatTarget` 建起来了), 而 `openSession` 抛
+       * `unknown session` 时 dsh 的 mainView 还留在电脑那一场 —— 那一拍会话表再推一版就会把门户拽回去。
+       * 所以判据是"画上了 **且** mainView 不再是电脑那一场" (main 读不到时按真算, 没有更好的读数)
+       * @param {boolean} drawn `switchTo` 的返回
+       * @param {string|null} mainId dsh mainView 那一场 (`currentSessionId()`)
+       * @param {string} wantId 要落地的那一场
+       * @param {boolean} mainOnPeer mainView 那一场是不是电脑那一场
+       * @returns {boolean} 到位了就 true
+       */
+      function terminalLanded(drawn, mainId, wantId, mainOnPeer) {
+        if (drawn !== true) return false
+        if (mainId === wantId) return true
+        return mainOnPeer !== true
+      }
+
+      /**
+       * 终端那扇弹窗现在该说哪一句 (纯函数)
+       *
+       * 四档: 没配对 / 终端关着 / 配对码缺连接口令或通道没开 / 电脑没连上 (探测通了就不弹, 不看配置缺不缺地址); `online` 时**不弹**
+       * (状态是空串). 每一档都给一句能照着做的人话 —— 弹窗上那两颗钮不变 (扫码配对 / 返回)
+       *
+       * **「正在找电脑」只有第一次探测才说** (2026-11-21 主人: "一直会反复闪这个弹窗"): 探针 5/15 秒一拍,
+       * 每一拍都先把卡片翻成「正在找电脑」再翻回来就是那个闪。已经有过落定读数 (`probe.at > 0`) 时,
+       * 重探那一拍按上一次的结论画 —— 掉线那张卡连原因都不闪 (`probe.why` 在重探期间保留)
+       * @param {object|null} info `portalTerminal()` 那一份
+       * @param {{ok: boolean, busy: boolean, why: string, at: number}} probe 最近一次探测
+       * @returns {{state: string, title: string, body: string, note: string}} 界面照它画
+       */
+      function terminalGateState(info, probe) {
+        var paired = !!(info && info.paired === true)
+        var at = probe && typeof probe.at === 'number' && isFinite(probe.at) ? probe.at : 0
+        var busy = !!(probe && probe.busy === true)
+        // 还没有任何落定读数的那一次探测 = 才配说「正在找电脑」; 其余重探都按上一次的结论画
+        var firstProbe = busy && !(at > 0)
+        var online = !firstProbe && !!(probe && probe.ok === true)
+        // 探通了就是通: 配置里缺 `peerUrl` 之类只影响"能不能主动拨", 对端在线这件事以探测为准
+        if (online && paired && info && info.syncOn === true) {
+          return { state: '', title: '', body: '', note: '' }
+        }
+        if (!paired) {
+          return {
+            state: 'unpaired',
+            title: '连上电脑',
+            body: '还没连上电脑。\n在电脑上的 dsh 面板里生成一张配对码, 再用这里扫一下。',
+            note: '',
+          }
+        }
+        if (!info || info.syncOn !== true) {
+          return {
+            state: 'off',
+            title: '终端关着',
+            body: '终端关着: 在 设置 → 终端 里打开它, 手机才能管电脑。\n也可以直接扫一张新的配对码。',
+            note: '',
+          }
+        }
+        if (info && info.terminalReady === false) {
+          return {
+            state: 'offline',
+            title: '终端还没配好',
+            body: '配对码里缺连接口令, 或者对端通道没开。\n在电脑上重新生成一张配对码, 再扫一次。',
+            note: '',
+          }
+        }
+        if (firstProbe) {
+          return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '' }
+        }
+        var why = probe && typeof probe.why === 'string' ? probe.why : ''
+        var who = info && typeof info.pcName === 'string' && info.pcName !== '' ? info.pcName : '电脑'
+        return {
+          state: 'offline',
+          title: '电脑没连上',
+          body: '配对过了, 但「' + who + '」那边没应答。\n确认电脑上的 dsh 开着、地址能通; 这里会自动再试。',
+          note: why === '' ? '' : '(' + why + ')',
+        }
+      }
+
+      /** 原生交回来的那份终端读数 (桥不在 / 老宿主 → 全按未配对) */
+      function fetchTerminalInfo() {
+        var raw = call('portalTerminal')
+        if (raw === null || raw === undefined) return null
+        if (typeof raw === 'string') {
+          try {
+            return JSON.parse(raw)
+          } catch (_badJson) {
+            return null
+          }
+        }
+        return typeof raw === 'object' ? raw : null
+      }
+
+      /** 影子根 (取不到就空串: 那一档不做任何过滤, 老行为一个字节不变) */
+      function terminalRoot() {
+        var key = TERMINAL_ROOT_KEY
+        var value = terminalInfo && terminalInfo[key]
+        return typeof value === 'string' ? value : ''
+      }
+
+      /** 这一场是不是"电脑那一场" */
+      function isTerminalSession(id) {
+        if (typeof id !== 'string' || id === '') return false
+        var snapshot = sessionsSnapshot()
+        var summary = snapshot && snapshot.byId ? snapshot.byId[id] : null
+        if (!summary || typeof summary !== 'object') return false
+        return underShadow(summary.cwd, terminalRoot())
+      }
+
+      /** 列表快照 (读不到就 null: 调用方按空表处理) */
+      function sessionsSnapshot() {
+        try {
+          return ctx.sessions.list.getSnapshot()
+        } catch (_noList) {
+          return null
+        }
+      }
+
+
+      /**
+       * 终端那身皮上的记号: 屏上这一场是不是电脑那一场 (2026-11-21 主人: "进入终端时门户的对话仍显示")
+       *
+       * 写的是 `#lwp-root` 的 `data-term-session` —— 样式表里那条
+       * `:not([data-term-session="on"]) #lwp-flow{visibility:hidden}` 靠它兜住 JS 还没跑的第一帧,
+       * `renderFlow` 的闸靠它决定要不要画。**不在终端时一律摘掉属性** (门户照旧显示对话)
+       */
+      function markTerminalSession() {
+        if (root === null) return
+        if (!terminalMode) {
+          root.removeAttribute('data-term-session')
+          return
+        }
+        root.setAttribute('data-term-session', isTerminalSession(sessionId) ? 'on' : 'off')
+      }
+
+      /** 把终端那身皮穿上 / 脱掉 (整页黑 + 那颗「‹」+ 强制的身份) */
+      function applyTerminalMode() {
+        if (root !== null) {
+          if (terminalMode) root.setAttribute('data-mode', 'terminal')
+          else root.removeAttribute('data-mode')
+        }
+        if (els.termBack) els.termBack.hidden = !terminalMode
+        // 落到电脑那一场没有: 决定对话上不上屏 (见 [markTerminalSession])
+        markTerminalSession()
+        // 身份: 终端里名字与头像都归这一页说了算 (见 [applyIdentity] 里那一段覆盖)
+        applyIdentity(look || {})
+      }
+
+      /**
+       * 进终端 (唯一入口: 头栏那颗「终端」、球菜单、抽屉那一行、原生 `terminal(true)`)
+       *
+       * 三件: 记下"进来之前是哪一场" (退出要回去)、穿皮、探一次电脑。**没连上也进** ——
+       * 主人要的是"点终端就全变黑", 弹窗盖在黑底上
+       *
+       * 返回点也落盘 (2026-11-21): 配对要把 host 重启一次, 页面重载之后这一句还认得出该回哪儿;
+       * 上一份记录里那个点要是电脑那一场 (老版本在终端里重载时会记成它) 就不认, 重新记当前这一场
+       */
+      function openTerminal() {
+        if (!mounted) mount()
+        terminalInfo = fetchTerminalInfo()
+        if (!terminalMode) {
+          var kept = terminalReturnOf(readStored(TERMINAL_KEY), sessionsSnapshot(), terminalRoot())
+          // 记不上"不是电脑那一场"时退门户自己记忆里那一场 —— 屏上本来就是电脑那一场 (老记录没有 `back`)
+          // 也绝不能把它记成返回点, 否则"返回"等于没退
+          terminalReturn = kept !== null
+            ? kept
+            : terminalReturnFor(
+              sessionId,
+              recallSession(),
+              isTerminalSession(sessionId),
+              isTerminalSession(recallSession()),
+            )
+          terminalMode = true
+          terminalAutoAt = 0
+          writeStored(TERMINAL_KEY, { on: true, back: terminalReturn })
+        }
+        applyTerminalMode()
+        // 门户那几条对话当场下屏 (样式已经靠 `data-term-session` 藏起来了, 这里再把 DOM 也清掉):
+        // 落到电脑那一场之后 `renderFlow` 会自己重画, 不必等 3 秒那一拍
+        flowSig = null
+        renderFlow()
+        call('portalTerminalVisible', true)
+        probeTerminal()
+        scheduleTerminalProbe()
+        renderTerminalGate()
+      }
+
+      /** 退出终端: 收起那扇窗, 回进终端之前那一场 (见 [terminalRestore]) */
+      function closeTerminal() {
+        if (!terminalMode) return
+        terminalMode = false
+        terminalGate = ''
+        writeStored(TERMINAL_KEY, { on: false })
+        if (terminalProbeTimer !== null) {
+          clearTimeout(terminalProbeTimer)
+          terminalProbeTimer = null
+        }
+        closeHistory()
+        if (els.termGate) els.termGate.hidden = true
+        applyTerminalMode()
+        call('portalTerminalVisible', false)
+        var back = terminalReturn
+        terminalReturn = null
+        terminalAutoAt = 0
+        // 终端里 `#lwp-flow` 是空的 (见 [renderFlow] 那道闸): 先作废签名, 再把屏换回门户那一场 ——
+        // 换成功了那条 `switchTo → follow` 会自己重画; 屏上本来就不是电脑那一场 (没换过场) 时这里当场画一次
+        flowSig = null
+        terminalRestore(back)
+        if (!isTerminalSession(sessionId)) renderFlow()
+      }
+
+      /**
+       * 退出终端之后把屏换回"进终端之前那一场" (2026-11-21)
+       *
+       * 两件事:
+       * ① 进终端之前门户还没落到任何一场 (`back.id` 空, 冷启动途中点的终端) —— 回门户那个默认工作区,
+       *    **不能把人留在电脑那一场**; 屏上本来就不是电脑场时什么都不做
+       * ② 有那一场就换回去, 而且**换到真的挂上为止**: 终端把 dsh 的 mainView 带去了影子工作区,
+       *    `openSession` 第一下会抛 `unknown session` (那句 `openBallWorkspace` 是异步的), 只试一次
+       *    就停会让门户一直停在电脑那一场
+       * 真换了场才 15 秒不跟账本 (与「开新对话」同一套): 这中间球那边说了话也不许把界面再拽走
+       * @param {{id: string}|null} back `terminalReturn`
+       */
+      function terminalRestore(back) {
+        var id = back && typeof back === 'object' && typeof back.id === 'string' ? back.id : ''
+        if (id === '') {
+          // 没记返回点: 屏上 (画的那一场 / mainView 那一场) 只要还在电脑那儿就回门户那个默认工作区
+          if (isTerminalSession(sessionId) || isTerminalSession(currentSessionId())) {
+            landInDefaultWorkspace('back')
+          }
+          return
+        }
+        // 根本没换过场 (还没落场就退出来 / 一直没连上电脑): 屏上就是那一场, 一个字节都不用动 ——
+        // 白走一趟 `switchTo` 会把门户记录顺手清掉 (那是给"真换了场"准备的)
+        if (sessionId === id && chatTarget !== null && currentSessionId() === id) return
+        var before = sessionId
+        var tries = 0
+        function look() {
+          // 这中间又点进终端了: 别再抢回来 (那是人的选择)
+          if (terminalMode) return
+          var drawn = switchTo(id, 'history')
+          var main = currentSessionId()
+          // 判据不能只看 `switchTo` 的返回值 (那只是"画得上"): mainView 还留在电脑那一场时
+          // 会话表再推一版就会把门户拽回去, 所以继续补拍
+          if (terminalLanded(drawn, main, id, isTerminalSession(main))) {
+            if (before !== id) ledgerHoldUntil = Date.now() + 15000
+            return
+          }
+          tries += 1
+          // 5 秒 (250 ms × 20): 这条路一定跨工作区 —— 要等 `openBallWorkspace` 那趟 RPC 回来才落得下,
+          // 慢机上 2 秒就点人一句"没打开"太急了 (与 [enterWorkspace] 的 24 拍同一个量级)
+          if (tries >= 20) {
+            showNote('刚才那一场没打开, 在历史里点一下它', true)
+            return
+          }
+          setTimeout(look, 250)
+        }
+        look()
+      }
+
+      /**
+       * 终端里出的事说一句 (同一句一分钟最多一句)
+       *
+       * 自动那趟 (探针每 5/15 秒一拍) 不能每拍都弹一次提示, 可也不能一声不响地把人留在黑底上 ——
+       * 所以静默那条路改走这一颗: 该知道的还是会知道, 只是同一句不刷屏。换了一句 (另一种原因)
+       * 就当场说, 不压在上一句的窗口里
+       * @param {string} text 要说的话
+       */
+      function terminalNoteOnce(text) {
+        var key = String(text === undefined || text === null ? '' : text)
+        if (key === '') return
+        var now = Date.now()
+        if (key === terminalNotedKey && now - terminalNotedAt < 60000) return
+        terminalNotedKey = key
+        terminalNotedAt = now
+        showNote(key, true)
+      }
+
+      /**
+       * 探一次电脑: 同源 `GET /luwi-sync/peer-live`
+       *
+       * 为什么是这条路由: 它本来就会顺手问一次对端 (`/peer/info`), 于是"电脑在不在"与"通道通不通"
+       * 是同一个读数; 令牌不出宿主 (页面这一侧一个字节都拿不到)。**只认 `ok === true`** ——
+       * 老插件没有这条路由时 dsh 的 SPA 兜底会回一张 index.html, 那不是 JSON
+       */
+      function probeTerminal() {
+        if (terminalProbe.busy) return
+        // 还没有落定读数的那一次探测才让卡片说「正在找电脑」; 之后每一拍重探都把上一次的结论
+        // (ok / at / why) 原样带过去 —— 卡片只在 `done()` 里按新读数画一次, 不在这一行翻面
+        var firstProbe = !(terminalProbe.at > 0)
+        terminalProbe = { at: terminalProbe.at, ok: terminalProbe.ok, busy: true, why: terminalProbe.why }
+        if (terminalMode && firstProbe) renderTerminalGate()
+        var settled = false
+        var control = null
+        var timer = null
+        function done(ok, why) {
+          if (settled) return
+          settled = true
+          if (timer !== null) clearTimeout(timer)
+          terminalProbe = { at: Date.now(), ok: ok, busy: false, why: why || '' }
+          console.log('[luwi-portal] terminal probe ' + (ok ? 'ok' : 'failed') + (why ? ' (' + why + ')' : ''))
+          if (terminalMode) renderTerminalGate()
+        }
+        timer = setTimeout(function () {
+          try {
+            if (control) control.abort()
+          } catch (_abortRefused) {
+            /* 老 WebView 不给 abort 就算了, 下面那一路仍会回一句超时 */
+          }
+          done(false, '探测超时')
+        }, TERMINAL_PROBE_MS)
+        try {
+          if (typeof AbortController === 'function') control = new AbortController()
+          var init = { cache: 'no-store', credentials: 'same-origin' }
+          if (control) init.signal = control.signal
+          fetch('/luwi-sync/peer-live', init).then(function (response) {
+            if (!response || response.ok !== true) {
+              // 403 是"这扇门只认本机界面" (反代 / 局域网上的浏览器) —— 与"电脑没连上"分开说
+              var status = response && response.status ? response.status : 0
+              done(false, status === 403 ? '这一页不是从本机打开的那一份 (控制面只认回环)' : 'HTTP ' + (status || '?'))
+              return null
+            }
+            return response.json().then(function (body) {
+              var ok = body !== null && typeof body === 'object' && body.ok === true
+              done(ok, ok ? '' : (body && body.error ? String(body.error) : ''))
+            }, function () {
+              done(false, '不懂的应答')
+            })
+          }, function () {
+            done(false, '网络不通')
+          }).catch(function () {
+            done(false, '网络不通')
+          })
+        } catch (_noFetch) {
+          done(false, '这一版 WebView 没有 fetch')
+        }
+      }
+
+      /** 探一次电脑 (在线时降频续探: 掉线要能自己回到弹窗, 不能只试一次) */
+      function scheduleTerminalProbe(onlineHint) {
+        if (terminalProbeTimer !== null) clearTimeout(terminalProbeTimer)
+        // 间隔在**这一拍探之前**算: `probeTerminal()` 一进去就把 `busy` 置真, 探完再算就永远不是 online
+        var online = onlineHint === undefined ? terminalProbe.ok === true : onlineHint === true
+        terminalProbeTimer = setTimeout(function () {
+          terminalProbeTimer = null
+          if (!terminalMode) return
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            scheduleTerminalProbe(online)
+            return
+          }
+          var wasOnline = terminalProbe.ok === true && terminalProbe.busy !== true
+          probeTerminal()
+          scheduleTerminalProbe(wasOnline)
+        }, online ? 15000 : TERMINAL_POLL_MS)
+      }
+
+      /** 把那扇窗按当前读数重画; online 时顺手把终端带进"最近那一场" */
+      function renderTerminalGate() {
+        if (!terminalMode || !els.termGate) return
+        var said = terminalGateState(terminalInfo, terminalProbe)
+        terminalGate = said.state
+        if (said.state === '') {
+          els.termGate.hidden = true
+          terminalEnter()
+          return
+        }
+        els.termGate.hidden = false
+        if (els.termTitle) els.termTitle.textContent = said.title
+        if (els.termBody) els.termBody.textContent = said.body
+        if (els.termNote) {
+          els.termNote.textContent = said.note
+          els.termNote.hidden = said.note === ''
+        }
+      }
+
+      /**
+       * 把"电脑那个工作区"找出来 (只找, **不建**)
+       *
+       * 为什么不在本地建: 插件的影工作区布局是 `<影子根>/<对端 deviceId>/<工作区名>`
+       * (`shadowDirName`), 页面拿不到那个 deviceId; 自建一个 `<影子根>/<电脑名>` 会让归属方闸
+       * 认不出是哪个工作区, 那几句话在电脑上就落到"最近那个工作区"去了。所以这一层只等插件把影子
+       * 工作区同步出来 (对端在线时几秒就有), 没有就明说 —— 不假装开了一场
+       * @param {(id: string) => void} done 空串 = 现在还没有
+       * @param {boolean} [quiet] 自动那趟 (`terminalEnter`) 传真: 等不到只说给日志, 不刷屏
+       */
+      function ensureTerminalWorkspace(done, quiet) {
+        var base = terminalRoot()
+        if (base === '') {
+          if (quiet) {
+            console.log('[luwi-portal] terminal auto-enter: no shadow root yet')
+            terminalNoteOnce('终端读数还没取到, 稍后再试')
+          } else showNote('终端读数还没取到, 稍后再试', true)
+          done('')
+          return
+        }
+        var tries = 0
+        function look() {
+          var ready = terminalWorkspaceOf(workspaceItems(), base)
+          if (ready !== '') {
+            done(ready)
+            return
+          }
+          tries += 1
+          if (tries >= 40) {
+            if (quiet) {
+              console.log('[luwi-portal] terminal auto-enter: no shadow workspace yet')
+              terminalNoteOnce('电脑那边还没有对话同步过来: 等它连上再开')
+            } else showNote('电脑那边还没有对话同步过来: 等它连上再开', true)
+            done('')
+            return
+          }
+          setTimeout(look, 250)
+        }
+        look()
+      }
+
+      /** 影子根底下的那个工作区 (纯查表; 没有就空串) */
+      function terminalWorkspaceOf(items, root) {
+        var list = Array.isArray(items) ? items : []
+        for (var i = 0; i < list.length; i += 1) {
+          var item = list[i]
+          if (!item) continue
+          var id = String(item.workspaceId || item.id || '')
+          if (id === '') continue
+          if (underShadow(item.path, root)) return id
+        }
+        return ''
+      }
+
+      /**
+       * 终端里的「新建」: 只建与电脑连的那一场
+       *
+       * 落到影子工作区里的一场新会话 —— 第一句话由插件的 `agent/pre-step` 闸按 `target:{kind:'new'}`
+       * 转给电脑, 电脑那边新开一场, 回答再折回这一场 (这就是"手机开新对话发送到 pc")
+       * @param {{quiet: boolean}} [options] 自动进终端那一趟不带提示 (窗口 1 小时内没有电脑对话时它会走到这里)
+       */
+      function terminalNew(options) {
+        if (navigating) return
+        if (!terminalMode) return
+        var quiet = !!(options && options.quiet === true)
+        var before = sessionId
+        ensureTerminalWorkspace(function (workspaceId) {
+          if (workspaceId === '') return
+          // 等这 10 秒的中间可能已经退出终端了: 那就别再开影子工作区, 否则 dsh 的 mainView
+          // 会被人留在电脑那一场上 (那句"返回就回门户那一场"就白说了)
+          if (!terminalMode) return
+          navigating = true
+          var opening = null
+          try {
+            opening = ctx.uiWorkspace.openWorkspace(workspaceId)
+          } catch (error) {
+            navigating = false
+            if (quiet) {
+              console.log('[luwi-portal] terminal auto-new: openWorkspace threw: ' + describeError(error))
+              terminalNoteOnce('电脑那个工作区打不开: ' + describeError(error))
+            } else showNote('电脑那个工作区打不开: ' + describeError(error), true)
+            return
+          }
+          if (opening && typeof opening.catch === 'function') {
+            opening.catch(function (reason) {
+              console.log('[luwi-portal] terminal openWorkspace failed: ' + describeError(reason))
+            })
+          }
+          var tries = 0
+          function look() {
+            // 这一趟等出来的新场不许把人从门户那一场拽走 (退出终端之后这场就不算数了)
+            if (!terminalMode) {
+              navigating = false
+              return
+            }
+            tries += 1
+            var id = currentSessionId()
+            if (id !== null && bindingOf(id) !== undefined) {
+              land(id)
+              return
+            }
+            if (tries >= 24) {
+              navigating = false
+              if (quiet) {
+                console.log('[luwi-portal] terminal auto-new: no session appeared')
+                terminalNoteOnce('电脑那边没开出来, 稍后再试')
+              } else showNote('电脑那边没开出来, 稍后再试', true)
+              return
+            }
+            setTimeout(look, 150)
+          }
+          function land(id) {
+            navigating = false
+            switchTo(id, 'new')
+            ledgerHoldUntil = Date.now() + 15000
+            renderMeta()
+            renderFlow()
+            if (!quiet && id === before) showNote('已经是新对话了')
+          }
+          setTimeout(look, 150)
+        }, quiet)
+      }
+
+      /**
+       * 进终端之后落到哪一场 (2026-11-21 主人的口径)
+       *
+       * - 已经在电脑那几场里: **不动** —— 人可能刚从终端历史里挑了更早的一场, 重探一拍不许把它拽走
+       * - 否则看 1 小时内最近那一场 ([terminalRecentRow]) → 换过去
+       * - 1 小时内一场都没有 → **新建一场与电脑连的对话** ([terminalNew]), 这一趟静默
+       * 自动那趟 20 秒最多一次 ([TERMINAL_ENTER_COOLDOWN_MS]): 建不出来时别每个探测拍都重来一遍
+       */
+      function terminalEnter() {
+        if (!terminalMode) return
+        if (isTerminalSession(sessionId)) return
+        if (Date.now() - terminalAutoAt < TERMINAL_ENTER_COOLDOWN_MS) return
+        terminalAutoAt = Date.now()
+        var recent = terminalRecentRow(
+          terminalRows(sessionsSnapshot(), '', sessionId, terminalRoot(), TERMINAL_HISTORY_MAX),
+          Date.now(),
+          TERMINAL_RECENT_MS,
+        )
+        if (recent === null) {
+          terminalNew({ quiet: true })
+          return
+        }
+        // 那一场所在的影子工作区可能还没打开 (`follow` 里 `openSession` 会抛, 之后要等一轮) ——
+        // 与 `pollLedger` 同一个做法: 开不出来就补拍几次, 不要只试一次就把人留在本地那一场
+        var tries = 0
+        function look() {
+          if (!terminalMode) return
+          if (isTerminalSession(sessionId)) return
+          if (switchTo(recent.id, 'history')) return
+          tries += 1
+          if (tries >= 8) {
+            // 自动那趟一分钟最多说一句 (人没点任何东西, 但黑底上也不能一声不响), 下一拍过了冷却再试
+            console.log('[luwi-portal] terminal auto-enter: could not open ' + recent.id)
+            terminalNoteOnce('电脑那一场现在打不开, 稍后再试')
+            return
+          }
+          setTimeout(look, 250)
+        }
+        look()
+      }
+
+      /**
+       * 返回键先问这一句 (2026-11-21; 由 [PAGE_BACK_JS] 调)
+       *
+       * 顺序: 弹窗 / 终端 → 历史窗 → 抽屉 → 预览窗。收掉一件回 `closed`, 什么都没收就 `none`
+       * (后者让原生把这一下还给「再按一次退出」)
+       */
+      function terminalBack() {
+        if (terminalMode) {
+          closeTerminal()
+          return 'closed'
+        }
+        if (historyOpen) {
+          closeHistory()
+          return 'closed'
+        }
+        if (drawer !== '') {
+          openDrawer('')
+          return 'closed'
+        }
+        if (els.preview && els.preview.hidden === false) {
+          closePreview()
+          return 'closed'
+        }
+        return 'none'
+      }
+
+      /**
+       * 原生那两句 (`terminal(true/false)`) 的落点: 幂等
+       *
+       * 已经在终端里时只重探一次 (页面重载 / 配完对回来那一拍), 不重复记 `terminalReturn`;
+       * 顺手把自动那趟的冷却清掉 —— 这一句是**人点进来的** (头栏 / 球菜单), 刚失败过再点一次就该当场再试
+       */
+      function setTerminal(open) {
+        var want = open !== false
+        if (want) {
+          if (terminalMode) {
+            terminalInfo = fetchTerminalInfo()
+            terminalAutoAt = 0
+            probeTerminal()
+            renderTerminalGate()
+            return
+          }
+          openTerminal()
+          return
+        }
+        closeTerminal()
+      }
+
       function build() {
         style = document.createElement('style')
         style.setAttribute('data-luwi-portal', '1')
@@ -5463,12 +7922,14 @@ window.__ModuleLoader__.load({
 
         var head = h('div')
         head.id = 'lwp-head'
-        // 左边那一块 = 身份 (头像 + 昵称): 整块可点 = 开一场新对话 (2026-11-08 的规矩留着);
-        // 头像与昵称由 `applyIdentity()` 从 `portalLook` 那一份里填 (2026-11-10 起可在外观里改)
+        // 左边 = 头像 (2026-11-19 主人: "点击头像开新对话改为打开历史" + "生效范围缩小到头像大小"):
+        // 那颗钮里只有 28px 的头像, **热区就是头像** —— 昵称搬到它旁边当标识, 点不亮任何东西。
+        // 头像与昵称都由 `applyIdentity()` 从 `portalLook` 那一份里填 (2026-11-10 起可在外观里改)
+        els.head = head
         els.brand = h('button')
         els.brand.id = 'lwp-brand'
         els.brand.type = 'button'
-        els.brand.setAttribute('aria-label', '开一个新对话')
+        els.brand.setAttribute('aria-label', '历史对话')
         var mark = h('span', 'lwp-mark')
         els.markImg = document.createElement('img')
         els.markImg.src = MARK_PNG
@@ -5483,29 +7944,61 @@ window.__ModuleLoader__.load({
         els.busy.setAttribute('data-on', 'off')
         mark.appendChild(els.busy)
         els.brand.appendChild(mark)
+        els.brand.onclick = function () { openHistory() }
+        // 终端那颗「‹ 返回」(2026-11-21): 只在终端里出现 —— 那是一位全黑的面, 没有别的出口
+        els.termBack = h('button')
+        els.termBack.id = 'lwp-term-back'
+        els.termBack.type = 'button'
+        els.termBack.textContent = '‹'
+        els.termBack.setAttribute('aria-label', '退出终端')
+        els.termBack.hidden = true
+        els.termBack.onclick = function () { closeTerminal() }
+        head.appendChild(els.termBack)
+        head.appendChild(els.brand)
+        // 昵称与读数: 只是标识 (不进那颗头像按钮, 否则又变成"整块可点")
         var brandText = h('span', 'lwp-brand-text')
         els.brandName = h('span', 'lwp-brand-name', DEFAULT_NAME)
         brandText.appendChild(els.brandName)
         els.meta = h('span', 'lwp-meta', '')
         brandText.appendChild(els.meta)
-        els.brand.appendChild(brandText)
-        els.brand.onclick = function () { newConversation() }
-        head.appendChild(els.brand)
-        // 右边: 历史 → 更多 (`⋯`)
-        els.historyButton = h('button', 'lwp-tab', '历史')
-        els.historyButton.id = 'lwp-history-btn'
-        els.historyButton.type = 'button'
-        els.historyButton.onclick = function () { openHistory() }
-        head.appendChild(els.historyButton)
+        head.appendChild(brandText)
+        // 右边三颗 (2026-11-20 主人: "顶栏应该是语音输出，是喇叭形状" / "都要放在靠近更多按钮的位置,
+        // 向右对齐"): **自动朗读 → 终端 → ⋯** 装进 `#lwp-tabs` 这一簇, `margin-left:auto` 挂在
+        // 那一簇上 —— 三颗一起贴最右, 不再跟着昵称走
+        var tabs = h('div')
+        tabs.id = 'lwp-tabs'
+        els.tabs = tabs
+        els.speakButton = h('button', 'lwp-tab lwp-tab-icon')
+        els.speakButton.id = 'lwp-speak-btn'
+        els.speakButton.type = 'button'
+        els.speakButton.setAttribute('aria-pressed', 'false')
+        els.speakButton.setAttribute('data-on', 'off')
+        els.speakButton.setAttribute('aria-label', '已关闭自动朗读')
+        els.speakButton.title = '已关闭自动朗读'
+        // 两副图标照官方手机端那两张: 关 = 喇叭 + 斜杠, 开 = 喇叭 + 两道声波 (见 [applySpeakStatus])
+        els.speakButton.innerHTML = SPEAKER_OFF_ICON
+        els.speakButton.onclick = function () { toggleSpeak() }
+        tabs.appendChild(els.speakButton)
+        // 「同步」搬出抽屉并改名「终端」(2026-11-20): 动作仍走原生清单那一条
+        // (`portalMenuPick('sync')` → `toggleSync`: 翻开关 + Toast + 重启 host), 文案与开关态也从
+        // `portalMenu()` 来 —— 页不另写死字, 一处 rename 两处跟着变
+        els.syncButton = h('button', 'lwp-tab', SYNC_TITLE)
+        els.syncButton.id = 'lwp-sync-btn'
+        els.syncButton.type = 'button'
+        els.syncButton.setAttribute('data-on', 'off')
+        els.syncButton.setAttribute('aria-label', SYNC_TITLE)
+        els.syncButton.onclick = function () { pickSync() }
+        tabs.appendChild(els.syncButton)
         els.moreButton = h('button', 'lwp-tab lwp-more', '⋯')
         els.moreButton.id = 'lwp-more-btn'
         els.moreButton.type = 'button'
         els.moreButton.setAttribute('aria-label', '更多')
         els.moreButton.onclick = function () { openDrawer(drawer === '' ? 'menu' : '') }
-        head.appendChild(els.moreButton)
+        tabs.appendChild(els.moreButton)
+        head.appendChild(tabs)
         root.appendChild(head)
 
-        // 「已开新对话」: head 与 flow 之间的一块 (流里的, 不遮消息), 8 秒后自己收
+        // 「已开新对话」: **浮在头栏下面的一层** (absolute, 不占排版), 8 秒后自己收
         els.undo = h('div')
         els.undo.id = 'lwp-undo'
         els.undo.hidden = true
@@ -5513,6 +8006,79 @@ window.__ModuleLoader__.load({
         els.undo.setAttribute('aria-live', 'polite')
         els.undo.appendChild(h('span', null, '已开新对话'))
         root.appendChild(els.undo)
+
+        /* ── 终端那扇「扫码配对 / 返回」(2026-11-21, 落实表 #48) ─────────────────────
+         *
+         * 黑底上的一张小卡: **恒有两颗钮** —— 主钮「扫码配对」、次钮「返回」(退出终端)。
+         * 文案按 `terminalGateState()` 那四档换, 钮不换 (主人只要这两颗)
+         */
+        els.termGate = h('div')
+        els.termGate.id = 'lwp-term-gate'
+        els.termGate.hidden = true
+        els.termGate.setAttribute('role', 'dialog')
+        els.termCard = h('div', 'lwp-term-card')
+        els.termTitle = h('div', 'lwp-term-title', '连上电脑')
+        els.termBody = h('div', 'lwp-term-body', '')
+        els.termCard.appendChild(els.termTitle)
+        els.termCard.appendChild(els.termBody)
+        var termRow = h('div', 'lwp-term-row')
+        els.termPair = h('button', null, '扫码配对')
+        els.termPair.type = 'button'
+        els.termPair.setAttribute('data-primary', 'on')
+        els.termPair.onclick = function () { call('portalTerminalPair') }
+        els.termExit = h('button', null, '返回')
+        els.termExit.type = 'button'
+        els.termExit.onclick = function () { closeTerminal() }
+        termRow.appendChild(els.termPair)
+        termRow.appendChild(els.termExit)
+        els.termCard.appendChild(termRow)
+        els.termNote = h('div', 'lwp-term-note', '')
+        els.termNote.hidden = true
+        els.termCard.appendChild(els.termNote)
+        els.termGate.appendChild(els.termCard)
+        root.appendChild(els.termGate)
+
+        /* ── 长按说话那条录音条 (2026-11-20 三次改口径) ─────────────────────────────
+         *
+         * 行序: 第一行「红点 + 提示 + 上滑时那枚向下箭头」和「计时胶囊」分居左右; 第二行是波形;
+         * 转写中把波形那一行换成三个点。**不吃事件** (`pointer-events:none`): 手指还压在原来的
+         * 输入框上, 抬手与上滑都得照旧落在它那一侧 —— 长按那一刻把 DOM 换掉, 抬手事件会被一起吞掉
+         */
+        els.rec = h('div')
+        els.rec.id = 'lwp-rec'
+        els.rec.setAttribute('data-on', 'off')
+        els.rec.setAttribute('role', 'status')
+        els.recRow = h('div')
+        els.recRow.id = 'lwp-rec-row'
+        els.recHint = h('div', 'lwp-rec-hint')
+        els.recDot = h('i', 'lwp-rec-dot')
+        els.recHint.appendChild(els.recDot)
+        els.recHint.appendChild(h('span'))
+        els.recArrow = h('i')
+        els.recArrow.className = 'lwp-rec-arrow'
+        els.recArrow.innerHTML = ARROW_DOWN_ICON
+        els.recHint.appendChild(els.recArrow)
+        els.recRow.appendChild(els.recHint)
+        els.recText = els.recHint.querySelector('span')
+        if (els.recText) {
+          els.recText.className = 'lwp-rec-text'
+          els.recText.setAttribute('aria-live', 'polite')
+          els.recText.textContent = REC_HINT
+        }
+        els.recTime = h('div', 'lwp-rec-time', '0:00 / 1:00')
+        els.recRow.appendChild(els.recTime)
+        els.rec.appendChild(els.recRow)
+        els.recWave = document.createElement('canvas')
+        els.recWave.className = 'lwp-rec-wave'
+        els.recWave.setAttribute('aria-hidden', 'true')
+        els.rec.appendChild(els.recWave)
+        els.recDots = h('div', 'lwp-rec-dots')
+        els.recDots.appendChild(h('i'))
+        els.recDots.appendChild(h('i'))
+        els.recDots.appendChild(h('i'))
+        els.recDots.setAttribute('aria-hidden', 'true')
+        els.rec.appendChild(els.recDots)
+        root.appendChild(els.rec)
 
         els.flow = h('div')
         els.flow.id = 'lwp-flow'
@@ -5560,9 +8126,12 @@ window.__ModuleLoader__.load({
 
         els.input = h('textarea')
         els.input.id = 'lwp-input'
-        els.input.placeholder = '说点什么'
+        els.input.placeholder = VOICE_HINT
         els.input.rows = 1
         els.input.addEventListener('keydown', function (event) {
+          // 敲键盘就是"我要打字": 那颗长按计时器当场作废
+          if (pressTimer !== null) clearTimeout(pressTimer)
+          pressTimer = null
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
             send('queue')
@@ -5573,6 +8142,59 @@ window.__ModuleLoader__.load({
           // 高度跟着内容长, 上限那一档写在 CSS 的 max-height 里 (14 行)
           els.input.style.height = 'auto'
           els.input.style.height = String(els.input.scrollHeight) + 'px'
+        })
+        /* ── 长按空输入框 = 当场开录 (2026-11-20 主人: "长按不是显示语音输入，而是直接开始录音") ──
+         *
+         * **只在草稿为空时接管**: 有字时长按仍是系统的选中 / 粘贴那一套 (浏览器自己办), 否则输入框里
+         * 就没法选字了。计时器在抬手 / 手指一动 / 落键 / 失焦时都撤掉 —— 早撤晚撤都是"这一下不是长按"
+         *
+         * `contextmenu` 是 WebView 里长按真正会来的那一下 (系统的选中菜单): 空草稿时吃掉它, 免得
+         * 菜单盖在面板上; 有字时留着 (粘贴要用)
+         */
+        /**
+         * 长按那 450 ms 里把输入的 `touch-action` 关掉 (2026-11-20 真机)
+         *
+         * 不关的话, 按住再往上划会被 Chromium 判成页面滚动, 于是先来一发 `pointercancel` ——
+         * 长按的计时器被撤掉、上滑取消那一路也永远走不到。收手时立刻还原, 免得影响正常的选区与滚动
+         */
+        var releaseTouchAction = function () {
+          if (els.input) els.input.style.touchAction = ''
+        }
+        var cancelPress = function () {
+          if (pressTimer === null) return
+          clearTimeout(pressTimer)
+          pressTimer = null
+          releaseTouchAction()
+        }
+        els.input.addEventListener('pointerdown', function (event) {
+          if (voiceState === 'recording' || voiceState === 'working') return
+          if (String(els.input.value || '').trim() !== '') return
+          cancelPress()
+          // 起手那一点记下来: 上滑取消按它算, 而"手指抖一下"不算取消了长按
+          if (els.input) els.input.style.touchAction = 'none'
+          var y = Number(event && event.clientY)
+          recStartY = isFinite(y) ? y : 0
+          pressStartX = Number(event && event.clientX) || 0
+          pressStartY = recStartY
+          pressTimer = setTimeout(function () {
+            pressTimer = null
+            beginHoldRecording()
+          }, VOICE_LONG_PRESS_MS)
+        })
+        els.input.addEventListener('pointerup', cancelPress)
+        els.input.addEventListener('pointercancel', cancelPress)
+        els.input.addEventListener('pointermove', function (event) {
+          if (pressTimer === null) return
+          // 手指挪过 40 px 才当"这不是长按": 真机按住不动也会抖, 40 px 也不会误伤"轻轻一划" ——
+          // 宁可多认一次长按 (抬手就能取消录音), 也不要让长按在这台机器上十次里八次不响
+          var dx = (Number(event && event.clientX) || 0) - pressStartX
+          var dy = (Number(event && event.clientY) || 0) - pressStartY
+          if (Math.sqrt(dx * dx + dy * dy) > 40) cancelPress()
+        })
+        els.input.addEventListener('blur', cancelPress)
+        els.input.addEventListener('contextmenu', function (event) {
+          if (String(els.input.value || '').trim() !== '') return
+          event.preventDefault()
         })
         // 待发附件那一行 **在文本区上面** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框
         // 上方显示, 像 dsh 原生那样") —— dsh 的 `InputBar` 里 `conversation.input.attachments` slot
@@ -5675,24 +8297,50 @@ window.__ModuleLoader__.load({
         els.send.setAttribute('aria-label', '发送')
         els.send.innerHTML = SEND_ICON
         els.send.disabled = true
-        var longPress
+        // 轻点 = queue, 按住到点 = steer (2.8.1 #33): 一次按下只许投一次 —— 判据全在 [sendGesture]
+        // 那个纯函数里, 这里只负责挂计时器与调 send
+        var sendPress = { pressed: false, fired: false }
+        var sendTimer
+        /** 抬起 / 撤掉计时器一处收口: 状态机与计时器必须一起复位, 否则下一次按下会被判 'ignore' */
+        function endSendPress(event) {
+          var step = sendGesture(sendPress, event)
+          sendPress = step.state
+          if (sendTimer !== undefined) {
+            clearTimeout(sendTimer)
+            sendTimer = undefined
+          }
+          return step
+        }
         els.send.addEventListener('pointerdown', function () {
-          longPress = setTimeout(function () {
-            longPress = undefined
-            send('steer')
-          }, 550)
+          var step = sendGesture(sendPress, 'down')
+          sendPress = step.state
+          if (step.act !== 'arm') return
+          sendTimer = setTimeout(function () {
+            sendTimer = undefined
+            var held = sendGesture(sendPress, 'hold')
+            sendPress = held.state
+            if (held.act === 'hold') {
+              send('steer')
+              // **投出去就复位** (2.8.1 #33 审查): send() 立刻把按钮置 disabled, 手指还按着时
+              // 表单项收不到 pointerup —— 不复位就卡在 `fired`, 此后每次轻点都判 'ignore',
+              // 屏上又是「按了没反应」
+              sendPress = { pressed: false, fired: false }
+            }
+          }, SEND_HOLD_MS)
         })
         els.send.addEventListener('pointerup', function () {
-          if (longPress !== undefined) {
-            clearTimeout(longPress)
-            longPress = undefined
-            send('queue')
-          }
+          var step = endSendPress('up')
+          if (step.act === 'tap') send('queue')
         })
-        els.send.addEventListener('pointercancel', function () {
-          if (longPress !== undefined) clearTimeout(longPress)
-          longPress = undefined
-        })
+        els.send.addEventListener('pointercancel', function () { endSendPress('cancel') })
+        // 按钮被置 disabled 之后 pointerup 不再送到它身上 (Chromium 不给 disabled 控件派发 pointer 事件):
+        // 补一条窗口捕获阶段的兜底, 只在还按着的时候收口 —— 正常那一路已经复位, 这里不会再投第二次
+        window.addEventListener('pointerup', function () {
+          if (sendPress.pressed) endSendPress('cancel')
+        }, true)
+        window.addEventListener('pointercancel', function () {
+          if (sendPress.pressed) endSendPress('cancel')
+        }, true)
         row.appendChild(els.send)
 
         card.appendChild(row)
@@ -5817,7 +8465,8 @@ window.__ModuleLoader__.load({
         els.history.hidden = true
         var historyCard = h('div', 'lwp-history-card')
         var historyHead = h('div', 'lwp-history-head')
-        historyHead.appendChild(h('div', 'lwp-history-title', '历史对话'))
+        els.historyTitle = h('div', 'lwp-history-title', '历史对话')
+        historyHead.appendChild(els.historyTitle)
         var historyClose = h('button', 'lwp-history-close', '×')
         historyClose.type = 'button'
         historyClose.setAttribute('aria-label', '关闭')
@@ -6013,6 +8662,42 @@ window.__ModuleLoader__.load({
 
       function unmount() {
         mounted = false
+        // 收起门户 = 退出终端 (2026-11-21): 页面不在了, 原生那一层也别再铺着黑底
+        if (terminalMode) {
+          terminalMode = false
+          terminalGate = ''
+          writeStored(TERMINAL_KEY, { on: false })
+          call('portalTerminalVisible', false)
+          // 后面那层 dsh 也别停在电脑那一场 (没有门户这层皮, 那一场看着就是"我的对话")
+          // **只切工作区**: 退出终端时 mainView 在影子工作区, 那儿的场 `openSession` 一个都留不住
+          // (`sessions.retain` 只认当前工作区), 而 `hide()` 刚在那儿开的空场也会跟着被换掉;
+          // 换不过去就算了, 下次进终端 / 挂载会重新落 (尽力而为, 不给卸挂添一条会抛的路)
+          if (isTerminalSession(currentSessionId())) {
+            var home = currentWorkspaceId()
+            if (home !== '') {
+              try {
+                var leaving = ctx.uiWorkspace.openWorkspace(home)
+                if (leaving && typeof leaving.catch === 'function') {
+                  leaving.catch(function (reason) {
+                    console.log('[luwi-portal] could not leave the peer workspace: ' + describeError(reason))
+                  })
+                }
+              } catch (_cannotLeave) {
+                console.log('[luwi-portal] could not leave the peer workspace: ' + describeError(_cannotLeave))
+              }
+            }
+          }
+        }
+        // 门户关了就不再记返回点 (DOM 与那一场的关系断了; 下次挂载按 `SESSION_KEY` 落回门户那一场),
+        // 冷却与"一句话一分钟"的记号也一起清 —— 重开这一页要能当场判一次该落哪一场
+        terminalReturn = null
+        terminalAutoAt = 0
+        terminalNotedAt = 0
+        terminalNotedKey = ''
+        if (terminalProbeTimer !== null) {
+          clearTimeout(terminalProbeTimer)
+          terminalProbeTimer = null
+        }
         // 撤掉之后 DOM 是新的: 记着的那个高度不再对应当前那一层, 挂载时由 `portalIme` 重新问
         imePx = 0
         // 同理, 内容签名也要作废 —— 否则重挂之后同样的内容会被判成"画过了", 流一直是空的
@@ -6037,6 +8722,26 @@ window.__ModuleLoader__.load({
         closeFileMenu()
         closePreview()
         closeHistory()
+        // 模型目录那条订阅跟着门户走 (2026-11-20): 收起就摘, 重挂时 loadModel 自己再挂
+        if (modelDirUnsub !== null) {
+          try { modelDirUnsub() } catch (_noUnsub) { /* 订阅已经不在了, 无所谓 */ }
+          modelDirUnsub = null
+        }
+        modelDirSource = null
+        modelDefaultPending = null
+        modelDefaultChecked = ''
+        // 录音这一层整块收掉 (2026-11-20): 录音 / 麦克风流 / 计时器 / 面板都不许跨挂载留着 ——
+        // 挂着一条开着的流, 退出门户之后麦克风还在被占, 那是主人一眼看得见的错
+        if (voiceState === 'recording') stopRecording(true)
+        dropRecListeners()
+        releaseVoiceCapture()
+        hideRecPanel()
+        if (pressTimer !== null) clearTimeout(pressTimer)
+        pressTimer = null
+        if (voiceWatch !== null) clearTimeout(voiceWatch)
+        voiceWatch = null
+        voiceHeld = false
+        voiceState = 'idle'
         // 下一次挂载是新的 DOM: 落进工作区那条腿若正等着, 让它自然超时 (不跨挂载落地);
         // 那条 15 s 的补试也一起撤掉 —— 重挂之后 autoStart 会再走一遍
         entering = false
@@ -6140,6 +8845,9 @@ window.__ModuleLoader__.load({
         // `false`, 一次 `true` 都没有 —— 于是宿主一直以为门户没开, 菜单永远写「回到前台」, 键盘也
         // 一直走"缩 WebView"那条旧路。挂上就报一次, 收起时 unmount() 再报 false
         call('portalVisible', true)
+        // 终端的读数先取一份 (2026-11-21): 普通历史要靠 `shadowRoot` 把电脑那几场过滤掉, 而它原先
+        // 只在真的点过终端之后才有 —— 冷启 / 重载之后那扇门就一直是"什么都不过滤"
+        terminalInfo = fetchTerminalInfo()
         staleFollowed = false
         try {
           restore()
@@ -6163,11 +8871,17 @@ window.__ModuleLoader__.load({
         try {
           listUnsub = ctx.sessions.list.subscribe(function () {
             var id = currentSessionId()
-            if (id !== sessionId) switchTo(id, 'list')
+            // 两扇门互不串 (2026-11-21): dsh 的 mainView 换到"另一种场"时不跟 —— 终端里只跟电脑那几场
+            // (否则 mainView 还在手机那一场时会把终端甩出来), 普通门户也不跟电脑那几场 (否则返回门户
+            // 会被再拽回电脑那一场, 那层界面已经没了, 人没有出口)
+            var sameKind = isTerminalSession(id) === terminalMode
+            if (id !== sessionId && sameKind) switchTo(id, 'list')
             else {
               renderModel()
               // 投影可能是后到的: 每一帧都再问一次「拨过没」, 拨过就什么都不做
               ensureFullAccess()
+              // 空白场跟默认那一条同理 (2026-11-20): 摘要 / 投影后到时补判一次, 同一档只问一次
+              followDefaultModel()
             }
           })
         } catch (_noList) {
@@ -6177,6 +8891,9 @@ window.__ModuleLoader__.load({
         pollLedger()
         // 空态就自己开一场 (2026-11-09): 等第一拍账本落定再判, 免得把 restore 出来的那一场挤掉
         setTimeout(autoStart, 800)
+        // 终端那一页扛得住重载 (2026-11-21): 配对要重启 host, 回来这一帧就自己进终端
+        var storedTerminal = readStored(TERMINAL_KEY)
+        if (storedTerminal && storedTerminal.on === true) setTimeout(openTerminal, 300)
         // 键盘那一格 (2026-11-09): 页面刷新 / 收起再张之后, 这一层先要知道现在是多高 ——
         // 宿主的推是"变了才推", 而这一次挂载正好错过了那一下 (幂等, 取不到就当 0)
         var ime = call('portalIme')
@@ -6188,6 +8905,15 @@ window.__ModuleLoader__.load({
         unmount: unmount,
         hide: hide,
         reloadLook: reloadLook,
+        /**
+         * 进 / 出终端那一页 (2026-11-21, 落实表 #48)
+         *
+         * 原生那两条入口都走它: 球菜单 / 抽屉那一行 (`PortalTerminal.open` 会先 `show()` 再
+         * `terminal(true)`), 以及页面重载之后补的那一句 (`terminal(true)`, 见 `TERMINAL_ON_SCRIPT`)
+         */
+        terminal: setTerminal,
+        /** 返回键先问页面这一句: 收掉一层就 `closed`, 什么都没收就 `none` */
+        back: terminalBack,
         /** 宿主推的键盘高度 (2026-11-09): 只改这一层的 padding, 不动 WebView 尺寸 */
         setKeyboard: applyIme,
         /**
@@ -6268,6 +8994,14 @@ window.__ModuleLoader__.load({
          * `onSettingsClosed`, 这里把 `portalStatus()` 再拉一遍 —— 面板上那几行读数才是刚改过的数
          */
         refresh: refresh,
+        /**
+         * 语音那一路的回推 (2026-11-20): 原生认完一句就调它
+         *
+         * 落点只有两件: `kind:'permission'` 改一句提示, 其余把文字接进草稿并退出语音态 ——
+         * 具体的判断与"编号对不对得上"都在 [voiceAnswer] 里
+         * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+         */
+        voice: function (payload) { voiceAnswer(payload) },
       }
     }
 
@@ -6289,6 +9023,16 @@ window.__ModuleLoader__.load({
           portal.mount()
         },
         hide: function () { portal.hide() },
+        /**
+         * 终端那一页的进出 (2026-11-21, 落实表 #48)
+         *
+         * 原生两条入口都落到这里: 球菜单 / 抽屉那一行 (`PortalTerminal.open` 先 `show()` 再
+         * `terminal(true)`), 以及页面重载之后补的那一句。**白名单少一行, 原生那句
+         * `evaluateJavascript` 就一声不响地什么都不做** —— 这一页于是永远打不开
+         */
+        terminal: function (open) { portal.terminal(open) },
+        /** 返回键先问这一句 (由 `PAGE_BACK_JS` 调): `closed` / `none` */
+        back: function () { return portal.back() },
         // 设置页那一侧用的 (2026-11-08): 外观里改完背景或透明度, 原生那页 evaluateJavascript 推一句
         reloadLook: function () { portal.reloadLook() },
         // 宿主那侧 `PortalBridge` 的 FileObserver 推的 (2026-11-08): 她说的话变了, 自己取增量
@@ -6333,6 +9077,15 @@ window.__ModuleLoader__.load({
          * @param payload `key` 那一档是 `{key}`
          */
         account: function (action, payload) { portal.account(action, payload) },
+        /**
+         * 语音那一路的回推 (2026-11-20): 转写结果与"权限给没给"都从这一条进来
+         *
+         * 与 `account` 同一条分寸: **白名单少一行, 原生那句 `evaluateJavascript` 就一声不响地
+         * 什么都不做** —— 页面上于是永远停在"正在识别…" (原生写的是
+         * `window.__LUWI_PORTAL__.voice(...)`)
+         * @param payload `{kind?, id?, ok, text?, error?, engine?, mic?}`
+         */
+        voice: function (payload) { portal.voice(payload) },
       }
     }
 

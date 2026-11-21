@@ -1,5 +1,6 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.Manifest
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
@@ -7,6 +8,7 @@ import android.content.ClipData
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Insets
 import android.net.Uri
 import android.os.Environment
@@ -264,6 +266,25 @@ fun HostScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // 门户那颗「按住 说话」要的那一问 (2026-11-20): 系统授权窗只有 Activity 弹得出来, 而门户那座桥
+    // 拿的是 applicationContext —— 页面落一个 [PortalAsk.Target.MIC] 掷标, 这里接住并弹窗; 结果
+    // 再经 `PortalVoice.reportPermission` 回推页面 (页面据此说"给好了"或"去设置里开")
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        PortalVoice.reportPermission(granted)
+    }
+
+    // 终端那个弹窗里的「扫码配对」(2026-11-21, 落实表 #48): 相机权限只有 Activity 弹得出来,
+    // 扫码窗也要这一层才画得出来 —— 页面点那颗钮只落一个 [PortalAsk.Target.PAIR] 掷标
+    var pairing by remember { mutableStateOf(false) }
+    val pairDenied = stringResource(R.string.settings_sync_pair_error_camera)
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            pairing = true
+        } else {
+            Toast.makeText(context, pairDenied, Toast.LENGTH_LONG).show()
+        }
+    }
+
     // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
     // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
     val askTarget = PortalAsk.pending.value
@@ -273,6 +294,23 @@ fun HostScreen(modifier: Modifier = Modifier) {
             PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
             PortalAsk.Target.FEEDBACK -> feedbackOpen = true
             PortalAsk.Target.DEV -> devOpen = true
+            // 已经给过就直接回推一句 (页面不必再等一个弹窗); 没给才弹系统窗
+            PortalAsk.Target.MIC -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) PortalVoice.reportPermission(true)
+                else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
+            // 终端: 权限给过就直接开扫码窗, 没给先弹系统那一问
+            PortalAsk.Target.PAIR -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) pairing = true else cameraPermission.launch(Manifest.permission.CAMERA)
+            }
             PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
                 if (name != null) {
                     scope.launch {
@@ -294,11 +332,43 @@ fun HostScreen(modifier: Modifier = Modifier) {
         if (screenErrorOnce.take(reason, SystemClock.uptimeMillis())) screenError = reason
     }
 
+    // 终端那张扫码窗 (2026-11-21): 解出第一张合法的码就写配置并重启 host —— 重启回来页面自己回到
+    // 终端 (页面把 `terminal=on` 记在 localStorage, 原生这边 [PortalTerminal.open] 也还立着)。
+    // 已经和**另一台**电脑配过的不在这条路上重配: 那要重置基线, 走设置页那一段 (那边有确认窗)
+    if (pairing) {
+        val otherPc = stringResource(R.string.terminal_pair_other_pc)
+        val pairedDone = stringResource(R.string.terminal_pair_done)
+        QrScanDialog(
+            onDismissRequest = { pairing = false },
+            onPayload = { payload ->
+                pairing = false
+                val now = SyncSetting.snapshot(context)
+                if (now.paired && now.pairedId.isNotBlank() && now.pairedId != payload.id) {
+                    Toast.makeText(context, otherPc, Toast.LENGTH_LONG).show()
+                } else {
+                    val problem = SyncSetting.applyPairing(context, payload)
+                    if (problem == null) {
+                        Toast.makeText(context, pairedDone, Toast.LENGTH_LONG).show()
+                        DshHost.restart(context)
+                    } else {
+                        Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+        )
+    }
+
     // **这一页没有顶栏**: 原来那条写着应用名的 `SmallTopAppBar` 去掉了, 顶上那点位置让给会话。
     // 唯一的菜单入口是浮标 (见 FloatingBall)。`innerPadding` 仍然带着状态栏那条 inset, 所以内容
     // 不会钻到时钟底下 - 顶栏在的时候那条 inset 是由顶栏自己吃的, 现在改由 Scaffold 给
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
-        Box(modifier = Modifier.fillMaxSize()) {
+        // 2026-11-21 终端: 门户那一页整页变黑时, 原生这一层也铺黑 —— 状态栏底下、WebView 之外
+        // 那一圈不留白, 换屏 (页面重载) 的那一帧也不会闪一下底色
+        Box(
+            modifier = Modifier.fillMaxSize().background(
+                if (PortalTerminal.open) Color.Black else Color.Transparent,
+            ),
+        ) {
             Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
                 // 画面空着就是空着, 页面上不留一行字 - 有没有屏、选中哪一块, ⋮ 菜单里都写着
                 when (val status = DshHost.status) {
@@ -330,6 +400,11 @@ fun HostScreen(modifier: Modifier = Modifier) {
                                     pageUp = true
                                     // 页面画出来了 = 加载界面走完: 首启引导从这一帧起才弹 (2.8.0 #44)
                                     GettingStarted.settle()
+                                    // 终端开着时页面重载过 (配对重启 host / renderer 重建): 让它接着画终端。
+                                    // 这时 `PortalState.run` 已经挂上新那一块 WebView, 于是这一句必到
+                                    if (PortalTerminal.open) {
+                                        PortalState.run?.invoke(TERMINAL_ON_SCRIPT)
+                                    }
                                 },
                                 // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
                                 // 一块空白的子 View 等新页面加载
@@ -377,7 +452,8 @@ fun HostScreen(modifier: Modifier = Modifier) {
             // 上一版为了拿到这个范围套了一个 fillMaxSize 的空 Box, 而 Compose 的 Box 默认参与命中
             // 测试 - "空盒子不吃事件"是错的, 它把窗口底下 1600 多像素的触摸全吃了, 用户的原话是
             // "虚拟屏下面一半都用不了"。所以这里宁可让窗口自己量, 也不再放一个会占满屏幕的东西
-            if (preview != null && !windowHidden) {
+            // 终端那一页开着时不画这块小窗: 那是一位全黑的面, 上面浮一块虚拟屏就不是"全变黑"了
+            if (preview != null && !windowHidden && !PortalTerminal.open) {
                 FloatingScreenWindow(
                     screen = preview,
                     onMinimize = { setWindowHidden(true) },
@@ -816,13 +892,15 @@ private fun mainMenu(
     val screens = VirtualScreen.screens
     // 「停止朗读」那一条 2026-10-24 撤掉了 (主人: "设置浮标的停止说话去掉") —— 球与设置页里都停得掉,
     // 菜单里再留一条只是占位置; 那 500 ms 一拍的状态轮询跟着一起去掉
-    // 「同步」那一行 (2026-10-14 主人: 加在"进设置之前的那个菜单按钮"里): 它与设置页那一段是**同一件事**
-    // —— `session-sync.json` 里的远端地址配没配。插件是**挂载时**读配置的, 所以这一个动作要顺带重启
-    // host, 否则这一行等于没点。`SyncSetting.revision` 是它在文件被改过之后重读的记号 (菜单自己改的
-    // 那一次也走同一条路 —— setSyncOn 会把它 +1)
+    // 「终端」那一行 (原「同步」, 2026-11-21 改口径): 点它是**打开终端那一页** (手机管电脑),
+    // 不再在这里翻开关 —— 开关归设置页那一段。这一行只借 SyncSetting.revision 重读一次"配没配对",
+    // 于是配完对回来那一行立刻说「已配对: 谁」
     val syncSnapshot = remember(SyncSetting.revision) { SyncSetting.snapshot(context) }
-    val syncOnToast = stringResource(R.string.menu_sync_switched_on)
-    val syncOffToast = stringResource(R.string.menu_sync_switched_off)
+    val terminalPaired = if (syncSnapshot.paired) {
+        stringResource(R.string.menu_sync_paired, syncSnapshot.pairedFrom.ifBlank { "PC" })
+    } else {
+        stringResource(R.string.menu_sync_need_remote)
+    }
     // 先算好: 下面那个下拉栏是 buildList 里拼的, 而那不是 composable 作用域, stringResource 进不去
     val windowToggle = stringResource(
         if (windowHidden) R.string.screen_window_show else R.string.screen_window_hide,
@@ -872,28 +950,13 @@ private fun mainMenu(
                     summary = "新建应用 / 工具链 / 打开开发台",
                     onClick = onDev,
                 ),
-                // 「同步」: 与设置页那一段同一个开关 (默认关)。关→开需要先有仓库地址, 没有就把人送到
-                // 设置页那一段去填; 改完必须重启 host 才生效, 所以这一下顺手重启 (主人点的那一下)
+                // 「终端」(原「同步」): 2026-11-21 起这一行只做一件事 —— 打开终端那一页。
+                // 开关仍在设置页那一段 (翻完要重启 host), 这里不再重复一份动作
                 DropdownItem(
                     text = stringResource(R.string.menu_sync),
-                    summary = when {
-                        syncSnapshot.syncOn -> stringResource(R.string.menu_sync_on)
-                        syncSnapshot.resumableRemote.isNotBlank() -> stringResource(R.string.menu_sync_off)
-                        else -> stringResource(R.string.menu_sync_need_remote)
-                    },
-                    selected = syncSnapshot.syncOn,
-                    onClick = {
-                        val wanted = !syncSnapshot.syncOn
-                        val problem = SyncSetting.setSyncOn(context, wanted)
-                        if (problem == null) {
-                            Toast.makeText(context, if (wanted) syncOnToast else syncOffToast, Toast.LENGTH_LONG).show()
-                            DshHost.restart(context)
-                        } else {
-                            // 没有地址可填: 把原因说清并把人送到设置页那一段 (那一行就在那儿)
-                            Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
-                            onSettings()
-                        }
-                    },
+                    summary = terminalPaired,
+                    selected = false,
+                    onClick = { PortalTerminal.open(context) },
                 ),
                 // 酒馆 (2026-10-24 主人: "在会话界面右上角加入「酒馆」选项, 点击进入"): 从这里进的是
                 // **首页** (进入酒馆 / 选择存档 / 选择主题 / 打开配置 都在那儿); 设置页那一段的
@@ -2022,6 +2085,9 @@ private fun nothingLanded(count: Int): JSONObject = JSONObject().apply {
  */
 private const val PAGE_BACK_JS = """
 (function () {
+  // 2026-11-21 终端: 页面先说话 —— 终端 / 历史窗 / 抽屉收得掉就由它收, 收不掉才轮到下面那一层
+  var portal = window.__LUWI_PORTAL__
+  if (portal && typeof portal.back === 'function' && portal.back() === 'closed') return 'closed'
   var panel = document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]')
   if (!panel) return 'none'
   var collapse = panel.querySelector('[data-sidebar-right-toggle]')
@@ -2030,6 +2096,15 @@ private const val PAGE_BACK_JS = """
   return 'closed'
 })()
 """
+
+/**
+ * 页面重载之后把终端接着画起来的那一句 (2026-11-21, 落实表 #48)
+ *
+ * 与 [PortalTerminal.open] 里那句不同的是这里**不再**调 `show()`: 页面刚画出来, 门户开着还是后台
+ * 以页面自己的开关为准, 这里只补"进终端"这一个动作
+ */
+private const val TERMINAL_ON_SCRIPT =
+    "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.terminal(true)"
 
 /** Shell facts worth logging after a load: boot globals, DOM size, and whatever text rendered */
 private const val SHELL_PROBE = """(function () {

@@ -87,7 +87,6 @@ import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreStatus
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.ProactiveGate
-import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.Wishes
@@ -837,7 +836,6 @@ fun SettingsScreen() {
                     ExploreOverview()
                     SettingsPanel { ExploreItems() }
                     SectionSmallTitle(stringResource(R.string.settings_activity_speak))
-                    ProactiveOverview()
                     SettingsPanel { ProactiveItems() }
                     SectionSmallTitle(stringResource(R.string.settings_activity_knows))
                     SettingsPanel { KnowsItems() }
@@ -1293,7 +1291,6 @@ private fun ChannelItems() {
     val context = LocalContext.current
     val state = ChannelSetting.state
     val routes = ChannelSetting.routes
-    val working = ChannelSetting.working
     LaunchedEffect(Unit) { ChannelSetting.refresh() }
     // fillMaxWidth 是必要的: 这一段的子项里有纯文字, 撑不满宽度, 而 Miuix 的 Card 是包着内容的 ——
     // 不填满, 卡片就比这一页别的卡片窄一截 (设置项自己会撑开, 所以别处不用管)。
@@ -1330,23 +1327,11 @@ private fun ChannelItems() {
                 )
             }
         }
+        // 「刷新状态」按钮 (2026-11-19 主人: 不要「用 root 连接」那个开关, 改成在「允许 DSH 通过
+        // 无障碍服务读取屏幕内容」上方一颗按钮 —— 点一下确认 root 与 shizuku 的可用状态, 优先 shizuku)
+        RefreshRow()
         AccessibilityRows()
         OcrRows()
-        if (state?.connected != true) {
-            Button(
-                onClick = { ChannelSetting.connect() },
-                enabled = !working,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
-            ) {
-                Text(
-                    text = stringResource(
-                        if (working) R.string.settings_channel_connecting else R.string.settings_channel_connect,
-                    ),
-                )
-            }
-        }
         ArrowPreference(
             title = stringResource(R.string.settings_channel_autostart),
             summary = stringResource(R.string.settings_channel_autostart_summary),
@@ -1395,6 +1380,49 @@ private fun KeepAliveRow() {
             whitelisted = BatteryWhitelist.ignored(context)
         },
     )
+}
+
+/**
+ * 「刷新状态」那一颗按钮 (2.8.1 #30 改口径, 2026-11-19 主人定)
+ *
+ * 主人: "最好不用加这个用 root 的按钮, 而是在『允许…内容』上方加一个刷新状态按钮, 点击后确认 root 和
+ * shizuku 的可用状态, 优先 shizuku" —— 于是原来那个「用 root 连接」开关整行撤掉: "要不要去问 root"
+ * 这件事改由**点这一下**表态, 问完就收回, 不落盘 (见 [ChannelSetting.reprobe])
+ *
+ * 位置就是读数块与无障碍那一行之间: 读数在上、按钮居中、两条路各自的状态同时在上面那几行里看得见
+ *
+ * 上一次刷新里 root 被拒时, 按钮下面留一句去哪儿办 (那件事只能在 root 管理器里做) —— 这里不放开关,
+ * 也就没必要把"被拒"藏进任何一行 Setting 的副标题里
+ */
+@Composable
+private fun RefreshRow() {
+    val working = ChannelSetting.working
+    val refused = ChannelSetting.rootRefused
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { ChannelSetting.reprobe() },
+            enabled = !working,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
+        ) {
+            Text(
+                text = stringResource(
+                    if (working) R.string.settings_channel_refreshing else R.string.settings_channel_refresh,
+                ),
+            )
+        }
+        if (refused) {
+            Text(
+                text = stringResource(R.string.settings_channel_refresh_refused),
+                modifier = Modifier.padding(
+                    start = UiSpacing.Large,
+                    end = UiSpacing.Large,
+                    bottom = UiSpacing.Medium,
+                ),
+            )
+        }
+    }
 }
 
 /**
@@ -3632,13 +3660,12 @@ private fun clockStamp(at: Long): String =
     if (at <= 0L) "—" else SimpleDateFormat("HH:mm", Locale.US).format(Date(at))
 
 /**
- * 「探索」那一段 (2.7.8 批次 8)
+ * 「探索」那一段 (2.7.8 批次 8; 2026-11-21 起只由判断层触发)
  *
- * 主人 2026-10-17: "探索应该是定时的由用户决定开始时间，不要手动开始探索" —— 所以这里**一个手动
- * 入口都没有**: 开不开 / 每天几点 / 下一场那张任务卡 (可手改), 外加两行读数
- * (下一次与上一次那趟的结果)。每日总次数上限 2.8.0 起取消 (B4-b), 这里不再有那一栏
- *
- * 卡不在这里改写; 它在每次探索收尾时由宿主按 `nextTask` 覆盖 (见 [ExploreTask])
+ * 主人 2026-10-17 的口径是"定时由用户决定开始时间", 2026-11-21 改成"由判断层挑时机开": 于是这一段
+ * **既没有手动入口, 也没有开关与时刻** —— 只剩她真正会用到的两格 (每场多少步 / 到锁屏时允不允许解)
+ * 与下一场那张任务卡 (可手改)。卡不在这里改写; 每次收尾由宿主按 `nextTask` 覆盖 (见 [ExploreTask]),
+ * 下一场开场前由宿主 `readExploreTask` 读回来当正文
  */
 /**
  * 「日常」那一组的段首读数 (2026-11-07 晚, 主人: "活动里第一个选项被小字挡住了")
@@ -3652,18 +3679,12 @@ private fun ExploreOverview() {
     val context = LocalContext.current
     val plan = remember { ExploreSchedule.plan(context) }
     val running = remember { ExploreTask.running(context) }
-    val nextAt = remember { ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) }
     val overview = buildString {
-        append(
-            if (plan.enabled) {
-                context.getString(R.string.settings_explore_next, scheduleStamp(nextAt ?: 0L))
-            } else {
-                context.getString(R.string.settings_explore_off)
-            },
-        )
-        // 预算那一截 (2.7.9 第 8 条 T2): 段首这一句就要说清下一场是多少分多少步
+        // 2026-11-21: 探索不再按时间排闹钟, 改由判断层挑时机开 —— 不再有"下一次几点"
+        append(context.getString(R.string.settings_explore_by_router))
+        // 预算只按步数 (时间预算那一路已撤, 宿主内部 deadline 只是看门狗)
         append(" · ")
-        append(context.getString(R.string.settings_explore_budget, plan.minutes, plan.steps))
+        append(context.getString(R.string.settings_explore_steps_summary, plan.steps))
         running?.let {
             append(" · ")
             append(context.getString(R.string.settings_explore_running, clockStamp(it.deadline)))
@@ -3711,7 +3732,6 @@ internal fun ExploreItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
-    var editingAt by rememberSaveable { mutableStateOf(false) }
     var editingCard by rememberSaveable { mutableStateOf(false) }
     var editingSummary by rememberSaveable { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -3725,22 +3745,10 @@ internal fun ExploreItems() {
         revision += 1
     }
 
-    SwitchPreference(
-        title = stringResource(R.string.settings_explore_toggle),
-        summary = stringResource(R.string.settings_explore_toggle_summary),
-        checked = plan.enabled,
-        onCheckedChange = { save(plan.copy(enabled = it)) },
-    )
-    ArrowPreference(
-        title = stringResource(R.string.settings_explore_at),
-        summary = stringResource(R.string.settings_explore_at_summary, plan.at),
-        onClick = {
-            haptic.contextClick()
-            editingAt = true
-        },
-    )
-    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 夜里到点那一下手机多半是锁着的, 这一条让排期用「锁屏」
-    // 那一段录的解把屏让开 —— 与那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (喊一声 / 到点了)
+    // 2026-11-21: 「每天几点」「启用探索」两行都撤了 —— 探索由判断层挑时机开, 这里没有总闸可拨;
+    // 留下的是她真正会用到的两格 (步数 / 到锁屏时允不允许解) 与那张卡
+    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 探索里手机多半是锁着的, 这一条让 `lw_lock op=unlock`
+    // 放行 —— 与「锁屏」那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (探索里那一次 / 喊一声)
     SwitchPreference(
         title = stringResource(R.string.settings_explore_unlock),
         summary = stringResource(R.string.settings_explore_unlock_summary),
@@ -3755,34 +3763,9 @@ internal fun ExploreItems() {
             }
         },
     )
-    // 每场预算 (2.7.9 第 8 条 T2): 两条都在这里, 仍然**没有"现在开一场"** —— 主人 2026-10-17 那条口径
-    // 一个字没动。分钟用滑块 (拖动时只改草稿, 松手才落盘, 免得每一帧都写一次文件并重排闹钟)
-    var minutesDraft by remember(revision) { mutableIntStateOf(plan.minutes) }
-    ArrowSlider(
-        title = stringResource(R.string.settings_explore_minutes),
-        summary = stringResource(R.string.settings_explore_minutes_summary, minutesDraft),
-        value = minutesDraft.toFloat(),
-        onValueChange = { raw ->
-            minutesDraft = ExploreSchedule.clamp(raw.roundToInt(), ExploreSchedule.MINUTES_RANGE)
-        },
-        valueRange = 1f..180f,
-        steps = 0,
-        unit = "分",
-        onValueChangeFinished = {
-            if (minutesDraft != plan.minutes) save(plan.copy(minutes = minutesDraft))
-        },
-        // 点标题那一行可以手打: 收起之后按同一个范围夹, 打出来的越界值不会写进文件
-        // (按 float 认而不是 toIntOrNull: 输入框允许小数点, "45." 这种写法 ArrowSlider 那一关是过的,
-        // 2026-10-19 在模拟器上量到的就是它 —— Int 那一关悄悄吃掉了这一次确认)
-        onInputConfirm = { text ->
-            val typed = text.trim().toFloatOrNull()?.roundToInt()
-            if (typed != null) {
-                minutesDraft = ExploreSchedule.clamp(typed, ExploreSchedule.MINUTES_RANGE)
-                save(plan.copy(minutes = minutesDraft))
-            }
-        },
-    )
-    // 步数也是滑块 + 手打 (档位只当吸附点): 验收那条要的是"5 分 / 10 步"能真的设出来, 只给四个档位
+    // 每场预算 (2026-11-21): 时间预算那一路已撤, 只留步数 —— 探索跑到步数上限就收尾.
+    // **这一格判断层那条路真的读**: 宿主 `readExploreSchedule` 每场开场前现读, 拨 10 步就只跑 10 步
+    // 步数用滑块 + 手打 (档位只当吸附点): 验收那条要的是"10 步"能真的设出来, 只给四个档位
     // 就做不到 —— 10 步不在 30 / 60 / 120 / 200 里
     var stepsDraft by remember(revision) { mutableIntStateOf(plan.steps) }
     ArrowSlider(
@@ -3816,25 +3799,8 @@ internal fun ExploreItems() {
             editingCard = true
         },
     )
-    plan.last?.let { last ->
-        val said = if (last.outcome == "started") {
-            // `why` 里可能有两件事 (卡是空的 / 到点屏是锁着的), 有就跟着这一行一起说
-            val note = last.why
-            if (note.isNullOrBlank()) {
-                context.getString(R.string.settings_explore_last_started, scheduleStamp(last.at))
-            } else {
-                context.getString(R.string.settings_explore_last_started_note, scheduleStamp(last.at), note)
-            }
-        } else {
-            context.getString(
-                if (last.outcome == "skipped") R.string.settings_explore_last_skipped
-                else R.string.settings_explore_last_failed,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-        }
-        PlaceholderItems(said)
-    }
+    // 2026-11-21 起这里不再有「上一次」那一行: 那个读数只有到点那一趟 (`fire`) 会写, 而排期已经撤了;
+    // 想知道上一场干了什么, 看下面那份摘要
     // 宿主那四项读数 (2.7.9 T5): 预设 / 为什么是它 / 省电探针读没读到 / 上一次出错 —— 它们原来只在
     // `lw_explore op=status` 里, 现在宿主每次落盘都写进 `lw/explore.json` 的 `status` 段
     val status = remember(revision) { ExploreStatus.read(context) }
@@ -3859,21 +3825,6 @@ internal fun ExploreItems() {
     PlaceholderItems(message ?: stringResource(R.string.settings_explore_card_note))
     PlaceholderItems(stringResource(R.string.settings_explore_note))
 
-    if (editingAt) {
-        ExploreTimeDialog(
-            current = plan.at,
-            onDismiss = { editingAt = false },
-            onSave = { text ->
-                editingAt = false
-                if (AutomationRule.minutesOf(text) == null) {
-                    message = context.getString(R.string.settings_explore_at_bad)
-                } else {
-                    message = null
-                    save(plan.copy(at = text.trim()))
-                }
-            },
-        )
-    }
     if (editingCard) {
         ExploreCardDialog(
             initial = cardText,
@@ -3936,48 +3887,7 @@ private fun ExploreSummaryDialog(file: File, onDismiss: () -> Unit) {
     }
 }
 
-/** 每天几点: 一个 `HH:mm` 的文本框 (校验在 [ExploreItems] 里做) */
-@Composable
-private fun ExploreTimeDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    val haptic = LocalHapticFeedback.current
-    InputDialog(
-        show = true,
-        title = stringResource(R.string.settings_explore_at),
-        summary = stringResource(R.string.settings_explore_at_dialog_summary),
-        onDismissRequest = onDismiss,
-    ) {
-        var text by rememberSaveable { mutableStateOf(current) }
-        SuperTextField(
-            modifier = Modifier.padding(bottom = 16.dp),
-            value = text,
-            onValueChange = { text = it },
-            label = stringResource(R.string.settings_explore_at_hint),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-        )
-        Row(horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(
-                text = stringResource(R.string.button_cancel),
-                onClick = {
-                    haptic.contextClick()
-                    onDismiss()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(20.dp))
-            TextButton(
-                text = stringResource(R.string.button_confirm),
-                onClick = {
-                    haptic.confirm()
-                    onSave(text)
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-            )
-        }
-    }
-}
-
-/** 下一场那张任务卡: 多行编辑框 (留空 = 到点自由探索) */
+/** 下一场那张任务卡: 多行编辑框 (留空 = 自由探索) */
 @Composable
 private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
@@ -4020,48 +3930,17 @@ private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (S
 }
 
 /**
- * 「定时对话」那一段 (2.8.0 B4-c)
+ * 「她什么时候开口」那一段 (2026-11-21 起只有判断层挑时机)
  *
- * ⑩: 排期与自动指令**摆在同一段里** —— 两路共用 [ProactiveGate] 那一道 30 分钟闸, 看"为什么这一场
- * 没开口"要同时看这两笔账; ⑪: 下一场什么时候、最近一次被拦是什么时候为什么, 都写在上面;
- * ⑫: 30 s 内再进设置页只刷新一次 UI, 读数与日志都在 [SchedulePanel] 那一层, 这一段只画它
- *
- * 这一页能改的三样 (开不开 / 一天那几个时刻 / 到点允不允许解屏) 都走 [ProactiveSchedule.save]:
- * 落盘与重排闹钟是同一件事, 改完 `SchedulePanel.invalidate()` 一下, 下一眼才看得到新值
+ * 按时间的主动对话排期已撤: 这一段只剩判断层开关 / 主动场能做什么 / 30 分钟闸 / 自动指令读数.
+ * 30 s 内再进设置页只刷新一次 UI, 读数与日志都在 [SchedulePanel] 那一层, 这一段只画它
  */
-/**
- * 「她什么时候开口」那一组的段首读数 (2026-11-07 晚, 与 [ExploreOverview] 同一处修法)
- *
- * 原来它在 `Card` 里第一行, 小字与第一个开关挤在一起; 现在卡片外, 卡片第一行就是开关
- */
-@Composable
-private fun ProactiveOverview() {
-    val context = LocalContext.current
-    val plan = remember { SchedulePanel.read(context).proactive }
-    val next = remember { SchedulePanel.read(context).proactiveNext }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
-    ) {
-        Text(
-            text = if (plan.enabled && next != null) {
-                context.getString(R.string.settings_proactive_next, scheduleStamp(next))
-            } else {
-                context.getString(R.string.settings_proactive_no_next)
-            },
-            color = colorScheme.onSurfaceVariantActions,
-        )
-    }
-}
-
 @Composable
 // internal 同上: 门户那颗「设置」弹的窗里也要这一段, 一份定义两个入口
 internal fun ProactiveItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
-    var editingTimes by rememberSaveable { mutableStateOf(false) }
     var confirmingFull by rememberSaveable { mutableStateOf(false) }
     // 「能做什么」那三档: 一行 + 一个弹窗 (2026-11-10 主人)
     var pickingActing by rememberSaveable { mutableStateOf(false) }
@@ -4070,20 +3949,9 @@ internal fun ProactiveItems() {
     var tickOn by remember { mutableStateOf(RouterTick.enabled(context)) }
 
     val reading = remember(revision) { SchedulePanel.read(context) }
-    val plan = reading.proactive
 
-    fun save(next: ProactiveSchedule.Plan) {
-        ProactiveSchedule.save(context, next)
-        SchedulePanel.invalidate()
-        revision += 1
-    }
-
-    SwitchPreference(
-        title = stringResource(R.string.settings_proactive_toggle),
-        summary = stringResource(R.string.settings_proactive_toggle_summary),
-        checked = plan.enabled,
-        onCheckedChange = { save(plan.copy(enabled = it)) },
-    )
+    // 按时间的主动对话排期 2026-11-21 已撤: 不再有排期开关 / 时刻 / 解锁那几行,
+    // 主动开口只由下面这道判断层开关挑时机; 排期场那一路不再存在
     // 记住自己挑时机 (2026-11-07): 打开之后每 25~55 分钟看一眼"该不该开口" —— 说不说、说什么由
     // 宿主那侧的判断层定 (打游戏久了 / 记着的事到点 / 太久没说话)。**缺省关着**: 一个"会自己开口"
     // 的东西, 装上就开始说比装上不说话糟得多
@@ -4099,29 +3967,6 @@ internal fun ProactiveItems() {
             }
         },
     )
-    ArrowPreference(
-        title = stringResource(R.string.settings_proactive_times),
-        summary = stringResource(R.string.settings_proactive_times_summary, plan.times.joinToString(", ")),
-        onClick = {
-            haptic.contextClick()
-            editingTimes = true
-        },
-    )
-    // 与探索那一段同一个开关口径: 夜里到点那一下手机多半是锁着的, 用「锁屏」那一段录的解让开
-    SwitchPreference(
-        title = stringResource(R.string.settings_proactive_unlock),
-        summary = stringResource(R.string.settings_proactive_unlock_summary),
-        checked = plan.unlock,
-        onCheckedChange = { on ->
-            save(plan.copy(unlock = on))
-            message = if (on && !LockSetting.unlockable(context)) {
-                context.getString(R.string.settings_proactive_unlock_missing)
-            } else {
-                null
-            }
-        },
-    )
-
     // 主动场能做什么 (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md` §4):
     // 落 `sim.json` 的 `proactive.acting`, 宿主那道三表硬闸读它, 改完 3 秒内生效.
     // **三档并成一行** (主人 2026-11-10: "三权限合成一行, 点击那行后弹出弹窗选择"):
@@ -4179,51 +4024,14 @@ internal fun ProactiveItems() {
         )
     }
 
-    // 上一场那趟
-    plan.last?.let { last ->
-        val said = when (last.outcome) {
-            "started" -> {
-                val note = last.why
-                if (note.isNullOrBlank()) {
-                    context.getString(R.string.settings_proactive_last_started, scheduleStamp(last.at))
-                } else {
-                    context.getString(R.string.settings_proactive_last_started_note, scheduleStamp(last.at), note)
-                }
-            }
-
-            "skipped" -> context.getString(
-                R.string.settings_proactive_last_skipped,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-
-            else -> context.getString(
-                R.string.settings_proactive_last_failed,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-        }
-        PlaceholderItems(said)
-    }
-
-    // 最近一次被拦 (⑪): 排期自己记的那一笔比 `last` 活得久, 自动指令那一笔从历史上取
-    val proactiveBlock = plan.blocked
-        ?: plan.last?.takeIf { it.outcome == "skipped" }
-            ?.let { ProactiveSchedule.Blocked(it.at, it.why.orEmpty()) }
+    // 最近一次被拦 (⑪): 排期那一路已撤, 现在只看自动指令从历史上取的那一笔
     val autoBlock = reading.autoBlocked
-    if (proactiveBlock == null && autoBlock == null) {
+    if (autoBlock == null) {
         PlaceholderItems(stringResource(R.string.settings_proactive_blocked_none))
     } else {
-        proactiveBlock?.let {
-            PlaceholderItems(
-                context.getString(R.string.settings_proactive_blocked_recent, scheduleStamp(it.at), it.why),
-            )
-        }
-        autoBlock?.let {
-            PlaceholderItems(
-                context.getString(R.string.settings_proactive_rules_blocked, scheduleStamp(it.at), it.reason),
-            )
-        }
+        PlaceholderItems(
+            context.getString(R.string.settings_proactive_rules_blocked, scheduleStamp(autoBlock.at), autoBlock.reason),
+        )
     }
 
     // 30 分钟闸此刻开没开 (与自动指令共用的那一笔账)
@@ -4259,73 +4067,7 @@ internal fun ProactiveItems() {
         }
     }
 
-    // 探索那一路也在这张排期表上: 下一次与上一次都摆出来, 一眼能对"两个定时器各在哪天"
-    PlaceholderItems(
-        context.getString(
-            R.string.settings_proactive_explore,
-            reading.exploreNext?.let { scheduleStamp(it) } ?: "—",
-            reading.exploreLast?.let { scheduleStamp(it.at) } ?: "—",
-        ),
-    )
     PlaceholderItems(message ?: stringResource(R.string.settings_proactive_note))
-
-    if (editingTimes) {
-        ProactiveTimesDialog(
-            current = plan.times.joinToString(", "),
-            onDismiss = { editingTimes = false },
-            onSave = { text ->
-                editingTimes = false
-                val times = ProactiveSchedule.parseTimes(text)
-                if (times == null) {
-                    message = context.getString(R.string.settings_proactive_times_bad)
-                } else {
-                    message = null
-                    save(plan.copy(times = times))
-                }
-            },
-        )
-    }
-}
-
-/** 一天那几个时刻: 一个文本框, 逗号隔开 (校验在 [ProactiveItems] 里做) */
-@Composable
-private fun ProactiveTimesDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    val haptic = LocalHapticFeedback.current
-    InputDialog(
-        show = true,
-        title = stringResource(R.string.settings_proactive_times),
-        summary = stringResource(R.string.settings_proactive_times_dialog_summary),
-        onDismissRequest = onDismiss,
-    ) {
-        var text by rememberSaveable { mutableStateOf(current) }
-        SuperTextField(
-            modifier = Modifier.padding(bottom = 16.dp),
-            value = text,
-            onValueChange = { text = it },
-            label = stringResource(R.string.settings_proactive_times_hint),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-        )
-        Row(horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(
-                text = stringResource(R.string.button_cancel),
-                onClick = {
-                    haptic.contextClick()
-                    onDismiss()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(20.dp))
-            TextButton(
-                text = stringResource(R.string.button_confirm),
-                onClick = {
-                    haptic.confirm()
-                    onSave(text)
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-            )
-        }
-    }
 }
 
 /**
@@ -4386,7 +4128,7 @@ private fun ProactiveActingPicker(current: String, onDismiss: () -> Unit, onPick
 /**
  * 「全放开」那一下的确认 (方案 §4: 选 `full` 时弹一次, **默认按钮是取消**)
  *
- * 与 [ProactiveTimesDialog] 同一套壳; 两个按钮位置反过来 (取消在前, 在左边那一位), 于是"手快按一下"
+ * 与别的确认弹窗同一套壳; 两个按钮位置反过来 (取消在前, 在左边那一位), 于是"手快按一下"
  * 落在取消上, 不是落在"她会自己点屏"上
  */
 @Composable

@@ -95,21 +95,38 @@ internal object RouterTick {
      *
      * 缺省关是刻意的: 一个"会自己开口"的东西, 装上就开始说, 比装上不说话糟得多
      *
-     * **2026-11-07 晚**: 「更多设置」里那一档 `sim.json` 的 `wake.mode = active` 也算开 —— 那是
-     * 主人对这一页的直说, 与这里的开关任一为开就唤醒
+     * **2026-11-20 起只有一个来源**: `router.json` 的 `tick.enabled`。原先 `sim.json` 的
+     * `wake.mode = active` 也算开 —— 那一格 2026-11-20 已从界面与数据层删掉 (它读起来像"她多主动",
+     * 实际只是这里的第二个开关), 老文件里的 `active` 由 [migrateMode] 搬一次
      */
-    fun enabled(context: Context): Boolean {
-        val bySwitch = runCatching {
-            val raw = file(context).takeIf { it.isFile }?.readText()
-            if (raw == null) {
-                false
-            } else {
-                val root = json.parseToJsonElement(raw).jsonObject
-                root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
-            }
-        }.getOrDefault(false)
-        if (bySwitch) return true
-        return runCatching { SimSetting.plan(context).wake.active }.getOrDefault(false)
+    fun enabled(context: Context): Boolean = runCatching {
+        val raw = file(context).takeIf { it.isFile }?.readText() ?: return@runCatching false
+        val root = json.parseToJsonElement(raw).jsonObject
+        root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
+    }.getOrDefault(false)
+
+    /**
+     * 老 `sim.json` 的 `wake.mode = active` 搬成 `tick.enabled = true` (2026-11-20)
+     *
+     * 界面删了那一格之后, 只在 `sim.json` 里选过"活跃"的机器不能就此静悄悄地停掉判断层。规矩:
+     * ① `router.json` 原文里已经有 `tick` 段 → 那是更明确的账, 不动它
+     * ② 老 `sim.json` 写着 `active` → 写 `tick.enabled = true` 一次
+     * ③ 写完之后 `sim.json` 那一格本来就没人读了, 不需要再摘 (下一次保存 `sim.json` 会自然瘦身)
+     *
+     * @returns 这一趟真的写过没有
+     */
+    fun migrateMode(context: Context): Boolean {
+        val target = file(context)
+        val root = runCatching {
+            target.takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it).jsonObject }
+        }.getOrNull()
+        if (root?.get("tick") is JsonObject) return false
+        val active = runCatching {
+            SimSetting.file(context).takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it) }
+                ?.jsonObject?.get("wake")?.jsonObject?.get("mode")?.jsonPrimitive?.contentOrNull
+        }.getOrNull() == "active"
+        if (!active) return false
+        return setEnabled(context, true)
     }
 
     /**

@@ -215,15 +215,17 @@ const sent = seen[0]
 const boundary = /boundary=(.+)$/.exec(sent?.options.headers['Content-Type'] ?? '')?.[1] ?? ''
 const sentBody = sent?.options.body ?? Buffer.alloc(0)
 check(
-  '登录了就用账号令牌打官方那一条',
+  '登录了就用账号令牌打官方那一条 (账号令牌走 dsh 那个头)',
   [
     sent?.url,
     sent?.options.method,
+    sent?.options.headers['x-dsh-auth-token'],
+    // 账号那条**不许**再塞 Authorization: 平台令牌在那个头上一直是 401
     sent?.options.headers.Authorization,
     sent?.options.headers['Content-Type'].startsWith('multipart/form-data; boundary='),
     boundary.length > 0,
   ],
-  [ENDPOINT, 'POST', 'Bearer tok-123', true, true],
+  [ENDPOINT, 'POST', 'tok-123', undefined, true, true],
 )
 check(
   '请求体是 multipart 的 file 字段 (名字 / 文件名 / 类型 / 首尾边界)',

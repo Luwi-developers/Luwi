@@ -12,7 +12,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { condense, liveDirectory, liveFileName, liveSnapshot, readLiveSnapshot } from '../lib/luwi-live.mjs'
+import { condense, liveDirectory, liveFileName, liveSnapshot, PLAN_ANSWER_PREFIX, readLiveSnapshot } from '../lib/luwi-live.mjs'
 
 /** 一场会话: 第一轮有思考与工具, 第二轮还在流 */
 const EVENTS = [
@@ -121,6 +121,90 @@ test('一条只有工具调用的回答不算回答', () => {
   assert.deepEqual(toolOnly.entries.map(entry => entry.role), ['user'], '占位不是回答')
   assert.equal(toolOnly.draft, null, '只有工具调用的那一轮没有草稿可看')
 })
+
+// ---------------------------------------------------------------------------
+// 2026-11-21: 一轮没有文本回答时也要有条目 (主人报的"当前会话没有收到回复")
+//   · 计划那一档: exit_plan_mode 的 plan 正文当回答 (手机上才看得到计划卡)
+//   · 其余工具轮: 一行「这一轮在电脑上跑了 N 次工具，没有文字回复」
+//   · 工具名 / 参数一个字都不进 (与上面那条同一条纪律)
+// ---------------------------------------------------------------------------
+
+/** 一轮纯工具 (settled) 的事件 */
+function toolOnlyTurn(tools = 3, extra = []) {
+  const events = [
+    { seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '看一下' }] } },
+  ]
+  for (let index = 0; index < tools; index += 1) {
+    events.push({ seq: 2 + index * 2, time: 2 + index, type: 'tool/call', data: { turn: 1, step: 1, name: 'pwsh', arguments: '{"command":"Get-ChildItem"}' } })
+    events.push({ seq: 3 + index * 2, time: 2 + index, type: 'tool/result', data: { turn: 1, step: 1 } })
+  }
+  events.push({ seq: 90, time: 90, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  events.push(...extra)
+  return events
+}
+
+test('一张只有工具、没有文本的轮落下"跑了 N 次工具"那一行 (不带工具名)', () => {
+  const { entries } = condense(toolOnlyTurn(3))
+  const answer = entries.filter(entry => entry.role === 'assistant')
+  assert.equal(answer.length, 1, '结算过的一轮必须留下一行回答')
+  assert.equal(answer[0].text, '（这一轮在电脑上跑了 3 次工具，没有文字回复）')
+  assert.equal(answer[0].seq, 6, '合成的回答用这一轮最后一个工具调用的 seq')
+  const joined = entries.map(entry => entry.text).join('|')
+  assert.ok(!joined.includes('pwsh'), '工具名不进投影')
+  assert.ok(!joined.includes('Get-ChildItem'), '工具参数不进投影')
+})
+
+test('exit_plan_mode 的计划正文当这一轮的回答', () => {
+  const plan = '# 修一下\n\n1. 先看账本\n2. 再落盘'
+  const events = toolOnlyTurn(1, [
+    {
+      seq: 7,
+      time: 7,
+      type: 'tool/call',
+      data: { turn: 1, step: 1, name: 'exit_plan_mode', arguments: JSON.stringify({ plan }) },
+    },
+    { seq: 8, time: 8, type: 'turn/end', data: { turn: 1 } },
+  ])
+  const { entries } = condense(events)
+  const answer = entries.filter(entry => entry.role === 'assistant')
+  assert.deepEqual(answer.map(entry => entry.seq), [7], '计划那一轮用 exit_plan_mode 自己的 seq')
+  assert.ok(answer[0].text.startsWith(PLAN_ANSWER_PREFIX), '计划正文带上一句前缀')
+  assert.ok(answer[0].text.includes('先看账本'), '计划正文逐字折进来')
+  assert.ok(!answer[0].text.includes('exit_plan_mode'), '工具名不进正文')
+})
+
+test('计划参数坏了 / 空计划 → 退回工具占位 (不假装有计划)', () => {
+  const broken = toolOnlyTurn(2, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: '{not json' } },
+  ])
+  const { entries } = condense(broken)
+  const answer = entries.find(entry => entry.role === 'assistant')
+  assert.equal(answer.text, '（这一轮在电脑上跑了 3 次工具，没有文字回复）')
+
+  const empty = toolOnlyTurn(1, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '   ' }) } },
+  ])
+  const second = condense(empty).entries.find(entry => entry.role === 'assistant')
+  assert.equal(second.text, '（这一轮在电脑上跑了 2 次工具，没有文字回复）')
+})
+
+test('有文本时文本优先: 计划与工具占位都不出', () => {
+  const events = toolOnlyTurn(2, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '计划正文' }) } },
+    { seq: 8, time: 8, type: 'assistant/message', data: { turn: 1, step: 2, message: { content: [{ type: 'text', text: '真回答' }] } } },
+  ])
+  const { entries } = condense(events)
+  const answers = entries.filter(entry => entry.role === 'assistant')
+  assert.deepEqual(answers.map(entry => [entry.seq, entry.text]), [[8, '真回答']])
+})
+
+test('还在跑的工具轮不出占位 (只留下一轮的用户消息)', () => {
+  const events = toolOnlyTurn(2).filter(event => event.type !== 'turn/end')
+  const { entries, draft } = condense(events, { running: true })
+  assert.deepEqual(entries.map(entry => entry.role), ['user'])
+  assert.equal(draft, null, '工具占位要等落定, 不能随分片改')
+})
+
 
 test('a turn/end still settles its turn when the fallback carrier supplies one', () => {
   const withEnd = [

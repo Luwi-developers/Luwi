@@ -114,9 +114,9 @@ expect('focus 参数有缺省值', simScreen, 'focus: String = "top"')
 expect('门户侧那两组由 withActivity 打开', simScreen, 'withActivity: Boolean = false')
 expect('组表 SIM_GROUPS', simScreen, 'private val SIM_GROUPS = listOf("wake", "send", "router", "sticker")')
 expect(
-  '组表 ACTIVITY_GROUPS 把两组摆在最前',
+  '组表 ACTIVITY_GROUPS 把两组摆在最前, 情绪与关系收在最后',
   simScreen,
-  'private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS',
+  'private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS + listOf("affect")',
 )
 // 2026-11-14 主人: "活动板块除探索和判断里已有的, 剩下缺少的都加到判断的设置里, 包括表情包数量"
 // —— 可见组由 focus 定: 探索面板只摆 explore, 判断面板吃下活动里剩下的全部
@@ -124,13 +124,16 @@ expect('可见组那张表', simScreen, 'private fun visibleGroups(focus: String
 expect('探索面板只看一组', simScreen, 'focus.trim() == "explore" -> listOf("explore")')
 expect('判断面板吃下活动里剩下的全部', simScreen, 'else -> ACTIVITY_GROUPS.filter { it != "explore" }')
 expect('设置页仍是四组', simScreen, '!withActivity -> SIM_GROUPS')
-for (const group of ['explore', 'proactive', 'wake', 'send', 'router', 'sticker']) {
+// 2026-11-21: 多一组 affect —— 它只有判断面板才有, 守卫在不在决定设置页会不会冒出那五格
+for (const group of ['explore', 'proactive', 'wake', 'send', 'router', 'sticker', 'affect']) {
   expect(`组 ${group} 有可见性守卫`, simScreen, `if (visible.contains("${group}")) {`)
 }
 expect('门户侧高度另一档', simScreen, 'visible.size <= 2 -> 0.52f')
-// 判断面板现在有五组, 一进来滚到最后那组会让人以为只剩一组 —— 所以不再按 focus 滚
+// 2026-11-21 主人定: 判断面板收到第六组之后六组以上再开一档 (0.66 要滚两屏)
+expect('六组以上再多一档高度', simScreen, 'visible.size >= 6 -> 0.72f')
+// 判断面板现在有六组, 一进来滚到最后那组会让人以为只剩一组 —— 所以不再按 focus 滚
 if (simScreen.includes('scrollToItem') || simScreen.includes('fun groupIndex')) {
-  failures.push('SimSettingsScreen: 还在按 focus 滚到某一组 (判断面板五组时会藏掉前四组)')
+  failures.push('SimSettingsScreen: 还在按 focus 滚到某一组 (判断面板六组时会藏掉前五组)')
 } else {
   notes.push('ok   不再按 focus 滚到某一组 (从头看)')
 }

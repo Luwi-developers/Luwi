@@ -13,7 +13,10 @@ export const P2P_POWER_MODES = Object.freeze(['resident', 'charging', 'ondemand'
 
 /** 缺省值；JSON 层与显式 cordis 键都只写自己真要改的那几项。 */
 export const P2P_DEFAULTS = Object.freeze({
-  enabled: false, // 缺省关：与 git 后端并存，必须显式开
+  // 2026-11-21 晚 (主人: "p2p 的设置没开…应当使用"): 缺省就开。两端都有 sidecar
+  // (电脑 `native/win32-x64/lwiroh.exe`, 手机 APK 里的 `lib/arm64-v8a/liblwiroh.so`),
+  // 起不来时 `fallbackToGit` 兜底并在读数里给出原因; 要在某一台关掉就显式写 `p2p.enabled: false`
+  enabled: true,
   power: 'resident',
   heartbeatMs: 60000, // resident 档 HEADS 心跳；T1 实测 3.5% 单核上限，不放长
   idleMs: 0, // sidecar 空闲自退；resident = 0（不退），ondemand 缺省 90 s

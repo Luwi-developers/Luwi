@@ -21,12 +21,11 @@ import io.github.yuloong07star.luwi.channel.PrivilegedBridge
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
 import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.plugin.PluginManager
-import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OutNotify
-import io.github.yuloong07star.luwi.tool.ProactiveSchedule
+import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.UsageLedger
 
@@ -61,13 +60,18 @@ class DshHostService : Service() {
         // 开放接口那份文档 (2026-10-25): 跟"应用又活了"走同一个钩子 —— agent 不用等谁打开设置页,
         // 也不用等开屏画出来, 进程一起来 `$DSH_HOME/lw/interfaces.md` 就在那儿了 (内容一致不重写)
         LwInterfaces.seed(this)
-        // 探索那张任务卡 (2.7.8 批次 8): 首启/升级后第一次把初始卡抄进来 (已经有就一个字节不动);
-        // 排期按主人设的那个时刻排上 (关着就撤) —— 它与宿主的存活无关, 但到点那一下要宿主在跑
+        // 探索那张任务卡 (2.7.8 批次 8): 首启/升级后第一次把初始卡抄进来 (已经有就一个字节不动).
+        // 2026-11-21 起探索与主动开口都不再按时间排闹钟: 探索改由判断层挑时机开, 排期 ensure 不再调
         ExploreTask.ensure(this)
-        ExploreSchedule.ensure(this)
-        // 主动对话的排期 (2.8.0 B4-a): 与探索那一句并排 —— 宿主起来就按主人定的几个时刻排上
-        // (关着就撤), 到点先拉宿主再投 `source:"proactive"` 那一行
-        ProactiveSchedule.ensure(this)
+        // 老配置的一次性搬家 (2026-11-20): `sim.json` 的 `mode = active` → `router.json` 的
+        // `tick.enabled`; `sim.json` 的 `wake.quiet*` → `automations/settings.json` 的 `quiet` 段。
+        // 两件都幂等, 宿主起来这一下跑一次就够 —— 界面那一侧删掉的格子不能"删了连行为一起没了"
+        runCatching {
+            if (RouterTick.migrateMode(this)) Log.i(TAG, "the old sim mode became router.json tick.enabled")
+            if (QuietHours.migrateLegacy(this)) Log.i(TAG, "the old sim quiet hours moved to automations/settings.json")
+        }.onFailure { Log.w(TAG, "the old sim settings were not migrated: ${it.message}") }
+        // 2026-11-21: 按时间的主动对话排期 (ProactiveSchedule) 已撤 —— 主动开口改由判断层挑时机,
+        // 不再有到点投 `source:"proactive"` 那一行
         // 判断层的唤醒 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
         // 才按 25~55 分钟不定时唤醒一次 "该看一眼了"
         RouterTick.ensure(this)
@@ -134,14 +138,12 @@ class DshHostService : Service() {
     /**
      * 主人从最近任务里划掉这个应用 (2026-11-07)
      *
-     * 划掉不等于"别再定时": 42 / 43 两个闹钟还挂在系统上, 这里按现在的配置校一遍 —— 有些 ROM
+     * 划掉不等于"别再定时": 判断层那个闹钟还挂在系统上, 这里按现在的配置校一遍 —— 有些 ROM
      * 清后台时连闹钟一起清, 这是最后一次机会。**不重启服务**: Android 12 起从后台启动前台服务
-     * 需要豁免, 划任务这一下没有
+     * 需要豁免, 划任务这一下没有。探索 / 主动对话的 42 / 43 闹钟 2026-11-21 起都不再排
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         runCatching {
-            ExploreSchedule.ensure(this)
-            ProactiveSchedule.ensure(this)
             RouterTick.ensure(this)
         }.onFailure { Log.w(TAG, "the schedules could not be re-armed after the task was removed", it) }
         super.onTaskRemoved(rootIntent)
