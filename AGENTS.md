@@ -159,6 +159,10 @@
   首次写 `permission.defaultPreset`); 气泡与浮层**只引 dsh 玻璃 token** (`--dsw-menu-surface-fill` /
   `--dsw-menu-backdrop-filter` / `--dsw-elevation-panel`); **待发附件行在文本区上面** (图/表情 64px 缩略 + `×`,
   非图 chip), **点表情只进待发栏** (`stageSticker`); 顶条不显示会话标题
+- **点发送必须看得见结果** (2.8.1 #33): 投出去先在本机占一行 (半透明 `pendingEcho`, 落盘那条 user 节点一到就让位,
+  15 s 不认就撤); `prompt()` 回 `{ok:false}` / 抛错改成时间线上一行红字 (`sendFails`, 与图片失败同一档) +
+  输入卡一句提示, **草稿只在这一刻还回去**; 发送钮三个监听器走 `sendGesture` (轻点 queue / 按住 550 ms steer,
+  一次按下只投一次); 判据 `check-luwi-portal` 第二十节
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
 - **门户头栏**: 左身份 (头像 + 昵称, 整块点 = 开新对话), 右 **历史** + **`⋯` 更多** (判断 / 探索 进抽屉 `menu` 态,
   顶上一行「‹ 返回」); 状态点是**头像右下角那颗** (`#lwp-busy`) 三态 **绿 = 空场 / 蓝 = 对话中 / 黄 = 正在做**

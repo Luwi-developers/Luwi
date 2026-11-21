@@ -2164,6 +2164,194 @@ if (readingSource === '' || workKeySource === '') {
   }
 }
 
+// ── 二十、点发送必须看得见结果 (2.8.1 #33) ──────────────────────────────────────
+//
+// 主人报的是"在前台点发送, 只有按钮变色, 没有内容发出去, 过一会又恢复原状". 三件都要钉住:
+// 1. `prompt()` 回 `{ok:false}` / 抛错时, 那句错误必须落到**时间线可见处** (`who:'error'`,
+//    与图片失败同一档), 不许只剩一行 `console.log` —— 门户盖着 dsh 自己的错误条, 屏上就等于没发生
+// 2. 空草稿点发送不再静默 `return`: 要么给一句提示, 要么那颗钮本来就是按不动的
+// 3. 一次 `pointerdown`→`pointerup` 只能投一次: 轻点 = `queue`, 长按 = `steer`, 长按之后那次抬起
+//    不再补一次 `queue` (以前靠"计时器有没有被清掉"当记号, 第二根手指就会投两次)
+//
+// 2 与 3 都是纯函数, 这里把源码原样抽出来真跑 (`sendGesture` / `pendingEchoState` /
+// `sendFailText`), 不复制第二份实现
+
+const sendSource = takeFunction('send')
+if (sendSource === '') {
+  failures.push('client.js: 抽不出 send (发送那一条链)')
+} else {
+  if (!sendSource.includes("showNote('先写点什么, 再发', true)")) {
+    failures.push('client.js: 空草稿点发送还是静默 return (屏上什么都不说)')
+  } else {
+    notes.push('ok   空草稿点发送留一句「先写点什么, 再发」')
+  }
+  if (sendSource.includes('throw new Error(reason)')) {
+    failures.push('client.js: 拒答还走 throw —— 只有 catch 里那行 console.log 看得见')
+  } else {
+    notes.push('ok   拒答不再靠 throw, 由 [failed] 一处收尾')
+  }
+  const failedBranch = sendSource.slice(sendSource.indexOf("if (failed !== '')"))
+  if (failedBranch.includes('pushSendFail(failed)') && failedBranch.includes('showNote(failed, true)')) {
+    notes.push('ok   拒答 / 抛错都落成时间线上一行红字 + 输入卡一句提示')
+  } else {
+    failures.push('client.js: 失败那一支没把话落到时间线上 (只剩 console.log)')
+  }
+  if (failedBranch.includes('pendingEcho = null') && failedBranch.includes("els.input.value = text")) {
+    notes.push('ok   失败那一拍: 撤掉本机占位 + 把草稿还回去')
+  } else {
+    failures.push('client.js: 失败那一拍没撤占位 / 没还草稿')
+  }
+  if (sendSource.includes('pendingEcho = pendingEchoStart(text, attach)')) {
+    notes.push('ok   投出去先在本机占一行 (dsh 的回显要等 Host 收下才进快照)')
+  } else {
+    failures.push('client.js: 投出去时没有本机占位 —— 点完发送时间线上会空好几拍')
+  }
+}
+expect('client.js', client, 'var sendFails = []')
+expect('client.js', client, 'function pushSendFail')
+// `session.prompt()` 同步抛的时候不许把 `sending` 永远钉在 true (按钮就一直转圈)
+expect('client.js', client, 'started = Promise.reject(error)')
+expect('client.js', client, "var rejected = promptErrorText(snapshot.promptError)")
+// 时间线上那一档: 本机那几条必须真的进 `extras` (画成 `who:'error'`), 不是只记不画
+if (/for \(var sf = 0; sf < sendFails\.length; sf \+= 1\) \{[\s\S]*?who: 'error',[\s\S]*?text: sendFails\[sf\]\.text/u.test(client)) {
+  notes.push('ok   本机那几条「这句没发出去」真的进了 extras (画成红字气泡)')
+} else {
+  failures.push('client.js: sendFails 没接进 nodesOf 的 extras —— 记下来却画不出来')
+}
+// 一次按下只投一次: 发送钮那三个监听器必须都走 [sendGesture]
+const sendWiring = client.slice(client.indexOf("els.send.addEventListener('pointerdown'"), client.indexOf("row.appendChild(els.send)"))
+if (sendWiring.includes('sendGesture(sendPress') && sendWiring.includes("held.act === 'hold'")
+  && sendWiring.includes("step.act === 'tap'") && !sendWiring.includes('longPress')) {
+  notes.push('ok   发送钮三个监听器都走 sendGesture (轻点 queue / 长按 steer 各一次)')
+} else {
+  failures.push('client.js: 发送钮还在用 longPress 那套记号 —— 一次按下可能投两次')
+}
+// 长按投出去之后状态必须复位 (2026-11-19 审查): send() 同步把按钮置 disabled, 手指还按着时
+// pointerup 收不到 —— 不复位就卡在 `fired`, 之后每一次轻点都被判 'ignore', 正是这单要修的观感
+if (sendWiring.includes('sendPress = { pressed: false, fired: false }')
+  && /window\.addEventListener\('pointerup'[\s\S]{0,120}sendPress\.pressed/u.test(sendWiring)) {
+  notes.push('ok   长按投完复位 + 窗口捕获兜底 (按钮被禁用也不丢抬起)')
+} else {
+  failures.push('client.js: 长按投出去之后没有复位 sendPress —— 按钮被置 disabled 后 pointerup 丢失, 下一次轻点会被吞')
+}
+
+/**
+ * 按大括号配对接一个具名函数的整段源 (缩进不是 6 空格的也认得 —— `describeError` 在模块那一层)
+ * @param name - 函数名
+ * @returns 从 `function name(` 到配对 `}` 的那一段; 找不到回空串
+ */
+function sliceFunction(name) {
+  const start = client.indexOf(`function ${name}(`)
+  if (start < 0) return ''
+  let depth = 0
+  const from = client.indexOf('{', start)
+  for (let index = from; index < client.length; index += 1) {
+    const char = client[index]
+    if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) return client.slice(start, index + 1)
+    }
+  }
+  return ''
+}
+
+const failTextSource = sliceFunction('sendFailText')
+const describeSource = sliceFunction('describeError')
+const promptErrorSource = sliceFunction('promptErrorText')
+if (failTextSource === '' || describeSource === '' || promptErrorSource === '') {
+  failures.push('client.js: 抽不出 sendFailText / describeError / promptErrorText (拒答那句话)')
+} else {
+  const describeError = new Function(`${describeSource}\nreturn describeError`)()
+  const sendFailText = new Function('describeError', `${failTextSource}\nreturn sendFailText`)(describeError)
+  const promptErrorText = new Function('sendFailText', `${promptErrorSource}\nreturn promptErrorText`)(sendFailText)
+  const codeCase = sendFailText({ code: 'session/model-unavailable', message: 'Select an available model' })
+  const cases = [
+    ['码与话都在', codeCase === '这句没发出去: session/model-unavailable: Select an available model'],
+    ['只有 Error', sendFailText(new Error('boom')) === '这句没发出去: boom'],
+    ['只有码', sendFailText({ code: 'gateway/internal' }) === '这句没发出去: gateway/internal'],
+    ['什么都没有', sendFailText(null) === '这句没发出去'],
+    ['空串不算话', sendFailText('   ') === '这句没发出去'],
+    ['快照上那一格', promptErrorText({ op: 'send', error: { code: 'c', message: 'm' } }) === '这句没发出去: c: m'],
+    ['停那一轮失败不在这条链上说', promptErrorText({ op: 'stop', error: { code: 'c', message: 'm' } }) === ''],
+    ['没有拒答就是空串', promptErrorText(null) === '' && promptErrorText({}) === ''],
+  ]
+  const broken = cases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (broken.length === 0) {
+    notes.push('ok   sendFailText / promptErrorText: 有码有话就照抄, 没有才用兜底那句')
+  } else {
+    failures.push(`拒答那句话拼错了: ${broken.join(' / ')}`)
+  }
+}
+
+const gestureSource = sliceFunction('sendGesture')
+if (gestureSource === '') {
+  failures.push('client.js: 抽不出 sendGesture (发送钮那一次按下的判据)')
+} else {
+  const sendGesture = new Function(`${gestureSource}\nreturn sendGesture`)()
+  const acts = []
+  let state = { pressed: false, fired: false }
+  const step = (event) => {
+    const one = sendGesture(state, event)
+    state = one.state
+    acts.push(one.act)
+    return one.act
+  }
+  // 轻点一下: down -> up
+  if (step('down') === 'arm' && step('up') === 'tap') notes.push('ok   轻点一下 = arm -> tap (投 queue 一次)')
+  else failures.push(`轻点那一下判错了: ${acts.join(' -> ')}`)
+  // 长按: down -> hold -> up (抬起那一下不许再投 queue)
+  acts.length = 0
+  state = { pressed: false, fired: false }
+  const longActs = [step('down'), step('hold'), step('up')]
+  if (longActs.join(',') === 'arm,hold,ignore') notes.push('ok   长按 = arm -> hold -> ignore (抬起不再补一次 queue)')
+  else failures.push(`长按那一下判错了: ${longActs.join(' -> ')}`)
+  // 多一根手指: 按着的时候第二次 down 不许挂第二个计时器
+  state = { pressed: false, fired: false }
+  const twice = [step('down'), step('down')]
+  if (twice.join(',') === 'arm,ignore') notes.push('ok   按着时第二次 down 被挡住 (一根手指一次投递)')
+  else failures.push(`第二次按下没挡住: ${twice.join(' -> ')}`)
+  // 抬起离开按钮 (cancel): 什么都不投
+  state = { pressed: false, fired: false }
+  const cancelled = [step('down'), step('cancel'), step('up')]
+  if (cancelled.join(',') === 'arm,disarm,ignore') notes.push('ok   按下后离开 (cancel) 撤计时器, 不投递')
+  else failures.push(`取消那一路判错了: ${cancelled.join(' -> ')}`)
+
+  const holdMs = grab(client, /var SEND_HOLD_MS = (\d+)/u)
+  const wiringHold = grab(client, /sendTimer = setTimeout\(function \(\) \{[\s\S]*?\n          \}, (SEND_HOLD_MS)\)/u)
+  if (holdMs === '550' && wiringHold === 'SEND_HOLD_MS') notes.push('ok   长按阈值 550 ms 由 SEND_HOLD_MS 一处给')
+  else failures.push(`长按阈值没走 SEND_HOLD_MS (抓到 ${String(holdMs)} / ${String(wiringHold)})`)
+}
+
+const echoSameSource = sliceFunction('pendingEchoSame')
+const echoStateSource = sliceFunction('pendingEchoState')
+if (echoSameSource === '' || echoStateSource === '') {
+  failures.push('client.js: 抽不出 pendingEchoSame / pendingEchoState (本机占位那一行)')
+} else {
+  const pendingEchoSame = new Function(`${echoSameSource}\nreturn pendingEchoSame`)()
+  const pendingEchoState = new Function('pendingEchoSame', `${echoStateSource}\nreturn pendingEchoState`)(pendingEchoSame)
+  const hold = { id: 'pending\u00011', at: 1_000_000, text: '测试发送', attach: [] }
+  const landed = { who: 'user', time: 1_000_400, text: '测试发送', attach: [] }
+  const older = { who: 'user', time: 900_000, text: '测试发送', attach: [] }
+  const other = { who: 'user', time: 1_000_500, text: '别的' , attach: [] }
+  const cases = [
+    ['落盘那条到了就让位', pendingEchoState(hold, [landed], true, 1_000_800, 15_000) === 'done'],
+    ['还在投就占着', pendingEchoState(hold, [], true, 1_000_800, 15_000) === 'keep'],
+    ['投完了还没落盘也占着', pendingEchoState(hold, [other], false, 1_000_800, 15_000) === 'keep'],
+    ['等太久就撤', pendingEchoState(hold, [], false, 1_020_000, 15_000) === 'drop'],
+    ['没有占位就什么都不画', pendingEchoState(null, [], true, 1_000_800, 15_000) === 'drop'],
+    ['同一句话的旧那条不算落盘', pendingEchoState(hold, [older], false, 1_000_800, 15_000) === 'keep'],
+  ]
+  const broken = cases.filter((one) => one[1] !== true).map((one) => one[0])
+  if (broken.length === 0) {
+    notes.push('ok   pendingEchoState: 落盘就让位 / 在投就占着 / 等太久撤 / 旧那条不冒充')
+  } else {
+    failures.push(`本机占位判错了: ${broken.join(' / ')}`)
+  }
+}
+expect('client.js', client, "row.setAttribute('data-pending', 'on')")
+expect('client.js', client, '.lwp-row[data-pending="on"] .lwp-bubble{opacity:.6}')
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
