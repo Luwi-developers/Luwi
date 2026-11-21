@@ -166,6 +166,10 @@
   不拨**。后者: 浮球 / 原生界面发的图不过门户 `lw-in` stash, 落盘只剩 `attachment.attachmentId`,
   门户走 `ctx.uiConversation.peekImageUrl / imageUrl` 取 blob URL 画, 取不到写「图没取到」, 单条最多
   4 张 + 「+N 张图」; 判据 `check-luwi-portal` 第二十五 / 二十六节
+- **点发送必须看得见结果** (2.8.1 #33): 投出去先在本机占一行 (半透明 `pendingEcho`, 落盘那条 user 节点一到就让位,
+  15 s 不认就撤); `prompt()` 回 `{ok:false}` / 抛错改成时间线上一行红字 (`sendFails`, 与图片失败同一档) +
+  输入卡一句提示, **草稿只在这一刻还回去**; 发送钮三个监听器走 `sendGesture` (轻点 queue / 按住 550 ms steer,
+  一次按下只投一次); 判据 `check-luwi-portal` 第二十八节
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
 - **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
   **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,

@@ -317,10 +317,19 @@ if (cappedMerge.length === 240 && cappedMerge[cappedMerge.length - 1].label === 
 
 // 记录的闸门: 那一拍没有 user 节点就不抄 (抄进去是半截线)
 const carrySource = sliceFunction('carryRecord')
-if (carrySource.includes('lastUsers === 0') && carrySource.includes('mergeTimeline(carried, items)')) {
+if (carrySource.includes('lastUsers === 0') && carrySource.includes('mergeTimeline(carried, keep)')) {
   notes.push('ok   carryRecord: 没有 user 节点就不抄记录, 抄的时候也按时间合并')
 } else {
   failures.push('client.js: carryRecord 还会把半截线抄进记录 (她的行会整组压在自己的消息上面)')
+}
+
+// 本机画的那几行不许被抄进记录 (2.8.1 #33 审查): 占位行 / 图片失败 / 「这句没发出去」都不是 dsh 账里的东西,
+// 抄进去就撤不掉 —— 换回来多一条永远淡着的气泡, 或者把上一场的失败捎到这一场
+if (carrySource.includes('one.pending === true') && carrySource.includes('one.fail === true')
+  && carrySource.includes("sendfail\\u0001")) {
+  notes.push('ok   carryRecord: 本机占位行与两条本机失败行不抄 (只抄 dsh 落盘的东西)')
+} else {
+  failures.push('client.js: carryRecord 会把本机占位行 / 本机失败行抄进记录 (换场后撤不掉)')
 }
 
 for (const note of notes) console.log(note)
