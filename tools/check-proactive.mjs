@@ -118,9 +118,9 @@ check('主动对话排期是一个独立的文件 (与探索拆开)', await exis
   'app/src/main/java/io/github/yuloong07star/luwi/tool/ProactiveSchedule.kt',
 ), true)
 check('requestCode 是 43', /private const val REQUEST = 43/u.test(schedule), true)
-check('三个闹钟各用各的 requestCode (41 / 42 / 43)', [
+check('两个闹钟各用各的 requestCode (41 / 43; 探索那个 42 已随排期删掉)', [
   /ALARM_REQUEST = 41/u.test(await read('app/src/main/java/io/github/yuloong07star/luwi/automation/AutomationMonitors.kt')),
-  /private const val REQUEST = 42/u.test(exploreSchedule),
+  !/REQUEST = 42/u.test(exploreSchedule),
   /private const val REQUEST = 43/u.test(schedule),
 ], [true, true, true])
 check('配置文件名与卡片名是约定那两份', [
@@ -232,9 +232,11 @@ check('判断层开口在场写 lw/out (门户+浮标同一份), 不再只发球
   /if \(inBall\) \{[\s\S]{0,300}lwOutAppend\(voiceDelivery\.current, \{ kind: 'text', text: line \}\)/u.test(routerTickBody),
   /reportSay\(line\)/u.test(routerTickBody),
 ], [true, false])
-check('球不在场时开一场只按步数的探索, 收尾顺带说那句', [
-  /await startExplore\(ctx, \{ via: 'router', speakOnFinish: line \|\| opening \}\)/u.test(routerTickBody),
-], [true])
+check('球不在场时开一场按卡与步数的探索, 收尾顺带说那句', [
+  /const card = await readExploreTask\(\)/u.test(routerTickBody),
+  /const \{ steps \} = await readExploreSchedule\(\)/u.test(routerTickBody),
+  /await startExplore\(ctx, \{ via: 'router', speakOnFinish: line \|\| opening, text: card, steps \}\)/u.test(routerTickBody),
+], [true, true, true])
 const finishBody = host.slice(
   host.indexOf('async function finishExplore('),
   host.indexOf('/** 这一档现在什么样 (给 `lw_explore op=status`) */'),

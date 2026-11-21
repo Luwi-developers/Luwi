@@ -200,8 +200,11 @@ internal class PortalBridge(private val context: Context) {
             // 探索那几行读数 (2.8.1 #12): 以前读的是 `explore.json` 里**从来没有**的三个键
             // (`nextTask` / `lastSummaryAt` / `schedule.time`), 于是面板永远写着「还没有排 / — / —」,
             // 换一场 / 换一版都不动 —— 那三样各有各的落点: 任务卡 `lw/explore-card.md`、摘要
-            // `lw/explore/<yyyyMMdd-HHmm>.md`、排期 `explore-schedule.json` (读法只有
+            // `lw/explore/<yyyyMMdd-HHmm>.md`、预算 `explore-schedule.json` (读法只有
             // [ExploreSchedule.plan] 一份, 别在这里再解一遍 JSON)
+            //
+            // **2026-11-21 二改**: 排期撤了, `schedule` / `enabled` / `nextAt` 三个读数一并删掉 ——
+            // 页面再画「探索时刻 03:00 (每天)」就是在骗人; 换成 `steps` (判断层每场开场真的读它)
             val plan = ExploreSchedule.plan(context)
             val card = ExploreTask.read(context)
             val lastFinish = explore.optJSONObject("lastFinish")
@@ -209,16 +212,7 @@ internal class PortalBridge(private val context: Context) {
                 put("nextTask", if (card.isEmpty()) "" else ExploreTask.summary(context))
                 put("cardChars", card.length)
                 put("lastSummaryAt", lastSummaryAt(lastFinish?.optLong("at", 0L) ?: 0L))
-                put("schedule", plan.at)
-                put("enabled", plan.enabled)
-                put(
-                    "nextAt",
-                    if (plan.enabled) {
-                        ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) ?: 0L
-                    } else {
-                        0L
-                    },
-                )
+                put("steps", plan.steps)
                 // 现在这一场在不在跑 (面板那一行, 与 `portalExplore` 的 `running` 同一个判据)
                 put("running", ExploreTask.running(context) != null)
             })
@@ -619,8 +613,8 @@ internal class PortalBridge(private val context: Context) {
      * 开始这一趟探索: 投一行 `source:"explore"`, 正文就是那张任务卡 (`lw/explore-card.md`)
      *
      * 2.8.1 #12: 这一行原来读 `explore.json` 的 `nextTask` —— 宿主从来不写那个键, 于是点「开始这一趟」
-     * 投的永远是兜底那句 `接着上一趟看看`, 与面板上写着的那张卡不是同一件事。卡只有一张, 排期到点那一趟
-     * 读的也是它 (宿主 `startExplore` 的同一个正文), 这里改读同一份
+     * 投的永远是兜底那句 `接着上一趟看看`, 与面板上写着的那张卡不是同一件事。卡只有一张, 判断层那条路
+     * 读的也是它 (宿主 `readExploreTask` 是同一个正文), 这里改读同一份
      *
      * 已经在跑的那一场不再投 (宿主 `startExplore` 里那道 "已经有活着的就拒" 的同一个判据): 投进去只会被
      * 它拒掉, 而页面上那句 toast 要说的正是"已经有一场在跑", 所以这里先把 `running` 报回去
@@ -637,7 +631,15 @@ internal class PortalBridge(private val context: Context) {
                 put("task", "")
             }.toString()
         }
-        val seq = runCatching { VoiceInbox.append(context, task, source = VoiceInbox.SOURCE_EXPLORE) }.getOrNull()
+        val seq = runCatching {
+            VoiceInbox.append(
+                context,
+                task,
+                source = VoiceInbox.SOURCE_EXPLORE,
+                // 与判断层那条同一个预算 (2026-11-21): 手动这一下不传步数就落宿主的 60 缺省, 两条路会不一致
+                steps = ExploreSchedule.plan(context).steps,
+            )
+        }.getOrNull()
         return JSONObject().apply {
             put("queued", seq != null)
             put("running", false)

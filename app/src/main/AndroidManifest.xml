@@ -330,14 +330,11 @@
             android:name=".automation.AutomationAlarmReceiver"
             android:exported="false" />
 
-        <!-- 探索的排期 (2.7.8 批次 8): 每天一个时刻, 到点读那张任务卡写一行收件箱。与上面那个闹钟
-             分开一个 requestCode (42 对 41), 两边互不覆盖; exported=false 的理由与上一条相同 -->
-        <receiver
-            android:name=".tool.ExploreAlarmReceiver"
-            android:exported="false" />
+        <!-- 探索**没有**闹钟 (2026-11-21 起): 它由判断层挑时机开, 应用这一侧不排任何时刻 —— 原来那个
+              requestCode 42 的接收器已随排期一起删掉 -->
 
         <!-- 主动对话的排期 (2.8.0 B4-a): 一天几个时刻, 到点读 proactive-card.md 写一行收件箱。
-             与上面两个闹钟分开一个 requestCode (43 对 41 / 42), 三个互不覆盖; exported=false 的
+             与自动化那个闹钟分开一个 requestCode (43 对 41), 两个互不覆盖; exported=false 的
              理由与上一条相同 -->
         <receiver
             android:name=".tool.ProactiveAlarmReceiver"

@@ -567,7 +567,7 @@
 
     <string name="settings_section_activity">活动</string>
     <string name="settings_section_activity_summary">她自己看看手机, 择时开口</string>
-    <string name="settings_activity_daily">她每天自己看看手机</string>
+    <string name="settings_activity_daily">她自己看看手机</string>
     <string name="settings_activity_speak">她什么时候开口</string>
     <string name="settings_activity_knows">她记着你哪些事</string>
     <string name="settings_activity_knows_empty">还没记着什么事 · 你在聊天里提一句日期或要办的事, 她自己记</string>
@@ -683,25 +683,13 @@
     <string name="settings_sim_affect_honesty_l2">明说</string>
     <string name="settings_sim_affect_honesty_muted">提旧事关掉了, 这一格暂时不生效</string>
     <string name="settings_sim_affect_note">这五格只改"她怎么陪", 不改她说什么; 拨完下一场主动开口就生效</string>
-    <string name="settings_explore_off">还没开</string>
-    <string name="settings_explore_next">下一次 %1$s</string>
     <string name="settings_explore_by_router">由她自己挑时机开</string>
     <string name="settings_explore_running">现在在跑 (到 %1$s 结束)</string>
-    <string name="settings_explore_toggle">允许她自己探索</string>
-    <string name="settings_explore_toggle_summary">她挑时机自己开一场, 不用手动点</string>
-    <string name="settings_explore_at">每天几点开始</string>
-    <string name="settings_explore_at_summary">每天 %1$s</string>
-    <string name="settings_explore_at_dialog_summary">一天一次, 填 HH:mm (例如 03:00)</string>
-    <string name="settings_explore_at_hint">03:00</string>
-    <string name="settings_explore_at_bad">时刻要写成 HH:mm, 例如 03:00</string>
     <string name="settings_explore_unlock">允许锁屏解锁</string>
-    <string name="settings_explore_unlock_summary">到点先亮屏并解锁</string>
+    <string name="settings_explore_unlock_summary">探索里屏锁着时允许它自己解开</string>
     <string name="settings_explore_unlock_missing">还没录过解锁: 开着只会点亮屏幕, 要真解开先到「锁屏」那一段录制或填密码</string>
-    <string name="settings_explore_minutes">每场多少分钟</string>
-    <string name="settings_explore_minutes_summary">每场 %1$d 分钟 (1~180)</string>
     <string name="settings_explore_steps">每场多少步</string>
     <string name="settings_explore_steps_summary">每场最多 %1$d 步 (1~1000)</string>
-    <string name="settings_explore_budget">预算 %1$d 分 / %2$d 步</string>
     <string name="settings_explore_checks">检测项: 共 %1$d 条 · 上一场交 %2$d 条 (%3$s)</string>
     <string name="settings_explore_checks_streak">已连续 %1$d 场没交</string>
     <string name="settings_explore_preset">预设: %1$s</string>
@@ -713,7 +701,6 @@
     <string name="settings_explore_summary_title">最近一份摘要</string>
     <string name="settings_explore_summary_note">全文在 %1$s</string>
     <string name="settings_explore_summary_failed">这一份读不出来: %1$s</string>
-    <string name="settings_explore_not_started">这次探索没开成</string>
     <string name="settings_explore_card">下一次探索的任务</string>
     <string name="settings_explore_card_empty">(空: 到点会自由探索这台手机)</string>
     <string name="settings_explore_card_dialog_summary">下一场的开场任务; 每趟探索结束会改写它</string>
@@ -721,11 +708,7 @@
     <string name="settings_explore_card_saved">已经存好了, 下一场就用这一份</string>
     <string name="settings_explore_card_save_failed">没写进去 (文件不可写), 这一份没生效</string>
     <string name="settings_explore_card_note">卡由她每次探索结束后改写 (已知记忆 + 这一趟的结论), 也可以在这里手改</string>
-    <string name="settings_explore_last_started">%1$s 开始了一场探索</string>
-    <string name="settings_explore_last_started_note">%1$s 开始了一场探索 · %2$s</string>
-    <string name="settings_explore_last_skipped">%1$s 没跑: %2$s</string>
-    <string name="settings_explore_last_failed">%1$s 没投出去: %2$s</string>
-    <string name="settings_explore_note">要让她自己开一场主动对话, 到点那一下照排期走 (2.8.0 起没有总闸); 省电不拦这一场, 宿主没在跑的那一次才会跳过并记在这里</string>
+    <string name="settings_explore_note">她按判断层挑的时机开一场; 开场先读上面那张卡, 跑到步数上限收尾。屏锁着时在探索里自己解 (看上面那个开关), 解不开就写进摘要</string>
 
     <string name="settings_proactive_toggle">按时间自己开一场对话</string>
     <string name="settings_router_tick">她自己挑时机开口</string>

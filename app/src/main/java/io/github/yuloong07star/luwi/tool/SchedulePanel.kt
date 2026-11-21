@@ -39,10 +39,6 @@ internal object SchedulePanel {
         /** 30 分钟闸上一笔是多少 (0 = 还没有主动投递) */
         val gateLastAt: Long,
         val gateSource: String?,
-        /** 下一次探索 (关着就是 null) */
-        val exploreNext: Long?,
-        /** 探索上一次那一趟 */
-        val exploreLast: ExploreSchedule.Last?,
         /** 自动指令 (读不出来的那几条不在这一列) */
         val rules: List<RuleLine>,
         /** 自动指令最近一次被拦下的那一行 (没有就是 null) */
@@ -79,8 +75,7 @@ internal object SchedulePanel {
         readAtUptime = now
         Log.i(
             TAG,
-            "settings schedule panel refreshed: explore nextTrigger=${fresh.exploreNext}"
-                + " last=${fresh.exploreLast?.at} proactive nextTrigger=${fresh.proactiveNext}"
+            "settings schedule panel refreshed: proactive nextTrigger=${fresh.proactiveNext}"
                 + " rules=${fresh.rules.size}",
         )
         fresh
@@ -94,7 +89,6 @@ internal object SchedulePanel {
 
     private fun snapshot(context: Context, now: Long): Reading {
         val proactive = ProactiveSchedule.plan(context)
-        val explore = ExploreSchedule.plan(context)
         return Reading(
             at = now,
             proactive = proactive,
@@ -105,8 +99,6 @@ internal object SchedulePanel {
             },
             gateLastAt = ProactiveGate.lastAt(context),
             gateSource = ProactiveGate.source(context),
-            exploreNext = if (explore.enabled) ExploreSchedule.nextAt(explore.at, now) else null,
-            exploreLast = explore.last,
             rules = AutomationStore.entries(context).mapNotNull { entry ->
                 entry.rule?.let { RuleLine(entry.name, it.summary(), it.enabled) }
             },
