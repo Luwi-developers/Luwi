@@ -84,7 +84,7 @@ class SimSettingTest {
 
     /** 2026-11-20 (方案 §9.2): 情绪与关系那五格, 缺键 / 越界 / 坏值都落到缺省或范围里 */
     @Test
-    fun `没有 affect 段时回 1 / 0 / 1 / 2 / 1`() {
+    fun `没有 affect 段时回 1 · 0 · 1 · 2 · 1`() {
         val affect = SimSetting.planFrom(root("""{"v":1}""")).affect
 
         assertEquals(SimSetting.Affect(), affect)

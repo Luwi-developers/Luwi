@@ -12941,12 +12941,12 @@ async function voiceDeliver(ctx, line) {
   // "开一场探索" —— 于是它不进命令表、不截图、也不碰 `voice/session.json` 那本账 (那本账只认球自己
   // 那一句, 见 [voiceSessionBump])。检查 `source` 放在最前面: 这一步只多一次字符串比较
   if (line.source === 'explore') {
-    // 每场预算跟着那一行走 (2.7.9 第 8 条 T1): 应用那边写 `minutes` / `steps`, 老行没有这两个键时
-    // startExplore 里的 exploreClamp 落 30 / 60 的缺省
+    // 每场预算跟着那一行走 (2.7.9 第 8 条 T1; 2026-11-21 起只剩步数): 门户那颗「开始这一趟」写
+    // `steps`, 老行没有这个键时 startExplore 里的 exploreClamp 落 60 的缺省. `minutes` 不再有写方
+    // (设置页那一格撤了), 宿主内部那 30 分钟只当看门狗
     return startExplore(ctx, {
       text: line.text,
       via: 'inbox',
-      minutes: line.minutes,
       steps: line.steps,
     })
   }
@@ -14102,7 +14102,16 @@ async function routerTick(ctx) {
   } else {
     // 球那一场不在 (冷启动 / 宿主刚起来): 开一场只按步数跑的探索, 收尾时把挑好的那句顺带说出来.
     // 按时间的排期场已撤, 主动开口这一档并进探索 (2026-11-21)
-    await startExplore(ctx, { via: 'router', speakOnFinish: line || opening })
+    //
+    // 2026-11-22: 排期没了之后设置页那两格只剩她能用 —— **步数** 与 **下一次探索的任务**.
+    // 判断层这条路上没有人手写正文, 所以卡与步数在这里现读 (每场一次, 文件只有几百字节):
+    // 卡进正文 (空卡才落"自由探索这台手机"), 步数进预算 (设置值 10 就真的只跑 10 步)
+    const card = await readExploreTask()
+    const { steps } = await readExploreSchedule()
+    console.log(
+      `luwi-channel: the router opened an exploration (budget ${steps} steps, card ${card.length} chars)`,
+    )
+    await startExplore(ctx, { via: 'router', speakOnFinish: line || opening, text: card, steps })
   }
   // 直推只写了一句, 开成探索才按 `quota` 派单记账
   await routerMarkSaid(decision, inBall ? { checkMessages: 1 } : quota)
@@ -16123,6 +16132,48 @@ const EXPLORE_MINUTES_DEFAULT = 30
 const EXPLORE_MINUTES_RANGE = [1, 180]
 const EXPLORE_STEPS_DEFAULT = 60
 const EXPLORE_STEPS_RANGE = [1, 1000]
+
+/** 排期文件那个名字: 应用单写, 宿主只读 (2026-11-22 起它只剩步数与解锁两个键) */
+const EXPLORE_SCHEDULE_FILE = 'explore-schedule.json'
+
+/**
+ * 排期文件里那一格步数 (纯函数)
+ *
+ * 2026-11-21 起探索由判断层挑时机开, 应用那侧的开关 / 时刻 / 上一趟都撤了 —— 这一格里**只认 steps**,
+ * 老文件里的 `enabled` / `at` / `minutes` / `last` 一律不看 (关着探索这件事不再存在).
+ * 读法与应用 `ExploreSchedule.planOf` 同一套: 认不出来给缺省, 认出来的一律夹进范围
+ */
+function exploreStepsFrom(root) {
+  const raw = root !== null && typeof root === 'object' ? root.steps : undefined
+  return exploreClamp(raw, EXPLORE_STEPS_RANGE, EXPLORE_STEPS_DEFAULT)
+}
+
+/** 任务卡正文 (纯函数): 去首尾空白, 8000 字封顶; 读不出来就是空, 由开场正文落兜底那句 */
+function exploreTaskText(raw) {
+  return String(raw ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
+}
+
+/**
+ * 判断层开探索之前现读一次步数 (`$DSH_HOME/lw/explore-schedule.json`)
+ *
+ * 不缓存: 主人可能刚好在设置页拨完那一条, 而这一场就在下一秒开
+ */
+async function readExploreSchedule() {
+  const home = process.env.DSH_HOME
+  const root = home ? await readRouterJson(join(home, 'lw', EXPLORE_SCHEDULE_FILE)) : null
+  return { steps: exploreStepsFrom(root) }
+}
+
+/** 判断层开探索之前现读一次任务卡 (`$DSH_HOME/lw/explore-card.md`, 与应用同一个文件) */
+async function readExploreTask() {
+  const path = exploreTaskPath()
+  if (path === null) return ''
+  try {
+    return exploreTaskText(await readFile(path, 'utf8'))
+  } catch {
+    return ''
+  }
+}
 
 /** 那几份文件的文件名 (与应用那一侧同一个约定, 谁都不许单边改) */
 const EXPLORE_TASK_FILE = 'explore-card.md'

@@ -538,7 +538,7 @@ if (!client.includes("'lwp-tab', '判断层'") && !client.includes("'lwp-tab', '
 }
 // 菜单那两行与点进去的面板标题同口径: 点进去前后看到的是同一个词
 expect('client.js', client, "drawerRow('判断', '她什么时候开口那一套读数'")
-expect('client.js', client, "drawerRow('探索', '探索排期与上一次摘要'")
+expect('client.js', client, "drawerRow('探索', '她挑时机开的那一场与最近一份摘要'")
 expect('client.js', client, "h('h3', null, '判断')")
 expect('client.js', client, "h('h3', null, '探索')")
 expect('client.js', client, 'id = \'lwp-more-btn\'')
@@ -2172,20 +2172,28 @@ if (splitSource === '' || itemSource === '') {
 // 需要加上toast反馈". 两半各钉各的
 //
 // 1. **宿主的读数**: 那三行原来读的是 `explore.json` 里从来没有的键 (`nextTask` / `lastSummaryAt` /
-//    `schedule.time`) —— 任务卡在 `lw/explore-card.md`、摘要在 `lw/explore/*.md`、排期在
+//    `schedule.time`) —— 任务卡在 `lw/explore-card.md`、摘要在 `lw/explore/*.md`、预算在
 //    `explore-schedule.json`, 于是面板永远「还没有排 / — / —」。现在一处读真的, 顺手把
-//    `enabled` / `running` 也报上来, 页面才说得清"关着"与"正在跑"
+//    `running` 也报上来, 页面才说得清"正在跑"
+//    **2026-11-21 二改**: 排期撤了 —— `schedule` / `enabled` / `nextAt` 三个读数删掉, 换成一格 `steps`
+//    (判断层每场开场真的读它); 页面那行「探索时刻」随之改成「每场步数」
 // 2. **页面那一层**: 三行由 `workReading` 拼 (这里真跑真值表, 不复制第二份措辞), 抽屉开着时每一拍比
 //    `workKey`, 盘上变了才重画
 // 3. **两颗按钮各留一句 toast**: 抽屉盖着时输入卡那行 `#lwp-note` 在后面, 写了也看不见
-// 4. **「开始这一趟」投的是那张卡**, 不是 `explore.json` 的 `nextTask` (宿主从来不写它)
+// 4. **「开始这一趟」投的是那张卡**, 不是 `explore.json` 的 `nextTask` (宿主从来不写它); 步数也照设置走
 
 expect('PortalBridge.kt 探索卡读 ExploreTask', portalBridge, 'ExploreTask.read(context)')
-expect('PortalBridge.kt 排期读 ExploreSchedule.plan', portalBridge, 'ExploreSchedule.plan(context)')
-expect('PortalBridge.kt 探索读数带 enabled', portalBridge, 'put("enabled", plan.enabled)')
+expect('PortalBridge.kt 预算读 ExploreSchedule.plan', portalBridge, 'ExploreSchedule.plan(context)')
+expect('PortalBridge.kt 探索读数带 steps', portalBridge, 'put("steps", plan.steps)')
+if (portalBridge.includes('put("nextAt"') || portalBridge.includes('put("schedule"')) {
+  failures.push('PortalBridge.kt: 还在报 schedule / nextAt (排期已撤, 那是假读数)')
+} else {
+  notes.push('ok   PortalBridge 不再报 schedule / nextAt')
+}
 expect('PortalBridge.kt 探索读数带 running', portalBridge, 'put("running", ExploreTask.running(context) != null)')
 expect('PortalBridge.kt 摘要取目录里最新那份', portalBridge, 'lwFile("explore").listFiles()')
 expect('PortalBridge.kt 开始这一趟投那张卡', portalBridge, 'val task = card.ifEmpty { DEFAULT_EXPLORE_TEXT }')
+expect('PortalBridge.kt 开始这一趟带步数', portalBridge, 'steps = ExploreSchedule.plan(context).steps')
 expect('PortalBridge.kt 已经在跑就不投', portalBridge, 'if (ExploreTask.running(context) != null) {')
 if (portalBridge.includes('explore.optString("nextTask")')) {
   failures.push('PortalBridge.kt: 还在读 explore.json 的 nextTask (宿主从不写那个键, 面板因此永远空)')
@@ -2222,24 +2230,24 @@ if (readingSource === '' || workKeySource === '') {
   )
   const workKey = new Function('workReading', `${workKeySource}\nreturn workKey`)(workReading)
   const card = {
-    nextTask: '看看相册', cardChars: 812, lastSummaryAt: 1_731_700_000_000, schedule: '03:00', enabled: true, running: true,
+    nextTask: '看看相册', cardChars: 812, lastSummaryAt: 1_731_700_000_000, steps: 60, running: true,
   }
   const empty = workReading({})
-  const off = workReading({ ...card, cardChars: 0, running: false, enabled: false })
+  const off = workReading({ ...card, cardChars: 0, running: false, steps: 0 })
   const cases = [
     ['有卡那一份', workReading(card).next === '看看相册 (812 字)'
       && workReading(card).last === 'T1731700000000'
-      && workReading(card).when === '03:00 (每天)'
+      && workReading(card).budget === '每场最多 60 步'
       && workReading(card).running === '正在跑'],
-    ['空的一份', empty.next === '还没有排 (到点自由探索)' && empty.last === '—'
-      && empty.when === '—' && empty.running === '没在跑'],
-    ['关着那一份', off.when === '03:00 (关着)' && off.next === '看看相册'],
+    ['空的一份', empty.next === '还没有排 (开场会自由探索)' && empty.last === '—'
+      && empty.budget === '—' && empty.running === '没在跑'],
+    ['没有步数那一份', off.budget === '—' && off.next === '看看相册'],
     ['盘上没变就同一把键', workKey(card) === workKey({ ...card })],
     ['跑没跑变了就换键', workKey(card) !== workKey({ ...card, running: false })],
   ]
   const broken = cases.filter((one) => one[1] !== true).map((one) => one[0])
   if (broken.length === 0) {
-    notes.push('ok   workReading: 卡 / 摘要 / 时刻 / 这一趟 四行都照盘上那份写 (空与关着各有各的说法)')
+    notes.push('ok   workReading: 卡 / 摘要 / 步数 / 这一趟 四行都照盘上那份写 (空与没步数各有各的说法)')
   } else {
     failures.push(`workReading 判错了: ${broken.join(' / ')}`)
   }

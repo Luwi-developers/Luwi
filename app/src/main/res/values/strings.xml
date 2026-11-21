@@ -684,25 +684,13 @@
     <string name="settings_sim_affect_honesty_l2">Says it plainly</string>
     <string name="settings_sim_affect_honesty_muted">Old things are off right now, so this one has no effect</string>
     <string name="settings_sim_affect_note">These five only change how she keeps him company, not what she says; the next proactive opener picks them up</string>
-    <string name="settings_explore_off">Not scheduled yet</string>
-    <string name="settings_explore_next">next %1$s</string>
     <string name="settings_explore_by_router">She picks her own moment to start</string>
     <string name="settings_explore_running">running now (until %1$s)</string>
-    <string name="settings_explore_toggle">Let her explore on her own</string>
-    <string name="settings_explore_toggle_summary">She starts one when she picks a moment; no tap needed</string>
-    <string name="settings_explore_at">Start time</string>
-    <string name="settings_explore_at_summary">Every day at %1$s</string>
-    <string name="settings_explore_at_dialog_summary">Once a day, fill in HH:mm (e.g. 03:00)</string>
-    <string name="settings_explore_at_hint">03:00</string>
-    <string name="settings_explore_at_bad">The time has to be HH:mm, for example 03:00</string>
     <string name="settings_explore_unlock">Allow unlocking the lock screen</string>
-    <string name="settings_explore_unlock_summary">Wakes and unlocks before it starts</string>
+    <string name="settings_explore_unlock_summary">When the screen is locked during an exploration, let it unlock</string>
     <string name="settings_explore_unlock_missing">No unlock recorded yet: this only lights the screen for now; record one (or set the password) under Lock screen to really get past it</string>
-    <string name="settings_explore_minutes">Length of one run</string>
-    <string name="settings_explore_minutes_summary">%1$d minutes per run (1-180)</string>
     <string name="settings_explore_steps">Steps per run</string>
     <string name="settings_explore_steps_summary">Up to %1$d steps per run (1-1000)</string>
-    <string name="settings_explore_budget">budget %1$d min / %2$d steps</string>
     <string name="settings_explore_checks">checks: %1$d watched · %2$d handed in last run (%3$s)</string>
     <string name="settings_explore_checks_streak">%1$d runs in a row handed in nothing</string>
     <string name="settings_explore_preset">Preset: %1$s</string>
@@ -714,7 +702,6 @@
     <string name="settings_explore_summary_title">Latest summary</string>
     <string name="settings_explore_summary_note">The whole file is %1$s</string>
     <string name="settings_explore_summary_failed">This file could not be read: %1$s</string>
-    <string name="settings_explore_not_started">This exploration did not start</string>
     <string name="settings_explore_card">The next exploration\'s task</string>
     <string name="settings_explore_card_empty">(empty: it will explore the phone freely)</string>
     <string name="settings_explore_card_dialog_summary">The opening task for the next run; rewritten after each run</string>
@@ -722,11 +709,7 @@
     <string name="settings_explore_card_saved">Saved; the next run will use this</string>
     <string name="settings_explore_card_save_failed">It was not written (the file is not writable), so nothing changed</string>
     <string name="settings_explore_card_note">She rewrites this card after every exploration (memory + what that run found); you can also edit it here</string>
-    <string name="settings_explore_last_started">Started an exploration at %1$s</string>
-    <string name="settings_explore_last_started_note">Started an exploration at %1$s · %2$s</string>
-    <string name="settings_explore_last_skipped">Skipped at %1$s: %2$s</string>
-    <string name="settings_explore_last_failed">Could not queue it at %1$s: %2$s</string>
-    <string name="settings_explore_note">For her to open a conversation on her own, the schedule is all it takes (there is no global switch since 2.8.0); power save does not stop a run, and a run skipped because the host was down is recorded here</string>
+    <string name="settings_explore_note">She opens a run whenever the judgement layer picks a moment; the run starts by reading the card above, and stops at the step limit. A locked screen is handled inside the run (see the switch above); if it cannot be unlocked, that goes into the summary</string>
 
     <string name="settings_proactive_toggle">Open a conversation on a schedule</string>
     <string name="settings_router_tick">She picks the moment herself</string>

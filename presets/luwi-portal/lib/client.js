@@ -5889,7 +5889,7 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(h('h3', null, '更多'))
         // 她自己的两张面板一直在最上面: 那是这一页的东西
         drawerRow('判断', '她什么时候开口那一套读数', '›', false, true, function () { openDrawer('router') })
-        drawerRow('探索', '探索排期与上一次摘要', '›', false, true, function () { openDrawer('work') })
+        drawerRow('探索', '她挑时机开的那一场与最近一份摘要', '›', false, true, function () { openDrawer('work') })
         // 2026-11-17 主人: 探索下面再来一行「开发」——点进去是这一页上的开发面板, 排法与判断 / 探索
         // / 虚拟屏同一套; 后台球菜单那一份仍是原生下拉 (那一层没有这一页可画)
         drawerRow('开发', '新建应用 / 工具链 / 打开开发台', '›', false, true, function () { openDrawer('dev') })
@@ -6229,27 +6229,30 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 探索面板那几行读数 (纯函数, 2.8.1 #12)
+       * 探索面板那几行读数 (纯函数, 2.8.1 #12; 2026-11-21 二改)
        *
        * 之前这三行读的是 `explore.json` 里**从来没有**的键 (`nextTask` / `lastSummaryAt` / `schedule.time`),
-       * 于是面板永远写着「还没有排 / — / —」, 宿主写得再勤也不动。宿主现在报的是真的那三份: 任务卡
-       * (`lw/explore-card.md`) / 摘要目录里最新那份 / `explore-schedule.json`。行文只在这里拼一处,
+       * 于是面板永远写着「还没有排 / — / —」, 宿主写得再勤也不动。宿主现在报的是真的那几份: 任务卡
+       * (`lw/explore-card.md`) / 摘要目录里最新那份 / `explore-schedule.json` 的步数。行文只在这里拼一处,
        * 判据脚本真跑这张真值表 (`tools/check-luwi-portal.mjs` 第十九节)
+       *
+       * **排期撤了之后没有「探索时刻」这一行**: `schedule` / `enabled` / `nextAt` 三个读数一并删掉,
+       * 换成一格步数 —— 那是判断层每场开场真的读的东西
        */
       function workReading(explore) {
         var data = explore || {}
         var task = typeof data.nextTask === 'string' ? data.nextTask.trim() : ''
         var chars = Number(data.cardChars)
-        var next = task === '' ? '还没有排 (到点自由探索)' : task
+        var next = task === '' ? '还没有排 (开场会自由探索)' : task
         if (task !== '' && isFinite(chars) && chars > 0) next += ' (' + String(chars) + ' 字)'
         // 摘要那一行用 `stamp` 而不是 `clock`: 上一次可能是前天的, 只写 HH:MM 会被读成今天
         var last = Number(data.lastSummaryAt) > 0 ? stamp(data.lastSummaryAt) : '—'
-        var at = typeof data.schedule === 'string' ? data.schedule.trim() : ''
-        var when = at === '' ? '—' : at + (data.enabled === false ? ' (关着)' : ' (每天)')
+        var steps = Number(data.steps)
+        var budget = isFinite(steps) && steps > 0 ? '每场最多 ' + String(steps) + ' 步' : '—'
         return {
           next: next,
           last: last,
-          when: when,
+          budget: budget,
           running: data.running === true ? '正在跑' : '没在跑',
         }
       }
@@ -6257,7 +6260,7 @@ window.__ModuleLoader__.load({
       /** 那几行拼成一把键: 抽屉开着时只有盘上真的变了才重画 (见 `pollLedger`) */
       function workKey(explore) {
         var reading = workReading(explore)
-        return [reading.next, reading.last, reading.when, reading.running].join('\u0001')
+        return [reading.next, reading.last, reading.budget, reading.running].join('\u0001')
       }
 
       function renderWorkDrawer() {
@@ -6267,7 +6270,7 @@ window.__ModuleLoader__.load({
         els.drawer.appendChild(h('h3', null, '探索'))
         els.drawer.appendChild(kv('下一趟', reading.next))
         els.drawer.appendChild(kv('上次摘要', reading.last))
-        els.drawer.appendChild(kv('探索时刻', reading.when))
+        els.drawer.appendChild(kv('每场步数', reading.budget))
         els.drawer.appendChild(kv('这一趟', reading.running))
         var actions = h('div', 'lwp-actions')
         var start = h('button', null, '开始这一趟')

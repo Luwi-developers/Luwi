@@ -3660,13 +3660,12 @@ private fun clockStamp(at: Long): String =
     if (at <= 0L) "—" else SimpleDateFormat("HH:mm", Locale.US).format(Date(at))
 
 /**
- * 「探索」那一段 (2.7.8 批次 8)
+ * 「探索」那一段 (2.7.8 批次 8; 2026-11-21 起只由判断层触发)
  *
- * 主人 2026-10-17: "探索应该是定时的由用户决定开始时间，不要手动开始探索" —— 所以这里**一个手动
- * 入口都没有**: 开不开 / 每天几点 / 下一场那张任务卡 (可手改), 外加两行读数
- * (下一次与上一次那趟的结果)。每日总次数上限 2.8.0 起取消 (B4-b), 这里不再有那一栏
- *
- * 卡不在这里改写; 它在每次探索收尾时由宿主按 `nextTask` 覆盖 (见 [ExploreTask])
+ * 主人 2026-10-17 的口径是"定时由用户决定开始时间", 2026-11-21 改成"由判断层挑时机开": 于是这一段
+ * **既没有手动入口, 也没有开关与时刻** —— 只剩她真正会用到的两格 (每场多少步 / 到锁屏时允不允许解)
+ * 与下一场那张任务卡 (可手改)。卡不在这里改写; 每次收尾由宿主按 `nextTask` 覆盖 (见 [ExploreTask]),
+ * 下一场开场前由宿主 `readExploreTask` 读回来当正文
  */
 /**
  * 「日常」那一组的段首读数 (2026-11-07 晚, 主人: "活动里第一个选项被小字挡住了")
@@ -3746,15 +3745,10 @@ internal fun ExploreItems() {
         revision += 1
     }
 
-    SwitchPreference(
-        title = stringResource(R.string.settings_explore_toggle),
-        summary = stringResource(R.string.settings_explore_toggle_summary),
-        checked = plan.enabled,
-        onCheckedChange = { save(plan.copy(enabled = it)) },
-    )
-    // 2026-11-21: 「每天几点」那一行已撤 —— 探索不再按时间排闹钟, 改由判断层挑时机开
-    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 判断层开探索时手机多半是锁着的, 这一条让排期用「锁屏」
-    // 那一段录的解把屏让开 —— 与那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (喊一声 / 到点了)
+    // 2026-11-21: 「每天几点」「启用探索」两行都撤了 —— 探索由判断层挑时机开, 这里没有总闸可拨;
+    // 留下的是她真正会用到的两格 (步数 / 到锁屏时允不允许解) 与那张卡
+    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 探索里手机多半是锁着的, 这一条让 `lw_lock op=unlock`
+    // 放行 —— 与「锁屏」那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (探索里那一次 / 喊一声)
     SwitchPreference(
         title = stringResource(R.string.settings_explore_unlock),
         summary = stringResource(R.string.settings_explore_unlock_summary),
@@ -3769,7 +3763,8 @@ internal fun ExploreItems() {
             }
         },
     )
-    // 每场预算 (2026-11-21): 时间预算那一路已撤, 只留步数 —— 探索跑到步数上限就收尾
+    // 每场预算 (2026-11-21): 时间预算那一路已撤, 只留步数 —— 探索跑到步数上限就收尾.
+    // **这一格判断层那条路真的读**: 宿主 `readExploreSchedule` 每场开场前现读, 拨 10 步就只跑 10 步
     // 步数用滑块 + 手打 (档位只当吸附点): 验收那条要的是"10 步"能真的设出来, 只给四个档位
     // 就做不到 —— 10 步不在 30 / 60 / 120 / 200 里
     var stepsDraft by remember(revision) { mutableIntStateOf(plan.steps) }
@@ -3804,25 +3799,8 @@ internal fun ExploreItems() {
             editingCard = true
         },
     )
-    plan.last?.let { last ->
-        val said = if (last.outcome == "started") {
-            // `why` 里可能有两件事 (卡是空的 / 到点屏是锁着的), 有就跟着这一行一起说
-            val note = last.why
-            if (note.isNullOrBlank()) {
-                context.getString(R.string.settings_explore_last_started, scheduleStamp(last.at))
-            } else {
-                context.getString(R.string.settings_explore_last_started_note, scheduleStamp(last.at), note)
-            }
-        } else {
-            context.getString(
-                if (last.outcome == "skipped") R.string.settings_explore_last_skipped
-                else R.string.settings_explore_last_failed,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-        }
-        PlaceholderItems(said)
-    }
+    // 2026-11-21 起这里不再有「上一次」那一行: 那个读数只有到点那一趟 (`fire`) 会写, 而排期已经撤了;
+    // 想知道上一场干了什么, 看下面那份摘要
     // 宿主那四项读数 (2.7.9 T5): 预设 / 为什么是它 / 省电探针读没读到 / 上一次出错 —— 它们原来只在
     // `lw_explore op=status` 里, 现在宿主每次落盘都写进 `lw/explore.json` 的 `status` 段
     val status = remember(revision) { ExploreStatus.read(context) }

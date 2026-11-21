@@ -539,8 +539,12 @@
 - 自动指令: 规则 `$DSH_HOME/automations/<名字>.json`; **没启用就不注册**; 事件驱动不回退 UsageStats 轮询; 「且/或」
   收 2~5 个叶子**不许嵌套**; 命中清新鲜标记 (**同一次只响一声**); 防骚扰: 静默 23:00-07:00 + 冷却 30 分钟 + 每天 5 次
 - **`task` 类直接执行** (总闸 `AutomationStore.Settings.allowActing` 与设置页那行已删, 旧 `settings.json` 里的键被忽略)
-- **探索没有手动开始**: 每天一个时刻 `AlarmManager` (requestCode 42) 投一句话, 卡由 `lw_explore op=finish` 的
-  `nextTask` 演进 (上限 8000 字); **省电不拦探索**; **宿主没跑就先 `startForegroundService` 拉起来再投**
+- **探索只由判断层触发, 没有开关也没有时刻** (2026-11-21 两次改口径): `judgeRouter` 判 `say=true` 且球不在场时,
+  宿主自己 `startExplore { via:'router' }`; 应用侧**没有**闹钟 / 自愈 / 补跑 / 总闸 (`ExploreAlarmReceiver` 已删,
+  `explore-schedule.json` 只剩 `steps` 与 `unlock` 两键)。**开场读卡**: 宿主 `readExploreTask` 每场读
+  `lw/explore-card.md` (卡由 `lw_explore op=finish` 的 `nextTask` 演进, 上限 8000 字) 当正文, 空卡才落"自由探索";
+  **预算只有步数**: 设置页那一格由宿主 `readExploreSchedule` 每场现读, 拨 10 步就只跑 10 步 (分钟只剩宿主内部
+  30 分钟看门狗); **省电不拦探索**; 屏锁着由探索自己在 `lw_lock op=unlock` 过「允许锁屏解锁」那道开关
 - **收尾写三样**: 摘要 / `nextTask` / `checks` —— `checks` 是"接下来盯什么", 最多 3 条 (**判法** `usage` / `time` /
   `event`), 宿主写进 `$DSH_HOME/lw/router.json`, 判断层当第三档候选 (分数 3); **默认要交**: 没有就在摘要
   `仍不确定的点` 写明为什么; 任务卡覆盖带尾注 `EXPLORE_CARD_TAIL`
