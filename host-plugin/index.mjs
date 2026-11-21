@@ -2755,7 +2755,19 @@ const TOOLS = [
       + 'read-back, which is the old behaviour word for word. Pass hold to make it a long press, '
       + 'which is how a context menu, a selection or a drag handle is reached; by name that uses '
       + 'the control\'s own long click action, and a control without one is pressed with a held '
-      + 'finger instead.',
+      + 'finger instead. Before any press the target is checked three ways, and a target that fails '
+      + 'any of them is not pressed at all: a name that reaches more than one control whose scores '
+      + 'are too close to tell apart answers with candidates (skip=ambiguous), a target whose short '
+      + 'side is under 48px answers skip=small, and one that is off this screen or covered by '
+      + 'another named control answers skip=occluded. Every candidate and every re-anchored target '
+      + 'comes with its rectangle AND the centre of it, so the next press can land on that exact '
+      + 'point. A press that leaves the screen unchanged is then recovered in two graded steps - '
+      + 'reread, then reanchor - answered as recover=reread or recover=reanchor with the target\'s '
+      + 'current centre, and as recover=giveup when neither helps; the tool never presses a second '
+      + 'time by itself. When pressing by point, pass expect with the text of the control you '
+      + 'believe is there: the point is checked against the control actually at it before the '
+      + 'touch, a mismatch answers reason=anchor-mismatch with what is really there and where the '
+      + 'closest control is, and a match answers anchor=confirmed.',
     parameters: {
       displayId: DISPLAY_ID,
       text: {
@@ -2782,6 +2794,13 @@ const TOOLS = [
           + 'off sends the press and answers exactly as this tool always did, which is what to '
           + 'use when the screen answers in a picture, a sound or a toast that no tree shows',
       },
+      expect: {
+        type: 'string',
+        description: 'For a press by point: the text of the control you expect at that point. The '
+          + 'point is checked against the control actually there before anything is sent - a '
+          + 'mismatch answers reason=anchor-mismatch with what is really there and where the '
+          + 'closest control is, and nothing is pressed. A match answers anchor=confirmed',
+      },
       hold: holdParameter(
         'A hold past a long press is a press kept down, which is what a voice message being '
         + 'recorded or a drag that has to be started by holding expects.',
@@ -2804,6 +2823,8 @@ const TOOLS = [
       const held = holdMs(args?.hold)
       // 核对那一档 (落实表 #32): 缺省 auto, verify=off 与今天逐字相同
       const verify = args?.verify === 'off' ? 'off' : 'auto'
+      // 按点按时"我以为是哪一个" (落实表 #37): 只有 auto 那一档才核, off 原样退回
+      const expected = typeof args?.expect === 'string' ? args.expect.trim() : ''
       const sessionId = sessionIdOf(context)
       const before = verify === 'off' ? null : await tapEffectSnapshot(args.displayId)
       const wanted = named
@@ -2829,12 +2850,32 @@ const TOOLS = [
       if (named) {
         const source = args.source ?? 'auto'
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
+        // 前置校验 (#37): 按之前那一次读树里先核一遍 —— 唯一 / 够大 / 没被盖住, 不过就不发触摸
+        if (source !== 'ocr' && before !== null) {
+          const hits = tapNameMatches(before, args.text)
+          if (hits.length > 1) {
+            const candidates = closestReadLines(hits.map((node) => ({
+              text: node.label, box: node.bounds, score: 1,
+            })), args.text)
+            const why = `${hits.length} controls on this screen say ${JSON.stringify(String(args.text))}`
+            return said(await withEffect(false, tapPrecheckCandidatesAnswer(
+              args.displayId, args.text, candidates, why,
+            )), args.note)
+          }
+          if (hits.length === 1) {
+            const skip = tapPrecheck(before, hits[0])
+            if (skip !== null) {
+              return said(await withEffect(false, tapSkipAnswer(args.displayId, args.text, skip)), args.note)
+            }
+          }
+        }
         if (source === 'ocr') {
-          const reading = await tapByReading(args.displayId, args.text, held)
-          const report = reading.candidates.length > 0
-            ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, undefined)
-            : reading.report
-          return said(await withEffect(reading.pressed === true, report, reading.pressedLabel), args.note)
+          const reading = await tapByReading(args.displayId, args.text, held, before)
+          return said(await withEffect(
+            reading.pressed === true,
+            tapReadingAnswer(args.displayId, args.text, reading, undefined),
+            reading.pressedLabel,
+          ), args.note)
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
@@ -2843,12 +2884,26 @@ const TOOLS = [
         if (source === 'a11y' || tree.clicked === true || tree.outcome === 'ambiguous') {
           return said(await withEffect(tree.clicked === true, namedTapReport(tree)), args.note)
         }
-        const reading = await tapByReading(args.displayId, args.text, held)
+        const reading = await tapByReading(args.displayId, args.text, held, before)
         // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
-        const report = reading.candidates.length > 0
-          ? tapCandidatesAnswer(args.displayId, args.text, reading.candidates, tree)
+        const report = reading.candidates.length > 0 || reading.skip
+          ? tapReadingAnswer(args.displayId, args.text, reading, tree)
           : `${namedTapReport(tree)}\n${reading.report}`
         return said(await withEffect(reading.pressed === true, report, reading.pressedLabel), args.note)
+      }
+      // 按点按: 说了期望是哪一个, 就先证明这个点上真的是它 (#37), 证明不了就不发这一下
+      let anchorLine = ''
+      if (expected !== '' && verify !== 'off') {
+        const mismatch = tapAnchorMismatch(before, expected, args.x, args.y)
+        if (mismatch !== null) {
+          return said(tapAnchorMismatchAnswer(args.displayId, mismatch, args.x, args.y), args.note)
+        }
+        const node = before === null ? null : tapEffectNodeAt(before, args.x, args.y)
+        const skip = node === null ? null : tapPrecheckGeometry(before, node.target ?? node.bounds)
+        if (skip !== null) return said(tapSkipAnswer(args.displayId, expected, skip), args.note)
+        console.log(`LwTap: anchor=confirmed on displayId ${before?.displayId ?? args.displayId}`
+          + ` at ${args.x},${args.y} for ${JSON.stringify(expected)}`)
+        anchorLine = `anchor=confirmed: the control at ${args.x},${args.y} is ${JSON.stringify(expected)}`
       }
       const delivered = await call('tap', {
         displayId: args.displayId,
@@ -2866,7 +2921,8 @@ const TOOLS = [
         step: exploreRun.steps,
         holdMs: held,
       })
-      return said(formatGesture('tapped', delivered, undefined, effect === '' ? [] : ['', effect]), args.note)
+      return said(formatGesture('tapped', delivered, undefined,
+        [anchorLine, effect].filter((line) => line !== '')), args.note)
     },
   }),
 
@@ -7061,11 +7117,13 @@ function asleepLine(result) {
  * Press a name that exists only as pixels
  *
  * Reading is a guess, so it never guesses twice: an exact match wins, otherwise a line that
- * contains the name, and more than one candidate presses nothing at all. Nothing at all is
- * answered with the lines that came closest (`candidates`), which the caller turns into "press
- * one of these" rather than "there is nothing here"
+ * contains the name, and more than one candidate presses nothing at all unless one of them is
+ * clearly ahead (score gap over TAP_SCORE_GAP, 落实表 #37). Nothing at all is answered with the
+ * lines that came closest (`candidates`), which the caller turns into "press one of these" rather
+ * than "there is nothing here". A candidate that is too small or not on the screen is skipped
+ * before any touch is sent, and the caller answers `skip=small|occluded`
  */
-async function tapByReading(displayId, text, hold = 0) {
+async function tapByReading(displayId, text, hold = 0, snapshot = null) {
   const result = await call('ocr', { displayId })
   if (result.error) {
     return { report: `the screen could not be read: ${result.error}`, candidates: [], pressed: false }
@@ -7094,17 +7152,30 @@ async function tapByReading(displayId, text, hold = 0) {
       pressed: false,
     }
   }
+  // 前置校验 ① (落实表 #37): 同名好几行时先看分数差 —— 分不开就不猜, 分得开才按最前面那一行
+  let only = candidates[0]
   if (candidates.length > 1) {
-    return {
-      report: `${candidates.length} lines on the screen say that, so nothing was pressed: `
-        + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
-          .join(', ')
-        + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
-      candidates: [],
-      pressed: false,
+    const ranked = [...candidates].sort((left, right) =>
+      (Number(right.score) || 0) - (Number(left.score) || 0))
+    const gap = (Number(ranked[0].score) || 0) - (Number(ranked[1].score) || 0)
+    if (gap < TAP_SCORE_GAP) {
+      return {
+        report: '',
+        candidates: closestReadLines(candidates, needle),
+        pressed: false,
+        skip: {
+          skip: 'ambiguous',
+          why: `${candidates.length} lines on the screen say ${JSON.stringify(needle)} and the top`
+            + ` two scores are ${gap.toFixed(3)} apart, too close to tell which one was meant`,
+        },
+      }
     }
+    only = ranked[0]
   }
-  const only = candidates[0]
+  // 前置校验 ②③: 太小 / 不在这一屏上都不发触摸 (读屏找到的字没有可点的树, 只判几何那两条)
+  // 读屏找到的是一行字, 字高不是命中区: 短边那条不卡它, 只判还在不在这一屏上
+  const geometry = tapPrecheckGeometry(snapshot, only.box ?? [], { minSide: false })
+  if (geometry !== null) return { report: '', candidates: [], pressed: false, skip: geometry }
   const point = scatterInside(only.box ?? [])
   const pressed = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
   return {
@@ -7113,10 +7184,23 @@ async function tapByReading(displayId, text, hold = 0) {
       + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
       + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`,
     candidates: [],
-    // 按下去了才值得回读核对 (落实表 #32): 上面三条"什么都没按"的路不占那一次读屏
+    // 按下去了才值得回读核对 (落实表 #32): 上面几条"什么都没按"的路不占那一次读屏
     pressed: true,
     pressedLabel: String(only.text ?? ''),
   }
+}
+
+/**
+ * 读屏那条路的回执: 三种"没按"各有各的说法 (分不开 / 太小或看不见 / 一个都不像), 按下去才有报告
+ */
+function tapReadingAnswer(displayId, wanted, reading, tree) {
+  const skip = reading.skip ?? null
+  if (skip !== null && skip.skip === 'ambiguous') {
+    return tapPrecheckCandidatesAnswer(displayId, wanted, reading.candidates, skip.why)
+  }
+  if (skip !== null) return tapSkipAnswer(displayId, wanted, skip)
+  if (reading.candidates.length > 0) return tapCandidatesAnswer(displayId, wanted, reading.candidates, tree)
+  return reading.report
 }
 
 /**
@@ -7149,6 +7233,8 @@ function closestReadLines(lines, wanted, limit = MAX_TAP_CANDIDATES) {
       text: String(line.text ?? ''),
       score,
       bbox: Array.isArray(line.box) ? line.box.slice(0, 4) : [],
+      // 那一格的中心: 下一次按落在这个点上 (落实表 #37 的"定点恢复")
+      center: centreInBox(line.box),
     }))
 }
 
@@ -7215,11 +7301,101 @@ function tapCandidatesAnswer(displayId, wanted, candidates, tree) {
     + ` for ${JSON.stringify(wanted)}`)
   return withJson([
     `${head}: nothing was pressed. The closest lines on the screen are:`,
-    ...candidates.map((candidate) => `- ${JSON.stringify(candidate.text)}`
-      + ` at [${candidate.bbox.join(',')}] score ${candidate.score.toFixed(3)}`),
+    ...candidateLines(candidates),
     'Press one of them by a point inside its bbox with lw_tap(x=..., y=...), or call lw_ui to see'
       + ' what the screen actually says.',
   ], { displayId, text: String(wanted), candidates })
+}
+
+/**
+ * 候选那几行: 名字 / 矩形 / 中心 / 分数
+ *
+ * 中心是 #37 加的: 恢复要交回去的正是"下一次按这个点", 让人自己从矩形算一次中间那格在真机上
+ * 每次都会多错一格
+ */
+function candidateLines(candidates) {
+  return candidates.map((candidate) => {
+    const centre = candidate.center ?? centreInBox(candidate.bbox)
+    return `- ${JSON.stringify(candidate.text)} at [${(candidate.bbox ?? []).join(',')}]`
+      + `${centre === null ? '' : ` centre ${centre.x},${centre.y}`}`
+      + ` score ${candidate.score.toFixed(3)}`
+  })
+}
+
+/**
+ * 前置校验没过时的回执 (落实表 #37): 一句"没按" + 为什么 + 下一步按哪儿
+ *
+ * 回 `skip=small|occluded`, 并且**一次都不发触摸** —— 这是与"按完发现没变"最要紧的区别
+ */
+function tapSkipAnswer(displayId, wanted, skip) {
+  console.log(`LwTap: skip=${skip.skip} on displayId ${displayId} for ${JSON.stringify(wanted)}`)
+  return withJson([
+    `not pressed: ${JSON.stringify(wanted)} was skipped on displayId ${displayId}`
+      + ` (skip=${skip.skip}).`,
+    skip.why,
+    skip.skip === 'small'
+      ? 'A control that small is usually an icon or a decoration. Press the row it sits in by name,'
+        + ' or read the screen with lw_ui and press a control that is big enough to take a press.'
+      : 'Read the screen again with lw_ui and press the control where it really is, or bring it'
+        + ' into view (scroll it, or close what is covering it) first.',
+  ], { displayId, text: String(wanted), skip: skip.skip, why: skip.why })
+}
+
+/** 同名候选分不开时的回执: 按 #27 的三候选格式给"最像的这几个", 但把 skip=ambiguous 说在明面上 */
+function tapPrecheckCandidatesAnswer(displayId, wanted, candidates, why) {
+  const name = JSON.stringify(wanted)
+  // 真机上这一行证明"没点"是前置校验做的, 不是按完才发现 (与 #27 的 `lw_tap: candidates=` 同一档)
+  console.log(`LwTap: precheck=ambiguous candidates=${candidates.length} on displayId ${displayId}`
+    + ` for ${name}`)
+  return withJson([
+    `${why}, so nothing was pressed on displayId ${displayId} (skip=ambiguous).`,
+    'The closest controls are:',
+    ...candidateLines(candidates),
+    `Press one of them by a point at its centre, or call lw_ui and name a control that only`
+      + ' appears once.',
+  ], { displayId, text: String(wanted), skip: 'ambiguous', why, candidates })
+}
+
+/**
+ * 按点按的锚点对不上时的回执 (落实表 #37): 点上是别的什么、期望的那一格现在在哪
+ *
+ * `reason=anchor-mismatch` 是给人之外那一层看的字面量, 与 #32 的 `effect=` 同一套写法
+ */
+function tapAnchorMismatchAnswer(displayId, mismatch, x, y) {
+  console.log(`LwTap: anchor=mismatch on displayId ${displayId} at ${x},${y}`
+    + ` for ${JSON.stringify(mismatch.want)}`)
+  const lines = [
+    `not pressed: ${x},${y} on displayId ${displayId} is not the control you expected`
+      + ' (reason=anchor-mismatch).',
+  ]
+  if (!mismatch.readable) {
+    lines.push('The control tree could not be read, so there is no way to prove that point is the'
+      + ' control you meant - nothing was sent.')
+  } else if (mismatch.found === '') {
+    lines.push('No control with a name covers that point - it is empty space or something a picture'
+      + ' draws.')
+  } else {
+    lines.push(`What is actually there is ${JSON.stringify(mismatch.found)}.`)
+  }
+  if (mismatch.closest === null) {
+    lines.push(`Nothing on this screen looks like ${JSON.stringify(mismatch.want)}: read it with`
+      + ' lw_ui first and press a control that is really there.')
+  } else {
+    const centre = mismatch.closest.center ?? centreInBox(mismatch.closest.bbox)
+    lines.push(`The closest control to ${JSON.stringify(mismatch.want)} is`
+      + ` ${JSON.stringify(mismatch.closest.text)} at [${mismatch.closest.bbox.join(',')}]`
+      + `${centre === null ? '' : ` centre ${centre.x},${centre.y}`}: press that point instead.`)
+  }
+  return withJson(lines, {
+    displayId,
+    x,
+    y,
+    reason: 'anchor-mismatch',
+    expected: mismatch.want,
+    found: mismatch.found,
+    readable: mismatch.readable,
+    closest: mismatch.closest,
+  })
 }
 
 /**
@@ -7241,6 +7417,7 @@ function scatterInside(box) {
   const y = Math.round(top + insetY + Math.random() * Math.max(0, bottom - top - 2 * insetY))
   return { x, y }
 }
+
 
 /** The report itself, before the caller's own note is put on it */
 function namedTapReport(result) {
@@ -7292,7 +7469,7 @@ function sameRect(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.every((value, index) => value === b[index])
 }
 
-/* ── 按完这一下先验一次 (2.8.1 落实表 #32) ────────────────────────────────
+/* ── 按完这一下先验一次 (2.8.1 落实表 #32) + 按之前先证明按的是对的那个 (#37) ──────
  *
  * 点按原来"送出去就算成功": 按钮是灰的、面板没开、点在动画中间 —— 界面一点没变, 而回执与真的生效
  * 一模一样, 于是调用方照着没变的界面继续点下去 (探索那种连点十几下的流程一踩就是十几下, 依据
@@ -7303,6 +7480,9 @@ function sameRect(a, b) {
  * 路. 连着两下没变时第三下**不发出去**, 回 `reason=effect-missing`
  *
  * 只在 `lw_tap` 上开 (`lw_swipe` / `lw_key` 不动): 每一下多两次树读取, 连点十几下的流程约 +0.3 s 一步
+ *
+ * #37 在这一段前后各补一块: 按之前的三道前置校验 (唯一 / 够大 / 在屏上) 与失败后的分级恢复
+ * (重读屏 → 重锚 → 放弃), 各自有一个小节写着为什么
  */
 
 /** 按下之后等多久再回读: 短了读到的还是按下那一帧, 长了每一步都慢 */
@@ -7349,9 +7529,14 @@ async function tapEffectSnapshot(displayId) {
   if (result === null || typeof result !== 'object') return null
   if (result.enabled !== true || result.error) return null
   const nodes = (Array.isArray(result.nodes) ? result.nodes : [])
-    .map((node) => ({
+    .map((node, order) => ({
       label: String(node?.text ?? '') || String(node?.description ?? ''),
       bounds: Array.isArray(node?.bounds) ? node.bounds.slice(0, 4) : [],
+      // 这一格按下去实际落在哪一格 (无障碍报的 target): "被盖住"要拿两边这个矩形比
+      target: Array.isArray(node?.target) ? node.target.slice(0, 4) : null,
+      // 前置校验 (#37) 要的两件: 这一格自己能不能按, 以及它画在第几层 (后画的盖在前面的上面)
+      clickable: node?.clickable === true,
+      order,
     }))
     .filter((node) => node.label !== '' && node.bounds.length === 4)
     .sort((left, right) => left.bounds[1] - right.bounds[1]
@@ -7360,6 +7545,10 @@ async function tapEffectSnapshot(displayId) {
   return {
     displayId: Number(result.displayId ?? displayId) || 0,
     label: String(result.label ?? ''),
+    // 这一块屏多大: 前置校验靠它判"这一格还在不在当前屏上" (读不到就不猜, 那一条直接跳过)
+    screen: Number(result.width) > 0 && Number(result.height) > 0
+      ? [Number(result.width), Number(result.height)]
+      : null,
     nodes,
     texts: [...new Set(nodes.map((node) => node.label))].sort(),
   }
@@ -7412,11 +7601,15 @@ function tapEffectCandidates(snapshot, wanted, limit = MAX_TAP_CANDIDATES) {
   return closestReadLines(lines, pressed, limit)
 }
 
-/** 一个点上压着的那一格叫什么: 点按那一档按过的那一格就是从这里读出来的 */
-function tapEffectLabelAt(snapshot, x, y) {
+/**
+ * 一个点上压着的那一格 (最里面那一格, 也就是后画在上面那个)
+ *
+ * 两个用处: 点按那一档按过的那一格就是从这里读出来的; 前置校验拿它判"这一点被谁盖着"
+ */
+function tapEffectNodeAt(snapshot, x, y) {
   const atX = Number(x)
   const atY = Number(y)
-  if (!Number.isFinite(atX) || !Number.isFinite(atY)) return ''
+  if (!Number.isFinite(atX) || !Number.isFinite(atY)) return null
   let best = null
   for (const node of snapshot?.nodes ?? []) {
     const [left, top, right, bottom] = node.bounds
@@ -7424,7 +7617,165 @@ function tapEffectLabelAt(snapshot, x, y) {
     const area = (right - left) * (bottom - top)
     if (best === null || area < best.area) best = { node, area }
   }
-  return best === null ? '' : best.node.label
+  return best === null ? null : best.node
+}
+
+/** 一个点上压着的那一格叫什么: 点按那一档按过的那一格就是从这里读出来的 */
+function tapEffectLabelAt(snapshot, x, y) {
+  const node = tapEffectNodeAt(snapshot, x, y)
+  return node === null ? '' : node.label
+}
+
+/* ── 按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ──────────────────────
+ *
+ * #32 只补了"按完看一眼". 可点错目标的病在按之前就种下了: 同名两行、短边只有二十几像素的图标、
+ * 被浮层盖住的控件 —— 那一下照样发出去, 界面只要变了就记 changed, 探索把错的一步当成功继续走
+ * (依据 UIAnchor https://arxiv.org/abs/2611.20753: 野外失败瓶颈是"误读可操作元素"与"执行时不
+ * 验证目标正确性")
+ *
+ * 三道校验都在**按下去之前**判, 任何一道不过就不发触摸:
+ *   ① 唯一: 同名候选不止一个且分数差 < [TAP_SCORE_GAP] → 回候选, 不猜
+ *   ② 够大: 目标那格短边 < [TAP_MIN_SIDE] px → `skip=small` (那么小的图标, 按下去落在旁边那格)
+ *   ③ 在屏上: 那格完全不在当前屏 (或大半不在) → `skip=occluded`; 要按的那个点上压着的是另一个
+ *      有名字的控件 (被浮层盖住) 同样算 occluded
+ */
+
+/** 目标那一格短边小于这个数就不按 (px): 安卓最小可点尺寸 48dp 的像素档 */
+const TAP_MIN_SIDE = 48
+
+/** 同名候选的分数差小于这个数就算"说不清是哪一个" (0~1, 与 closenessScore 同一把尺) */
+const TAP_SCORE_GAP = 0.15
+
+/** 一块 bbox 的中心 (回给调用方"下一次按这个点"的那一处), 形状不对回 null */
+function centreInBox(box) {
+  if (!Array.isArray(box) || box.length < 4) return null
+  const numbers = box.slice(0, 4).map(Number)
+  if (!numbers.every(Number.isFinite)) return null
+  return {
+    x: Math.round((numbers[0] + numbers[2]) / 2),
+    y: Math.round((numbers[1] + numbers[3]) / 2),
+  }
+}
+
+/** 外面那格是不是把里面那格整个包住 (同名控件与它自己的子节点是同一处, 不算两个候选) */
+function containsRect(outer, inner) {
+  return Array.isArray(outer) && Array.isArray(inner) && outer.length === 4 && inner.length === 4
+    && inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+/** 快照里名字对得上的那几格 (子节点被外面那格包住的不算第二个候选) */
+function tapNameMatches(snapshot, wanted) {
+  const needle = squashText(wanted)
+  if (needle === '') return []
+  const nodes = (snapshot?.nodes ?? []).filter((node) => node.label !== '')
+  const exact = nodes.filter((node) => squashText(node.label) === needle)
+  const hits = exact.length > 0 ? exact : nodes.filter((node) => squashText(node.label).includes(needle))
+  return hits.filter((node) => !hits.some((other) => other !== node && containsRect(other.bounds, node.bounds)))
+}
+
+/**
+ * 几何那两条校验 (够大 / 在屏上)
+ *
+ * 回 null = 可以按; 回 `{ skip, why }` = 这一下不发出去. 读不到屏尺寸时只跳过"在屏上"这一条:
+ * 不拿一个猜出来的数当判据
+ *
+ * `minSide` 只在按名字那条路上开: 那一格有命中区 (`target`), 量的是"按下去会落在多大一块".
+ * 读屏找到的是一行字, 字高不是命中区 (14sp 在 3x 屏上才 42px), 拿短边去卡它会把正常的一行字全
+ * 挡掉, 所以读屏那条只判"还在不在这一屏上"
+ */
+function tapPrecheckGeometry(snapshot, box, { minSide = true } = {}) {
+  const rect = Array.isArray(box) ? box.slice(0, 4).map(Number) : []
+  if (rect.length < 4 || !rect.every(Number.isFinite)) {
+    return { skip: 'occluded', why: 'this target has no rectangle on the screen, so nothing proves it is there' }
+  }
+  const [left, top, right, bottom] = rect
+  const width = right - left
+  const height = bottom - top
+  if (width <= 0 || height <= 0) {
+    return { skip: 'occluded', why: `its rectangle [${rect.join(',')}] has no area` }
+  }
+  const short = Math.min(width, height)
+  if (minSide && short < TAP_MIN_SIDE) {
+    return {
+      skip: 'small',
+      why: `the area it takes a press on is ${width}x${height}px, and its short side of ${short}px is`
+        + ` under the ${TAP_MIN_SIDE}px this tool presses: a control that small is usually an icon`
+        + ' or a decoration, and a press on it lands on whatever sits next to it',
+    }
+  }
+  const screen = Array.isArray(snapshot?.screen) ? snapshot.screen : null
+  if (screen !== null && screen[0] > 0 && screen[1] > 0) {
+    const seenAcross = Math.max(0, Math.min(right, screen[0]) - Math.max(left, 0))
+    const seenDown = Math.max(0, Math.min(bottom, screen[1]) - Math.max(top, 0))
+    const seen = seenAcross * seenDown
+    if (seen <= 0) {
+      return {
+        skip: 'occluded',
+        why: `its rectangle [${rect.join(',')}] is off the ${screen[0]}x${screen[1]} screen entirely`,
+      }
+    }
+    if (seen * 2 < width * height) {
+      return {
+        skip: 'occluded',
+        why: `only ${Math.round((seen / (width * height)) * 100)}% of its rectangle is on the`
+          + ` ${screen[0]}x${screen[1]} screen, so the point this tool would press may not be on it`,
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 三道一起: 几何两条 + "要按的那个点上是不是盖着别的能按的控件" (按名字那条路走它)
+ *
+ * 量的是**命中区** (`target`: 按下去实际落在哪一格), 不是名字那一格的文字框 —— 一行字的文字框
+ * 往往比它能按的面积小得多, 拿文字框去卡"够不够大"会把正常的列表行全挡掉
+ */
+function tapPrecheck(snapshot, node) {
+  const label = node?.label ?? ''
+  const hit = Array.isArray(node?.target) ? node.target : (node?.bounds ?? [])
+  const geometry = tapPrecheckGeometry(snapshot, hit)
+  if (geometry !== null) return geometry
+  const centre = centreInBox(hit)
+  if (centre === null) return null
+  const onTop = tapEffectNodeAt(snapshot, centre.x, centre.y)
+  if (onTop === null || onTop.label === '' || onTop.clickable !== true) return null
+  const want = squashText(label)
+  const seen = squashText(onTop.label)
+  if (want === '' || seen === '' || seen === want || seen.includes(want) || want.includes(seen)) return null
+  // 同一格里换了名字不算盖住: 子节点与它所在的那一行按下去落在同一块 (target 相同)
+  const theirs = Array.isArray(onTop.target) ? onTop.target : onTop.bounds
+  if (sameRect(hit, theirs)) return null
+  return {
+    skip: 'occluded',
+    why: `the point this tool would press is covered by ${JSON.stringify(onTop.label)}, a different`
+      + ' clickable control, so the press would land on that one instead',
+  }
+}
+
+/**
+ * 按点按时核对「这个点上的控件是不是调用方期望的那个」 (落实表 #37)
+ *
+ * 回 null = 对得上 (或者调用方没说期望什么); 回 `{ want, found, readable, closest }` = 对不上,
+ * 这一下不发. 树读不回来也算对不上: 证明不了就不按, 这是这张卡的整个意思
+ */
+function tapAnchorMismatch(snapshot, expected, x, y) {
+  const want = String(expected ?? '').trim()
+  if (want === '') return null
+  if (snapshot === null) return { want, found: '', readable: false, closest: null }
+  const found = tapEffectLabelAt(snapshot, x, y)
+  if (found !== '' && squashText(found) === squashText(want)) return null
+  const nodes = (snapshot.nodes ?? []).map((node) => ({ text: node.label, box: node.bounds, score: 1 }))
+  const closest = closestReadLines(nodes, want, 1)[0] ?? null
+  return { want, found, readable: true, closest }
+}
+
+/** 重锚那一档用: 在这一屏上把目标重新找出来, 连它现在的中心一起交回去 */
+function tapAnchorNode(snapshot, wanted) {
+  const first = tapNameMatches(snapshot, wanted)[0] ?? null
+  if (first === null) return null
+  const centre = centreInBox(first.bounds)
+  return centre === null ? null : { label: first.label, bounds: first.bounds, centre }
 }
 
 /**
@@ -7526,13 +7877,71 @@ function tapEffectBrakeAnswer(brake, displayId) {
 }
 
 /**
+ * 失败分支的分级恢复 (落实表 #37): 重读屏 → 重锚 → 放弃
+ *
+ * 只做两件事, 而且**一次都不重放原来那一下**: ① 再读一眼, 慢一拍的界面 (动画 / 转场 / 回包)
+ * 在这一步就认了; ② 在这一屏上把目标重新锚一次, 把它现在的矩形与中心交回去 —— 下一次按落在
+ * 那里, 而不是原地再按一次. 两步都没救回来才 `giveup`
+ *
+ * 每一步 stdout 一行 `LwTap: recover=`, 真机 logcat 认这一行; 整趟最多两次 (重读 / 重锚),
+ * 没有第三次重试
+ *
+ * 回 `{ recover, text }`: `recover` 进账 (`exploreEffectReason` 的停判看它), `text` 进回执.
+ * 屏幕真的变了 (effect=changed) 就不恢复, 回空串
+ */
+async function tapEffectRecover({ before, after, effect, wanted, displayId, holdMs = 0 }) {
+  if (effect === 'changed') return { recover: '', text: '' }
+  const at = before === null ? displayId : before.displayId
+  const base = before ?? after
+  // ① 重读屏: 界面可能只是慢了一拍, 再看一眼, 变了就算这一下成了
+  await new Promise((resume) => setTimeout(resume, TAP_EFFECT_WAIT_MS + Math.max(0, Number(holdMs) || 0)))
+  const seen = await tapEffectSnapshot(at)
+  const late = base === null || seen === null ? 'unknown' : tapEffectOf(base, seen, wanted)
+  console.log(`LwTap: recover=reread effect=${effect} then=${late}`
+    + `${seen === null ? ' (the screen could not be read back)' : ''}`)
+  if (late === 'changed') {
+    return {
+      recover: 'reread',
+      text: 'recover=reread: a second look shows the screen did change - this press worked, just'
+        + ' more slowly than the first read allowed for. Nothing was pressed a second time.',
+    }
+  }
+  // ② 重锚: 在这一屏上把目标重新找出来, 交回它现在的中心 (只重锚, 不重放那一下)
+  const anchor = tapAnchorNode(seen ?? after ?? base, wanted)
+  console.log(`LwTap: recover=reanchor`
+    + `${anchor === null ? ' anchor=none' : ` anchor=${anchor.centre.x},${anchor.centre.y}`}`)
+  if (anchor !== null) {
+    return {
+      recover: 'reanchor',
+      text: (seen === null
+        ? 'recover=reanchor: the screen could not be read back after the press, and the last known'
+          + ` position of ${JSON.stringify(anchor.label)} is`
+        : `recover=reanchor: the screen did not change, and ${JSON.stringify(anchor.label)} is at`)
+        + ` [${anchor.bounds.join(',')}], centre ${anchor.centre.x},${anchor.centre.y}. If it is`
+        + ' still the thing you want, press that point (or a different name) - this tool did not'
+        + ' press again by itself.',
+    }
+  }
+  // ③ 放弃: 两条路都没了, 再说"再按一次"就是骗人
+  console.log('LwTap: recover=giveup')
+  return {
+    recover: 'giveup',
+    text: 'recover=giveup: the press changed nothing, a second look found nothing new, and'
+      + ` ${wanted === '' ? 'the point that was pressed' : JSON.stringify(wanted)} is not on the`
+      + ' screen any more. Stop pressing here: read the screen with lw_ui and pick another target.',
+  }
+}
+
+/**
  * 按下之后那一次回读: 回 `effect` 那一段, 顺手记一条账
  *
- * `verify=off` 或**这一下根本没按出去** (同名多个 / 没有这个名字 / 屏在睡) 时回空串 —— 那三条路不
+ * `verify=off` 或**这一下根本没按出去** (同名多个 / 没有这个名字 / 屏在睡) 时回空串 —— 那几条路不
  * 占这一次读屏, 而"没按"本来就不需要核对
  *
  * 长按要等按住那一段走完再回读 (`holdMs`): 3 s 的长按在 300 ms 那一刻当然还没发生任何事, 拿那一帧
  * 去判就是一句假的 `unchanged`
+ *
+ * 没变 (或读不回来) 时接上 #37 的分级恢复, 恢复走到哪一档记进账的 `recover` 那一格
  */
 async function tapEffectCheck({ verify, before, pressed, wanted, displayId, sessionId, step, holdMs = 0 }) {
   if (verify === 'off' || pressed !== true) return ''
@@ -7541,9 +7950,11 @@ async function tapEffectCheck({ verify, before, pressed, wanted, displayId, sess
   const after = await tapEffectSnapshot(at)
   const effect = tapEffectOf(before, after, wanted)
   const candidates = effect === 'unchanged' ? tapEffectCandidates(after ?? before, wanted) : []
+  const recovery = await tapEffectRecover({ before, after, effect, wanted, displayId: at, holdMs })
   const entry = {
     step: Number(step) || 0,
     effect,
+    recover: recovery.recover,
     displayId: Number(after?.displayId ?? at) || 0,
     at: Date.now(),
     fingerprint: effect === 'unchanged' ? tapEffectFingerprint(after) : '',
@@ -7554,8 +7965,10 @@ async function tapEffectCheck({ verify, before, pressed, wanted, displayId, sess
   // 真机上这条是唯一能证明核对真的跑过、并且真的读出了三个候选的读数 (与 `lw_tap: candidates=` 同一档)
   console.log(`lw_tap: effect=${effect}`
     + `${effect === 'unchanged' ? ` candidates=${candidates.length}` : ''}`
+    + `${recovery.recover === '' ? '' : ` recover=${recovery.recover}`}`
     + ` on displayId ${entry.displayId}`)
-  return formatTapEffect(effect, before, after, candidates)
+  const report = formatTapEffect(effect, before, after, candidates)
+  return recovery.text === '' ? report : `${report}\n\n${recovery.text}`
 }
 
 /** A report a model can read, with the structured answer kept underneath it */
@@ -14919,18 +15332,20 @@ function exploreEffectsFor(log, sessionId) {
 }
 
 /**
- * 这一场该不该停一下 (纯函数): 尾巴上连着两条 `unchanged` 就报 `effect-missing`
+ * 这一场该不该停一下 (纯函数): 尾巴上连着两条 `recover=giveup` 就报 `giveup`
  *
- * 尺子与点按那一层同一个数 (`TAP_EFFECT_STREAK`) —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ * 落实表 #37 起停判看恢复的最后一档, 不再是"连着两条 unchanged": unchanged 只说"这一下没让界面
+ * 变", 而 giveup 是"重读与重锚都没把它救回来" —— 后者才值得让一场探索停下来. 尺子仍与点按那一层
+ * 同一个数 (`TAP_EFFECT_STREAK`) —— 漂开的样子是"status 说该停, 而 lw_tap 还在发"
  */
 function exploreEffectReason(effects) {
   const list = Array.isArray(effects) ? effects : []
   let streak = 0
   for (let index = list.length - 1; index >= 0; index -= 1) {
-    if (list[index]?.effect !== 'unchanged') break
+    if (list[index]?.recover !== 'giveup') break
     streak += 1
   }
-  return streak >= TAP_EFFECT_STREAK ? 'effect-missing' : ''
+  return streak >= TAP_EFFECT_STREAK ? 'giveup' : ''
 }
 
 /**
@@ -16002,7 +16417,7 @@ async function exploreStatus(ctx) {
   const readings = await voiceWorkspaceReadings(ctx, exploreRun.session ?? '', exploreWorkspaceState)
   const power = await explorePowerSave()
   const task = await exploreTaskInfo()
-  // 这一场点过、核对过的那几下 (落实表 #32): 连着两条 unchanged 就报 reason=effect-missing
+  // 这一场点过、核对过的那几下 (落实表 #32 / #37): 连着两条 recover=giveup 就报 reason=giveup
   const effects = exploreEffectsFor(tapEffectLog, exploreRun.session)
   return {
     running: exploreRun.session !== null && exploreRun.over !== true,
@@ -16074,7 +16489,7 @@ async function exploreStatusText(ctx) {
       + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,
     `this run: ${readings.started} started, ${readings.finished} finished, ${readings.stubs} stub(s),`
       + ` ${readings.refusals} refused`,
-    // 点按效果那一段 (落实表 #32): 连着两条 unchanged 就是"再按同一个地方也不会变"
+    // 点按效果那一段 (落实表 #32 / #37): 连着两条 recover=giveup 才是"这一场该换个走法了"
     `press effects: ${readings.effects.length} recorded this run`
       + `${readings.effectReason === ''
         ? ''
