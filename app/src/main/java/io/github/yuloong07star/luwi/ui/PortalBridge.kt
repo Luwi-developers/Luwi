@@ -26,6 +26,7 @@ import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.SimSetting
+import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.workspace.Workspace
 import org.json.JSONArray
@@ -114,7 +115,7 @@ internal object PortalState {
  * 2. **动作只走已有入口**: 唤醒 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时唤醒投的是同一行),
  *    开探索 = 投一行 `source:"explore"`, 开关 = `RouterTick.setEnabled` —— 不新增第二条判断链路
  * 3. **写账与宿主同格式**: `voice/session.json` 是 `{id, at, origin, cwd}`, 宿主 `voiceCurrentSession()`
- *    只在 `cwd` 落在 `dsh-ball` 底下时认它 ([VOICE_SESSION_MS] 那 10 分钟也在那边), 所以这里写的是
+ *    只在 `cwd` 落在浮标那条工作区 (`Luwi`) 底下时认它 ([VOICE_SESSION_MS] 那 30 分钟也在那边), 所以这里写的是
  *    同一个形状、同一个 cwd
  */
 internal class PortalBridge(private val context: Context) {
@@ -271,7 +272,7 @@ internal class PortalBridge(private val context: Context) {
      * 球那一场: 账本原文 + 它还算不算数 + 还剩多久
      *
      * `usable` 的判法是宿主 `voiceCurrentSession()` 的同一条: id 在、没超 [VOICE_SESSION_MS]、
-     * cwd 落在 `dsh-ball` 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
+     * cwd 落在浮标那条工作区 (`Luwi`) 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
      */
     @JavascriptInterface
     fun portalSession(): String {
@@ -462,8 +463,12 @@ internal class PortalBridge(private val context: Context) {
     /**
      * 把这一场记成"球的那一场"
      *
-     * 门户里发的第一句之后调一次: 于是球接下来 10 分钟内说的话接的也是这一场, 两边看到同一个流
-     * (宿主的 `voiceSessionBump` 只对球自己那一句记账, 门户这一侧没有别的路能写这本账)
+     * **门户里每发一句都调一次** (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"): 于是球接下来
+     * 30 分钟内说的话接的也是这一场, 两边看到同一个流; 只在第一句写的话, 门户里聊久了回浮标就换场了
+     * (宿主的 `voiceSessionBump` 只认球自己那一句与回复框接着回的那一句, 门户这一侧没有别的路能写这本账)
+     *
+     * `origin` 仍写 `"ball"`: 这本账的身份是"浮标那一场", 写者是谁不进契约 (宿主只按 `cwd` 与新
+     * 鲜度判它, 见 `voiceCurrentSession`)
      */
     @JavascriptInterface
     fun portalBind(id: String): String {
@@ -491,12 +496,13 @@ internal class PortalBridge(private val context: Context) {
      * **为什么不再投 `router`** (2026-11-15 主人: "点击唤醒一下时, 必须主动说话"): 那个来源是闹钟
      * 那一拍用的, 进了宿主的 `judgeRouter` 就要过静默时段 / 冷却 / 沉睡前等待, 再落到"没什么值得
      * 说的" —— 人当面戳了一下, 屏上却一个字都没有, 正是这次要修的那件事。换成 `wake` 之后宿主
-     * 一道闸都不看 (见 `routerWakeNow`), 并且先落一句应声, 于是点完 3 s 内必有一颗气泡
+     * 一道闸都不看 (见 `routerWakeNow`), 并且先落一句由判断层挑出来的话题 (2.8.1 #31), 于是点完
+     * 3 s 内必有一颗气泡
      *
      * **回执要够用** (2026-11-15 主人: 「唤醒一下」点不动): 投出去只是第一步, 宿主在不在跑决定了
      * 这一句什么时候被看见 —— 所以回 `host`:
      *
-     * - `running`: 她这一拍就开一场, 应声马上落进 `lw/out`
+     * - `running`: 她这一拍就开一场, 那一句马上落进 `lw/out`
      * - `starting`: 宿主还没起来, 这一行已经在收件箱里, 起好了就会被消费 (异步拉起, 不等)
      *
      * **不在这里同步等宿主**: `ExploreSchedule.wakeHost` 会睡到就绪 (最长几十秒), 而这座桥跑在
@@ -625,6 +631,90 @@ internal class PortalBridge(private val context: Context) {
     }
 
     /**
+     * 门户那颗「按住 说话」(2026-11-20 主人: "长按输入框使用语音输入")
+     *
+     * 四个动作挤在一条方法上 (桥上"一个方法一段 JSON"的规矩):
+     *
+     * - `status`: 麦克风给没给 / 语音走哪一档 / 那一档现在能不能出字, 页面据此决定要不要先要素权限、
+     *   以及输入卡那行小字写什么
+     * - `ask`: 请宿主弹系统的麦克风授权窗 (页面自己弹不出来 —— 桥拿的是 applicationContext) ——
+     *   落一个掷标由 [HostScreen] 消费
+     * - `transcribe`: **只答应不干活**: 当场回 `{ok:true, id}`, 认完之后由 [PortalVoice] 经
+     *   `window.__LUWI_PORTAL__.voice({ok, id, text})` 回推。**不能同步等** —— 桥回调在 WebView 的
+     *   JavaBridge 线程上, 一句话要认几秒, 同步等就是整页卡住
+     * - `cancel`: 作废在途那一趟 (退出语音态 / 又按了一次)
+     *
+     * @param payload `{op:"status"|"ask"|"transcribe"|"cancel", id?, data?, language?}`
+     * @return 一段 JSON (status 的读数 / 答应或拒绝那一句)
+     */
+    @JavascriptInterface
+    fun portalVoice(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        return when (val op = body.optString("op", "").trim()) {
+            "status" -> PortalVoice.status(context).toString()
+            "ask" -> {
+                PortalAsk.ask(PortalAsk.Target.MIC)
+                JSONObject().put("ok", true).toString()
+            }
+            "cancel" -> {
+                PortalVoice.cancel()
+                JSONObject().put("ok", true).toString()
+            }
+            "transcribe" -> PortalVoice.transcribe(
+                context = context,
+                id = body.optInt("id", 0),
+                data = body.optString("data", ""),
+                language = body.optString("language", "auto"),
+            ) { answer -> pushVoice(answer) }.toString()
+            else -> JSONObject().put("ok", false).put("error", "op has to be status, ask, transcribe or cancel, not \"$op\"").toString()
+        }
+    }
+
+    /** 转写那一路的回推: 必须在主线程 `evaluateJavascript` (WebView 只认那一条) */
+    private fun pushVoice(answer: JSONObject) {
+        val script = "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.voice(" + answer.toString() + ")"
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            PortalState.run?.invoke(script)
+            return
+        }
+        Handler(Looper.getMainLooper()).post { PortalState.run?.invoke(script) }
+    }
+
+    /**
+     * 门户头栏那颗喇叭 = **语音输出（自动朗读）开关** (2026-11-20 主人)
+     *
+     * 它翻的就是 设置 → 说话 → 「朗读回答」那一格 (`SpeakSettings.readAloud`): 一处状态两处界面,
+     * 页面上不做第二份开关。宿主每轮念之前都会问一次 `speak op=status` (`host-plugin` 的
+     * `lwSpeakLine` / `startReadAloud`), 所以这里**不用重启 host**, 下一轮就按新值走
+     *
+     * 两个动作:
+     * - `status` → `{ok, readAloud, engine}`: 页面据此换喇叭的两副图标 (关 = 带斜杠, 开 = 带声波)
+     * - `toggle` → 翻一次并回新的那一份 (页面拿回执直接画, 不必再问一趟)
+     *
+     * @param payload `{op:"status"|"toggle"}`
+     * @return 一段 JSON (新状态)
+     */
+    @JavascriptInterface
+    fun portalSpeak(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        val op = body.optString("op", "").trim()
+        if (op == "toggle") {
+            runCatching { SpeakSettings.setReadAloud(context, !SpeakSettings.readAloud) }
+                .onFailure { Log.w(LOOK_TAG, "the read-aloud switch could not be written: ${it.message}") }
+        } else if (op != "status") {
+            return JSONObject().put("ok", false)
+                .put("error", "op has to be status or toggle, not \"$op\"").toString()
+        }
+        return JSONObject().apply {
+            put("ok", true)
+            put("readAloud", SpeakSettings.readAloud)
+            put("engine", SpeakSettings.engine.name.lowercase())
+        }.toString()
+    }
+
+    /**
      * 主人从门户传上来一个文件 (`+` 那颗, 2026-11-08)
      *
      * **为什么不走 dsh 自己的 attachment 上传**: 那条链在安卓上必然失败 —— `dsh-attachment-local`
@@ -717,12 +807,16 @@ internal class PortalBridge(private val context: Context) {
         val rejected = JSONArray()
         for (uri in uris) {
             val name = displayNameOf(uri)
+            // 读不动时要带一句真原因 (2026-11-19 真机: 拖放那份 `content://` 的授权松手就失效) ——
+            // 只留一句"这一份读不动"看不出是哪一档: 没权限、空流、还是 provider 自己抛的
+            var why = ""
             val bytes = runCatching {
                 context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
+            }.onFailure { why = "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }.getOrNull()
             if (bytes == null || bytes.isEmpty()) {
-                rejected.put(JSONObject().put("name", name).put("reason", PICKED_UNREADABLE))
-                Log.w(LOOK_TAG, "picked $name: $PICKED_UNREADABLE")
+                val said = if (why.isEmpty()) PICKED_UNREADABLE else "$PICKED_UNREADABLE ($why)"
+                rejected.put(JSONObject().put("name", name).put("reason", said))
+                Log.w(LOOK_TAG, "picked $name: $said")
                 continue
             }
             val result = LwIn.put(root, name, bytes)
@@ -951,7 +1045,7 @@ internal class PortalBridge(private val context: Context) {
 
     private fun lwFile(name: String): File = homeFile("lw/$name")
 
-    /** 球那一场所在的工作区 (`dsh-ball`), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
+    /** 球那一场所在的工作区 (`Luwi`, 2026-11-20 起与探索那条同一个目录), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
     private fun ballWorkspace(): File = File(Workspace.resolve(context).directory, BALL_WORKSPACE)
 
     /** 「Luwi」那条通道工作区 (探索 / 主动场那条, 与宿主 `EXPLORE_WORKSPACE_NAME` 同一个名字) */
@@ -979,13 +1073,13 @@ internal class PortalBridge(private val context: Context) {
 
     private companion object {
         /** 工作区名: 宿主那一侧是 `BALL_WORKSPACE_NAME`, 判据脚本会比对这两个量 */
-        const val BALL_WORKSPACE = "dsh-ball"
+        const val BALL_WORKSPACE = "Luwi"
 
         /** 「Luwi」那条通道工作区: 宿主那一侧是 `EXPLORE_WORKSPACE_NAME`, 两处同一个字面量 */
         const val CHANNEL_WORKSPACE = "Luwi"
 
-        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (10 分钟) */
-        const val VOICE_SESSION_MS = 10 * 60 * 1000L
+        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (2026-11-20 起 30 分钟) */
+        const val VOICE_SESSION_MS = 30 * 60 * 1000L
 
         /** 会话 id 的长度上限 (与 [WakeBridge] 那一处同一个数) */
         const val SESSION_ID_MAX = 128

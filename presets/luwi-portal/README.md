@@ -9,10 +9,18 @@ nextTask + router 的 checks) 摆在同一屏上
    (`MARK_PNG`, 由 `tools/make-portal-mark.py` 从 `tools/brand/luwi-mark.png` 生成并内嵌, 透明底染
    `#01B4FF`) + `Luwi` + 一句「在的，说吧」。有消息时这一块不画 (屏幕中间归对话)。没有会话时
    多挂一颗「开一场」
-2. **左上角 = 开新对话**: `#lwp-brand` 是按钮 (标记 + `+` 徽标 + 名字 + 读数)。点一下走
+2. **左上角头像 = 历史窗** (2026-11-19 改口径, 原「开新对话」):
+   `#lwp-brand` 只有 28px 头像那么大 (**热区就是头像**), 点一下开 `#lwp-history`; 旁边的昵称与读数
+   只是标识, 点不动 —— 于是 `#lwp-head` 是「头像 + 名字 ... 喇叭 + 终端 + `⋯`」, 那颗「历史」胶囊已撤。
+   右边那三颗是 2026-11-20 定的, 并且**装进 `#lwp-tabs` 一簇、整簇靠最右**: **自动朗读 (喇叭图标钮) → 终端** (原「同步」, 从 `⋯` 抽屉搬上来的那一颗, 动作仍是 `portalMenuPick('sync')`) →
+   **`⋯` 更多**; **抽屉里因此不再画「终端」那一行**
+   (球菜单下的是原生清单, 那一行还在)。
+   开新对话走历史窗底部的「开始新的对话」(`startFromHistory`) 与首启的 `autoStart()`, 路径仍是
    `newConversation()`: `startSession()` → 轮询 `currentSessionId()` 每 150 ms 最多 24 次 →
    `adopt` + **`portalBind`**(不写账会被 3 s 之后的 `pollLedger` 拽回旧场) + 8 s 的「已开新对话」读数。
    旧会话不删不归档, 只是这一层不再画它。
+   **那颗读数是一层浮层** (`position:absolute`, `z-index:2`, `pointer-events:none`, `top` 按头栏高度写):
+   出现与收起都不改 `#lwp-flow` 的高度, 中间的图文不跟着下移再弹回来。
    **这里没有「撤销」**: 上一场在切走后会被 dsh 卸载, 回来要重新 `openSession`, 而 `sessions.retain`
    只认当前工作区里还挂着的会话 —— 真机实测一律 `unknown session`, 异步重试 3.2 s 也救不回来。
    摆一颗按下去只回一句「打不开了」的按钮比没有更糟, 所以那一格只留读数
@@ -70,6 +78,30 @@ nextTask + router 的 checks) 摆在同一屏上
   一行** (2026-11-10 主人: "附件发图片和发表情包, 应该要在输入框上方显示, 像 dsh 原生那样")。
   底部一行左边 `+` 与表情钮、右边模型 chip 与 34px 圆钮。**输入卡上不画工作区选择**, 预设那一档也
   **已取消** (2026-11-08 主人); 工作区只在空态那颗「选工作区」(见下节)
+- **输入框灰字是「发消息或长按说话」** (2026-11-20 主人): 全靠这一句告诉人「长按就能说话」。
+  **空草稿长按 450 ms 就当场开录** (`contextmenu` 一并吃掉, 免得系统的选中菜单盖在面板上);
+  有字时长按仍归浏览器的选中 / 粘贴
+- **长按说话那条录音条** (`#lwp-rec`, 照官方截图 + wavesurfer 那套读法): 压住输入卡那一块再高出半截 ——
+  左右/底各 12px, **高度 = 输入卡实测高 × 1.5** (`REC_PANEL_MAX 210` 封顶), 圆角 28。
+  第一行左「红点呼吸 + **「松手转写，上滑取消」**」右「计时胶囊 `0:03 / 1:00`」, 第二行是走带波形。
+  **边缘是渐变**: 条子的上沿 `-webkit-mask-image` 22px 淡出 (与页面之间没有硬接缝), 波形左右两端各 9% 淡出;
+  mask 会裁掉外投影, 所以材质只留上沿 1 px 内高光 + 顶部径向柔光 + 3.5% 噪点。
+  波形是**真波形**, 不是一排等高柱子: 每 40 ms 折一列 (`REC_SAMPLE_MS`, 窗口 80 列), 峰值 → 保持 (0.995 衰减)
+  → 归一化 (`ratio ** 0.6`, 低于 0.02 当静音) → 快起 0.6 / 慢落 0.12; 几何在 `recWaveRects` (走带右对齐 /
+  条宽 2 + 缝 1 + 圆角帽 1 + 最小高 2, 镜像于中线), 旧的往左淡出 + 右端柔光点。
+  **帧循环起在 `voiceState = 'recording'` 之后** (`startRecPump`): 早一帧时麦克风还没到手, pump 会立刻退出 ——
+  那就是上一版"条不动"的真因。
+  **上滑过 56 px** 进「松开取消」态 (条下沉 + 退成中性灰 + 出现向下箭头 + 提示换字), 松手丢弃并说一句
+  「已取消」; 松手默认转写 (条上换「正在转写…」+ 三个跳动点), 文字接进草稿 (有字时前留一个空格, 光标到末尾)。
+  条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
+  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉。录音在页面
+  (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16), **上限 60 s**、
+  短于 0.5 s 当误触; 转写在应用 (`ui/PortalVoice.kt` → `LwSpeech.dispatch`, 引擎跟 `lw/voice-source.json`),
+  桥是 `portalVoice` (status / ask / transcribe / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推。没权限 /
+  缺模型 / 没登录 / 太短各有一句人话, 不许静默
+- **顶栏那颗喇叭 = 语音输出（自动朗读）开关**: 翻的是 设置 → 说话 → 「朗读回答」那一格
+  (`SpeakSettings.readAloud`, 一处状态两处界面, 桥是 `portalSpeak`), 两副图标——**关 = 喇叭 + 斜杠 /
+  开 = 喇叭 + 两道声波**, Toast 照官方那两张图写 **「已开启自动朗读」/「已关闭自动朗读」**
 - **待发附件行** (`#lwp-attach-row`): 图与表情是 64px 缩略图 + 右上角 `×` (照 dsh 的
   `ComposerAttachments`: 圆角 16 / `object-fit:cover` / `pointer:coarse` 时常显), 非图片文件是一颗
   「名字 · 大小 · 状态」chip; 顺序就是挑选 / 点的顺序, `reading` 有扫光、`error` 红描边, 全部 ready
@@ -84,7 +116,19 @@ nextTask + router 的 checks) 摆在同一屏上
   并且**首次**把宿主 settings 的 `permission.defaultPreset` 也写成它 (以后新开会话天生完全权限;
   只写一次, 主人之后改的档不会被改回来)
 - **模型 chip**: 与 dsh 那颗共用 `ctx.modelDirectories` 的同一份目录 (`directoryFor(sessionId)`),
-  显示当前模型的名字, 换模型走 `directory.select({provider, model})`
+  显示当前模型的名字, 换模型走 `directory.select({provider, model})`; 目录的 store 挂了订阅, 别处
+  换了模型 chip 当场跟着改
+- **门户里换的模型 = 新会话的模型** (2026-11-20): dsh 那条 `selectModel` 会把这次选择同时落成宿主
+  默认, 而**新对话复用的是工作区里那张空白场** —— 它早先记过的 `model/selection` 会把新会话按老模型
+  发出去。所以落到一张**空白场**上时, 门户自己问一次 `remote.session.modelCatalog()`, 与
+  `modelState.current` 比 (`blankModelNeedsDefault`, 纯函数): 不一致就 `select(默认)` 拨回去, 一致或
+  拿不到就什么都不做。**非空白场永远不拨** (那一场自己选过的模型归它自己); 同一档只问一次
+- **后台 dsh 发的图也画真图** (2026-11-20 主人: "这个在后台dsh内发送的图要求也要在门户上显示"):
+  浮球 / 原生会话界面发出去的图不经门户 `lw-in` stash, 落盘只剩
+  `{type:'image', attachment:{attachmentId, mediaType, width, height, bytes, name}}` ——
+  门户走 `ctx.uiConversation.peekImageUrl / imageUrl(sessionId, attachment)` 取那张 (blob URL, 按会话
+  缓存), 先钉 `width/height` 再解码, 取不到就写「图没取到」; 点一下仍进预览窗 (给 `src` 那一档)。
+  单条最多画 4 张, 多出来的写「+N 张图」; 一条引用都没有的旧消息才回落到「（图）」
 - **背景与浓淡**: 设置 → 外观 落 `$DSH_HOME/lw/face.json` (`{alpha, wall}`) 与一张
   `$DSH_HOME/lw/face/<名字>.jpg` (`tool/PortalFace.kt` 是唯一写者, 换图只留一张)。页面拿
   `--lwp-wall-alpha` 与 `#lwp-wall` 的 `background-image` 上屏, 图按 `ver` 缓存在 localStorage

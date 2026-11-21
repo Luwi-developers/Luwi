@@ -37,8 +37,11 @@ internal object PortalAsk {
      * 开设置页 / 进酒馆 / 弹反馈窗都要 navigator 或主页那一层自己的状态, 而 `PortalMenu` 是一个 object,
      * 拿不到 CompositionLocal —— 于是它只在这里落一个掷标, 由 `HostScreen` 的 `LaunchedEffect` 消费
      * 完再清掉。同一刻只有一件 (点一下走一件, 抽屉会先收起)
+     *
+     * `MIC` (2026-11-20) 也走这条路: 系统授权窗只有 Activity 弹得出来, 而 `PortalBridge` 拿的是
+     * applicationContext —— 页面按住说话之前那一问因此落到这里
      */
-    enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT }
+    enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC }
 
     /** 待办的那一件; 读它就会跟着重组 */
     val pending = mutableStateOf<Target?>(null)

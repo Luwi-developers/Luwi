@@ -1,15 +1,21 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.Manifest
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Insets
 import android.net.Uri
 import android.os.Environment
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import android.view.DragEvent
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.webkit.ConsoleMessage
@@ -137,6 +143,7 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Remove
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -259,6 +266,13 @@ fun HostScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // 门户那颗「按住 说话」要的那一问 (2026-11-20): 系统授权窗只有 Activity 弹得出来, 而门户那座桥
+    // 拿的是 applicationContext —— 页面落一个 [PortalAsk.Target.MIC] 掷标, 这里接住并弹窗; 结果
+    // 再经 `PortalVoice.reportPermission` 回推页面 (页面据此说"给好了"或"去设置里开")
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        PortalVoice.reportPermission(granted)
+    }
+
     // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
     // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
     val askTarget = PortalAsk.pending.value
@@ -268,6 +282,15 @@ fun HostScreen(modifier: Modifier = Modifier) {
             PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
             PortalAsk.Target.FEEDBACK -> feedbackOpen = true
             PortalAsk.Target.DEV -> devOpen = true
+            // 已经给过就直接回推一句 (页面不必再等一个弹窗); 没给才弹系统窗
+            PortalAsk.Target.MIC -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) PortalVoice.reportPermission(true)
+                else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
             PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
                 if (name != null) {
                     scope.launch {
@@ -1320,6 +1343,14 @@ private fun HostWebView(
                     setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
                         startDownload(context, downloadUrl, contentDisposition, mimeType)
                     }
+                    // **系统文件管理器拖进来的文件也要能进待发栏** (2.8.1 #34): Android 的 WebView
+                    // 对系统拖过来的 `content://` **不派发 HTML5 的 dragenter / dragover / drop** ——
+                    // 页面那一侧挂再多监听也等不到 drop, 真机上就是"拖过来什么都不发生"。所以在原生
+                    // 这一层接: 与 `+` 选完同一条链 (宿主读字节、宿主落进 `lw-in/`, 落好的几份再交回
+                    // 页面画成待发 chip)。只认带 Uri 的拖拽, 页面自己的拖拽与拖纯文本都不抢
+                    setOnDragListener { _, event ->
+                        acceptDrop(event, portal = portal, scope = scope)
+                    }
                     loadUrl(url)
                     launched[0] = url
                 }
@@ -1865,6 +1896,118 @@ private fun WebView.pickState(state: String) {
 private fun WebView.pickedFiles(payload: JSONObject) {
     val literal = payload.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.picked($literal)", null)
+}
+
+/**
+ * 系统文件管理器把一份文件拖进这一屏时该做什么 (2.8.1 #34)
+ *
+ * 页面那一侧的 `dragenter` / `dragover` / `drop` 只对浏览器自己造出来的 `DataTransfer` 有效: 从文件
+ * 管理器拖过来的 `content://` 在 Android 的 WebView 里**不派发 HTML5 drop**, 页面上永远等不到那一拍
+ * (2026-11-19 复核: 只有 JS 侧监听时真机拿不到"投 1 个文件 -> 出 1 个 chip"的读数)。于是改在原生这一
+ * 层接: [ClipData] 里的 Uri 交给 [PortalBridge.stashPicked] (与 `+` 选完那一趟同一份落盘实现), 落好的
+ * 几份再经 [pickedFiles] 交回页面, 页面照 `picked` 画成待发 chip
+ *
+ * 只认 `content` / `file` 两种 scheme: 拖一段选中的文本进来时用户要的是"粘贴", 那一档留给页面自己,
+ * 这里返回 false 放行 —— 也不能把所有拖拽都吃了, 否则页面内的拖拽 (排序、它自己的上传区) 全哑
+ * @param event 那一拍拖拽事件
+ * @param portal 门户桥 (读字节与落 `lw-in/` 都在它那边, 与 `+` 同一条链)
+ * @param scope 这一屏的作用域: 一份 3 MB 的图从相册读出来再写进 `/sdcard` 是几百毫秒, 要下 IO
+ * @return 这一拍接没接 (false = 交给系统继续问别人)
+ */
+private fun WebView.acceptDrop(
+    event: DragEvent,
+    portal: PortalBridge,
+    scope: CoroutineScope,
+): Boolean = when (event.action) {
+    DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()
+    // 拖进来了: 页面那侧的说明牌与虚线一起亮 (2026-11-19 主人: "再加上如图所示的提示")
+    DragEvent.ACTION_DRAG_ENTERED -> {
+        dropOver(true)
+        true
+    }
+    DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {
+        dropOver(false)
+        true
+    }
+    DragEvent.ACTION_DROP -> {
+        dropOver(false)
+        val uris = dropUris(event.clipData)
+        // 一行读数: 真机上"拖进来没有 / 几份 / 叫什么"只能看这一行
+        val names = uris.joinToString(", ") { it.lastPathSegment ?: it.toString() }
+        Log.i(WEB_TAG, "drop -> ${uris.size} 份: $names")
+        if (uris.isEmpty()) {
+            false
+        } else {
+            // **拖放那份读权限只在这一拍有效** (2026-11-19 真机踩到): 系统给拖进来那张
+            // `content://` 的授权是"一次性的", 松手之后 `openInputStream` 就再也打不开 —— 落盘那
+            // 一侧只看到"这一份读不动" (落成 0 份, 页面上就是一句"这些没进"). 所以先在主线程把
+            // 它要到手 (问的是 Activity), 读完再 release
+            val grant = runCatching { context.findActivity()?.requestDragAndDropPermissions(event) }
+                .getOrNull()
+            Log.i(WEB_TAG, "drop grant=${grant != null}")
+            scope.launch {
+                val landed = withContext(Dispatchers.IO) {
+                    runCatching { JSONObject(portal.stashPicked(uris)) }.getOrNull()
+                }
+                runCatching { grant?.release() }
+                // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
+                pickedFiles(landed ?: nothingLanded(uris.size))
+            }
+            true
+        }
+    }
+    else -> true
+}
+
+/**
+ * 告诉页面"现在有没有东西拖在这一块上" (2026-11-19 主人: "再加上如图所示的提示")
+ *
+ * 系统拖放不给页面 HTML5 事件, 所以那块说明牌 (`#lwp-drop-hint`) 与那圈虚线只能由原生这一层喊醒:
+ * `ACTION_DRAG_ENTERED` 亮, 松手 / 拖走 / 拖拽结束灭 —— 与桌面浏览器那条路同一个 `markDrop`
+ * @param on 拖进来为 true, 其余三拍为 false
+ */
+private fun WebView.dropOver(on: Boolean) {
+    evaluateJavascript(
+        "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.dropOver(${if (on) "true" else "false"})",
+        null,
+    )
+}
+
+/**
+ * 从这一层 [Context] 往上找到那个 Activity (2.8.1 #34)
+ *
+ * 拖放那份读权限 (`requestDragAndDropPermissions`) 只有 Activity 问得到; Compose 里拿到的是
+ * `LocalContext.current`, 宿主是 Activity 时它就是 Activity, 套了一层主题包装时不是 —— 所以往上走
+ */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
+/**
+ * 拖进来的那份 [ClipData] 里有哪几个能落盘的 Uri (2.8.1 #34)
+ *
+ * 文件管理器给的是 `content://`; 有的机型另塞一条 `text/uri-list` 文本项 —— 两种都认. 只有文字
+ * (拖一段选中的文本) 的那种不算, 交给页面自己处理
+ * @param clip 那一拍事件带的 ClipData (可能为 null)
+ */
+private fun dropUris(clip: ClipData?): List<Uri> {
+    if (clip == null) return emptyList()
+    val out = ArrayList<Uri>(clip.itemCount)
+    for (index in 0 until clip.itemCount) {
+        val item = clip.getItemAt(index)
+        val uri = item.uri ?: item.text?.toString()
+            ?.takeIf { it.startsWith("content://") || it.startsWith("file://") }
+            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (uri != null && (uri.scheme == "content" || uri.scheme == "file") && !out.contains(uri)) {
+            out.add(uri)
+        }
+    }
+    return out
 }
 
 /**
