@@ -2816,7 +2816,9 @@ const TOOLS = [
         // 这里看的是 clicked 而不是 outcome: 无障碍动作被拒之后桥会用一根按住的手指兜底,
         // 那一下 outcome 仍是 unclicked 而 clicked 已经是真, 再退到读屏就会按第二次
         if (source === 'a11y' || tree.clicked === true || tree.outcome === 'ambiguous') {
-          return remember(formatNamedTap(tree, args.note), tree)
+          // 生产里最常见的一条路 (第三轮 E): 按名成功也要把"真的按到了"报给账, 否则
+          // `pressed` 在真机上永远是空的, 提示只剩 intent 一行
+          return remember(formatNamedTap(tree, args.note), tree, undefined, exploreMemoryDelivered(tree))
         }
         const reading = await tapByReading(args.displayId, args.text, held)
         // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
@@ -2833,7 +2835,8 @@ const TOOLS = [
         y: args.y,
         holdMs: held,
       })
-      return remember(formatGesture('tapped', tapped, args.note), tapped)
+      // 坐标那一路也是"真按到了" (第三轮 E): 回执说 tapped 就算按到
+      return remember(formatGesture('tapped', tapped, args.note), tapped, undefined, exploreMemoryDelivered(tapped))
     },
   }),
 
@@ -7088,7 +7091,13 @@ async function tapByReading(displayId, text, hold = 0) {
         + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
           .join(', ')
         + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
-      candidates: [],
+      // 两条同名行本身就要交回去 (第三轮 F): 只写进 report 的话模型拿到的是空候选,
+      // 那句"按坐标选一条"就没有坐标可依 —— 坐标与置信度都在这两个候选里
+      candidates: candidates.slice(0, MAX_TAP_CANDIDATES).map((line) => ({
+        text: String(line.text ?? ''),
+        score: Number(line.score ?? 0),
+        bbox: Array.isArray(line.box) ? line.box.slice(0, 4) : [],
+      })),
       pressed: false,
       reason: 'ambiguous',
     }
@@ -7112,14 +7121,23 @@ async function tapByReading(displayId, text, hold = 0) {
 /**
  * 读屏那一路交给模型的话 (纯函数, 2.8.1 #36 第二轮 F): 只有两种情形换成候选
  *
- * 「没这一行」与「同名两行」换成候选列表 (那是"再挑一个"就够了的两种); 熄屏 / 读不到 / 按到了但
+ * 「没这一行」与「同名两行」换成候选列表 (那是"再挑一个"就够了的两种): 前者是 close guesses,
+ * 后者是屏幕上真有的那两条 (带 bbox 与 score), 开头那句也换掉 —— 屏幕上有这一行, 只是不止一条。
+ * 熄屏 / 读不到 / 按到了但
  * 没送达三种**原样念原因** —— 那三种的下一步各不相同 (先唤醒 / 先开无障碍 / 换个点再按), 收成一句
  * "没找到这一行"等于把模型推回去瞎猜。`pressedPrefix` 是树里那段话 (按名字读屏兜底时挂在前面)
  */
 function tapReadingAnswer(reading, displayId, wanted, tree = undefined, pressedPrefix = '') {
   const reason = String(reading?.reason ?? '')
-  if (reason === 'no-match' || reason === 'ambiguous') {
-    return tapCandidatesAnswer(displayId, wanted, reading.candidates, tree)
+  const candidates = Array.isArray(reading?.candidates) ? reading.candidates : []
+  if (reason === 'ambiguous') {
+    // 同名两条: 屏幕上确实有这一行, 只是不止一条 (第三轮 F) —— 开头别再说"没有这一行"
+    return tapCandidatesAnswer(displayId, wanted, candidates, tree,
+      `${candidates.length} lines on displayId ${displayId} say ${JSON.stringify(wanted)},`
+        + ' so pick the one you meant')
+  }
+  if (reason === 'no-match') {
+    return tapCandidatesAnswer(displayId, wanted, candidates, tree)
   }
   const report = String(reading?.report ?? '')
   return reason === 'pressed' && pressedPrefix !== '' ? `${pressedPrefix}\n${report}` : report
@@ -7206,7 +7224,7 @@ function closenessScore(line, needle) {
  * 尾部的 JSON 与 `lw_ocr` 一样是给人之外的那一层看的: `candidates` 每项是 `{text, score, bbox}`,
  * 按 score 从高到低. 屏幕上真的一行字都没有时这个列表是空的, 那句"没读到任何字"才回来
  */
-function tapCandidatesAnswer(displayId, wanted, candidates, tree) {
+function tapCandidatesAnswer(displayId, wanted, candidates, tree, opening = '') {
   const name = JSON.stringify(wanted)
   // 树没被读到 (无障碍关着) 时不能写成"树里没有": 那是另一件事, 模型据此会去关掉无障碍的闸
   const head = tree === undefined
@@ -7219,8 +7237,11 @@ function tapCandidatesAnswer(displayId, wanted, candidates, tree) {
   // 真机上这条是唯一能证明候选真的给出来了的读数 (2026-11-17, 落实表 #27)
   console.log(`lw_tap: candidates=${candidates.length} on displayId ${displayId}`
     + ` for ${JSON.stringify(wanted)}`)
+  // `opening` 给"同名两条"那种情形用 (第三轮 F): 那时候屏幕上是**有**这一行, 只是不止一条
   return withJson([
-    `${head}: nothing was pressed. The closest lines on the screen are:`,
+    opening === ''
+      ? `${head}: nothing was pressed. The closest lines on the screen are:`
+      : `${opening}: nothing was pressed. These are the ones to pick from:`,
     ...candidates.map((candidate) => `- ${JSON.stringify(candidate.text)}`
       + ` at [${candidate.bbox.join(',')}] score ${candidate.score.toFixed(3)}`),
     'Press one of them by a point inside its bbox with lw_tap(x=..., y=...), or call lw_ui to see'
@@ -14404,6 +14425,18 @@ function exploreMemoryEffect(result) {
   return 'failed'
 }
 
+/**
+ * 这一下真的按到了吗 (纯函数, 第三轮 E): 无障碍那一路看 `clicked`, 同名两条不算按到
+ *
+ * `clicked` 而不是 `outcome`: 动作被拒之后桥会用一根按住的手指兜底, 那一下 `outcome` 仍是
+ * unclicked 而 `clicked` 已经是真 (与 [namedTapReport] 同一条判据); 坐标那一路看 `tapped`。
+ * 少传这一个布尔, 生产里最常见的那条 a11y 按名成功就只剩 intent 一行 ("上次按过"永远是空的)
+ */
+function exploreMemoryDelivered(result) {
+  if (result?.outcome === 'ambiguous') return false
+  return result?.clicked === true || result?.tapped === true
+}
+
 /** 这一步按的是什么 (纯函数): 按名字就是那个名字, 按点就是那个点 */
 function exploreMemoryTapText(args) {
   const named = exploreMemoryText(args?.text, 120)
@@ -14910,7 +14943,16 @@ async function exploreStateRestore() {
   // 敏感包 (第二轮 C): 盘上那一格是上一版写的敏感应用时置空 —— 读侧同一条纪律
   const restoredPkg = typeof run.pkg === 'string' ? run.pkg.trim() : ''
   exploreRun.pkg = exploreMemorySensitive(restoredPkg) || exploreMemoryShell(restoredPkg) ? '' : restoredPkg
-  exploreRun.memory = exploreMemoryLimit() === 0 ? {} : exploreMemoryOpen(run.memory)
+  const keptMemory = exploreMemoryLimit() === 0 ? {} : exploreMemoryOpen(run.memory)
+  const diskMemory = run.memory !== null && typeof run.memory === 'object' && !Array.isArray(run.memory)
+    ? run.memory
+    : {}
+  // 丢过东西就把盘上那份也重写一次 (第三轮 C 的残留): 只滤内存的话, 上一版那行明文 (数字与包名)
+  // 要等到下一次写盘才被盖掉 —— 中途任何一次崩溃 / 强杀都把那 40 字留在盘上
+  const dropped = exploreRun.pkg !== restoredPkg
+    || (exploreMemoryLimit() !== 0 && Object.keys(diskMemory).length !== Object.keys(keptMemory).length)
+  exploreRun.memory = keptMemory
+  if (dropped) void exploreStateWrite()
   return true
 }
 
