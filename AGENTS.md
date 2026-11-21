@@ -389,6 +389,24 @@
 - **情感状态也是宿主算的** (`host-plugin/emotion/state.mjs`, 纯函数): 每轮 `turn/start` 落 `lw/memory/affect.json`,
   对话场拼在 `{{lw_persona}}` 后面, 主动场走开场正文第 5 参; 四个维度 (valence / arousal / engagement / phase)
   与共情策略都不调模型 —— 判据 `tools/check-emotion.mjs`
+- **「情绪与关系」那五格归门户判断面板** (2026-11-21, 2.8.1 #46, 方案 §9): `sim.json` 的 `affect` 段五键
+  `baseline` / `empathy` / `boundary` / `recall` / `honesty` (缺省 1 / 0 / 1 / 2 / 1), **只在判断面板多一组**
+  (`ACTIVITY_GROUPS` 收 `affect`, `SIM_GROUPS` 仍是四组 —— 设置页一个字节不改, 主人 2026-11-21 07:17 拍板 ③);
+  宿主 `affectSettingsOf(sim.affect)` 读同一套键, 三处生效: 缺省策略 (`empathy` 盖 `empathyPlanOf` 的 default 那支) /
+  召回预算 0·2·4·6 (`recall`) / 「今天的分寸」三句与边界条数 (`baseline` / `boundary`), 而 `honesty` 只在
+  **真的提到旧事时**附一句"这是记得的哪一句" —— 判据 `tools/check-sim.mjs` + `check-emotion.mjs` 第十一节.
+  两条界面口径 (主人 2026-11-21 定): **`recall = 0` (不提旧事) 时透明程度那一格置灰** (`MutedRow`, 摆灰字不给
+  下拉 —— 拨了不生效的格子比不摆更糟), **判断面板六组以上高度走 0.72 屏** (0.66 要滚两屏)
+- **她这一摊有离线审计** (2026-11-21, 2.8.1 #47): `node tools/lw-emotion-audit.mjs [--home DIR] [--since 7]
+  [--json] [--template]` 出六个数 (人格漂移 / 重复开场 / 追发率 / 透明引用率 / 策略分布 / 边界违规) 与
+  关系曲线, 只读文件不调模型; 策略分布读 `lw/memory/plans.jsonl` (宿主每**开成**一场主动对话补一行),
+  曲线读 `lw/memory/relation.jsonl` (**一天一行**: 换天补一行, 同一天只改写那一行), 两份都**只追加**、
+  同一条路径上的写入串行 (`host-plugin/emotion/ledger.mjs`), 写不动只 warn 不拖死这一场;
+  **读不到的读数是 `n/a` 不是 0** (`found` 那几个标记跟着 `--json` 出去), 追发只认主动开口那一侧、
+  他说的只认 `voice` / `keyboard` / `ball` 三种 source (门户正文不进那份账, 所以它是下界);
+  `--template` 打八维抽检骨架 (`--out <文件>` 才写盘, 缺省只打 stdout); **`--strict` 时有 `over` 就退 3**
+  (进发版闸用), 缺省恒 0 —— 它是量尺, 不替人拦 (主人 2026-11-21 定);
+  判据 `tools/check-emotion-audit.mjs` (夹具真跑)
 - **每个能力先过权限闸** (`PermissionGate` + `PermissionCatalog`): 缺什么说什么, **不假装成功**, 写入写完读回
 - **答案由应用侧写**: 桥回来的 `result.text` 才是给人那句
 - **只有 app uid 做不到的才走特权** (卸载/清数据/停应用/装包/停用/飞行/移动数据/蓝牙/熄屏), 白名单
@@ -589,6 +607,14 @@
   = 没重载
 - **出包前先删旧 APK**: `app/build/outputs/apk/<变体>/app-<变体>.apk` (发布包是 `release/app-release.apk`) ——
   打包任务会在旧包上原地改写留空洞
+- **新建的 git worktree 里 `jniLibs` 是空的** (2026-11-21 踩到): 24 个 `.so` (含 65 MB `libnode.so`) 是未跟踪的本地文件,
+  只存在于别的检出里; 不补这一目录, `:app:assembleDebug` 照样 BUILD SUCCESSFUL, 但 APK 里没有 `libnode.so`,
+  装机后 host 报 `node runtime is missing at …/lib/libnode.so`、整包起不来. 判据 `unzip -l <apk> | findstr libnode`
+- **工位里的 dsh 子模块与 `luwi-plugins` 要自己备** (2026-11-21): `git -c protocol.file.allow=always submodule update
+  --init third_party/deepseek-harness` (从别的检出 clone), 再在子模块里
+  `pnpm install --frozen-lockfile --config.registry=https://registry.npmjs.org --config.node-linker=hoisted`
+  (少了它会 `tsx` 找不到 `esbuild` / `tsc` 报 TS2554 退出); `copySeedAssets` 按「仓库根上级」找
+  `luwi-plugins/packages/*.lwp`, 工位不在 `D:\apk` 底下时用 `mklink /J` 补一个
 - **`packHostTree` 偶发原生崩溃**: `Client bundle` 那一步整个进程退 `3221226505` (`0xC0000409`), 那是原生
   bundler 一次从零打三百多个包时的偶发事 —— 同一棵树重跑就绿 (`run-gates` 10/10, 第二趟只补剩下的);
   `tools/pack-host.mjs` 只在原生崩溃码 / 信号上自动补跑一次, 脚本自己退的 1 不重试 (真红不许盖)

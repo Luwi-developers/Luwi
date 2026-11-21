@@ -655,6 +655,35 @@
     <string name="settings_sim_sticker_every">How often a sticker</string>
     <string name="settings_sim_sticker_every_summary">about one every %1$d lines (0 = never)</string>
     <string name="settings_sim_sticker_note">Both what she saves herself (lw_sticker op=fetch) and the ones you add here follow these two limits; anything bigger, or one sticker too many, is refused</string>
+    <string name="settings_sim_affect_group">Mood and closeness</string>
+    <string name="settings_sim_affect_baseline">Her resting warmth</string>
+    <string name="settings_sim_affect_baseline_summary">Her everyday temperature; further right is warmer</string>
+    <string name="settings_sim_affect_baseline_l0">Calm</string>
+    <string name="settings_sim_affect_baseline_l1">Gentle</string>
+    <string name="settings_sim_affect_baseline_l2">Warm</string>
+    <string name="settings_sim_affect_empathy">Company or solutions</string>
+    <string name="settings_sim_affect_empathy_summary">When she starts talking, does she hold him first or hand him a fix</string>
+    <string name="settings_sim_affect_empathy_l0">Company first</string>
+    <string name="settings_sim_affect_empathy_l1">Depends</string>
+    <string name="settings_sim_affect_empathy_l2">Solutions first</string>
+    <string name="settings_sim_affect_boundary">How strict the boundary</string>
+    <string name="settings_sim_affect_boundary_summary">How tightly she holds back when he does not answer</string>
+    <string name="settings_sim_affect_boundary_l0">Loose</string>
+    <string name="settings_sim_affect_boundary_l1">Normal</string>
+    <string name="settings_sim_affect_boundary_l2">Strict</string>
+    <string name="settings_sim_affect_recall">How often she brings up old things</string>
+    <string name="settings_sim_affect_recall_summary">At most this many old things in one run (0 / 2 / 4 / 6)</string>
+    <string name="settings_sim_affect_recall_l0">Not at all</string>
+    <string name="settings_sim_affect_recall_l1">Now and then</string>
+    <string name="settings_sim_affect_recall_l2">Often</string>
+    <string name="settings_sim_affect_recall_l3">Whenever it fits</string>
+    <string name="settings_sim_affect_honesty">How transparent</string>
+    <string name="settings_sim_affect_honesty_summary">Whether she says where an old memory came from</string>
+    <string name="settings_sim_affect_honesty_l0">No source</string>
+    <string name="settings_sim_affect_honesty_l1">A hint</string>
+    <string name="settings_sim_affect_honesty_l2">Says it plainly</string>
+    <string name="settings_sim_affect_honesty_muted">Old things are off right now, so this one has no effect</string>
+    <string name="settings_sim_affect_note">These five only change how she keeps him company, not what she says; the next proactive opener picks them up</string>
     <string name="settings_explore_off">Not scheduled yet</string>
     <string name="settings_explore_next">next %1$s</string>
     <string name="settings_explore_by_router">She picks her own moment to start</string>

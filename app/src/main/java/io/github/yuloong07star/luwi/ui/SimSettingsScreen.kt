@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -49,15 +50,21 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles
 /** 设置页那四个入口的顺序 (一组 = 小标题 + 卡片, 两个 item) */
 private val SIM_GROUPS = listOf("wake", "send", "router", "sticker")
 
-/** 门户那两颗「设置」多出来两组, 摆在最前面; 加组只改这两张表, 别在 item 里数魔法数 */
-private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS
+/**
+ * 门户那两颗「设置」多出来的三组, 加组只改这两张表, 别在 item 里数魔法数
+ *
+ * `affect` (情绪与关系, 2026-11-21 主人拍板第 ③ 条) 只摆在这里, **不进 `SIM_GROUPS`**:
+ * 设置 → 活动 → 更多设置 仍是原来四组, 一个字节不改
+ */
+private val ACTIVITY_GROUPS = listOf("explore", "proactive") + SIM_GROUPS + listOf("affect")
 
 /**
  * 门户面板进来的**可见组** (2026-11-14 主人: "活动板块除探索和判断里已有的, 剩下缺少的都加到判断的设置里, 包括表情包数量")
  *
  * - 探索面板: 只有 `explore` 一组 (她每天自己看手机那一摊)
- * - 判断面板: **活动里除探索之外的全归它** —— 主动对话 / 主动程度 / 开口节奏与分条 / 判断层 / 表情
- *   (面板上那六行读数在 `wake` + `router` 里, 而"说几条、一张表情多大"也是她开口那套的一部分)
+ * - 判断面板: **活动里除探索之外的全归它** —— 主动对话 / 主动程度 / 开口节奏与分条 / 判断层 / 表情 /
+ *   情绪与关系 (六组; 最后那一组 2026-11-21 起才有, 面板上那六行读数在 `wake` + `router` 里,
+ *   而"说几条、一张表情多大、她多热络"也是她开口那套的一部分)
  * - 设置页 (`withActivity = false`): 仍是原来四组, 一个字节不改
  * - 认不出来的词: 也退"活动里除探索"这一份 —— 门户只有那两颗按钮, 不必处理失败分支
  */
@@ -115,8 +122,9 @@ fun SimSettingsDialog(
     var editingTo by remember { mutableStateOf(false) }
     // 可见组由 focus 决定 (2026-11-14): 探索面板只看探索, 判断面板看活动里剩下的全部
     val visible = visibleGroups(focus, withActivity)
-    // 2026-11-14: 不再按 focus 滚到某一组 —— 判断面板现在有五组, 一进来就滚到最后那组
-    // ("判断层") 会让人以为只剩一组; 从头看, 顺序就是"主动对话 -> 主动程度 -> 分条 -> 判断层 -> 表情"
+    // 2026-11-14: 不再按 focus 滚到某一组 —— 判断面板现在有六组, 一进来就滚到最后那组
+    // ("情绪与关系") 会让人以为只剩一组; 从头看, 顺序就是"主动对话 -> 主动程度 -> 分条 ->
+    // 判断层 -> 表情 -> 情绪与关系"
     val listState = rememberLazyListState()
 
     fun commit(next: SimSetting.Plan = plan) {
@@ -157,9 +165,11 @@ fun SimSettingsDialog(
                 // 2026-11-13: 门户进来时多两组 (探索 / 主动对话), 五个小标题 + 六张卡在原高度里太挤,
                 // 那一侧给 0.66 屏 (设置页那四个入口仍是 0.58, 一个像素没动)
                 // 2026-11-14: 门户那两颗「设置」各自只看自己那半 (1~2 组), 高度跟着收
+                // 2026-11-21: 判断面板收到第六组 (情绪与关系) 之后, 0.66 屏要滚两屏才看得完, 于是再多一档
                 .height((screenHeight * when {
                     !withActivity -> 0.58f
                     visible.size <= 2 -> 0.52f
+                    visible.size >= 6 -> 0.72f
                     else -> 0.66f
                 }).dp),
         ) {
@@ -597,6 +607,95 @@ fun SimSettingsDialog(
             }
             }
 
+            /* ── 五、情绪与关系 (2026-11-20, 方案 §9) ─────────────────────── */
+            if (visible.contains("affect")) {
+            item { SectionSmallTitle(stringResource(R.string.settings_sim_affect_group)) }
+            item {
+                Card {
+                    Column {
+                        // 五格都用下拉档, 不用方案 §9.4 里那个滑块 —— 对 §9.4 的有意偏差:
+                        // 五格都是"有名字的档" (冷静 / 温和 / 偏暖), 滑块上只有 0/1/2 说不清是哪一档
+                        OverlayDropdownPreference(
+                            title = stringResource(R.string.settings_sim_affect_baseline),
+                            summary = stringResource(R.string.settings_sim_affect_baseline_summary),
+                            items = listOf(
+                                stringResource(R.string.settings_sim_affect_baseline_l0),
+                                stringResource(R.string.settings_sim_affect_baseline_l1),
+                                stringResource(R.string.settings_sim_affect_baseline_l2),
+                            ),
+                            selectedIndex = plan.affect.baseline,
+                            onSelectedIndexChange = { index ->
+                                commit(plan.copy(affect = plan.affect.copy(baseline = index)))
+                            },
+                        )
+                        OverlayDropdownPreference(
+                            title = stringResource(R.string.settings_sim_affect_empathy),
+                            summary = stringResource(R.string.settings_sim_affect_empathy_summary),
+                            items = listOf(
+                                stringResource(R.string.settings_sim_affect_empathy_l0),
+                                stringResource(R.string.settings_sim_affect_empathy_l1),
+                                stringResource(R.string.settings_sim_affect_empathy_l2),
+                            ),
+                            selectedIndex = plan.affect.empathy,
+                            onSelectedIndexChange = { index ->
+                                commit(plan.copy(affect = plan.affect.copy(empathy = index)))
+                            },
+                        )
+                        OverlayDropdownPreference(
+                            title = stringResource(R.string.settings_sim_affect_boundary),
+                            summary = stringResource(R.string.settings_sim_affect_boundary_summary),
+                            items = listOf(
+                                stringResource(R.string.settings_sim_affect_boundary_l0),
+                                stringResource(R.string.settings_sim_affect_boundary_l1),
+                                stringResource(R.string.settings_sim_affect_boundary_l2),
+                            ),
+                            selectedIndex = plan.affect.boundary,
+                            onSelectedIndexChange = { index ->
+                                commit(plan.copy(affect = plan.affect.copy(boundary = index)))
+                            },
+                        )
+                        OverlayDropdownPreference(
+                            title = stringResource(R.string.settings_sim_affect_recall),
+                            summary = stringResource(R.string.settings_sim_affect_recall_summary),
+                            items = listOf(
+                                stringResource(R.string.settings_sim_affect_recall_l0),
+                                stringResource(R.string.settings_sim_affect_recall_l1),
+                                stringResource(R.string.settings_sim_affect_recall_l2),
+                                stringResource(R.string.settings_sim_affect_recall_l3),
+                            ),
+                            selectedIndex = plan.affect.recall,
+                            onSelectedIndexChange = { index ->
+                                commit(plan.copy(affect = plan.affect.copy(recall = index)))
+                            },
+                        )
+                        // 提旧事关掉了 (recall = 0) 时透明程度这一格没有落点 (主人 2026-11-21 定: 置灰),
+                        // 摆一行灰字而不给下拉 —— 拨了不生效的格子比不摆更糟
+                        if (plan.affect.recall == 0) {
+                            MutedRow(
+                                title = stringResource(R.string.settings_sim_affect_honesty),
+                                summary = stringResource(R.string.settings_sim_affect_honesty_muted),
+                            )
+                        } else {
+                            OverlayDropdownPreference(
+                                title = stringResource(R.string.settings_sim_affect_honesty),
+                                summary = stringResource(R.string.settings_sim_affect_honesty_summary),
+                                items = listOf(
+                                    stringResource(R.string.settings_sim_affect_honesty_l0),
+                                    stringResource(R.string.settings_sim_affect_honesty_l1),
+                                    stringResource(R.string.settings_sim_affect_honesty_l2),
+                                ),
+                                selectedIndex = plan.affect.honesty,
+                                onSelectedIndexChange = { index ->
+                                    commit(plan.copy(affect = plan.affect.copy(honesty = index)))
+                                },
+                            )
+                        }
+                        Note(stringResource(R.string.settings_sim_affect_note))
+                    }
+                }
+            }
+            }
+
             message?.let { one ->
                 item { Note(one) }
             }
@@ -698,6 +797,20 @@ private fun TwoTimes(from: String, to: String, onFrom: () -> Unit, onTo: () -> U
         summary = to,
         onClick = onTo,
     )
+}
+
+/** 一行灰掉的设置 (拨了不生效时用): 只有标题与说明, 不给交互 (2026-11-21, recall=0 时的透明程度) */
+@Composable
+private fun MutedRow(title: String, summary: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(0.4f)
+            .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
+    ) {
+        Text(text = title, style = textStyles.body1, color = colorScheme.onSurfaceVariantActions)
+        Text(text = summary, style = textStyles.footnote1, color = colorScheme.onSurfaceVariantActions)
+    }
 }
 
 /** 一段灰字 (页首说明、空态、落盘回执都走它) */

@@ -31,6 +31,7 @@ import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
 // 情感状态与共情策略 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`)
 // 纯函数都放那一个文件里: 宿主这一侧只负责"喂读数 / 拼进提示词", 判据可以直接 import 它真跑
 import * as emotion from './emotion/state.mjs'
+import { appendJsonl, readJsonl, writeJsonl } from './emotion/ledger.mjs'
 
 /** Set by the app when it starts the host; both absent everywhere else */
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
@@ -14626,6 +14627,12 @@ function memoryPath(name) {
 /** 情节最多几条: 400 条是方案 §6.1 的上限, 再多召回也翻不动 */
 const EPISODE_MAX = 400
 
+/** 策略那本账最多几行 (方案 §12.1 第五个数: 一周的分布, 500 行足够细也足够小) */
+const PLAN_MAX = 500
+
+/** 关系曲线最多几行 (方案 §12.2: 一天一行, 400 天够看趋势) */
+const RELATION_HISTORY_MAX = 400
+
 /** 画像最多几个键 (方案 §6.1): 白名单之外一律不收 —— 30 个键已经能把一个人写得很细 */
 const PROFILE_MAX = 30
 
@@ -14751,6 +14758,48 @@ async function readRelation() {
   return (await readMemoryJson(memoryPath('relation.json'))) ?? {}
 }
 
+/** 读一本账 (坏行跳过; 读不到就是空) —— 落在 `emotion/ledger.mjs`, 那里能被判据真跑 */
+const readMemoryLines = (path) => readJsonl(path)
+
+/**
+ * 往一本只追加的账上补一行 (只留最新 [max] 行)
+ *
+ * 写不动只 warn: 这两本账 (`plans.jsonl` / `relation.jsonl`) 是给审计脚本看的读数, 不是记忆本身 ——
+ * 不许因为账本写不进去就把这一场主动对话拖死
+ */
+async function appendMemoryJsonl(path, row, max, what) {
+  try {
+    await appendJsonl(path, row, max)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: ${what} was not appended: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/**
+ * 关系曲线那本账: **一天一行** —— 换天就追加, 同一天里只改写最后那一行
+ *
+ * 写不动只 warn (与策略那本同一条纪律): 账本是读数, 不许把这一拍拖死
+ */
+async function recordRelationPoint(path, point, max) {
+  if (!path) return false
+  try {
+    const rows = await readMemoryLines(path)
+    const last = rows.length > 0 ? rows[rows.length - 1] : null
+    if (last !== null && Number(last?.day ?? 0) === Number(point?.day ?? -1)) {
+      rows[rows.length - 1] = point
+      await writeJsonl(path, rows, max)
+    } else {
+      await appendJsonl(path, point, max)
+    }
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: relation.jsonl was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
 /**
  * 关系账跟着事件走 (方案 §6.1 的第三层: **宿主自动, 不调模型**)
  *
@@ -14798,6 +14847,19 @@ async function touchRelation(now, inputs) {
   const SAME = ['firstSeenAt', 'days', 'closeness', 'ignored', 'answeredAt', 'penalizedFor', 'mutedUntil']
   const unchanged = SAME.every((key) => (Number(next[key]) || 0) === (Number(before?.[key]) || 0))
   if (!unchanged) await writeMemoryJson(path, next)
+  // 关系曲线 (方案 §12.2): `relation.json` 每拍覆盖, 曲线要一本账才画得出来 —— **一天一行**:
+  // 换天了补一行, 同一天里亲近度再变只改写那一行 (2026-11-21 审查: 原先"挪 0.02 也补一行",
+  // 而他每接一句就是 +0.02, 400 行封顶几天就满, delta 的起点会被悄悄裁掉)
+  if (!unchanged) {
+    const dayStart = new Date(now)
+    dayStart.setHours(0, 0, 0, 0)
+    await recordRelationPoint(memoryPath('relation.jsonl'), {
+      at: now,
+      day: dayStart.getTime(),
+      days: next.days,
+      closeness: next.closeness,
+    }, RELATION_HISTORY_MAX)
+  }
   return next
 }
 
@@ -15924,6 +15986,7 @@ async function startProactive(ctx, options = {}) {
       + ` (plan ${String(mood.plan?.lead ?? '?')}/${String(mood.plan?.avoid ?? '?')}`
       + `, episodes ${Array.isArray(mood.episodes) ? mood.episodes.length : 0})`)
   }
+  // 策略分布那本账 (方案 §12.1 第五个数) 挪到这一场真的开成之后再补 —— 见下面 `deliverToBall` 之后
   const request = {
     ...ballCreatePlace(workspace),
     ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
@@ -15997,6 +16060,25 @@ async function startProactive(ctx, options = {}) {
     `luwi-channel: proactive conversation ${sessionId} started in ${proactiveRun.workspace}`
       + ` (via ${via}, preset ${presetId ?? 'the registry default'}, tier ${acting})`,
   )
+  // 策略分布那本账 (方案 §12.1 第五个数): `affect.json` 每拍覆盖一次, 一周的分布算不出来 ——
+  // **这一场真开成之后**才补一行 (2026-11-21 审查: 原先落在 `controller.create` 之前, 开不成的场
+  // 也会记一行, 把 planMix 的分母抬高). 写不动只 warn, 不许因为账本把这一场拖死
+  if (mood !== null && typeof mood?.plan === 'object' && mood.plan !== null) {
+    await appendMemoryJsonl(
+      memoryPath('plans.jsonl'),
+      {
+        at: startedAt,
+        via,
+        lead: String(mood.plan.lead ?? ''),
+        avoid: String(mood.plan.avoid ?? ''),
+        budget: Number(mood.plan.budget ?? 0) || 0,
+        why: String(mood.plan.why ?? ''),
+        ref: String(mood.memoryRef ?? ''),
+      },
+      PLAN_MAX,
+      'plans.jsonl',
+    )
+  }
   return {
     started: true,
     session: sessionId,

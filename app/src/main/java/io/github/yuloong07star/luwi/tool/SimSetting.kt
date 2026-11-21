@@ -85,6 +85,18 @@ internal object SimSetting {
      */
     val INTERRUPT_COST_RANGE = 0..3
 
+    /**
+     * 情绪与关系那五格的范围 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md` §9.2)
+     *
+     * 与宿主 `emotion.affectSettingsOf` 的 `AFFECT_SETTING_RANGES` 逐字同一套: 四格 0..2,
+     * 只有「提旧事的频率」是 0..3 (0 / 2 / 4 / 6 条旧事)
+     */
+    val AFFECT_BASELINE_RANGE = 0..2
+    val AFFECT_EMPATHY_RANGE = 0..2
+    val AFFECT_BOUNDARY_RANGE = 0..2
+    val AFFECT_RECALL_RANGE = 0..3
+    val AFFECT_HONESTY_RANGE = 0..2
+
     /** 每一档的缺省值 (与 `qq-bridge/config.json` 的 `socialV2` 对齐, 见 `tools/check-sim.mjs`) */
     object Default {
         const val WAKE_GAP_MIN_MS = 1_500_000L
@@ -121,6 +133,17 @@ internal object SimSetting {
         const val STICKER_MAX_MB = 2
         const val STICKER_MAX_COUNT = 200
         const val STICKER_EVERY_N = 4
+        /**
+         * 情绪与关系那五格的缺省 (方案 §9.2, 与宿主 `AFFECT_SETTING_DEFAULTS` 同一套数)
+         *
+         * 缺键就是这一份: 老 `sim.json` 里没有 `affect` 段, 读起来正是
+         * 「温和 / 先陪 / 正常 / 经常 / 点到」
+         */
+        const val AFFECT_BASELINE = 1
+        const val AFFECT_EMPATHY = 0
+        const val AFFECT_BOUNDARY = 1
+        const val AFFECT_RECALL = 2
+        const val AFFECT_HONESTY = 1
     }
 
     /**
@@ -204,6 +227,21 @@ internal object SimSetting {
         val recentCost: Int = Default.RECENT_COST,
     )
 
+    /**
+     * 情绪与关系那五格 (2026-11-20, 方案 §9.2)
+     *
+     * 五格全是**行为刻度**不是物理上限: 宿主把它们换成提示词里的几句话 (`affectMoodLines` /
+     * `recallRowsOf` / `honestyLine`), 于是"拨一格, 下一场主动开口就变"。顺序就是 `sim.json`
+     * 里那五个键的顺序
+     */
+    data class Affect(
+        val baseline: Int = Default.AFFECT_BASELINE,
+        val empathy: Int = Default.AFFECT_EMPATHY,
+        val boundary: Int = Default.AFFECT_BOUNDARY,
+        val recall: Int = Default.AFFECT_RECALL,
+        val honesty: Int = Default.AFFECT_HONESTY,
+    )
+
     data class Plan(
         val wake: Wake = Wake(),
         val send: Send = Send(),
@@ -211,6 +249,7 @@ internal object SimSetting {
         val interrupt: Interrupt = Interrupt(),
         val proactive: Acting = Acting(),
         val sticker: Sticker = Sticker(),
+        val affect: Affect = Affect(),
     )
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -233,6 +272,7 @@ internal object SimSetting {
         val interrupt = root?.obj("interrupt")
         val proactive = root?.obj("proactive")
         val sticker = root?.obj("sticker")
+        val affect = root?.obj("affect")
         val gapMin = wake.long("gapMinMs", Default.WAKE_GAP_MIN_MS, GAP_RANGE)
         val gapMax = wake.long("gapMaxMs", Default.WAKE_GAP_MAX_MS, GAP_RANGE)
         return Plan(
@@ -281,6 +321,14 @@ internal object SimSetting {
                 maxMb = sticker.int("maxMb", Default.STICKER_MAX_MB, STICKER_MB_RANGE),
                 maxCount = sticker.int("maxCount", Default.STICKER_MAX_COUNT, STICKER_COUNT_RANGE),
                 everyN = sticker.int("everyN", Default.STICKER_EVERY_N, STICKER_EVERY_RANGE),
+            ),
+            // 情绪与关系那五格 (方案 §9.2): 越界夹回 [AFFECT_*_RANGE], 缺键取缺省
+            affect = Affect(
+                baseline = affect.int("baseline", Default.AFFECT_BASELINE, AFFECT_BASELINE_RANGE),
+                empathy = affect.int("empathy", Default.AFFECT_EMPATHY, AFFECT_EMPATHY_RANGE),
+                boundary = affect.int("boundary", Default.AFFECT_BOUNDARY, AFFECT_BOUNDARY_RANGE),
+                recall = affect.int("recall", Default.AFFECT_RECALL, AFFECT_RECALL_RANGE),
+                honesty = affect.int("honesty", Default.AFFECT_HONESTY, AFFECT_HONESTY_RANGE),
             ),
         )
     }
@@ -334,6 +382,14 @@ internal object SimSetting {
             put("maxMb", plan.sticker.maxMb)
             put("maxCount", plan.sticker.maxCount)
             put("everyN", plan.sticker.everyN)
+        })
+        // 情绪与关系那五格 (方案 §9.2): 老 sim.json 缺这一段天然就是缺省, 所以 v 仍是 1
+        put("affect", buildJsonObject {
+            put("baseline", plan.affect.baseline)
+            put("empathy", plan.affect.empathy)
+            put("boundary", plan.affect.boundary)
+            put("recall", plan.affect.recall)
+            put("honesty", plan.affect.honesty)
         })
     }
 

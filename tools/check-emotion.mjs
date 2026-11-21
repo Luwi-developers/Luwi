@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 
+import * as ledger from '../host-plugin/emotion/ledger.mjs'
 import * as emotion from '../host-plugin/emotion/state.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -347,6 +348,8 @@ check('主动场预设引用了同一张人格卡 (方案 §10 #15)', (() => {
   mkdirSync(join(loadDir, 'emotion'), { recursive: true })
   copyFileSync(join(root, 'host-plugin', 'index.mjs'), join(loadDir, 'index.mjs'))
   copyFileSync(join(root, 'host-plugin', 'emotion', 'state.mjs'), join(loadDir, 'emotion', 'state.mjs'))
+  // 账本那一份也要一起拷 (2026-11-21: index.mjs 多了这一条 import, 漏拷就 import 当场炸)
+  copyFileSync(join(root, 'host-plugin', 'emotion', 'ledger.mjs'), join(loadDir, 'emotion', 'ledger.mjs'))
   let loaded = null
   let failure = ''
   try {
@@ -435,6 +438,86 @@ check('留白那一档只说一条, 且带原因', (() => {
   return [line.includes('只说一条'), line.includes('不问第二句'), line.includes(emotion.AVOID_WORDS.advise)]
 })(), [true, true, true])
 check('宿主每一场把这一段的字数与主调打进日志 (真机读数看它)', /proactive mood \$\{Array\.from\(mood\.block\)\.length\} chars/u.test(host), true)
+
+/* ── 十一、五格最后那一格 (透明程度) 与两本账 (2026-11-21 P2/P3 补) ──────────
+ *
+ * `honesty` 那一格此前**没有任何读取方** —— 拨了什么都不变; 而 §12 的「策略分布」与「关系曲线」
+ * 要的是一周的账, 两份覆盖写的 json (`affect.json` / `relation.json`) 都算不出来, 于是各补一本
+ * 只追加的行账. 这里两头都钉: 纯函数那一句, 与宿主真的写了那两行
+ */
+
+check('透明程度: 0 不给话 / 1 点到 / 2 明说 / 坏值按 1', [
+  emotion.honestyLine(0),
+  emotion.honestyLine(1).includes('你之前说过'),
+  emotion.honestyLine(2).includes('原话'),
+  emotion.honestyLine('x').includes('你之前说过'),
+  emotion.honestyLine(9) === emotion.honestyLine(2),
+], ['', true, true, true, true])
+{
+  const one = { id: 'e1', at: NOW, what: '想换一把键盘', open: false, valence: 0 }
+  check('提旧事时才附那一句 (一件旧事都没有就不出现)', [
+    emotion.affectBlockOf({ episodes: [one], settings: { honesty: 1 } }).includes(emotion.honestyLine(1)),
+    emotion.affectBlockOf({ episodes: [one], settings: { honesty: 0 } }).includes(emotion.honestyLine(1)),
+    emotion.affectBlockOf({ episodes: [], settings: { honesty: 2 } }).includes('原话'),
+    emotion.affectBlockOf({ episodes: [one] }).includes(emotion.honestyLine(1)),
+  ], [true, false, false, false])
+}
+
+check('宿主每开一场主动对话记一行策略 (方案 §12.1 第五个数)', [
+  /const PLAN_MAX = 500/u.test(host),
+  /memoryPath\('plans\.jsonl'\)/u.test(host),
+  // 写点必须在"这一场真开成之后" (2026-11-21 审查): 落在 controller.create 之前会把开不成的场也记进去
+  host.indexOf("memoryPath('plans.jsonl')") > host.indexOf('proactive conversation ${sessionId} started'),
+  /\n\s+via,\n\s+lead: String\(mood\.plan\.lead/u.test(host),
+], [true, true, true, true])
+check('关系曲线: 一天一行, 同一天只改写那一行 (方案 §12.2)', [
+  /const RELATION_HISTORY_MAX = 400/u.test(host),
+  /memoryPath\('relation\.jsonl'\)/u.test(host),
+  // 2026-11-21 审查: 原先"亲近度挪 0.02 也补一行", 而他每接一句就是 +0.02, 400 行几天就满
+  /async function recordRelationPoint\(path, point, max\)/u.test(host),
+  /Number\(last\?\.day \?\? 0\) === Number\(point\?\.day \?\? -1\)/u.test(host),
+  /await writeJsonl\(path, rows, max\)/u.test(host),
+], [true, true, true, true, true])
+{
+  // 账本真跑 (2026-11-21 审查: 原先只拿正则 grep 宿主源码, 把 slice(-max) 删掉照样全绿)
+  const dir = join(root, '.lwtmp', `ledger-${process.pid}`)
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, 'plans.jsonl')
+  let wrote = 0
+  for (let index = 0; index < 501; index += 1) {
+    wrote = await ledger.appendJsonl(file, { at: NOW + index, lead: index === 0 ? 'first' : 'later' }, 500)
+  }
+  const kept = await ledger.readJsonl(file)
+  check('账本封顶: 写 501 行只留 500, 丢的是最早那一行', [
+    wrote,
+    kept.length,
+    kept[0].lead,
+    kept[kept.length - 1].at,
+  ], [500, 500, 'later', NOW + 500])
+  check('坏行跳过, 好行照读', await (async () => {
+    writeFileSync(join(dir, 'broken.jsonl'), '{"ok":1}\nnot json\n{"ok":2}\nnull\n', 'utf8')
+    return (await ledger.readJsonl(join(dir, 'broken.jsonl'))).length
+  })(), 2)
+  check('读不到的文件回空 (不许抛)', await ledger.readJsonl(join(dir, 'nope.jsonl')), [])
+  writeFileSync(join(dir, 'blocked'), 'x', 'utf8')
+  let failed = ''
+  try {
+    await ledger.appendJsonl(join(dir, 'blocked', 'x.jsonl'), { at: NOW }, 5)
+  } catch {
+    failed = 'threw'
+  }
+  check('写不动就抛 (由调用方决定 warn 还是当错)', failed, 'threw')
+  const first = await ledger.appendJsonl(join(dir, 'relation.jsonl'), { at: NOW, day: 1, days: 9, closeness: 0.5 }, 400)
+  check('一行一次: 追加后回写了几行', first, 1)
+  // 并发写不能丢行 (2026-11-21 审查): 读-改-写整份重写不是原子追加, 宿主里真会撞
+  const race = join(dir, 'race.jsonl')
+  await Promise.all(Array.from({ length: 8 }, (_, index) => ledger.appendJsonl(race, { at: NOW + index }, 100)))
+  check('8 个并发 append 之后 8 行都在', (await ledger.readJsonl(race)).length, 8)
+  await ledger.writeJsonl(race, [{ at: 1 }, { at: 2 }], 1)
+  check('writeJsonl 也按封顶裁 (留最后一行)', await ledger.readJsonl(race), [{ at: 2 }])
+  rmSync(dir, { recursive: true, force: true })
+}
 
 if (failures > 0) {
   console.error(`check-emotion: FAIL (${failures}/${checks})`)

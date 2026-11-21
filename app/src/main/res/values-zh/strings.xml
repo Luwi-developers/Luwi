@@ -654,6 +654,35 @@
     <string name="settings_sim_sticker_every">多久贴一张</string>
     <string name="settings_sim_sticker_every_summary">大约每 %1$d 条话贴一张 (0 = 不贴)</string>
     <string name="settings_sim_sticker_note">她自己攒的表情 (lw_sticker op=fetch) 与你在门户里加的都按这两条; 超过的单张, 或者多出来的那一张, 都会被拒</string>
+    <string name="settings_sim_affect_group">情绪与关系</string>
+    <string name="settings_sim_affect_baseline">情绪基调</string>
+    <string name="settings_sim_affect_baseline_summary">她平时的温度, 拨到右边更热络</string>
+    <string name="settings_sim_affect_baseline_l0">冷静</string>
+    <string name="settings_sim_affect_baseline_l1">温和</string>
+    <string name="settings_sim_affect_baseline_l2">偏暖</string>
+    <string name="settings_sim_affect_empathy">先陪还是先给办法</string>
+    <string name="settings_sim_affect_empathy_summary">平时开口时, 她先接住人还是先给办法</string>
+    <string name="settings_sim_affect_empathy_l0">先陪</string>
+    <string name="settings_sim_affect_empathy_l1">看情况</string>
+    <string name="settings_sim_affect_empathy_l2">先给办法</string>
+    <string name="settings_sim_affect_boundary">边界严格度</string>
+    <string name="settings_sim_affect_boundary_summary">他没回、他说不想聊时, 她收得多紧</string>
+    <string name="settings_sim_affect_boundary_l0">松</string>
+    <string name="settings_sim_affect_boundary_l1">正常</string>
+    <string name="settings_sim_affect_boundary_l2">严</string>
+    <string name="settings_sim_affect_recall">提旧事的频率</string>
+    <string name="settings_sim_affect_recall_summary">每一场最多想起几件旧事 (0 / 2 / 4 / 6 条)</string>
+    <string name="settings_sim_affect_recall_l0">不提</string>
+    <string name="settings_sim_affect_recall_l1">偶尔</string>
+    <string name="settings_sim_affect_recall_l2">经常</string>
+    <string name="settings_sim_affect_recall_l3">能提就提</string>
+    <string name="settings_sim_affect_honesty">透明程度</string>
+    <string name="settings_sim_affect_honesty_summary">提旧事时, 她要不要说明这是记得的哪一句</string>
+    <string name="settings_sim_affect_honesty_l0">不说来路</string>
+    <string name="settings_sim_affect_honesty_l1">点到</string>
+    <string name="settings_sim_affect_honesty_l2">明说</string>
+    <string name="settings_sim_affect_honesty_muted">提旧事关掉了, 这一格暂时不生效</string>
+    <string name="settings_sim_affect_note">这五格只改"她怎么陪", 不改她说什么; 拨完下一场主动开口就生效</string>
     <string name="settings_explore_off">还没开</string>
     <string name="settings_explore_next">下一次 %1$s</string>
     <string name="settings_explore_by_router">由她自己挑时机开</string>

@@ -449,6 +449,26 @@ export function affectMoodLines(affect) {
   return { base, lead, edge: [...edge] }
 }
 
+/**
+ * 第五格「透明程度」那一句 (方案 §9.2 / §8.3)
+ *
+ * 这一格在 2026-11-21 之前只有 `affectSettingsOf` 收着, **没有第二个读者** —— 拨了什么都不变.
+ * 落点只有一处: **提旧事的时候**才出现. 一件旧事都没有时整句不出现 (与 [episodeBlock] 同一条
+ * 纪律: 不许留一个孤零零的标题)
+ *
+ * 0 = 不说来路 / 1 = 点到 / 2 = 明说
+ */
+export const HONESTY_LINES = Object.freeze([
+  '',
+  '提旧事时说一句「你之前说过」就够, 不用解释你怎么记得',
+  '提旧事时把哪一天、哪句原话带上, 让人看得出这是记忆, 不是猜的',
+])
+
+/** 五格里的那一格 → 一句提示词 (坏值按 1) */
+export function honestyLine(honesty) {
+  return HONESTY_LINES[clampInt(honesty, AFFECT_SETTING_DEFAULTS.honesty, 0, 2)]
+}
+
 /** 把一句中文切成可比的词: 拉丁词按词, 汉字按二元组 (方案 §6.3 的 tokenize) */
 export function tokenize(text) {
   const raw = String(text ?? '').toLowerCase()
@@ -604,6 +624,11 @@ export function affectBlockOf({ affect, facts, relation, plan, episodes, setting
     parts.push(`今天的分寸: ${mood.base}; ${mood.lead}; ${mood.edge.join(' / ')}`)
   }
   const episodesText = episodeBlock(episodes)
-  if (episodesText !== '') parts.push(episodesText)
+  if (episodesText !== '') {
+    parts.push(episodesText)
+    // 透明程度那一格 (方案 §9.2): 只有真的提旧事时才附这一句, 一件旧事都没有就不出现
+    const honest = settings ? honestyLine(settings.honesty) : ''
+    if (honest !== '') parts.push(honest)
+  }
   return parts.join('\n')
 }
