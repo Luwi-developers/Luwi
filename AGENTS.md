@@ -18,14 +18,22 @@
   (双指放大缩小, 没有固定像素档)。r1 / r2 / r3 原地留着; 这一版走 **PR #90** 进 main (`agent/2.8.0-r4-portal-crop`),
   merge commit `2069c82` —— **main 有分支保护, 直接推 heads/main 会被 422 挡**, 要 `lw-api-push.ps1 -Branch …` 推分支
   再 `gh pr merge`
+- **2.8.1 冻结包 = 换签名那一版** (2026-11-22 主人: "2.8.1 要彻底换签名"):
+  `archive\releases\Luwi-2.8.1-frozen-20261122.apk`, **244,245,599 字节**, sha256
+  `ac817348f95c75992846a2d540d89015af6978d117b74f2308998f481c3c0490`, **versionCode 21 / versionName 2.8.1**,
+  `debuggable=false`, V3.0 Signer **`CN=Luwi Release` (SHA-256 `550c0499…6d77b`)**;
+  lineage 在 `archive\releases\luwi-lineage.bin` —— Signer #1 `CN=Android Debug` → Signer #2 `CN=Luwi Release`,
+  **2.8.0 与更早的 debug-key 包都能直接覆盖升级**; 2.7.x 那条链之外的老包才要卸载重装
 - 发布只认 `archive\releases\` 副本 (`app-release.apk` 下次构建就被重写); `versionCode` / `versionName` 由人定
 - 发布包 = `:app:assembleRelease` 的 `app-release.apk` (**2.8.0 #36 起**; 以前发 debug 包), `debuggable=false`;
-  **签名仍是那把旧 debug key** (`CN=Android Debug`) —— 换 key 会让 2.7.10 装不上 2.8.0, 只能卸载重装,
-  `files/dsh-home` (会话 / 凭据 / 设置) 跟着丢; **彻底换签名留到 2.8.1** (2026-11-15 主人定, 原记的 2.9.0 作废),
-  且必须走 `apksigner` 的 v3 lineage
-  (`tools/lw-make-release-keystore.ps1` 已备好那把 `CN=Luwi Release` 的新 key, key 与口令都不进仓库)
-- 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定 / 不可调试) —— **换 key = 全员卸载重装**,
-  并跑 `python tools/apk-bytes.py <apk>` 验无归属区间 (最大那条只应几 KB)
+  **2.8.1 起签名是 release key** (上面那条), 签法固定三条: ① `apksigner rotate` 先出 lineage
+  (`--old-signer` 旧 debug / `--new-signer` 新 release), ② `apksigner sign --lineage <file>` 带两个 signer
+  (`--next-signer` 旧 key 那一份必给, v2 也要它), ③ `--v1-signing-enabled false`、`--min-sdk-version 33`;
+  **换 key 只对"没有 lineage 的那条链"才是卸载重装**, 有 lineage 的 2.8.0 照旧覆盖
+  (`tools/lw-make-release-keystore.ps1` 管那把 key 的生成 / 体检, key 与口令都不进仓库)
+- 发前过 `tools/lw-release-check.ps1` (文件名 / 验签 / 证书固定 / **升级链 lineage** / 不可调试),
+  设备读数用 `-EvidenceFile docs\device-evidence-2.8.1.md`; `python tools/apk-bytes.py <apk>` 验无归属区间
+  (本机没有 python, 退 `zipalign -c -p 4` 那一档)
 - 公告: 对外只叫 `Luwi`, 不写 DSH / LW; 未上真机的项不进公告
 - 发版闸带「分支漂移」: tag 后新起的 agent 分支, tip 未进 main 的必须在 `tools/branch-drift-allow.json` 写 why;
   `flow tasks` 同一条 warning

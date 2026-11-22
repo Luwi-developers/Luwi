@@ -9,9 +9,10 @@
     - 设备读数: 证据文件 (默认 docs\device-evidence.md) 里每一项都有可用读数, 由 tools\check-device-evidence.mjs 判
     - 文件名必须是 app-release.apk (debug 包不进发布流程: 它 debuggable)
     - apksigner verify 必须通过 (v2 / v3 签名在)
-    - 证书必须是项目那把固定的 debug key (CN=Android Debug, D:\apk\.android\debug.keystore)
-      **2.8.0 仍然用旧 key**: 换 key 等于 2.7.10 装不上 2.8.0, 只能卸载重装, files/dsh-home
-      (会话 / 凭据 / 设置) 跟着丢; 换 key 推到 2.9.0 并走 v3 签名轮换 (lineage)
+    - 证书必须是项目那把固定 key: **2.8.1 起是 CN=Luwi Release** (D:\apk\.android\luwi-release.jks);
+      旧的 CN=Android Debug 只出现在 v3 签名轮换的 lineage 里 (它签字授权新 key) —— 2.8.0 因此仍能
+      直接覆盖升级到 2.8.1, 而 2.7.x 及更早那条 debug key 链也照旧; **lineage 必须随包带上**, 缺了
+      就等于换了一把没有任何旧 key 授权的 key, 老用户只能卸载重装
     - aapt2 dump badging 里不能有 application-debuggable 那一行
   最后打一张汇总: FAIL 的那一项连同它缺的东西一起点名; 有 FAIL 就以非零退出码结束,
   发布 / 上传那一步看见非零就不许传
@@ -42,10 +43,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 项目固定那把 key (2.8.0 仍是旧 debug key): 换 key = 所有人卸载重装, 理由见 app/build.gradle.kts
-# 2.9.0 要换成 release key 时, 这两个常量跟着换, 并且那一版必须走 v3 lineage, 否则老用户装不上
-$ExpectedCertSha256 = '652084a902c50f95bf71e6ce6cd0bad8fa5a9b231a146f99016bc17265c97359'
-$ExpectedCertCn = 'CN=Android Debug'
+# 项目固定那把 key: **2.8.1 起换成 release key** (2026-11-22 主人: "2.8.1 要彻底换签名"), 走
+# apksigner 的 v3 签名轮换 —— 旧 debug key 在 lineage 里签字授权新 key, 2.8.0 仍能直接覆盖升级
+# 换 key 本身 = 所有人卸载重装 (只对 2.7.x 及更早成立), 理由见 app/build.gradle.kts
+$ExpectedCertSha256 = '550c0499296de51186cc374d719bb4aaabd9e36e7c13439e9c3951d80fc6d77b'
+$ExpectedCertCn = 'CN=Luwi Release'
 
 $checks = [System.Collections.Generic.List[object]]::new()
 function Add-Check([string]$Name, [string]$Status, [string]$Detail) {
@@ -197,12 +199,27 @@ if (-not (Test-Path -LiteralPath $Apk)) {
             } else {
                 $certSha = ($certLine -replace '.*certificate SHA-256 digest:\s*', '').Trim().ToLowerInvariant()
                 if ($certDn -notmatch [regex]::Escape($ExpectedCertCn)) {
-                    Add-Check '证书' 'FAIL' "主体不是 ${ExpectedCertCn}: $certDn (换 key 要等 2.9.0 + v3 lineage, 否则 2.7.10 覆盖安装不上)"
+                    Add-Check '证书' 'FAIL' "主体不是 ${ExpectedCertCn}: $certDn (2.8.1 起是 CN=Luwi Release; 换回旧 key 会让 lineage 与包对不上)"
                 } elseif ($certSha -ne $ExpectedCertSha256) {
-                    Add-Check '证书' 'FAIL' "摘要不是项目那把 key: $certSha (应为 $ExpectedCertSha256; 换 key 等于所有人卸载重装)"
+                    Add-Check '证书' 'FAIL' "摘要不是项目那把 release key: $certSha (应为 $ExpectedCertSha256)"
                 } else {
                     Add-Check '证书' 'PASS' "$certDn $($certSha.Substring(0, 8))…"
                 }
+            }
+
+            # 升级链: 2.8.1 换了 key, v3 lineage 里必须同时有新旧两条证书 —— 缺了就等于发了一把
+            # 没有任何旧 key 授权的 key, 2.8.0 覆盖安装会回 INSTALL_FAILED_UPDATE_INCOMPATIBLE
+            if (Get-Command $apksigner -ErrorAction SilentlyContinue) {
+                $lineageOut = (& $apksigner lineage --in $Apk --print-certs 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) {
+                    Add-Check '升级链' 'FAIL' "apksigner lineage 读不出来（这个包没有 v3 轮换链）: $($lineageOut.Trim())"
+                } elseif (($lineageOut -match 'Luwi Release') -and ($lineageOut -match 'Android Debug')) {
+                    Add-Check '升级链' 'PASS' 'v3 lineage: CN=Android Debug → CN=Luwi Release'
+                } else {
+                    Add-Check '升级链' 'FAIL' 'lineage 里没有同时出现新旧两把证书: 2.8.0 覆盖安装不上'
+                }
+            } else {
+                Add-Check '升级链' 'SKIP' '没有 apksigner'
             }
 
             # 判据: aapt2 dump badging 里没有 application-debuggable 那一行
