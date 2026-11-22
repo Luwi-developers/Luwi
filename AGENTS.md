@@ -353,7 +353,10 @@
   `send` 段抽); 门户走 `PortalBridge.portalOut(id, next)` 两段水位, 浮球走 `tool/OutFile.kt` 读同一份 ——
   **解析器只一处**, `OutWatch` 一个 `FileObserver` 三个听众 (门户 / 浮球 / 通知); 节奏 (含 `dueAt`)、条数、`seq` 两边必须一致; `luwi`
   档在 `BALL_SILENT_PRESETS` 里 (正文不进框不念), 图走只读 `/lw-out` (`kind:'prefix'` + effect + **只认回环两头**);
-  判据 `tools/check-lw-out.mjs` (169 条) + `OutFileTest` / `BallOutboxTest`
+  **2026-11-22 起只有一条写路**: 宿主那句 `sayToConversation` → `lwOutAppend` 就是全部 —— `lw_router op=say` /
+  `lw_sticker op=say` 以前绕 `overlay op=say|sticker` 只推球 (门户与通知收不到), 现在一并落 jsonl; `overlay`
+  那两支只留作旧 host 兜底, `op=reply` 只做 turn end 补行写不进盘时的降级; 当前没有那一场就抛错, 不静默丢;
+  判据 `tools/check-lw-out.mjs` (172 条) + `OutFileTest` / `BallOutboxTest`
 - **她的话还要在手机上弹一条通知** (2.8.1 #7): 第三个听众 `tool/OutNotify.kt`, 挂在 `DshHostService.onCreate`;
   **应用不在前台才弹** (`getMyMemoryState` 的 importance `> IMPORTANCE_FOREGROUND`), 一句一条 (`lw-say` 渠道 /
   id = 会话与 `seq` 合成 / 点它经 `EXTRA_OPEN_SESSION` 回到那一场), **冷启动只记水位不补历史**, 表情取名字不写占位符
