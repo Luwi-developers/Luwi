@@ -278,7 +278,14 @@
   **2026-11-21 修整 (主人四条)**: ① 插件在 DSH 侧边栏那一行显示名改成 **`luwi终端`** (原「同步」), 同一插件里那枚**沙盒终端面板**
   (在手机的 Linux 沙盒里跑命令: `luwi-term` 入口 + `POST /luwi-sync/term` + `lib/term-channel.mjs`) 与同步无关, 整条下线;
   ② 「正在找电脑」那张卡**只许首探说一次** (`terminalGateState` 的 `firstProbe = busy && !(at > 0)`, 后续每一拍重探按上一次结论画 ——
-  探针 5/15 秒一拍, 之前每拍都翻面, 症状就是"弹窗反复闪"); ③ **进终端不显示门户对话**: `renderFlow` 在
+  探针 5/15 秒一拍, 之前每拍都翻面, 症状就是"弹窗反复闪"); **2026-11-22 再加 3 秒门槛**
+  (主人: "终端还是一直会闪正在连接的窗口, 但只出现不到 1s, 要求若未连接超过 3s 才出现那个窗口"): 那张卡本身
+  闪的就是"进终端当场上屏, 而探针 200 ms 内就回来了"这一拍 —— 所以 `renderTerminalGate` 先黑着,
+  从**进终端那一拍** (`terminalGateSince`, `openTerminal` 里落 `Date.now()`) 起满 `TERMINAL_GATE_GRACE_MS = 3000` 才许弹
+  (算法是纯函数 `terminalGateWait`, 不满时挂一个到点重画的计时器, 不打轮询); 探通就清 0 且一次都不上屏,
+  门槛只卡 `probe: true` 那两档 (探测中 / 电脑没连上), 没配对 / 关着 / 配对码缺口令从配置读得出, 当场就画;
+  退出终端连计时器一起撤; 真机 A 读数 (2026-11-22 20:23, 飞行模式 + 撤 `adb reverse` 完全断网):
+  进终端后 1.39 / 2.57 / 3.65 s 三帧都没有卡, 4.72 s 那帧才见「电脑没连上」; 之前是 1 s 内一闪; ③ **进终端不显示门户对话**: `renderFlow` 在
   `terminalMode && !isTerminalSession(sessionId)` 时清空并记 `TERMINAL_HIDDEN_SIG`, 样式那条
   `#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}` 兜第一帧 (`markTerminalSession` 由
   `renderMeta` / `applyTerminalMode` 各对一次, 退出终端时 `closeTerminal` 作废签名再画回来); ④ 插件的**登录 Luwi 账号 / 权益**

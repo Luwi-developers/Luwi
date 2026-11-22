@@ -3555,6 +3555,54 @@ if (refsSource === '' || bubbleSource === '') {
   expect('client.js', client, 'var firstProbe = busy && !(at > 0)')
   expect('client.js', client, 'if (terminalMode && firstProbe) renderTerminalGate()')
   expect('client.js', client, 'terminalProbe = { at: terminalProbe.at, ok: terminalProbe.ok, busy: true, why: terminalProbe.why }')
+
+  // ②d 2026-11-22: 弹窗的 3 秒门槛 —— 主人: "终端还是一直会闪正在连接的窗口, 但只出现不到 1s,
+  // 要求若未连接超过 3s 才出现那个窗口"
+  //
+  // 闪的就是首探那张「正在找电脑」: 一进终端就上屏, 而探针多半 200 ms 内就回来了. 现在先黑着,
+  // 从"这一轮没连上的第一拍"(`terminalGateSince`) 起满 3 秒才许弹; 门槛的算法是纯函数
+  // (`terminalGateWait`), 这里把源码抽出来真跑, 不复制第二份实现
+  const gateWait = new Function(`${takeFunction('terminalGateWait')}\nreturn terminalGateWait`)()
+  const waitCases = [
+    [0, 1000, 3000, 3000, '还没开始算: 失败关闭, 给满门槛'],
+    [1000, 1200, 3000, 2800, '刚过 200 ms: 还差 2.8 秒'],
+    [1000, 3999, 3000, 1, '差 1 ms 也不许弹'],
+    [1000, 4000, 3000, 0, '满 3 秒: 当场弹'],
+    [1000, 99000, 3000, 0, '掉线久了也一直是 0 (弹出来的卡不会自己收回去)'],
+    [1000, 2000, 0, 0, '门槛为 0: 老行为, 立刻弹'],
+  ]
+  const wrongWait = waitCases.filter((item) => gateWait(item[0], item[1], item[2]) !== item[3])
+  if (wrongWait.length === 0) {
+    note('terminalGateWait: 没连上满 3 秒才许弹窗 (不满先黑着, 到点再画一次)')
+  } else {
+    fail(`terminalGateWait: 门槛算错了 ${JSON.stringify(wrongWait.map((item) => ({ why: item[4], got: gateWait(item[0], item[1], item[2]), want: item[3] })))}`)
+  }
+  expect('client.js', client, 'var TERMINAL_GATE_GRACE_MS = 3000')
+  // 门槛只管"要靠活探测才有结论"的那两档: 配置能直接读出结论的三档当场画, 不让人对着黑屏等
+  const gateFlags = [unpaired.probe, off.probe, legacy.probe, probing.probe, offline.probe, online.probe]
+  if (JSON.stringify(gateFlags) === JSON.stringify([false, false, false, true, true, false])) {
+    note('terminalGateState: 门槛只卡探测中 / 电脑没连上两档 (没配对 / 关着 / 没配好当场就画)')
+  } else {
+    fail(`terminalGateState: probe 那一格不对 ${JSON.stringify(gateFlags)}`)
+  }
+  const gateSource = takeFunction('renderTerminalGate')
+  if (gateSource === '') {
+    fail('client.js: 抽不出 renderTerminalGate')
+  } else {
+    expect('client.js', gateSource, 'if (said.probe === true) {')
+    expect('client.js', gateSource, 'var wait = terminalGateWait(terminalGateSince, now, TERMINAL_GATE_GRACE_MS)')
+    expectOrder('renderTerminalGate: 不满门槛先黑着, 到点才上屏', gateSource, 'if (wait > 0)', 'els.termGate.hidden = false')
+    expect('client.js', gateSource, 'terminalGateTimer = setTimeout(function () {')
+    expect('client.js', gateSource, 'terminalGateSince = 0')
+  }
+  // 进出终端各把门槛那一拍清掉: 上一趟的计时器不许在出去之后还画一次, 也不许把门槛算到这一次头上
+  const gateCloseSource = takeFunction('closeTerminal')
+  const gateOpenSource = takeFunction('openTerminal')
+  expect('client.js', gateCloseSource, 'clearTimeout(terminalGateTimer)')
+  expect('client.js', gateCloseSource, 'terminalGateSince = 0')
+  // 门口那一拍起算 (不从第一帧渲染起算: 穿皮 + 清 DOM 那零点几秒不该算进门槛)
+  expect('client.js', gateOpenSource, 'terminalGateSince = Date.now()')
+  expectOrder('openTerminal: 门槛先起算, 再探一次电脑', gateOpenSource, 'terminalGateSince = Date.now()', 'probeTerminal()')
   // 门户对话那条: 样式兜第一帧, 脚本清 DOM, 退出终端再画回来
   expect('client.js', client, '#lwp-root[data-mode="terminal"]:not([data-term-session="on"]) #lwp-flow{visibility:hidden}')
   expect('client.js', client, 'function markTerminalSession')
