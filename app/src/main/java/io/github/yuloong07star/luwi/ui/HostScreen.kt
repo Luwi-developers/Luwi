@@ -277,6 +277,9 @@ fun HostScreen(modifier: Modifier = Modifier) {
     // 终端那个弹窗里的「扫码配对」(2026-11-21, 落实表 #48): 相机权限只有 Activity 弹得出来,
     // 扫码窗也要这一层才画得出来 —— 页面点那颗钮只落一个 [PortalAsk.Target.PAIR] 掷标
     var pairing by remember { mutableStateOf(false) }
+    // 「现在重启 dsh 吗」那一问的标题 (2026-11-22): 非空时就是开着那一扇 [RestartHostDialog],
+    // 标题按场景换 (配对成功 / 终端已打开 / 终端已关闭 / 已取消配对), 一份状态只挂一扇窗
+    var restartAsk by remember { mutableStateOf<String?>(null) }
     val pairDenied = stringResource(R.string.settings_sync_pair_error_camera)
     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -340,12 +343,14 @@ fun HostScreen(modifier: Modifier = Modifier) {
         if (screenErrorOnce.take(reason, SystemClock.uptimeMillis())) screenError = reason
     }
 
-    // 终端那张扫码窗 (2026-11-21): 解出第一张合法的码就写配置并重启 host —— 重启回来页面自己回到
-    // 终端 (页面把 `terminal=on` 记在 localStorage, 原生这边 [PortalTerminal.open] 也还立着)。
+    // 终端那张扫码窗 (2026-11-21): 解出第一张合法的码就写配置, 然后**问一句要不要现在重启 dsh**
+    // (2026-11-22 主人: "成功配对或关闭终端等需要重新启动的情况, 要弹出重启 dsh 启动终端的弹窗"——
+    // 以前这里一声不吭就把 host 掀掉)。重启回来页面自己回到终端 (页面把 `terminal=on` 记在
+    // localStorage, 原生这边 [PortalTerminal.open] 也还立着)。
     // 已经和**另一台**电脑配过的不在这条路上重配: 那要重置基线, 走设置页那一段 (那边有确认窗)
     if (pairing) {
         val otherPc = stringResource(R.string.terminal_pair_other_pc)
-        val pairedDone = stringResource(R.string.terminal_pair_done)
+        val pairedTitle = stringResource(R.string.terminal_pair_done)
         QrScanDialog(
             onDismissRequest = { pairing = false },
             onPayload = { payload ->
@@ -356,12 +361,25 @@ fun HostScreen(modifier: Modifier = Modifier) {
                 } else {
                     val problem = SyncSetting.applyPairing(context, payload)
                     if (problem == null) {
-                        Toast.makeText(context, pairedDone, Toast.LENGTH_LONG).show()
-                        DshHost.restart(context)
+                        // 配置已经落盘: 重启这一问由下面那扇窗说完, 不再叠一句 Toast
+                        restartAsk = pairedTitle
                     } else {
                         Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
                     }
                 }
+            },
+        )
+    }
+
+    // 需要重启 dsh 才生效的那一问 (2026-11-22): 四个写入点共用 `RestartHostDialog` ——
+    // 门户扫码配对走这里, 设置页那三处 (配对 / 总开关开与关 / 取消配对) 在 `SettingsScreen` 自己弹
+    restartAsk?.let { said ->
+        RestartHostDialog(
+            title = said,
+            onDismissRequest = { restartAsk = null },
+            onRestart = {
+                restartAsk = null
+                DshHost.restart(context)
             },
         )
     }
@@ -2562,17 +2580,18 @@ private fun HostBootPanel(
                 )
             } else {
                 // 设置 -> 外观里挑的那一套图标 (2026-11-22): 上一支的 `splash.json` 是主人的显式覆写,
-                // 没配时画当前套的标记。盒子按"墨迹与内置那份一样大"倒推 —— 内置是 112dp 画布里
-                // 0.46 的墨迹, 女仆那张紧裁过 (inkRatio 1.0), 于是盒子只有 51dp
+                // 没配时画当前套的标记。画框两套共用一个数 (`SPLASH_BOX_DP`), 墨迹由 `splashBitmap`
+                // 统一收到画框的 0.46 —— 换套时图标高度与下面那几行字的位置都不跳 (2026-11-22 主人:
+                // "启动时的不同的图标, 位置不同" 与 "开屏高度采用第一张鲸尾图标的高度")
                 val iconStamp = remember { IconTheme.stamp(context) }
                 val iconSet = remember(iconStamp) { IconTheme.current(context) }
-                val mark = remember(iconStamp, iconSet) { IconTheme.markBitmap(context, iconSet) }
+                val mark = remember(iconStamp, iconSet) { IconTheme.splashBitmap(context, iconSet) }
                 if (mark != null) {
                     Image(
                         bitmap = mark.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.size(IconTheme.splashBoxDp(iconSet).dp),
+                        modifier = Modifier.size(IconTheme.SPLASH_BOX_DP.dp),
                     )
                 } else {
                     Image(

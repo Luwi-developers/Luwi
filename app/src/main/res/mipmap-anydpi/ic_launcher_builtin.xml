@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 内置那套 (鲸尾) 的自适应图标 (2026-11-22)
+
+     应用图标位 (`mipmap/ic_launcher`) 让给缺省套 (女仆) 之后, 内置这套搬到这里, 由
+     `IconSet.BUILTIN.launcherRes` 与清单里 `.IconBuiltin` 那个 alias 指着 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

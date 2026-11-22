@@ -573,11 +573,22 @@ expect('client.js', client, "if (!switchTo(id, 'history'))")
 expect('client.js', client, 'function applyIdentity')
 expect('client.js', client, 'els.brandName.textContent = name')
 expect('client.js', client, 'els.heroName.textContent = name')
-// 空态那张脸与头栏同一个形状 (2026-11-10 主人: "这个新对话屏幕中间的图案应用圆形, 与头像一致")
-if (client.includes('#lwp-hero .lwp-hero-mark img{display:block;width:96px;height:96px;border-radius:999px;object-fit:cover}')) {
-  notes.push('ok   空态那张脸也是圆裁 + 铺满 (与头栏头像同一个形状)')
+// 空态那张脸: 2026-11-10 要"与头栏同一个形状"(圆裁), 2026-11-22 主人又补一条 —— 图标套那张
+// **不许被 96x96 的 cover 裁掉呆毛**, 于是圆裁只留给自选头像, 默认那张按高度定尺寸、宽度跟比例
+if (client.includes('#lwp-hero .lwp-hero-mark[data-photo="on"] img{width:96px;height:96px;border-radius:999px;object-fit:cover}')) {
+  notes.push('ok   自选头像在空态仍是圆裁 + 铺满 (与头栏同一个形状)')
 } else {
-  failures.push('client.js: 空态中间那张图不是圆形 (缺 border-radius:999px / object-fit:cover)')
+  failures.push('client.js: 自选头像在空态不是圆形 (缺 border-radius:999px / object-fit:cover)')
+}
+if (client.includes('#lwp-hero .lwp-hero-mark img{display:block;height:96px;width:auto;max-width:140px;object-fit:contain}')) {
+  notes.push('ok   图标套那张在空态不裁 (按高度定尺寸, 宽度跟图形比例)')
+} else {
+  failures.push('client.js: 图标套那张还被 96x96 的 cover 框着 —— 女仆头顶那根呆毛会被裁掉')
+}
+if (!client.includes('#lwp-hero .lwp-hero-mark{position:relative;width:96px;height:96px;')) {
+  notes.push('ok   中心图标那格不再写死 96x96')
+} else {
+  failures.push('client.js: 中心图标那格仍写死 96x96 (尺寸限制没去掉)')
 }
 expect('client.js', client, 'var AVATAR_CACHE = \'dsh.luwi.portal.avatar\'')
 if (!/els\.brandName\.innerHTML|els\.heroName\.innerHTML/u.test(client)) {
@@ -1942,7 +1953,10 @@ expect('释放仍带 byUser', portalMenu, 'VirtualScreen.release(it, byUser = tr
 // 2026-11-21 终端那一行改口径: 点它 = 打开终端那一页 (手机管电脑), 不再在菜单里翻开关
 expect('终端那一行打开终端页', portalMenu, 'PortalTerminal.open(context)')
 expect('终端的开关只剩设置页一处', String(!/SyncSetting\.setSyncOn\(context, wanted\)/u.test(portalMenu)), 'true')
-expect('终端改完顺手重启 host', hostScreen, 'DshHost.restart(context)')
+// 2026-11-22: 写完不再一声不吭重启 —— 先弹那一问 (`RestartHostDialog`), 重启留在它的「现在重启」里
+expect('终端改完先问一句再重启 (HostScreen)', hostScreen, 'RestartHostDialog(')
+expect('重启那一问的真动作', hostScreen, 'DshHost.restart(context)')
+expect('设置页那几处写入点共用同一问', settingsScreen, 'RestartHostDialog(')
 expect('回到后台走页面那条入口', portalMenu, 'window.__LUWI_PORTAL__')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenu(): String')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenuPick(id: String): String')
@@ -3357,6 +3371,11 @@ if (refsSource === '' || bubbleSource === '') {
   expect('client.js', client, "els.termGate.id = 'lwp-term-gate'")
   expect('client.js', client, "els.termPair = h('button', null, '扫码配对')")
   expect('client.js', client, "els.termExit = h('button', null, '返回')")
+  // 2026-11-22: 卡片那张黑幕**不许吃掉卡片外的点击** —— 终端的出口是头栏那颗「对话」,
+  // 少了 `pointer-events:none` 真机上点它纹丝不动 (卡片自己再收回可点)
+  expect('client.js', client, 'background:rgba(0,0,0,.72);pointer-events:none}')
+  expect('client.js', client, '.lwp-term-card{width:100%;max-width:360px;border-radius:20px;padding:20px 18px 16px;')
+  expect('client.js', client, 'color:#e8e8e8;pointer-events:auto;')
   expect('client.js', client, "els.termPair.onclick = function () { call('portalTerminalPair') }")
   // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」")
   expect('client.js', client, "els.termInstall = h('button', null, '去给 PC 装 luwi终端')")
@@ -3384,8 +3403,16 @@ if (refsSource === '' || bubbleSource === '') {
   expect('client.js', client, 'terminal: function (open) { portal.terminal(open) }')
   expect('client.js', client, 'back: function () { return portal.back() }')
   expect('client.js', client, 'function pickSync')
-  // 那一颗现在打开终端页, 不再翻开关
-  expect('client.js', client, 'openTerminal()\n        // 顺手把原生清单的文案对齐一次')
+  // 2026-11-22 主人: "终端不加返回按钮, 而是从终端按钮返回, 在终端时, 按钮上的字应当是「对话」"
+  // —— 那颗钮成了一个开关: 不在终端时进终端, 在终端里回对话; 头栏那颗「‹ 返回」整块撤掉
+  expect('client.js', client, 'var TERMINAL_BACK_TITLE = \'对话\'')
+  expect('client.js', client, 'var TERMINAL_BACK_HINT = \'回到对话\'')
+  expect('client.js', client, 'function applySyncTitle')
+  expect('client.js', client, 'els.syncButton.textContent = TERMINAL_BACK_TITLE')
+  expect('client.js', client, 'if (terminalMode) closeTerminal()\n        else openTerminal()')
+  expect('终端里没有自己的返回按钮', String(!/lwp-term-back|termBack/u.test(client)), 'true')
+  // 那颗钮的字归 `applyTerminalMode` 每进每出对一次 (页面重载 / 配对重启回来也走这一句)
+  expect('client.js', client, 'applySyncTitle()\n        // 落到电脑那一场没有')
 
   // ②b 进终端落哪一场 / 退出回哪一场的接线 (2026-11-21)
   expect('client.js', client, 'var TERMINAL_RECENT_MS = 60 * 60 * 1000')

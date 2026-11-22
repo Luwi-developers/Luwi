@@ -90,10 +90,12 @@ class IconSetTest {
     }
 
     @Test
-    fun `开屏那一块两套看起来一样大`() {
-        // 内置是 112dp 画布里 0.46 的墨迹; 女仆那张紧裁过, 盒子缩到同一个墨迹尺寸
-        assertEquals(112, IconTheme.splashBoxDp(IconSet.BUILTIN))
-        assertEquals(51, IconTheme.splashBoxDp(IconSet.MAID))
+    fun `开屏的画框与墨迹比例两套共用一个数`() {
+        // 2026-11-22 主人: 换套时图标位置不同要改成一致, 高度取鲸尾那一档。于是画框恒定 112dp,
+        // 墨迹都按内置那份 0.46 归一 (splashBitmap 干这件事), 谁都不再按 markInkRatio 倒推盒子
+        assertEquals(112, IconTheme.SPLASH_BOX_DP.toInt())
+        assertEquals(IconTheme.BASE_INK_RATIO, IconTheme.SPLASH_INK_RATIO)
+        assertEquals(0.46f, IconTheme.SPLASH_INK_RATIO)
     }
 
     @Test

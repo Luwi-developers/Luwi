@@ -5,8 +5,11 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.drawable.Icon
+import android.os.Bundle
 import android.util.Base64
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -22,7 +25,7 @@ import kotlin.math.roundToInt
  * | 桌面图标 / roundIcon / 启动闪屏 / 最近任务 / 应用信息 | `activity-alias` ([apply]) |
  * | 球 / 开屏 / 桌面组件 | [markRes] 与 [markBitmap] (画布原样, 尺寸按 [boxDpForInk] 换算) |
  * | 门户头像 / 空态那张脸 / 设置里的缩略图 | [markTightBitmap] (**紧裁填满**, 见那一支的注释) |
- * | 五处通知 | [notificationIcon]; 三条常驻通知由 [watch] 随切随重投 |
+ * | 五处通知 | [notificationIcon] (small icon) + [withLuwiIcon] 塞的 `miui.appIcon` (彩色整图); 三条常驻通知由 [watch] 随切随重投 |
  *
  * 桌面那一条**只有 alias 一条路**: 启动器读的是 APK 里的资源, 系统没有"运行时替换自己 launcher
  * icon"的 API, 所以每套图标必须在构建时就有一份资源与一个 alias (`IconSet.alias` 与清单逐字对齐)
@@ -33,6 +36,20 @@ import kotlin.math.roundToInt
 internal object IconTheme {
 
     private const val TAG = "LwIcon"
+
+    /**
+     * MIUI / HyperOS 画通知时优先读的那一枚「应用图标」(`Notification.extras` 的键, 与 dumpsys
+     * 里 `miui.appIcon=` 那一行逐字相同)
+     *
+     * 不塞这一个, 它就回落到 `ApplicationInfo.icon` —— 那是清单里静态的 `@mipmap/ic_launcher`,
+     * **永远是内置那套** (activity-alias 只改桌面快捷方式, 改不到它), 于是桌面已经换成女仆、
+     * 状态栏与通知卡片还是鲸尾 (2026-11-22 主人报的「通知栏的图标和 luwi 的图标不一致」)
+     *
+     * **真机 A 读数**: 这一版 HyperOS (22041216C) 塞了它也不认, 面板照旧画 `ApplicationInfo.icon`;
+     * 真正让两处一致的是把缺省套的图放进应用图标位 (见 `mipmap-anydpi/ic_launcher.xml`)。这里照旧塞着,
+     * 给认这个键的 MIUI 版本留一条路, 两枚都指向当前套
+     */
+    const val MIUI_APP_ICON = "miui.appIcon"
 
     /**
      * 内置那份矢量里墨迹占画布的比例 (2026-10-06 定下的 0.46, 球与开屏都按它换算)
@@ -86,18 +103,59 @@ internal object IconTheme {
     fun notificationIcon(context: Context): Int = current(context).notifyRes
 
     /**
+     * 当前套的启动图标 (自适应图标那份 xml)
+     *
+     * 只给通知的 `miui.appIcon` 用 —— 界面内那几处各有各的算法, 别拿这一份顶
+     */
+    fun launcherIconRes(context: Context): Int = current(context).launcherRes
+
+    /**
      * 一块"墨迹占 [inkDp]"的标记要画多大 (dp)
      *
-     * 球与开屏都是"标记本身多大"的语义, 而素材画布里的留白各套不同: 内置矢量的墨迹只占 0.46,
+     * 球那一侧是"标记本身多大"的语义, 而素材画布里的留白各套不同: 内置矢量的墨迹只占 0.46,
      * 女仆那张是紧裁过的满幅。除一下就让两套看起来一样大 —— 内置那一档算出来与旧算式
      * (`ballDraw * 0.65 / 0.46`) 逐字节相同
      */
     fun boxDpForInk(inkDp: Float, set: IconSet): Int =
         max(1, (inkDp / set.markInkRatio).toInt())
 
-    /** 开屏那一块的盒子: 112dp 画布里墨迹原本占 `112 * 0.46` */
-    fun splashBoxDp(set: IconSet = IconSet.DEFAULT): Int =
-        boxDpForInk(112f * BASE_INK_RATIO, set)
+    /**
+     * 开屏那一格 (dp): **两套同一个数**, 换套时图标与下面那几行字的位置都不跳
+     *
+     * 2026-11-22 主人: "启动时的不同的图标, 位置不同, 要改成一致的", 又"以鲸尾图标为标准, 宽度一致"
+     * —— 原来这一格是按 `markInkRatio` 倒推的 (内置 112 / 女仆 51), 女仆那张因此又小又靠下。
+     * 现在画框固定, 墨迹都由 [splashBitmap] 按**宽度**归一, 谁都不用倒推
+     */
+    const val SPLASH_BOX_DP = 112f
+
+    /** 开屏里墨迹占画框的比例: 沿用内置那份 0.46, 也就是鲸尾原本那一档的宽度 */
+    const val SPLASH_INK_RATIO = BASE_INK_RATIO
+
+    /** 开屏那张图的渲染边长上限 (紧裁、按 0.46 归一之后还要缩到屏幕那一档) */
+    private const val SPLASH_RAW_PX = 1024
+
+    /**
+     * 开屏专用的那一张: 紧裁 → **宽度收到画框的 0.46** → 居中放进方画框
+     *
+     * 2026-11-22 主人: "确保宽度一致即可", "以鲸尾图标为标准" —— 于是归一量的口径是**宽度**
+     * (鲸尾宽高都是 0.46 那一档, 女仆等比放到同宽, 高度自然比鲸尾高一截)。左右居中、画框同一个,
+     * 图标整块与下面那几行的相对位置不随套变
+     */
+    fun splashBitmap(context: Context, set: IconSet = current(context)): Bitmap? = runCatching {
+        val tight = markTightBitmap(context, set, SPLASH_RAW_PX) ?: return null
+        val density = context.resources.displayMetrics.density
+        val box = max(1, (SPLASH_BOX_DP * density).roundToInt())
+        val ink = max(1, (box * SPLASH_INK_RATIO).roundToInt())
+        val scale = ink.toFloat() / tight.width
+        val width = max(1, (tight.width * scale).roundToInt())
+        val height = max(1, (tight.height * scale).roundToInt())
+        val scaled = Bitmap.createScaledBitmap(tight, width, height, true)
+        if (scaled !== tight) runCatching { tight.recycle() }
+        val canvas = Bitmap.createBitmap(box, box, Bitmap.Config.ARGB_8888)
+        Canvas(canvas).drawBitmap(scaled, (box - width) / 2f, (box - height) / 2f, null)
+        runCatching { scaled.recycle() }
+        canvas
+    }.onFailure { Log.w(TAG, "splash bitmap failed for ${set.id}", it) }.getOrNull()
 
     /** 一套图标的标记解成位图 (矢量与位图走同一条: 都先变成 Drawable 再画进画布) */
     fun markBitmap(
@@ -314,4 +372,26 @@ internal object IconTheme {
     /** alias 的组件名: 字符串必须与 AndroidManifest 里 `<activity-alias android:name>` 逐字相同 */
     fun component(context: Context, set: IconSet): ComponentName =
         ComponentName(context.packageName, context.packageName + set.alias)
+}
+
+/**
+ * 通知的两枚图标一起上 (2026-11-22)
+ *
+ * - `smallIcon` = 每套那份单色白模 (标准通道, 系统按主题染色)
+ * - `miui.appIcon` = 每套的**启动图标整图** —— MIUI / HyperOS 画通知 (状态栏那一位与通知卡片
+ *   左侧那颗) 时优先读它, 不塞就回落到 `ApplicationInfo.icon`, 而后者是清单里静态的
+ *   `@mipmap/ic_launcher` (内置那套), 于是桌面/球/开屏都换了、通知栏还是鲸尾
+ *
+ * 五处通知 (`DshHostService` / `OverlayService` / `WakeWordService` / `LockReplay` / `LwNotify`)
+ * 必须都走这一条, 漏一处那一处就还是旧图
+ */
+internal fun NotificationCompat.Builder.withLuwiIcon(context: Context): NotificationCompat.Builder {
+    setSmallIcon(IconTheme.notificationIcon(context))
+    val icon = runCatching {
+        Icon.createWithResource(context, IconTheme.launcherIconRes(context))
+    }.getOrNull()
+    if (icon != null) {
+        addExtras(Bundle().apply { putParcelable(IconTheme.MIUI_APP_ICON, icon) })
+    }
+    return this
 }

@@ -941,8 +941,8 @@
     <string name="settings_sync_master_on">开着: 手机能管电脑, 电脑只把最近的对话同步过来</string>
     <string name="settings_sync_master_off">关着: 不拉不推, 后台一趟都不跑 (默认)</string>
     <string name="settings_sync_master_need_pair">先在 PC 面板生成二维码, 再点下面扫码配对</string>
-    <string name="settings_sync_switched_on">终端已打开, 正在重启 DSH host…</string>
-    <string name="settings_sync_switched_off">终端已关闭, 正在重启 DSH host…</string>
+    <string name="settings_sync_switched_on">终端已打开</string>
+    <string name="settings_sync_switched_off">终端已关闭</string>
     <string name="settings_sync_pair">扫码配对</string>
     <string name="settings_sync_pair_unpaired">未配对</string>
     <string name="settings_sync_pair_paired">已配对：%1$s</string>
@@ -957,7 +957,7 @@
     <string name="settings_sync_pair_reconfirm_title">换一台电脑重新配对?</string>
     <string name="settings_sync_pair_reconfirm_body">已和 %1$s 配过对。重新配对会重置同步基线, 并清掉仓库里的旧会话</string>
     <string name="settings_sync_pair_reconfirm_ok">重新配对</string>
-    <string name="settings_sync_pair_done">配对完成, 正在重启 DSH host…</string>
+    <string name="settings_sync_pair_done">配对成功</string>
     <string name="settings_sync_install_pc">去给 PC 装 luwi终端</string>
     <string name="settings_sync_install_pc_summary">在电脑 dsh 里装 luwi-dsh-sync, 装完在它的面板里生成配对码</string>
     <string name="settings_sync_unpair">取消配对</string>
@@ -965,7 +965,7 @@
     <string name="settings_sync_unpair_confirm_title">与这台电脑断开?</string>
     <string name="settings_sync_unpair_confirm_body">%1$s: 会清掉配对码、连接地址与口令, 并关掉终端。本机的对话、收下的图片与文件都留着。要再连, 得让它在面板里重新生成一张配对码</string>
     <string name="settings_sync_unpair_ok">断开</string>
-    <string name="settings_sync_unpair_done">已取消配对, 正在重启 DSH host…</string>
+    <string name="settings_sync_unpair_done">已取消配对</string>
 
     <string name="settings_tavern_title">酒馆</string>
     <string name="settings_tavern_summary_unbound">还没绑定酒馆工作区</string>
@@ -1115,8 +1115,10 @@
     <string name="menu_sync">终端</string>
     <string name="menu_sync_need_remote">未配对</string>
     <string name="menu_sync_paired">已配对：%1$s</string>
-    <string name="terminal_pair_done">配对完成, 正在重启 DSH host…</string>
+    <string name="terminal_pair_done">配对成功</string>
     <string name="terminal_pair_other_pc">已经和另一台电脑配过对：换电脑重新配对会重置同步基线, 请到 设置 → 终端 里换</string>
+    <string name="terminal_restart_body">终端是 dsh 里的插件, 配置改完要重启 dsh 才生效。\n现在重启吗?</string>
+    <string name="terminal_restart_ok">现在重启</string>
     <string name="settings_sync_interval">周期拉取</string>
     <string name="settings_sync_interval_summary">%1$d 分钟一次; 0 = 关</string>
     <string name="settings_sync_interval_dialog">0 - 60 分钟 (0 = 关)</string>

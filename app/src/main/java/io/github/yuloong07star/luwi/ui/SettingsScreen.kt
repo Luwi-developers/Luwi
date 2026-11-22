@@ -2166,6 +2166,10 @@ private fun SyncItems() {
     var pending by remember { mutableStateOf<PairPayload?>(null) }
     // 取消配对那一问 (2026-11-22): 说清会断开什么、不会删什么, 确认之后才写
     var unpairing by remember { mutableStateOf(false) }
+    // 「现在重启 dsh 吗」那一问 (2026-11-22 主人: "成功配对或关闭终端等需要重新启动的情况, 要弹出
+    // 重启 dsh 启动终端的弹窗"): 非空时就是开着那一扇 [RestartHostDialog], 标题按场景换 ——
+    // 配对成功 / 终端已打开 / 终端已关闭 / 已取消配对这四件都是"写完要重启才生效"的
+    var restartAsk by remember { mutableStateOf<String?>(null) }
     var interval by remember(snapshot.pullInterval) { mutableIntStateOf(snapshot.pullInterval) }
 
     val pairDone = stringResource(R.string.settings_sync_pair_done)
@@ -2177,7 +2181,7 @@ private fun SyncItems() {
     // 状态那一句里的"仓库在哪": 有主机名就报主机名, 本机路径就报那一段路径
     val repoWhere = snapshot.repoHost.ifBlank { snapshot.sessionRemote }
 
-    /** 一张合法配对码落到配置里: 写 → 说一声 → 重启 host → 关窗 (一个动作四件事) */
+    /** 一张合法配对码落到配置里: 写 → 问一句要不要现在重启 → 关窗 (重启那一问见文件末尾那扇窗) */
     fun applyPairing(payload: PairPayload) {
         val problem = SyncSetting.applyPairing(context, payload)
         if (problem != null) {
@@ -2187,8 +2191,7 @@ private fun SyncItems() {
         notice = null
         pending = null
         scanning = false
-        Toast.makeText(context, pairDone, Toast.LENGTH_LONG).show()
-        DshHost.restart(context)
+        restartAsk = pairDone
     }
 
     PlaceholderItems(stringResource(R.string.settings_sync_note))
@@ -2206,8 +2209,8 @@ private fun SyncItems() {
         onCheckedChange = { wanted ->
             val problem = SyncSetting.setSyncOn(context, wanted)
             if (problem == null) {
-                Toast.makeText(context, if (wanted) switchedOn else switchedOff, Toast.LENGTH_LONG).show()
-                DshHost.restart(context)
+                // 开与关都要重启 host 才生效 (插件挂载时读配置): 问一句, 不替人掀页面
+                restartAsk = if (wanted) switchedOn else switchedOff
             } else {
                 // 没有仓库地址可开: 把那句原因照实说 (它同时是一条"先去配对"的指路)
                 Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
@@ -2416,8 +2419,7 @@ private fun SyncItems() {
                         val problem = SyncSetting.unpair(context)
                         unpairing = false
                         if (problem == null) {
-                            Toast.makeText(context, unpairDone, Toast.LENGTH_LONG).show()
-                            DshHost.restart(context)
+                            restartAsk = unpairDone
                         } else {
                             notice = problem
                         }
@@ -2453,6 +2455,19 @@ private fun SyncItems() {
                 )
             }
         }
+    }
+
+    // 「现在重启 dsh 吗」(2026-11-22): 上面四个写入点 (配对 / 总开关开 / 总开关关 / 取消配对)
+    // 写完都落到这一扇窗 —— 终端是 dsh 插件, 挂载时读配置, 不重启就什么都不变
+    restartAsk?.let { said ->
+        RestartHostDialog(
+            title = said,
+            onDismissRequest = { restartAsk = null },
+            onRestart = {
+                restartAsk = null
+                DshHost.restart(context)
+            },
+        )
     }
 }
 
