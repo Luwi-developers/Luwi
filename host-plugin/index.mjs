@@ -5276,8 +5276,8 @@ const TOOLS = [
       + 'Fetching does NOT put anything in the conversation. **Putting a sticker '
       + 'into the conversation does not happen here**: pass that file name to lw_say\'s sticker '
       + 'parameter, which is the one channel she speaks through (it references the file, it does not '
-      + 'copy it). op=say is the host\'s own low-level path (the ball\'s reply box) and is not for you '
-      + 'to call.',
+      + 'copy it). op=say is the host\'s own low-level path (it writes one line into the current '
+      + 'conversation, same out file as lw_say) and is not for you to call.',
     parameters: {
       op: {
         type: 'string',
@@ -5444,8 +5444,8 @@ const TOOLS = [
         if (id.includes('/') || id.includes('\\') || id.includes('..')) {
           throw new Error(`that is not a sticker file name: ${id}`)
         }
-        reportSticker(id)
-        return `the sticker ${id} is on its way to the ball (it shows above the reply, one at a time)`
+        await reportSticker(id)
+        return `the sticker ${id} went into the conversation (portal, ball and the notification all read the same line)`
       }
       throw new Error(`op has to be list, pick, tag, fetch or say, not "${op}"`)
     },
@@ -5756,8 +5756,9 @@ const TOOLS = [
     description:
       'The decision layer: whether she should speak up right now, and about what. op=judge runs the '
       + 'judgement over the phone\'s own numbers (how long the heaviest app has been running today, the '
-      + 'things she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts '
-      + 'one sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
+      + 'things she remembers about you, the recent signals) and returns { say, kind, why }; op=say says '
+      + 'one sentence into the current conversation (portal, ball and the notification all read that one '
+      + 'out file); op=status shows the last decision and the rules in effect. '
       + 'op=rules sets how long one app has to run today before it counts as long (appMinutes - any app, '
       + 'not just games; the home screen, the keyboard and Luwi herself never count) and how many days '
       + 'ahead a promise is brought up (wishDays) - '
@@ -5775,7 +5776,7 @@ const TOOLS = [
       },
       text: {
         type: 'string',
-        description: 'For op=say: the sentence to put on the ball',
+        description: 'For op=say: the sentence to say into the current conversation',
       },
       appMinutes: {
         type: 'number',
@@ -5806,8 +5807,8 @@ const TOOLS = [
       if (op === 'say') {
         const text = String(args?.text ?? '').trim()
         if (!text) throw new Error('op=say needs text')
-        reportSay(text)
-        return `said it on the ball: ${text}`
+        await reportSay(text)
+        return `said it in the conversation: ${text} (portal, ball and the notification all read that one line)`
       }
       if (op === 'rules') {
         const written = await writeRouterRules({
@@ -9353,6 +9354,22 @@ async function lwOutAppend(sessionId, fields, prepare, atHint) {
   mark.seq = seq
   mark.at = at
   mark.chars = lwOutChars(row)
+  return row
+}
+
+/**
+ * 她发消息的唯一出口 (2026-11-22): 只写 `lw/out` 那一份 jsonl, 门户 / 球 / 通知三端各自读它
+ *
+ * 任何"她说话"的路径都从这里走, 不许再绕 `overlay op=say` / `op=sticker` 直推 —— 那几路只到球,
+ * 门户与通知永远收不到. 一次 `lwOutAppend` 写一行, 于是"球有、门户没有"在数据层就不成立
+ *
+ * 没有可说的那一场时抛错 (不静默丢): 调用方要么先开一场, 要么把这句话落进当前那一场
+ */
+async function sayToConversation(sessionId, fields) {
+  const id = String(sessionId ?? '').trim()
+  if (id === '') throw new Error('there is no conversation to speak into')
+  const row = await lwOutAppend(id, fields)
+  console.log(`luwi-channel: said one ${fields?.kind ?? 'text'} line #${row.seq} into ${id}`)
   return row
 }
 
@@ -13459,6 +13476,10 @@ function replyChannelText(text) {
 /**
  * 把一句回答推回浮标那个输入通道 (主人 2026-10-05: "回复结果也传此通道")
  *
+ * **这一条从 2026-11-22 起只是降级路**: 她说话的正路是 [sayToConversation] → `lwOutAppend` → `lw/out`
+ * 那一份 jsonl (门户 / 球 / 通知三端各自读它). `overlay op=reply` 只在 turn end 补行**写不进 jsonl**
+ * (没有 DSH_HOME / 盘满) 时才被调用 —— 它不是第二条通道, 平时一句都不走这里
+ *
  * 与「正在想」那一句同一个去向 (`overlay` 那一个通道方法), 只是 op=reply: 应用那侧把它画进那块
  * 650 px 的文字框里 —— 问与答落在同一块框, 眼睛不必在浮标与页面之间来回找
  *
@@ -13506,33 +13527,33 @@ function reportNote(ctx, text) {
 }
 
 /**
- * 推一句"她自己想说的"到浮标 (2026-11-07: 球是门户)
+ * 她说一句"自己想说的" (2026-11-22: 统一出口)
  *
- * 与 [reportReply] 的差别只在应用那一侧怎么画: 这一句**不占回复框、不带 session、不动"下一刻把话
- * 投给谁"那笔账** —— 它是一句主动说的话, 主人看一眼就知道她为什么这时候开口
+ * 以前这一句只推球 (`overlay op=say`), 门户与通知收不到. 现在它写进当前那一场的 `lw/out`,
+ * 三端从同一份 jsonl 读 —— 一次写入, 谁都不用再各推一份
  *
- * 推不出去只记一行: 球被关掉的时候它本来就没有落脚处, 那不是要报给模型的错
+ * 当前没有可说的那一场时抛错: 调用方要么先开一场, 要么把这句话落进正在说的那一场
  */
-function reportSay(text) {
+async function reportSay(text) {
   const line = String(text ?? '').trim()
-  if (!line) return
-  void call('overlay', { op: 'say', text: line.slice(0, 200) }).catch((error) => {
-    console.warn(`luwi-channel: the ball did not get a bubble: ${error?.message ?? error}`)
-  })
+  if (!line) return null
+  const current = typeof voiceDelivery.current === 'string' ? voiceDelivery.current.trim() : ''
+  if (current === '') throw new Error('there is no current conversation to say that in')
+  return sayToConversation(current, { kind: 'text', text: line })
 }
 
 /**
- * 贴一张表情到浮标 (2026-11-07 主人: "能让 luwi 发表情包更具人味")
+ * 她贴一张表情 (2026-11-22: 统一出口)
  *
- * 参数是 `$DSH_HOME/lw/stickers/` 里的**文件名**: 应用那一侧按名字读图 (带路径的名字它不认),
- * 于是"她贴哪一张"这件事只由这个目录里有什么决定
+ * 参数是 `$DSH_HOME/lw/stickers/` 里的**文件名** (带路径的名字不认). 与 [reportSay] 同一条出口:
+ * 写进当前那一场的 `lw/out`, 三端都从那份 jsonl 读, 不再只推球
  */
-function reportSticker(id) {
+async function reportSticker(id) {
   const name = String(id ?? '').trim()
-  if (!name) return
-  void call('overlay', { op: 'sticker', id: name }).catch((error) => {
-    console.warn(`luwi-channel: the sticker did not reach the ball: ${error?.message ?? error}`)
-  })
+  if (!name) return null
+  const current = typeof voiceDelivery.current === 'string' ? voiceDelivery.current.trim() : ''
+  if (current === '') throw new Error('there is no current conversation to put that sticker in')
+  return sayToConversation(current, { kind: 'sticker', sticker: name })
 }
 
 /* ── 判断层的落点 (2026-11-07) ─────────────────────────────────────────────── */

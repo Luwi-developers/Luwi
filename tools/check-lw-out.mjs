@@ -262,6 +262,21 @@ check('新会话的第一条也上球 (第一次见到的变更不整场跳过)'
   /if \(changed\.isEmpty\(\)\) \{/.test(overlay),
 ], [true, true, true])
 
+// 2026-11-22: 统一发送出口 —— 她发消息只写 lw/out 那一份, 门户 / 球 / 通知三端各自读它.
+// 以前 `lw_router op=say` / `lw_sticker op=say` 走 `overlay op=say/sticker` 只推球, 门户与通知收不到
+const sayExit = bodyOf(host, 'async function sayToConversation(')
+check('统一出口 sayToConversation 存在, 且只调 lwOutAppend (不另开写路)',
+  sayExit !== '' && /await lwOutAppend\(id, fields\)/.test(sayExit)
+    && !/call\('overlay'/.test(sayExit))
+check('reportSay 走统一出口 (不再 overlay op=say 只推球)',
+  /async function reportSay\(text\)/.test(host)
+    && /sayToConversation\(current, \{ kind: 'text', text: line \}\)/.test(host)
+    && !/call\('overlay', \{ op: 'say'/.test(host))
+check('reportSticker 走统一出口 (不再 overlay op=sticker 只推球)',
+  /async function reportSticker\(id\)/.test(host)
+    && /sayToConversation\(current, \{ kind: 'sticker', sticker: name \}\)/.test(host)
+    && !/call\('overlay', \{ op: 'sticker'/.test(host))
+
 /* ── 九、浮球那侧的正文闸 + persona 的出口 ──────────────────────────────── */
 
 check('luwi 在 BALL_SILENT_PRESETS 里 (正文不进框、不念)', /const BALL_SILENT_PRESETS = new Set\(\['explore', 'luwi'\]\)/.test(host))
