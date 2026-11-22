@@ -3808,6 +3808,25 @@ if (lookSource === '') {
   notes.push('ok   fetchLook: 换套才搬一次 mark')
 }
 
+// 空态那圈描边只给自选头像 (2026-11-22): 原来拿 `avatar !== MARK_PNG` 判, 而换套之后 avatar 是
+// data URL, 永远不等于内嵌常量 —— 终端页那张截图外面那圈框就是这么冒出来的 (`face.json` 里 avatar 是空串)
+const heroSource = sliceFunction('heroNode')
+if (heroSource === '') {
+  failures.push('client.js: 抽不出 heroNode (空态那圈描边的判据)')
+} else if (!/data-photo', identity\.photo \? 'on' : 'off'/u.test(heroSource)) {
+  failures.push('heroNode: 描边没按 identity.photo 判 (图标套那张会被当成自选头像)')
+} else if (/identity\.avatar !== MARK_PNG/u.test(heroSource)) {
+  failures.push('heroNode: 还在拿 MARK_PNG 认"自选头像"')
+} else {
+  notes.push('ok   heroNode: 描边只给自选头像')
+}
+if (identitySource !== '' && !/avatar = ''[\s\S]{0,600}?var photo = avatar !== ''/u.test(identitySource)) {
+  failures.push('applyIdentity: photo 没在终端清空 avatar 之后算')
+} else if (identitySource !== '') {
+  notes.push('ok   applyIdentity: 终端里 photo 一定是 false')
+}
+expect('client.js', client, "'dsh.luwi.portal.mark2'")
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)

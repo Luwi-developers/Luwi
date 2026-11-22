@@ -124,7 +124,7 @@
     <string name="settings_luwi_icon_summary">现在用的是 %1$s</string>
     <string name="settings_luwi_icon_dialog">挑一个图标, 桌面、球与开屏会一起换</string>
     <string name="settings_luwi_icon_builtin">鲸尾</string>
-    <string name="settings_luwi_icon_maid">Luwi 头像</string>
+    <string name="settings_luwi_icon_maid">鲸鱼娘头像</string>
     <string name="settings_luwi_icon_switched">已经换成「%1$s」</string>
     <string name="settings_luwi_icon_failed">这个图标这次换不过来, 还是原来那个</string>
     <string name="settings_luwi_icon_desktop_note">换完之后桌面图标可能挪到另一屏</string>

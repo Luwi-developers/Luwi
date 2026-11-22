@@ -8,7 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -40,6 +42,12 @@ import io.github.yuloong07star.luwi.tool.UsageLedger
 class DshHostService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** 换套时摘掉那个听众 ([IconTheme.watch]) —— 服务没了不该还挂着一个会去碰通知的回调 */
+    private var unwatchIcon: (() -> Unit)? = null
+
+    /** 重投通知要回主线程 (回调从设置页的 IO 上来的) */
+    private val main = Handler(Looper.getMainLooper())
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -49,6 +57,11 @@ class DshHostService : Service() {
             notification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
+        // **换图标要重投这一条** (2026-11-22 主人: "通知图标没有随图标变化"): 常驻通知是起服务
+        // 那一刻 build 一次的, 切图标只重画球的话, 状态栏里会一直是旧那套的鲸尾
+        unwatchIcon = IconTheme.watch {
+            main.post { repostNotification() }
+        }
         // The privileged channel belongs to the app process, which outlives any activity, and the
         // socket the host's tools call it through is opened here so that whoever starts the host
         // finds it already there
@@ -172,6 +185,8 @@ class DshHostService : Service() {
     }
 
     override fun onDestroy() {
+        unwatchIcon?.invoke()
+        unwatchIcon = null
         // 会话锁先放: 它是这个进程按住的那一把, 进程要走了留着没人能放 (2026-11-07)
         LwSessionLock.releaseAll()
         DshHost.stop()
@@ -213,7 +228,32 @@ class DshHostService : Service() {
             .setSmallIcon(IconTheme.notificationIcon(this))
             .setContentIntent(open)
             .setOngoing(true)
+            // 重投只换图, 不该再响一声 (这条是 LOW 档常驻, 但别让 ROM 把它当新通知动一遍)
+            .setOnlyAlertOnce(true)
             .build()
+    }
+
+    /**
+     * 换了图标套之后把这一条重投一次 (2026-11-22)
+     *
+     * 先按"再进一次前台"走 (`startForeground` 同类型常量): 那是系统认的那条路; 极少数 ROM 从后台
+     * 拒掉这一下 (API 34+ 的 while-in-use 限制那一类), 就退成普通 `notify` —— 同一个 id, 同一条
+     * 通知就地换图, 不叠第二条。两条都失败只留日志, 不把服务带崩
+     */
+    private fun repostNotification() {
+        runCatching {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        }.onFailure { refused ->
+            Log.w(TAG, "re-posting the host notification with the new icon failed: ${refused.message}")
+            runCatching {
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification())
+            }.onFailure { Log.w(TAG, "the host notification could not be re-posted", it) }
+        }
     }
 
     companion object {

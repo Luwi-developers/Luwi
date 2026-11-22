@@ -3694,6 +3694,10 @@ class OverlayService : Service() {
             stripTitle?.text = title(word)
             lastRing = ring
         }
+        // **换图标也要重投这一条通知** (2026-11-22 主人: "通知图标没有随图标变化"): 通知是
+        // `fend()` / 文字变化时 build 的, 单靠重画球, 状态栏里那枚 small icon 一直是旧那套。
+        // 与上面共用一个 `restyled` 判据, 不另起计时器
+        if (restyled) announce(notice(word))
         // 球外那几圈涟漪 (说往外扩 / 听往回收): 那两档才挂窗, 别的档位把窗摘掉 (见 [applyPulse])
         applyPulse(word, ring)
         // 有状态就滑出来说话, 闲着就收边 (参考那套的 `floating_ball_idle_to_edge`)

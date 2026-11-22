@@ -20,8 +20,9 @@ import kotlin.math.roundToInt
  * | 位置 | 走哪一条 |
  * | :-- | :-- |
  * | 桌面图标 / roundIcon / 启动闪屏 / 最近任务 / 应用信息 | `activity-alias` ([apply]) |
- * | 球 / 开屏 / 桌面组件 / 门户头像 | [markRes] 与 [markBitmap] |
- * | 五处通知 | [notificationIcon] |
+ * | 球 / 开屏 / 桌面组件 | [markRes] 与 [markBitmap] (画布原样, 尺寸按 [boxDpForInk] 换算) |
+ * | 门户头像 / 空态那张脸 / 设置里的缩略图 | [markTightBitmap] (**紧裁填满**, 见那一支的注释) |
+ * | 五处通知 | [notificationIcon]; 三条常驻通知由 [watch] 随切随重投 |
  *
  * 桌面那一条**只有 alias 一条路**: 启动器读的是 APK 里的资源, 系统没有"运行时替换自己 launcher
  * icon"的 API, 所以每套图标必须在构建时就有一份资源与一个 alias (`IconSet.alias` 与清单逐字对齐)
@@ -44,12 +45,33 @@ internal object IconTheme {
     /** 应用内标记解码的上限 (球 48dp / 开屏 112dp, 3x 屏上 512 已经两倍有余) */
     private const val MARK_BITMAP_PX = 512
 
-    /** 门户头像那个 28dp 圆框: 192px 是 2x 屏的两倍, 再大只是白搬 base64 */
-    private const val PORTAL_MARK_PX = 192
+    /**
+     * 交出去那份 (门户 / 缩略图) 先按这个边长渲染一遍
+     *
+     * 内置那份矢量只有 108dp (`ic_launcher_foreground`) 的 intrinsic, 在 3x 屏上约 300px; 直接按
+     * intrinsic 画, 紧裁之后只剩 0.46 那一小块, 再放到 96dp 的空态里就糊了。矢量按请求边长重绘
+     * 不吃这个亏 —— 紧裁完再缩回 [PORTAL_MARK_PX]
+     */
+    private const val PORTAL_MARK_RAW_PX = 1024
+
+    /** 门户那份 data URL 的边长上限 (96dp 的空态在 3x 屏上是 288px, 384 已经有余) */
+    private const val PORTAL_MARK_PX = 384
+
+    /** 紧裁时算作"有墨"的最低 alpha: 描出来的矢量边缘有一圈近透明杂点, 拿它当边界框会白留一圈 */
+    private const val INK_ALPHA_MIN = 8
 
     /** 门户那份 data URL 的单槽缓存 (只有当前套一个 key, 换套就作废) */
     private var cachedUrlKey: String = ""
     private var cachedUrl: String = ""
+
+    /**
+     * 换完套要跟着动的那些人 (三条常驻通知各订一个, 见 [watch])
+     *
+     * 常驻通知是**起服务那一刻 build 一次**, 之后不再重投 —— 切图标只重画球的话, 状态栏里就一直是
+     * 旧那套的图 (2026-11-22 主人: "通知图标没有随图标变化")。这里只负责"叫一声", 重投那一下由
+     * 订阅方自己做 (它们才知道自己的通知 id 与文案)
+     */
+    private val listeners = LinkedHashSet<() -> Unit>()
 
     /** 现在用的是哪一套 */
     fun current(context: Context): IconSet = IconSetting.current(context)
@@ -96,16 +118,113 @@ internal object IconTheme {
     }.onFailure { Log.w(TAG, "mark bitmap failed for ${set.id}", it) }.getOrNull()
 
     /**
-     * 门户那张缺省头像 (data URL)
+     * 一套图标的标记, **紧裁之后铺满整格** (给门户与设置里的缩略图)
+     *
+     * 与 [markBitmap] 的差别就是那一圈留白: 内置那套是 108dp 画布里一只 0.46 的鲸尾, 女仆那张是满幅
+     * 紧裁 —— 同样塞进 96px 的空态圆框, 鲸尾只剩女仆那张的 46%, 主人 2026-11-22 报的"尺寸太小"
+     * 就是它。球与开屏不能吃这一份: 它们的盒子按 [boxDpForInk] 用 [IconSet.markInkRatio] 反算,
+     * 换成紧裁的就白乘了一趟
+     */
+    fun markTightBitmap(
+        context: Context,
+        set: IconSet = current(context),
+        side: Int = PORTAL_MARK_PX,
+    ): Bitmap? = runCatching {
+        val raw = renderSquare(context, set, PORTAL_MARK_RAW_PX) ?: return null
+        val box = inkBox(raw)
+        val cropped = if (box == null) {
+            raw
+        } else {
+            val cut = Bitmap.createBitmap(raw, box[0], box[1], box[2] - box[0], box[3] - box[1])
+            if (cut !== raw) runCatching { raw.recycle() }
+            cut
+        }
+        val longest = max(cropped.width, cropped.height)
+        if (longest <= side) return cropped
+        val scale = side.toFloat() / longest
+        val scaled = Bitmap.createScaledBitmap(
+            cropped,
+            max(1, (cropped.width * scale).roundToInt()),
+            max(1, (cropped.height * scale).roundToInt()),
+            true,
+        )
+        if (scaled !== cropped) runCatching { cropped.recycle() }
+        scaled
+    }.onFailure { Log.w(TAG, "tight mark failed for ${set.id}", it) }.getOrNull()
+
+    /** 按 [side] 的方画布渲染一次 (矢量因此按请求的分辨率重绘, 不再被 108dp 的 intrinsic 卡住) */
+    private fun renderSquare(context: Context, set: IconSet, side: Int): Bitmap? {
+        val drawable = context.getDrawable(set.markRes) ?: return null
+        val bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        drawable.setBounds(0, 0, side, side)
+        drawable.draw(Canvas(bitmap))
+        return bitmap
+    }
+
+    /**
+     * 墨迹实际占的那块矩形 (`left / top / right / bottom`), 整幅都空时回 null
+     *
+     * 逐行取, 只分配一行宽的数组: 门户那一趟是 1024 见方的中间图, 整张 `getPixels` 要多搬 4 MB
+     */
+    private fun inkBox(bitmap: Bitmap): IntArray? {
+        val width = bitmap.width
+        val height = bitmap.height
+        val row = IntArray(width)
+        var left = width
+        var right = -1
+        var top = -1
+        var bottom = -1
+        for (y in 0 until height) {
+            bitmap.getPixels(row, 0, width, 0, y, width, 1)
+            var x = 0
+            while (x < width) {
+                // alpha 低于这一档当空白: 描出来的矢量边缘有近透明的杂点, 别把整幅都当成墨
+                if (row[x] ushr 24 > INK_ALPHA_MIN) {
+                    if (top < 0) top = y
+                    bottom = y
+                    if (x < left) left = x
+                    if (x > right) right = x
+                }
+                x += 1
+            }
+        }
+        if (right < 0 || bottom < 0) return null
+        return intArrayOf(left, top, right + 1, bottom + 1)
+    }
+
+    /**
+     * 订"换套了"这一声, 回一个摘掉自己的函数
+     *
+     * 回调在**发起切换那个线程**上 (`apply` 从设置页的 IO 上调进来), 谁要动界面或通知就自己
+     * `Handler.post` 一下 —— 与 `OutWatch` 同一条写法
+     */
+    fun watch(listener: () -> Unit): () -> Unit {
+        synchronized(listeners) { listeners.add(listener) }
+        return { synchronized(listeners) { listeners.remove(listener) } }
+    }
+
+    /** 切成功了叫一声 (失败回滚那条不叫, 通知不该跟着一次没成的切换动) */
+    private fun publish() {
+        val copy = synchronized(listeners) { listeners.toList() }
+        for (listener in copy) {
+            runCatching { listener() }
+        }
+    }
+
+    /**
+     * 门户那张缺省头像 (data URL), 以及设置里那两格缩略图吃的同一份紧裁图
      *
      * 页面跑在 WebView 里, 拿不到 app 画沙盒里的资源, 所以与背景 / 头像同一条路: 在宿主这一侧编成
      * base64 一起交出去。页面按 `markVer` (就是套的 id) 缓存, 换套才搬一次
+     *
+     * **紧裁之后才交** (2026-11-22): 画布原样那份里内置那套的鲸尾只占 0.46, 96dp 的圆框里看着像
+     * 半个; 页面侧同一份 key 还换了名字 (`MARK_CACHE` 那个 `mark2`), 老机器上缓存的旧小数一起作废
      */
     @Synchronized
     fun markDataUrl(context: Context): String? {
         val set = current(context)
         if (cachedUrlKey == set.id && cachedUrl.isNotEmpty()) return cachedUrl
-        val bitmap = markBitmap(context, set, PORTAL_MARK_PX) ?: return null
+        val bitmap = markTightBitmap(context, set, PORTAL_MARK_PX) ?: return null
         val encoded = runCatching {
             val buffer = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, buffer)
@@ -142,7 +261,12 @@ internal object IconTheme {
     fun apply(context: Context, set: IconSet): Boolean {
         val previous = current(context)
         if (!IconSetting.save(context, set)) return false
-        if (enforce(context, set)) return true
+        if (enforce(context, set)) {
+            // 三条常驻通知靠这一声重投自己 (`DshHostService` / `OverlayService` / `WakeWordService`),
+            // 否则状态栏里一直是起服务那一刻那套的图 (2026-11-22 主人: "通知图标没有随图标变化")
+            publish()
+            return true
+        }
         runCatching { IconSetting.save(context, previous) }
         enforce(context, previous)
         return false
