@@ -47,6 +47,7 @@ import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.tool.IconTheme
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 import io.github.yuloong07star.luwi.tool.BallAttach
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.LwSpeak
@@ -4285,7 +4286,7 @@ class OverlayService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(IconTheme.notificationIcon(this))
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .addAction(0, getString(R.string.overlay_close), close)
             .setOngoing(true)

@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标位 (= 清单里 `<application android:icon>`), 承载**缺省那套** (2026-11-22)
+
+     这一位没有运行时开关: activity-alias 只改桌面快捷方式, 改不到 `ApplicationInfo.icon`,
+     而 MIUI / HyperOS 通知栏与通知卡片左侧那颗读的就是它 —— 主人 2026-11-22 报的
+     "通知栏的图标和 luwi 的图标不一致" 就是这条 (那时这里是内置鲸尾, 桌面已经是女仆)。
+     所以缺省套 (女仆) 的图同时占住这一位; 内置那套另存 `ic_launcher_builtin`,
+     切到它时桌面/球/开屏/缩略图都跟着换, 只有这一位仍是女仆 (系统没有动态换应用图标的 API)
+
+     由 tools/make-icon-sets.py 的 `app-icon` 开关一并写, 别手改: 换图重跑那一步 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+    <foreground android:drawable="@mipmap/ic_launcher_maid_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_maid_mono" />
 </adaptive-icon>

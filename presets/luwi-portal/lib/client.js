@@ -117,6 +117,15 @@ window.__ModuleLoader__.load({
      */
     var TERMINAL_TITLE = 'luwi终端'
     var TERMINAL_KEY = 'dsh.luwi.portal.terminal'
+    /**
+     * 终端里那颗头栏钮的字 (2026-11-22 主人: "终端不加返回按钮, 而是从终端按钮返回, 在终端时,
+     * 按钮上的字应当是「对话」")
+     *
+     * 于是终端**没有**自己的「‹」: 进出的那一颗从头到尾是同一个位置 —— 不在终端时写「终端」(文案跟原生
+     * 清单走), 在终端里写这一个, 点它就回门户那一场对话 (见 [pickSync] / [applySyncTitle])
+     */
+    var TERMINAL_BACK_TITLE = '对话'
+    var TERMINAL_BACK_HINT = '回到对话'
     /** 终端里点头像列几场 (主人: "只显示最近pc会话") */
     var TERMINAL_HISTORY_MAX = 20
     /** 探一次对端最多等这么久 / 弹窗开着时多久再探一次 */
@@ -1006,11 +1015,15 @@ window.__ModuleLoader__.load({
       '#lwp-hero::before{content:"";position:absolute;left:50%;top:50%;width:min(78vw,340px);',
       'height:min(78vw,340px);transform:translate(-50%,-52%);border-radius:50%;pointer-events:none;',
       'background:radial-gradient(circle,rgba(1,180,255,.12),rgba(1,180,255,0) 62%)}',
-      '#lwp-hero .lwp-hero-mark{position:relative;width:96px;height:96px;display:grid;place-items:center;',
+      '#lwp-hero .lwp-hero-mark{position:relative;display:grid;place-items:center;',
       'animation:lwp-float 4.2s ease-in-out infinite}',
       // 空态那张脸与头栏**同一个形状** (2026-11-10 主人: "这个新对话屏幕中间的图案应用圆形, 与头像一致"):
       // 圆裁 + 铺满, 96px 的框不变 —— 方图 (相册里随手选的那张) 也不会挤出一个方角
-      '#lwp-hero .lwp-hero-mark img{display:block;width:96px;height:96px;border-radius:999px;object-fit:cover}',
+      // **2026-11-22 起图标套那张不受这个尺寸限制**: 96x96 的 cover 会把女仆头顶那根呆毛裁掉
+      // (主人: "去除门户中心图标的尺寸限制, 否则会把呆毛也裁剪了"), 于是默认那张改按高度定尺寸、
+      // 宽度跟着图形比例走, `contain` 不裁; 圆裁与铺满只给自选头像 (`data-photo="on"`)
+      '#lwp-hero .lwp-hero-mark img{display:block;height:96px;width:auto;max-width:140px;object-fit:contain}',
+      '#lwp-hero .lwp-hero-mark[data-photo="on"] img{width:96px;height:96px;border-radius:999px;object-fit:cover}',
       // 换了自定义头像之后, 头栏那颗 28px 有白描边才立得住; 空态这张大图同理 (原来是品牌图, 有自带留白)
       '#lwp-hero .lwp-hero-mark[data-photo="on"] img{box-shadow:0 0 0 2px var(--lwp-glass-fill,rgba(252,253,254,.9)),',
       '0 0 0 3px rgba(15,23,42,.08)}',
@@ -1198,9 +1211,6 @@ window.__ModuleLoader__.load({
       '#lwp-root[data-mode="terminal"] .lwp-meta{display:none}',
       '#lwp-root[data-mode="terminal"] #lwp-tabs .lwp-tab{color:#cfcfcf;',
       'border-color:rgba(255,255,255,.18);background:transparent}',
-      '#lwp-term-back{appearance:none;border:0;background:transparent;color:#cfcfcf;font-size:15px;',
-      'line-height:1;padding:4px 6px 4px 2px;margin-right:2px}',
-      '#lwp-term-back[hidden]{display:none}',
       '#lwp-root[data-mode="terminal"] #lwp-flow{color:#d8d8d8}',
       // 终端里还没落到电脑那一场 (`data-term-session` 不是 on) 时, 门户那几条对话一条都不给看 (2026-11-21 主人:
       // "进入终端时, 门户的对话仍显示在终端, 进入终端时应当不显示") —— `visibility` 而不是 `display`,
@@ -1217,11 +1227,14 @@ window.__ModuleLoader__.load({
       '#lwp-root[data-mode="terminal"] #lwp-input::placeholder{color:#8a8a8a}',
       '#lwp-root[data-mode="terminal"] .lwp-hero-name{color:#e6e6e6}',
       '#lwp-root[data-mode="terminal"] .lwp-working{color:#9a9a9a;background:rgba(255,255,255,.06)}',
+      // 卡片外的点击**不许被这层遮罩吃掉** (2026-11-22): 终端的出口是头栏那颗「对话」, 而这一层
+      // 是 `position:fixed;inset:0` 的黑幕 —— 不给 `pointer-events:none` 的话头栏那几颗一个都点不到
+      // (真机实测: 点「对话」纹丝不动, 只有卡片上的「返回」能退)。卡片自己再收回可点
       '#lwp-term-gate{position:fixed;inset:0;z-index:30;display:flex;align-items:center;',
-      'justify-content:center;padding:0 24px;background:rgba(0,0,0,.72)}',
+      'justify-content:center;padding:0 24px;background:rgba(0,0,0,.72);pointer-events:none}',
       '#lwp-term-gate[hidden]{display:none}',
       '#lwp-term-gate .lwp-term-card{width:100%;max-width:360px;border-radius:20px;padding:20px 18px 16px;',
-      'background:#111;border:1px solid rgba(255,255,255,.14);color:#e8e8e8;',
+      'background:#111;border:1px solid rgba(255,255,255,.14);color:#e8e8e8;pointer-events:auto;',
       'box-shadow:0 18px 60px rgba(0,0,0,.6)}',
       '#lwp-term-gate .lwp-term-title{font-size:15px;font-weight:600;line-height:22px;margin-bottom:8px}',
       '#lwp-term-gate .lwp-term-body{font-size:12.5px;line-height:20px;color:#b9b9b9;margin-bottom:16px;',
@@ -1451,6 +1464,14 @@ window.__ModuleLoader__.load({
       var tickNote = ''
       // 「虚拟屏」那一项的二级项: 原生清单里的一项带 children 时暂存在这里, 抽屉切进 `screen` 态再画
       var screenItems = []
+      /**
+       * 原生清单里 `sync` 那一项的两句 (2026-11-22)
+       *
+       * 存下来是为了"进 / 出终端时只改字不跑一趟桥": 终端里那颗钮写「对话」, 出来要立刻写回清单
+       * 里那一句 (设置里 rename 过也是它) —— 见 [applySyncState] / [applySyncTitle]
+       */
+      var syncTitle = ''
+      var syncSummary = ''
       var sending = false
       /**
        * 键盘那一格 (px): 宿主推过来的高度, 只在门户盖着时才有值 (2026-11-09)
@@ -6026,32 +6047,55 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 头栏那颗钮现在写什么字 (2026-11-22)
+       *
+       * 两档: **在终端里 = 「对话」**(点它回门户那一场), 否则 = 原生清单里那一句「终端」。
+       * 清单那两句先由 [applySyncState] 存进 `syncTitle` / `syncSummary`, 于是开关终端、页面重载、
+       * 配对回来这几种时刻都不用再走一趟桥就能把字换对
+       */
+      function applySyncTitle() {
+        if (!els.syncButton) return
+        if (terminalMode) {
+          els.syncButton.textContent = TERMINAL_BACK_TITLE
+          els.syncButton.title = TERMINAL_BACK_HINT
+          els.syncButton.setAttribute('aria-label', TERMINAL_BACK_HINT)
+          return
+        }
+        var title = syncTitle === '' ? SYNC_TITLE : syncTitle
+        var summary = syncSummary
+        els.syncButton.textContent = title
+        els.syncButton.title = summary
+        els.syncButton.setAttribute('aria-label', summary === '' ? title : title + ': ' + summary)
+      }
+
+      /**
        * 头栏那颗「终端」的文案 / 已打开态 / 无障碍名字全从原生清单来
        *
        * 文案与状态只有一处实现 (`PortalMenu.items()` 读 `menu_sync` 那两句), 页不抄第二份 ——
-       * 于是设置里改名、开与关的 summary 变化, 这颗钮自己就跟上了
+       * 于是设置里改名、开与关的 summary 变化, 这颗钮自己就跟上了。**字写哪一句归 [applySyncTitle]
+       * 说** (终端里换「对话」), 这一份只负责把清单那两句记下来并把亮灯对齐
        * @param menu 一份新的清单
        */
       function applySyncState(menu) {
         if (!els.syncButton) return
         var item = syncItemOf(menu)
-        var title = item && typeof item.title === 'string' && item.title !== '' ? item.title : SYNC_TITLE
-        var summary = item && typeof item.summary === 'string' ? item.summary : ''
-        els.syncButton.textContent = title
-        els.syncButton.title = summary
-        els.syncButton.setAttribute('aria-label', summary === '' ? title : title + ': ' + summary)
+        syncTitle = item && typeof item.title === 'string' && item.title !== '' ? item.title : SYNC_TITLE
+        syncSummary = item && typeof item.summary === 'string' ? item.summary : ''
         els.syncButton.setAttribute('data-on', item && item.on === true ? 'on' : 'off')
+        applySyncTitle()
       }
 
       /**
-       * 头栏那颗「终端」(2026-11-20 从 `⋯` 抽屉里搬上来)
+       * 头栏那颗钮 (2026-11-20 从 `⋯` 抽屉里搬上来)
        *
-       * 2026-11-21 改了口径: 这一颗不再翻开关, 而是**打开终端那一页** (手机管电脑)。开关仍在
-       * 设置页那一段; 这颗钮的文案与"配没配对"仍从原生清单 (`portalMenu()`) 来 —— 一处 rename
-       * 两处跟着变, 页面不抄第二份
+       * 2026-11-21 改了口径: 这一颗不再翻开关, 而是**打开终端那一页** (手机管电脑); 开关仍在
+       * 设置页那一段。2026-11-22 起它是**一个开关**: 不在终端时进终端, 在终端里回对话 ——
+       * 终端不再有自己的「‹ 返回」(主人: "终端不加返回按钮, 而是从终端按钮返回, 在终端时按钮上的字
+       * 应当是「对话」"), 于是同一个位置既是入口也是出口
        */
       function pickSync() {
-        openTerminal()
+        if (terminalMode) closeTerminal()
+        else openTerminal()
         // 顺手把原生清单的文案对齐一次 (它仍写着「已配对: 谁」/「未配对」)
         setTimeout(function () { applySyncState(call('portalMenu')) }, 160)
       }
@@ -7506,13 +7550,14 @@ window.__ModuleLoader__.load({
         root.setAttribute('data-term-session', isTerminalSession(sessionId) ? 'on' : 'off')
       }
 
-      /** 把终端那身皮穿上 / 脱掉 (整页黑 + 那颗「‹」+ 强制的身份) */
+      /** 把终端那身皮穿上 / 脱掉 (整页黑 + 头栏那颗写「终端 / 对话」+ 强制的身份) */
       function applyTerminalMode() {
         if (root !== null) {
           if (terminalMode) root.setAttribute('data-mode', 'terminal')
           else root.removeAttribute('data-mode')
         }
-        if (els.termBack) els.termBack.hidden = !terminalMode
+        // 出口那颗钮的字: 终端里「对话」, 出来写回原生清单那一句 (2026-11-22)
+        applySyncTitle()
         // 落到电脑那一场没有: 决定对话上不上屏 (见 [markTerminalSession])
         markTerminalSession()
         // 身份: 终端里名字与头像都归这一页说了算 (见 [applyIdentity] 里那一段覆盖)
@@ -8005,15 +8050,8 @@ window.__ModuleLoader__.load({
         mark.appendChild(els.busy)
         els.brand.appendChild(mark)
         els.brand.onclick = function () { openHistory() }
-        // 终端那颗「‹ 返回」(2026-11-21): 只在终端里出现 —— 那是一位全黑的面, 没有别的出口
-        els.termBack = h('button')
-        els.termBack.id = 'lwp-term-back'
-        els.termBack.type = 'button'
-        els.termBack.textContent = '‹'
-        els.termBack.setAttribute('aria-label', '退出终端')
-        els.termBack.hidden = true
-        els.termBack.onclick = function () { closeTerminal() }
-        head.appendChild(els.termBack)
+        // 头栏这里**不留**「‹ 返回」 (2026-11-22 主人: "终端不加返回按钮, 而是从终端按钮返回")
+        // 终端的出口是右边那颗钮: 在终端里它写「对话」(见 [applySyncTitle]), 点一下回门户那一场
         head.appendChild(els.brand)
         // 昵称与读数: 只是标识 (不进那颗头像按钮, 否则又变成"整块可点")
         var brandText = h('span', 'lwp-brand-text')
@@ -8039,9 +8077,8 @@ window.__ModuleLoader__.load({
         els.speakButton.innerHTML = SPEAKER_OFF_ICON
         els.speakButton.onclick = function () { toggleSpeak() }
         tabs.appendChild(els.speakButton)
-        // 「同步」搬出抽屉并改名「终端」(2026-11-20): 动作仍走原生清单那一条
-        // (`portalMenuPick('sync')` → `toggleSync`: 翻开关 + Toast + 重启 host), 文案与开关态也从
-        // `portalMenu()` 来 —— 页不另写死字, 一处 rename 两处跟着变
+        // 「同步」搬出抽屉并改名「终端」(2026-11-20): 文案与开关态从 `portalMenu()` 来 ——
+        // 页不另写死字, 一处 rename 两处跟着变; 2026-11-22 起它在终端里改写成「对话」([applySyncTitle])
         els.syncButton = h('button', 'lwp-tab', SYNC_TITLE)
         els.syncButton.id = 'lwp-sync-btn'
         els.syncButton.type = 'button'

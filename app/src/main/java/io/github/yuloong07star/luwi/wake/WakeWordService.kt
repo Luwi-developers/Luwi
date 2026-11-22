@@ -38,6 +38,7 @@ import io.github.yuloong07star.luwi.overlay.BallSpot
 import io.github.yuloong07star.luwi.overlay.OverlayService
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.tool.IconTheme
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 import io.github.yuloong07star.luwi.tool.LwSpeech
 import io.github.yuloong07star.luwi.tool.LwSpeak
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -1702,7 +1703,7 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(IconTheme.notificationIcon(this))
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .addAction(0, "停止", stop)
             .setOngoing(true)

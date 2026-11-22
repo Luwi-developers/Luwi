@@ -110,6 +110,43 @@ check('自适应图标引用了自己的前景', anydpi.includes('@mipmap/ic_lau
 check('自适应图标引用了自己的单色层', anydpi.includes('@drawable/ic_launcher_maid_mono'), true)
 check('自适应图标复用内置那条背景渐变', anydpi.includes('@drawable/ic_launcher_background'), true)
 
+/* ── 二点五、应用图标位 = 缺省套 (2026-11-22): 通知栏画的那一枚就是它 ─────── */
+
+// 这一位没有运行时开关 (activity-alias 改不到 ApplicationInfo.icon), 但 MIUI / HyperOS 的通知栏
+// 与通知卡片左侧那颗读的正是它 —— 桌面换了、这里不换, 就是"通知栏和 luwi 图标不一致"
+check(
+  '内置那套的 alias 指着自己的图标位',
+  /android:name="\.IconBuiltin"[\s\S]*?android:icon="@mipmap\/ic_launcher_builtin"/u.test(
+    byName.get('.IconBuiltin') ?? '',
+  ),
+  true,
+)
+check(
+  '内置那套的 alias 指着自己的圆图标位',
+  (byName.get('.IconBuiltin') ?? '').includes('android:roundIcon="@mipmap/ic_launcher_builtin_round"'),
+  true,
+)
+check(
+  '女仆那套的 alias 指着自己的图标',
+  (byName.get('.IconMaid') ?? '').includes('android:icon="@mipmap/ic_launcher_maid"'),
+  true,
+)
+
+const slotIcon = await read('app/src/main/res/mipmap-anydpi/ic_launcher.xml')
+const slotRound = await read('app/src/main/res/mipmap-anydpi/ic_launcher_round.xml')
+check('应用图标位是缺省那套的前景', slotIcon.includes('@mipmap/ic_launcher_maid_foreground'), true)
+check('应用图标位是缺省那套的单色层', slotIcon.includes('@drawable/ic_launcher_maid_mono'), true)
+check('圆的应用图标位同一份', slotRound.includes('@mipmap/ic_launcher_maid_foreground'), true)
+check('应用图标位不再指内置矢量', slotIcon.includes('@drawable/ic_launcher_foreground'), false)
+
+const builtinXml = await read('app/src/main/res/mipmap-anydpi/ic_launcher_builtin.xml')
+check('内置那套另存了自适应图标', builtinXml.includes('@drawable/ic_launcher_foreground'), true)
+check(
+  '内置那套的圆图标也在',
+  await exists('app/src/main/res/mipmap-anydpi/ic_launcher_builtin_round.xml'),
+  true,
+)
+
 /* ── 三、运行时: 缺省与 alias 的字符串 ─────────────────────────────────────── */
 
 const setting = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/IconSetting.kt')
@@ -141,8 +178,12 @@ expect('球在心跳里读 stamp', ball, 'IconTheme.stamp(context)')
 expect('球的心跳把图标套算进重画档', overlay, 'IconTheme.stamp(this)')
 expect('球的心跳真的用上那一档', overlay, '|| restyled')
 expect('球贴的是当前套的位图', ball, 'IconTheme.markBitmap(context, set)')
-expect('开屏画当前套的位图', host, 'IconTheme.markBitmap(context, iconSet)')
-expect('开屏的盒子按墨迹算', host, 'IconTheme.splashBoxDp(iconSet)')
+expect('开屏画的是归一后那张', host, 'IconTheme.splashBitmap(context, iconSet)')
+expect('开屏画框两套共用一个数', host, 'IconTheme.SPLASH_BOX_DP')
+expectNot('开屏不再按套倒推盒子', host, 'IconTheme.splashBoxDp(')
+expect('IconTheme 里有归一的墨迹比例', theme, 'const val SPLASH_INK_RATIO = BASE_INK_RATIO')
+expect('IconTheme 里有共用的画框', theme, 'const val SPLASH_BOX_DP = 112f')
+expect('归一那支走紧裁', theme, 'markTightBitmap(context, set, SPLASH_RAW_PX)')
 expect('组件取当前套的 mark', widget, 'IconTheme.markRes(context)')
 expect('门户交 mark', bridge, 'put("mark", mark)')
 expect('门户交 markVer', bridge, 'put("markVer", iconSet.id)')
@@ -160,9 +201,22 @@ const notifyFiles = [
 ]
 for (const relative of notifyFiles) {
   const text = await read(relative)
-  check(`${relative} 的通知小图标跟套走`, text.includes('IconTheme.notificationIcon('), true)
+  // 2026-11-22 下半场: 通知的图标改成两枚一起上 (`withLuwiIcon` = small icon + `miui.appIcon`),
+  // 后一枚是 MIUI / HyperOS 状态栏与通知卡片实际画的那张 —— 不塞它那里就回落成静态的
+  // `@mipmap/ic_launcher`, 桌面换了、通知栏不换
+  check(`${relative} 的通知图标跟套走`, text.includes('.withLuwiIcon('), true)
+  expectNot(`${relative} 不再各自只上 small icon`, text, 'IconTheme.notificationIcon(context))')
   expectNot(`${relative} 没有写死的通知图标`, text, '.setSmallIcon(R.drawable.ic_notification)')
 }
+
+/* ── 四点四、通知两枚图标的那一份接线 (2026-11-22) ───────────────────────── */
+
+expect('IconTheme 供启动图标', theme, 'fun launcherIconRes(')
+expect('IconTheme 有那个 extras 键', theme, 'const val MIUI_APP_ICON = "miui.appIcon"')
+expect('扩展里上 small icon', theme, 'setSmallIcon(IconTheme.notificationIcon(context))')
+expect('扩展里上 miui.appIcon', theme, 'putParcelable(IconTheme.MIUI_APP_ICON, icon)')
+expect('每套登记自己的启动图标', setting, 'launcherRes = R.mipmap.ic_launcher_maid')
+expect('内置那套登记自己的启动图标', setting, 'launcherRes = R.mipmap.ic_launcher_builtin')
 
 /* ── 四点五、回补 (2026-11-22): 通知随切随重投 / 门户那份紧裁填满 ──────────── */
 
@@ -191,6 +245,8 @@ expect('生成脚本写 mark', generator, 'ic_mark_')
 expect('生成脚本写 launcher', generator, 'ic_launcher_')
 expect('生成脚本写通知', generator, 'ic_notification_')
 expect('生成脚本写自适应 xml', generator, 'ic_launcher_{set_id}.xml')
+expect('生成脚本有 app-icon 开关', generator, "add_argument(\n        '--app-icon'")
+expect('生成脚本写应用图标位', generator, 'slot_xml(set_id)')
 
 const summary = `${checks - failures}/${checks}`
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} ${summary}`)

@@ -11,8 +11,12 @@
      不被裁), 所以内容只占 0.62
 
 用法:
-  python tools/make-icon-sets.py
-  python tools/make-icon-sets.py --source tools/brand/luwi-maid.png --id maid --res app/src/main/res
+  python tools/make-icon-sets.py --source tools/brand/luwi-maid.png --id maid --res app/src/main/res --app-icon
+
+`--app-icon` (2026-11-22) 额外把这一套写进**应用图标位** (`mipmap/ic_launcher*`): 清单里
+`<application android:icon>` 指着的那一位, 也是 MIUI / HyperOS 拿画通知栏与通知卡片图标的那一位。
+它没有运行时开关 (alias 改不到 `ApplicationInfo.icon`), 所以只有**缺省套**带这个开关;
+内置那套的位图与自适应 xml 另存 `ic_launcher_builtin*` (由 `tools/make-icons.py` 生成)
 
 生成 (以 id = maid 为例):
   mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_maid.webp            方形 (渐变打底 + 内容)
@@ -22,6 +26,7 @@
   drawable-nodpi/ic_mark_maid.png                              应用内标记 (透明底, 紧裁)
   drawable-nodpi/ic_launcher_maid_mono.png                     单色层 (alpha 白模)
   drawable-nodpi/ic_notification_maid.png                      通知小图标 (24dp 白模)
+  mipmap-*/ic_launcher.webp 与 mipmap-anydpi/ic_launcher.xml    仅 `--app-icon`: 应用图标位
 
 **不进构建**: 产物提交进仓库, Gradle 不认识这个脚本, 换图时手工跑一次
 """
@@ -179,11 +184,34 @@ def adaptive_xml(name, background_ref, foreground_ref, mono_ref):
     )
 
 
+def slot_xml(set_id):
+    """应用图标位那一份 (清单里 `<application android:icon>` 指过去的名字)"""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<!-- 应用图标位 (= 清单里 `<application android:icon>`), 承载**缺省那套** (2026-11-22)\n'
+        '\n'
+        '     这一位没有运行时开关: activity-alias 只改桌面快捷方式, 改不到 `ApplicationInfo.icon`,\n'
+        '     而 MIUI / HyperOS 通知栏与通知卡片左侧那颗读的就是它 —— 桌面换了、这里不换就是\n'
+        '     "通知栏的图标和 luwi 的图标不一致"。所以缺省套的图同时占住这一位\n'
+        '     由 tools/make-icon-sets.py 的 `app-icon` 开关一并写, 别手改: 换图重跑那一步 -->\n'
+        '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <background android:drawable="@drawable/ic_launcher_background" />\n'
+        f'    <foreground android:drawable="@mipmap/ic_launcher_{set_id}_foreground" />\n'
+        f'    <monochrome android:drawable="@drawable/ic_launcher_{set_id}_mono" />\n'
+        '</adaptive-icon>\n'
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description='Render one switchable Luwi icon set')
     parser.add_argument('--source', required=True, help='the RGBA artwork this set is rendered from')
     parser.add_argument('--id', required=True, help='resource suffix, e.g. maid -> ic_mark_maid')
     parser.add_argument('--res', default='app/src/main/res', help='where the resources live')
+    parser.add_argument(
+        '--app-icon',
+        action='store_true',
+        help='also write this set into the application-icon slot (mipmap/ic_launcher*), i.e. make it the default set',
+    )
     parser.add_argument('--preview', metavar='DIR', help='write PNG copies of everything here, for looking at')
     arguments = parser.parse_args()
 
@@ -227,6 +255,11 @@ def main():
             print(f'  {target} {size}x{size}')
             if preview:
                 icon.save(preview / f'{density}-ic_launcher_{set_id}{suffix}.png')
+            if arguments.app_icon:
+                # 应用图标位那一份: 同一张图, 只是名字换成占位的那两个 (2026-11-22)
+                slot = directory / f'ic_launcher{suffix}.webp'
+                icon.save(slot, 'WEBP', lossless=True, quality=100)
+                print(f'  {slot} (application icon slot)')
 
     # 三、自适应前景 (108dp 画布, 内容 0.62)
     for density, size in FOREGROUND_PX.items():
@@ -264,6 +297,15 @@ def main():
         encoding='utf-8',
     )
     print(f'  {xml_path}')
+
+    if arguments.app_icon:
+        # 应用图标位 (= 清单里 `<application android:icon>`) 跟着这一套走: MIUI / HyperOS 拿它画
+        # 通知栏与通知卡片左侧那颗, 而它没有运行时开关 (见 IconTheme.MIUI_APP_ICON)
+        slot = slot_xml(set_id)
+        for name in ('ic_launcher.xml', 'ic_launcher_round.xml'):
+            path = anydpi / name
+            path.write_text(slot, encoding='utf-8')
+            print(f'  {path} (application icon slot)')
 
     print(f'done, now point IconTheme at the {set_id} set and build')
 

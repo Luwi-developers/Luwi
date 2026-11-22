@@ -162,7 +162,35 @@
   球的 / 开屏 / 组件仍走 `markBitmap` + `boxDpForInk`, 一个像素不动, 页面 `MARK_CACHE` 键带 `mark2` 作废旧缓存;
   ③ **空态那圈描边只给自选头像** —— 页面 `identity.photo` 在终端清空 `avatar` 之后算, 别拿
   `avatar !== MARK_PNG` 判 (图标套那张 data URL 会被误判成自选图, 终端页那圈框就是这么冒出来的)。
-  判据 `tools/check-icon-sets.mjs` + `IconSetTest`; 方案 `docs/Luwi-图标切换-方案-2026-11-22.md`
+  **同日第三轮 (主人: "通知栏的图标和 luwi 的图标不一致, 应当改为一致的图标")**: 真机 A 实测定了根因 ——
+  MIUI / HyperOS 的通知栏那一位与通知卡片左侧那颗**不读 `setSmallIcon`**, 读的是**应用图标**
+  (`ApplicationInfo.icon`, 即清单里 `<application android:icon="@mipmap/ic_launcher">`), 而 alias 只改
+  桌面快捷方式、改不到它; 通知里塞的 `miui.appIcon` extra 在这一版 HyperOS 上也不被采纳 (塞了、重启过、
+  仍是旧图)。落法两条: ① **应用图标位让给缺省套** —— `mipmap/ic_launcher(.xml / .webp)` 的内容改成女仆
+  (`make-icon-sets.py --app-icon` 一并写), 内置那套整组搬去 `ic_launcher_builtin*` (位图与自适应 xml,
+  `make-icons.py` 现在写的就是这个名字), 清单里 `.IconBuiltin` 的 `icon` / `roundIcon` 跟着改; ② 五处通知
+  统一走 `NotificationCompat.Builder.withLuwiIcon(context)` (= `setSmallIcon` + `miui.appIcon` extra,
+  键 `IconTheme.MIUI_APP_ICON`), 别再各写各的 `setSmallIcon(IconTheme.notificationIcon(…))`。
+  **已知不完美**: 切到内置那套时桌面 / 球 / 开屏 / 缩略图都换, 只有应用图标位 (通知栏、应用信息、安装器)
+  仍是女仆 —— 系统没有运行时换 application icon 的 API, 这条写进 `ic_launcher.xml` 的注释了, 别当成 bug 改回去。
+  真机 A 读数 (2026-11-22 15:00): `icon.json=builtin` 冷启后桌面第二页第 4 位变鲸尾, 状态栏与通知卡片仍是女仆;
+  `icon.json=maid` 冷启后两处都是女仆。**换包之后要重启一次设备** —— HyperOS 的这份图标缓存安装/升级都不刷,
+  装完当场看还是旧图 (`ic_launcher` 已经是女仆, 面板照样画鲸尾), 重启一次才对
+  **同日第四轮 (主人: "启动时的不同的图标, 位置不同, 要改成一致的" + "长宽取中间值" + "开屏高度采用第一张鲸尾图标的高度")**:
+  开屏那一格改成两套**共用一个画框** (`IconTheme.SPLASH_BOX_DP = 112dp`), 墨迹统一由 `IconTheme.splashBitmap`
+  (紧裁 → 最长边收到画框的 `SPLASH_INK_RATIO` = 0.46, 也就是鲸尾原本那一档) 归一; `splashBoxDp(set)` 连同
+  "按 `markInkRatio` 倒推盒子"那条整块撤掉 —— 原来内置算 112、女仆算 51, 图标一小一大的同时整列内容跟着
+  上下移。**球那侧不动** (`boxDpForInk` + `markInkRatio` 仍是它的算法)。真机 A 读数 (1080x2460 / density 2.75):
+  builtin 图标 138x142, 中心 (540,1135); maid 113x142, 中心 (540,1135) —— 高度与中心逐像素相同,
+  宽度按各自图形比例 (女仆是竖长头像, 同高下自然窄一圈)
+  **同日第五轮 (主人: "确保宽度一致即可" + "以鲸尾图标为标准" + "门户的对话中以当前女仆图标为标准" +
+  "去除门户中心图标的尺寸限制, 否则会把呆毛也裁剪了")**: ① `splashBitmap` 的归一口径从**最长边**改成
+  **宽度** (`scale = ink / tight.width`) —— 开屏两套宽度都 = 画框的 0.46 (鲸尾宽高同档, 不变), 女仆等比放到
+  同宽、高度自然比鲸尾高一截; ② 门户空态那张脸 (`#lwp-hero .lwp-hero-mark`) 去掉写死的 96x96 与外层尺寸限制,
+  默认那张改 `height:96px;width:auto;object-fit:contain` (**不裁**, 女仆头顶那根呆毛完整), 圆裁 + 铺满
+  (`border-radius:999px` + `object-fit:cover`) 只留给 `[data-photo="on"]` 的自选头像 —— 2026-11-10 那条
+  "空态与头栏同一个圆形" 仍然只对自选头像成立; 判据 `check-luwi-portal` 第 577 段那三条
+  判据 `tools/check-icon-sets.mjs` (第二点五 / 四点四节) + `IconSetTest`; 方案 `docs/Luwi-图标切换-方案-2026-11-22.md`
 - **门户那张脸归设置 → 外观**: 「背景」「背景透明度」落 `$DSH_HOME/lw/face.json` + `lw/face/<名字>.jpg`
   (`tool/PortalFace.kt` 唯一写者, 换图只留一张), 页面走 `PortalBridge.portalLook()` 取 data URL (键是文件名),
   改完调 `__LUWI_PORTAL__.reloadLook()`
@@ -279,6 +307,16 @@
   `withWebServer()` 拿不到服务时 `logger.error`, `/sync doctor` 打路由条数
   判据 `check-luwi-portal` 第二十七节 + `check-terminal` (回环 / 角色 / 沙盒终端已下线 / 侧边栏显示名与左座位) + `check-sync-setting` 第六节,
   方案 `docs/Luwi-终端-手机管电脑-方案-2026-11-21.md`
+- **终端的出口是头栏那颗「终端 / 对话」, 要重启的写入点先问一句** (2026-11-22 主人: "终端不加返回按钮, 而是从终端按钮返回,
+  在终端时, 按钮上的字应当是「对话」" + "成功配对或关闭终端等需要重新启动的情况, 要弹出重启 dsh 启动终端的弹窗"):
+  页面 `#lwp-term-back` 那颗 `‹` 与它的 CSS 整块撤了, 出口只剩 `#lwp-sync-btn` —— `applySyncTitle()` 在终端里写「对话」
+  (`aria-label`「回到对话」), 出来写回 `portalMenu()` 的 `sync` 两句 (`syncTitle` / `syncSummary` 存着, 进出不跑桥);
+  `pickSync()` 于是成了开关 (`terminalMode ? closeTerminal() : openTerminal()`), 卡片上的「扫码配对 / 返回」与硬件返回照旧
+  (判据 `check-luwi-portal` 终端那一段的出口断言: `TERMINAL_BACK_TITLE` / `applySyncTitle` / `pickSync` 两档 / 没有 `termBack`)。
+  四个"写完要重启才生效"的点 (门户扫码配对 / 设置扫码配对 / 终端总开关开与关 / 取消配对)
+  统一走 `ui/RestartHostDialog.kt`: 标题按场景 (`terminal_pair_done` / `settings_sync_pair_done` / `settings_sync_switched_on|off` /
+  `settings_sync_unpair_done`), 正文 `terminal_restart_body`, 钮「取消 / `terminal_restart_ok`」,**不再一声不吭 `DshHost.restart`**;
+  取消之后配置已在文件里, 补重启走设置右上 ⋮ 那条 (那条本身不加确认)。判据 `check-luwi-portal` 那两组 `RestartHostDialog(` 断言
 - **终端里的图与文件: 双向传, 走「附件段」不走附件块** (2026-11-22, 2.8.1 #50; 插件 0.4.6):
   手机侧 dsh 的附件在安卓上落不下, 手机 `lw-in/` 那一份才是门户画的东西 (`.lwp-image` / `.lwp-file` 读
   `/lw-out/in/<名字>`)。所以跨设备只做两件事 —— **搬字节 + 换路径**, 形状照 `[附件 N 个, 图片用 read_image 打开]`

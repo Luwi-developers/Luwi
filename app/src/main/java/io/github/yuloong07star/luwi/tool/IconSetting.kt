@@ -23,6 +23,7 @@ import java.io.File
  * | [markInkRatio] | 球与开屏的尺寸换算 (内置那份矢量墨迹只占 0.46) |
  * | [markTintWhite] | 球上那份要不要染白 (内置那份是单色矢量, 女仆那份是彩色位图) |
  * | [notifyRes] | 五处通知的 small icon (单色白模) |
+ * | [launcherRes] | 通知 extras 里的 `miui.appIcon` (彩色整图, 与桌面那一枚同一个资源) |
  *
  * **低分套与高分套不许写反**: [alias] 是与清单里 `<activity-alias android:name>` 的字符串对齐的唯一
  * 依据, 写成别的名字不会报错, 只是切过去之后桌面一个入口都没有 (见 [switchPlan] 的顺序与回滚)
@@ -35,6 +36,7 @@ internal enum class IconSet(
     val markInkRatio: Float,
     val markTintWhite: Boolean,
     val notifyRes: Int,
+    val launcherRes: Int,
 ) {
     /** 内置那套: 一圈水花里一只鲸尾, 从 2026-10-10 起一直是缺省 */
     BUILTIN(
@@ -45,6 +47,8 @@ internal enum class IconSet(
         markInkRatio = 0.46f,
         markTintWhite = true,
         notifyRes = R.drawable.ic_notification,
+        // 应用图标位 (`ic_launcher*`) 现在承载缺省套 (女仆), 内置那套另存成 `ic_launcher_builtin`
+        launcherRes = R.mipmap.ic_launcher_builtin,
     ),
 
     /** 主人 2026-11-22 给的那张 (蓝发女仆), 也是这一版之后的缺省 */
@@ -56,6 +60,7 @@ internal enum class IconSet(
         markInkRatio = 1.0f,
         markTintWhite = false,
         notifyRes = R.drawable.ic_notification_maid,
+        launcherRes = R.mipmap.ic_launcher_maid,
     ),
     ;
 

@@ -23,14 +23,15 @@ import io.github.yuloong07star.luwi.channel.PrivilegedBridge
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
 import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.plugin.PluginManager
-import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OutNotify
 import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.UsageLedger
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 
 /**
  * Keeps the host process alive while the app is not in front
@@ -221,11 +222,11 @@ class DshHostService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.host_notification_title))
             .setContentText(getString(R.string.host_notification_text))
-            // 通知的小图标不是启动器图标: 它按模板染色, 只认 alpha 通道, 所以每套图标另带一张纯白
-            // 的水花鲸尾 / 女仆剪影 (`IconTheme.notificationIcon`, 2026-11-22 起跟着设置里那一套走)。
-            // 原来这里用的是 `ic_launcher_foreground` (108dp 的启动器前景), 系统把它缩进 24dp 的
-            // 状态栏位里, 糊成一团
-            .setSmallIcon(IconTheme.notificationIcon(this))
+            // 通知的图标是两枚一起上 (`withLuwiIcon`): small icon 是每套那份纯白剪影, 系统按模板染色;
+            // MIUI / HyperOS 另外还在 extras 里读 `miui.appIcon` 画状态栏与卡片左侧那一枚 ——
+            // 不塞它, 那里回落成清单里静态的 `@mipmap/ic_launcher` (永远是内置那套), 就是
+            // 2026-11-22 主人报的"通知栏和桌面图标不一致"
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .setOngoing(true)
             // 重投只换图, 不该再响一声 (这条是 LOW 档常驻, 但别让 ROM 把它当新通知动一遍)
