@@ -91,7 +91,8 @@ const ROUTER_HOME_PACKAGES = hostSet('ROUTER_HOME_PACKAGES')
  * 点按效果那几样也在那一段外面 (落实表 #32 / #37: 账与"连着几条算停"写在点按那一层), 同样手递
  *
  * `TAP_EFFECT_STREAK` 两处必须同一个数 —— 漂开的样子是"status 说该停, 而 lw_tap 还在发".
- * #37 起它数的是连着几条 `recover=giveup` (不再是 unchanged), 刹车那一档仍数 unchanged
+ * 它数的是连着几条「什么都没变」(`effect=unchanged` 或 `recover=giveup`, #32 立的停判),
+ * `effect=unknown` 与 `recover=reread`(慢一拍的成功) 都不算 (必修 3 / 第二轮必修 A)
  */
 const TAP_EFFECT_STREAK = 2
 
@@ -1479,6 +1480,15 @@ const tapStop = host.indexOf('const MAX_TAP_CANDIDATES', tapStart)
 if (tapStart < 0 || tapStop < 0) throw new Error('tapByReading is not in host-plugin/index.mjs')
 const tapSource = host.slice(tapStart, tapStop)
 
+// #37 起 `tapByReading` 用 `squashText` / `alikeText` 比"像不像": 这两件定义在上面抽不到的那一段里,
+// 把宿主那一份原样拼进来 (不复制第二份算法), 一并带上它们自己的 `commonLetters`
+const textHelperStart = host.indexOf('/** 比较之前先抹掉大小写与空白')
+const textHelperEnd = host.indexOf('/** 一行读出来的字离想要的名字有多近', textHelperStart)
+if (textHelperStart < 0 || textHelperEnd < 0) {
+  throw new Error('squashText / alikeText are not in host-plugin/index.mjs')
+}
+const textHelperSource = host.slice(textHelperStart, textHelperEnd)
+
 /** 那一档的个数从宿主源码里取 (`const MAX_TAP_CANDIDATES = n`), 抽出来的那段自己看不见它 */
 const MAX_TAP_CANDIDATES = Number((host.match(/const MAX_TAP_CANDIDATES = (\d+)/u) ?? [])[1])
 /** 同名两行分得开的分差 (#37) —— 抽出来的那段也看不见它, 同样从源码里取 */
@@ -1489,7 +1499,7 @@ function readingWith(replies) {
   const queue = [...replies]
   return new Function('call', 'closestReadLines', 'scatterInside', 'formatMs', 'MAX_TAP_CANDIDATES',
     'tapPrecheckGeometry', 'TAP_SCORE_GAP',
-    `${tapSource}\nreturn tapByReading`)(
+    `${textHelperSource}\n${tapSource}\nreturn tapByReading`)(
     async (op) => (op === 'tap'
       ? (queue.shift() ?? { tapped: true, displayId: 7 })
       : (queue.shift() ?? {})),
@@ -1568,8 +1578,14 @@ check('跨应用记忆 ⑱-c: 同名两条那段话换成「按坐标选一条�
 const candidateStart = host.indexOf('function tapCandidatesAnswer(')
 const candidateStop = host.indexOf('function scatterInside(', candidateStart)
 if (candidateStart < 0 || candidateStop < 0) throw new Error('tapCandidatesAnswer is not in host-plugin/index.mjs')
+// `displayWhere` 也照 `textHelperSource` 的办法原样切进来: 手抄一份的话宿主改了措辞 (负号 / 非有限
+// id 回「the screen in hand」) 这条判据不会红, 而它断言的前缀正是那句话
+const whereStart = host.indexOf('function displayWhere(')
+const whereEnd = host.indexOf('/** 连着几条 `unchanged` 才踩那一脚', whereStart)
+if (whereStart < 0 || whereEnd < 0) throw new Error('displayWhere is not in host-plugin/index.mjs')
+const displayWhereSource = host.slice(whereStart, whereEnd)
 const candidatesAnswer = new Function('withJson', 'candidateLines', 'centreInBox',
-  `${host.slice(candidateStart, candidateStop)}\nreturn tapCandidatesAnswer`)(
+  `${displayWhereSource}\n${host.slice(candidateStart, candidateStop)}\nreturn tapCandidatesAnswer`)(
   (lines, json) => ({ lines, json }),
   (candidates) => candidates.map((one) => `- ${JSON.stringify(one.text)}`),
   (box) => ({ x: Math.round((Number(box?.[0] ?? 0) + Number(box?.[2] ?? 0)) / 2),
@@ -1971,11 +1987,14 @@ if (effectStart < 0 || effectEnd < 0 || effectEnd < effectStart) {
 let tapUiAnswer = null
 
 const tapApi = new Function(
-  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect', 'squashText',
-  `${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
+  'call', 'withTimeout', 'closestReadLines', 'MAX_TAP_CANDIDATES', 'sameRect',
+  // `squashText` 不手抄一份: 把宿主那一段原样拼进 body (同名 function 声明盖掉同名参数), 否则宿主
+  // 改了归一化 (大小写 / 空白) 这几条判据不会红
+  `${textHelperSource}\n${host.slice(effectStart, effectEnd)}\nreturn { TAP_EFFECT_STREAK, TAP_EFFECT_KEPT,`
     + ' TAP_EFFECT_WAIT_MS, TAP_MIN_SIDE, TAP_SCORE_GAP, tapEffectSnapshot, tapEffectFingerprint,'
     + ' tapEffectOf, tapEffectTail, tapEffectStreak, tapEffectBrake, formatTapEffect,'
-    + ' tapNameMatches, tapPrecheckGeometry, tapPrecheck, tapAnchorMismatch, tapEffectRecover }',
+    + ' tapNameMatches, tapPrecheckGeometry, tapPrecheck, tapAnchorMismatch, tapAnchorNode,'
+    + ' tapEffectRecover }',
 )(
   async () => tapUiAnswer,
   (promise) => promise,
@@ -1984,7 +2003,6 @@ const tapApi = new Function(
   })),
   3,
   (left, right) => JSON.stringify(left) === JSON.stringify(right),
-  (value) => String(value ?? '').toLowerCase().replace(/\s+/gu, ''),
 )
 
 check('两处那个"连着几条算停"是同一个数 (2)', [
@@ -2107,6 +2125,49 @@ const uiTree = (rows) => ({
 tapUiAnswer = uiTree(SETTINGS_TREE)
 const tapScreen = await tapApi.tapEffectSnapshot(0)
 
+/* 第三轮审查点名的「删掉实现仍全绿」三处, 各补一条 (每条都实测过: 改回缺陷版会红) */
+
+check('锚点回执: 点落在行内空白段 (该格 target 内、所有 bounds 外) 仍说得出「蓝牙」', (() => {
+  const row = {
+    displayId: 0, width: 1080, height: 2400,
+    nodes: [{ label: '蓝牙', bounds: [40, 400, 460, 480], target: [40, 400, 900, 480] }],
+  }
+  const miss = tapApi.tapAnchorMismatch(row, '位置信息', 750, 440)
+  const hit = tapApi.tapAnchorMismatch(row, '蓝牙', 750, 440)
+  return [miss?.found, miss === null ? 'null' : 'mismatch', hit === null]
+})(), ['蓝牙', 'mismatch', true])
+
+check('重锚: 两格同名都含这一点时交回「离这一点最近」的那一处', (() => {
+  const two = {
+    displayId: 0, width: 1080, height: 2400,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 600, 380], target: [0, 280, 1080, 400] },
+      { label: '设置', bounds: [620, 300, 900, 380], target: [0, 300, 540, 380] },
+    ],
+  }
+  return tapApi.tapAnchorNode(two, '设置', { x: 200, y: 340 })?.centre
+})(), { x: 270, y: 340 })
+
+check('按名字: 「设 置」与「设置」是同一个名字 (比较前抹掉空白, 大小写同理)', (() => {
+  const spaced = { displayId: 0, nodes: [{ label: '设 置', bounds: [40, 300, 900, 380] }] }
+  const cased = { displayId: 0, nodes: [{ label: 'WiFi', bounds: [40, 300, 900, 380] }] }
+  return [tapApi.tapNameMatches(spaced, '设置').length, tapApi.tapNameMatches(cased, 'wifi').length]
+})(), [1, 1])
+
+// 第三轮 verifier 的探针: 点上那格自己**有名字** (只是没 target 也不可点) 时, 期望写外包层的名字
+// 不能盖章 —— 这一下并不落在任何可点控件上, main 上同名函数是回 mismatch
+check('锚点: 点上有名字但不可点的那格 + expect 写外包层 → anchor-mismatch (不盖章)', (() => {
+  const wrapper = {
+    displayId: 0, width: 1080, height: 2400,
+    nodes: [
+      { label: '设置', bounds: [0, 0, 1080, 2400] },
+      { label: '位置信息', bounds: [40, 400, 900, 480] },
+    ],
+  }
+  const miss = tapApi.tapAnchorMismatch(wrapper, '设置', 500, 440)
+  return [miss === null ? 'null' : 'mismatch', miss?.found]
+})(), ['mismatch', '位置信息'])
+
 check('前置校验: 名字对得上的子节点被外面那格包住时只算一处', (() => {
   const nested = {
     ...tapScreen,
@@ -2117,6 +2178,36 @@ check('前置校验: 名字对得上的子节点被外面那格包住时只算�
   }
   return tapApi.tapNameMatches(nested, '设置').length
 })(), 1)
+
+check('前置校验: 同一行里两条同名标签落在同一格 (target 相同) 也只算一处 (必修 8)', (() => {
+  const twin = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 500, 380], target: [40, 300, 900, 380] },
+      { label: '设置', bounds: [520, 300, 880, 380], target: [40, 300, 900, 380] },
+    ],
+  }
+  return tapApi.tapNameMatches(twin, '设置').map((node) => node.bounds[0])
+})(), [40])
+
+check('前置校验: 子节点排在父节点前面也只算一处 (去重与快照顺序无关, backlog)', (() => {
+  const childFirst = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [60, 310, 300, 370] },
+      { label: '设置', bounds: [40, 300, 900, 380] },
+    ],
+  }
+  return tapApi.tapNameMatches(childFirst, '设置').map((node) => node.bounds)
+})(), [[40, 300, 900, 380]])
+
+check('恢复: 零面积的格子 ([0,0,0,0]) 不拿来重锚, 全被滤掉就回 null (旧问题)', (() => {
+  const flat = {
+    ...tapScreen,
+    nodes: [{ label: '设置', bounds: [0, 0, 0, 0] }],
+  }
+  return tapApi.tapAnchorNode(flat, '设置')
+})(), null)
 
 check('前置校验: 短边 < TAP_MIN_SIDE → small, 整格出屏 → occluded, 正常格放行', [
   tapApi.tapPrecheckGeometry(tapScreen, [40, 300, 900, 338])?.skip,
@@ -2179,10 +2270,56 @@ check('恢复 ②: 屏没变而目标还在 → reanchor, 交回它现在的中�
 ], ['reanchor', true])
 
 const blind = await recoverOn(null, 'unknown', { after: null })
-check('恢复 ②b: 重读读不回来 → reanchor 用按之前那一份, 并说清这次没读到', [
+check('恢复 ②b: 树读不回来 (effect=unknown) 不跑恢复 —— unknown 既不是变了也不是没变 (必修 3)', [
   blind.recover,
-  /could not be read back/u.test(blind.text),
+  blind.text,
+], ['', ''])
+
+// 屏没变、但恢复那一次重读读不回来: 仍是 reanchor (交回最后一次看到的中心), 文案要说清"读不回来"
+const blindAnchor = await recoverOn(null, 'unchanged')
+check('恢复 ②c: 屏没变而重读读不回来 → 仍 reanchor, 文案写明「读不回来」', [
+  blindAnchor.recover,
+  /could not be read back/u.test(blindAnchor.text),
 ], ['reanchor', true])
+
+check('前置校验: 同名两处时重锚交回"按过的那一处", 不是最上面那一处 (必修 2)', (() => {
+  const twoRows = {
+    ...tapScreen,
+    nodes: [
+      { label: '设置', bounds: [40, 300, 900, 380] },
+      { label: '设置', bounds: [40, 1200, 900, 1280] },
+    ],
+  }
+  const nearby = tapApi.tapAnchorNode(twoRows, '设置', { x: 500, y: 1240 })
+  const top = tapApi.tapAnchorNode(twoRows, '设置')
+  return [nearby?.centre, top?.centre]
+})(), [{ x: 470, y: 1240 }, { x: 470, y: 340 }])
+
+check('前置校验: 点在行内子文本上而 expect 是整行名字 → 对得上 (必修 7)', (() => {
+  const row = {
+    ...tapScreen,
+    nodes: [
+      { label: '蓝牙', bounds: [40, 400, 900, 480], target: [40, 400, 900, 480] },
+      { label: '已连接', bounds: [700, 410, 880, 470], target: [40, 400, 900, 480] },
+    ],
+  }
+  return [
+    tapApi.tapAnchorMismatch(row, '蓝牙', 750, 440),
+    tapApi.tapAnchorMismatch(row, '位置信息', 750, 440)?.found,
+  ]
+})(), [null, '已连接'])
+
+check('前置校验: 容器的 target 盖住子按钮时 expect 写容器名 → 对不上 (第二轮必修 C)', (() => {
+  const covered = {
+    ...tapScreen,
+    nodes: [
+      { label: '更多设置', bounds: [0, 100, 1080, 200], target: [0, 100, 1080, 200] },
+      { label: '更多', bounds: [880, 110, 1060, 190], target: [880, 110, 1060, 190] },
+    ],
+  }
+  const mismatch = tapApi.tapAnchorMismatch(covered, '更多设置', 950, 150)
+  return [mismatch?.found, mismatch?.want, tapApi.tapAnchorMismatch(covered, '更多', 950, 150)]
+})(), ['更多', '更多设置', null])
 
 const nowhere = await recoverOn(uiTree(SETTINGS_TREE), 'unchanged', { wanted: '' })
 check('恢复 ③: 屏上哪儿都不是目标 (按在空白处) → giveup', nowhere.recover, 'giveup')
@@ -2200,11 +2337,29 @@ check('exploreEffectReason: 连着两条 recover=giveup 才停 (2.8.1 落实表 
   api.exploreEffectReason([{ recover: 'reread' }, { recover: 'giveup' }]),
   api.exploreEffectReason([]),
 ], ['giveup', '', '', ''])
-check('exploreEffectReason: 连着两条 unchanged 不再算停 (effect 判定不回归, 停判只认 giveup)', [
+check('exploreEffectReason: 连着两条「什么都没变」就停 (必修 4, #32 的停判不许失效)', [
   api.exploreEffectReason([{ effect: 'unchanged', recover: 'reanchor' },
     { effect: 'unchanged', recover: 'reanchor' }]),
-  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unchanged' }]),
-], ['', ''])
+  api.exploreEffectReason([{ effect: 'unchanged', recover: '' }, { effect: 'unchanged', recover: 'giveup' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }]),
+  api.exploreEffectReason([{ effect: 'changed' }, { effect: 'unchanged' }]),
+], ['giveup', 'giveup', '', ''])
+check('exploreEffectReason: unknown 不算「没变」也不进停判 (必修 3, 自绘屏每一下都是 unknown)', [
+  api.exploreEffectReason([{ effect: 'unknown', recover: '' }, { effect: 'unknown', recover: '' }]),
+  api.exploreEffectReason([{ effect: 'unchanged' }, { effect: 'unknown' }]),
+  api.exploreEffectReason([{ effect: 'unknown' }, { effect: 'unchanged' }]),
+], ['', '', ''])
+check('exploreEffectReason: recover=reread 是慢一拍的成功, 不算「没变」(第二轮必修 A)', [
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reread' },
+    { effect: 'unchanged', recover: 'reread' }]),
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reread' }, { effect: 'unchanged' }]),
+  api.exploreEffectReason([{ effect: 'unchanged', recover: 'reanchor' },
+    { effect: 'unchanged', recover: 'reread' }]),
+  // 第三轮 backlog: 新账把 reread 记成 changed, 这两条是宿主真正写出来的形状, 更不能算没变
+  api.exploreEffectReason([{ effect: 'changed', recover: 'reread' },
+    { effect: 'changed', recover: 'reread' }]),
+  api.exploreEffectReason([{ effect: 'changed', recover: 'reread' }, { effect: 'changed', recover: '' }]),
+], ['', '', '', '', ''])
 check('exploreEffectsFor 只挑这一场, 别的会话点的不算', [
   api.exploreEffectsFor([
     { session: 'a', effect: 'unchanged' },
