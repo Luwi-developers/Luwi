@@ -1277,7 +1277,7 @@ private fun PortalFaceItems() {
  * 两套并排, 选中那格描边用主色 —— **点一下就切** (不设确认键): 切图标是能回退的一步, 而且桌面图标
  * 会重排一次; 那件事在下面的小字里已经说过, 再问一次"确定要改桌面吗"只是多按一下
  *
- * 缩略图走 [IconTheme.markBitmap] (与球 / 开屏同一份), 于是这里看到的就是切完的样子
+ * 缩略图走 [IconTheme.markTightBitmap] (与门户那张缺省头像同一份, 紧裁填满), 于是两套并排一样大
  */
 @Composable
 private fun IconPickerDialog(
@@ -1321,7 +1321,9 @@ private fun IconPickerDialog(
                         }
                         .padding(vertical = 12.dp),
                 ) {
-                    val mark = remember(set) { IconTheme.markBitmap(context, set) }
+                    // 与门户同一份"紧裁填满"的图 (2026-11-22): 内置那套的鲸尾只占画布 0.46, 拿
+                    // `markBitmap` 那画布原样的一份, 两格缩略图一大一小; 球与开屏按比值换算, 不吃这份
+                    val mark = remember(set) { IconTheme.markTightBitmap(context, set, 192) }
                     if (mark != null) {
                         Image(
                             bitmap = mark.asImageBitmap(),

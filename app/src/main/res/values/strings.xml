@@ -125,7 +125,7 @@
     <string name="settings_luwi_icon_summary">Now using %1$s</string>
     <string name="settings_luwi_icon_dialog">Pick an icon; the launcher, the ball and the splash all follow</string>
     <string name="settings_luwi_icon_builtin">Whale tail</string>
-    <string name="settings_luwi_icon_maid">Luwi portrait</string>
+    <string name="settings_luwi_icon_maid">Whale girl portrait</string>
     <string name="settings_luwi_icon_switched">Switched to %1$s</string>
     <string name="settings_luwi_icon_failed">That icon could not be applied; still on the previous one</string>
     <string name="settings_luwi_icon_desktop_note">The launcher icon may move to another screen after the switch</string>

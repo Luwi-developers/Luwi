@@ -504,6 +504,9 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
     @Volatile
     private var watchingPower = false
 
+    /** 换套时摘掉那个听众 ([IconTheme.watch]), 服务没了不该还留一个会去碰通知的回调 */
+    private var unwatchIcon: (() -> Unit)? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -513,6 +516,11 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         powerSave = runCatching { LwWakeWord.powerSave(this) }.getOrDefault(false)
         WakeWordState.powerSave = powerSave
         fend()
+        // **换图标要重投这一条** (2026-11-22 主人: "通知图标没有随图标变化"): 这一条只在 [fend] 与
+        // 状态词变化时 build, 切图标本来碰不到它, 状态栏里就一直挂着旧那套的剪影
+        unwatchIcon = IconTheme.watch {
+            handler.post { runCatching { announce(listeningText()) } }
+        }
         startPowerWatch()
     }
 
@@ -616,6 +624,8 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
     }
 
     override fun onDestroy() {
+        unwatchIcon?.invoke()
+        unwatchIcon = null
         stopPowerWatch()
         stopListening()
         // 开门之后那条"预热 + 通知"的待办跟服务一起走 (2026-10-10): [stopListening] 那条路上多半已经

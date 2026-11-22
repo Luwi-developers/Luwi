@@ -50,8 +50,12 @@ window.__ModuleLoader__.load({
      *
      * 与头像同一个套路: `markVer` 是套的 id, 没换套就不搬图。它比头像更常被用到 —— 头像没配、
      * 终端页 (那里头像被强制清空) 以及每次重挂都要画一次
+     *
+     * **键名里那个 `2` 是有用的** (2026-11-22): 之前那份 mark 是"画布原样", 内置那套的墨迹只占
+     * 0.46, 于是在 96px 的空态里鲸尾只有女仆那张的一半大; 现在宿主交下来的是**紧裁填满**的那一份。
+     * 不换键的话, 老机器 localStorage 里那份小数会一直画下去 (换套才会作废, 而人不一定换)
      */
-    var MARK_CACHE = 'dsh.luwi.portal.mark'
+    var MARK_CACHE = 'dsh.luwi.portal.mark2'
     /** 没有自定义昵称时头栏与空态显示的那个名字 (设置里留空 = 回这一个) */
     var DEFAULT_NAME = 'Luwi'
     /**
@@ -1461,8 +1465,12 @@ window.__ModuleLoader__.load({
        *
        * `avatar` 是**已经能直接塞进 `img.src`** 的那个串 (`MARK_PNG` 或 `data:image/jpeg;base64,…`),
        * 空串只出现在还没取到 look 的那一瞬
+       *
+       * `photo` 说的是"这张脸是不是主人自选的图" (2026-11-22): 空态那圈白描边只给自选头像, 图标套
+       * 那张不算 —— 原来拿 `avatar !== MARK_PNG` 判, 而换套之后 `avatar` 是 data URL, 永远不等于
+       * 内嵌那个常量, 于是终端页那圈描边自己冒了出来 (`face.json` 的 `avatar` 明明还是空串)
        */
-      var identity = { name: DEFAULT_NAME, avatar: '' }
+      var identity = { name: DEFAULT_NAME, avatar: '', photo: false }
       /** 历史记录窗开着没有 / 它的订阅 (`ctx.sessions.list`) */
       var historyOpen = false
       var historyUnsub = null
@@ -3130,8 +3138,10 @@ window.__ModuleLoader__.load({
         var hero = h('div')
         hero.id = 'lwp-hero'
         var wrap = h('div', 'lwp-hero-mark')
-        // 自定义头像才加那圈描边 (品牌图自带留白, 再套一圈只会显脏)
-        wrap.setAttribute('data-photo', identity.avatar !== '' && identity.avatar !== MARK_PNG ? 'on' : 'off')
+        // 自定义头像才加那圈描边 (品牌图自带留白, 再套一圈只会显脏) —— 判据是 [identity.photo],
+        // 不是"avatar 不等于内嵌的 MARK_PNG": 图标套那张 data URL 也不是自选图 (2026-11-22 终端页
+        // 那圈框就是这么冒出来的)
+        wrap.setAttribute('data-photo', identity.photo ? 'on' : 'off')
         els.heroMark = wrap
         var img = document.createElement('img')
         // 空态那张脸与头栏用同一份身份 (2026-11-10: 外观里改完这两处一起变)
@@ -4798,13 +4808,16 @@ window.__ModuleLoader__.load({
           avatar = ''
         }
         var src = avatar === '' ? mark : avatar
+        // 「这张脸是不是自选的图」只在这里算一次, 而且**排在终端那一段清空 `avatar` 之后** ——
+        // 终端页清空之后必然 `false`, 那圈描边于是进不了终端 (2026-11-22)
+        var photo = avatar !== ''
         if (els.brandName) els.brandName.textContent = name
         if (els.markImg) els.markImg.src = src
         // 空态那张脸是"重新画一遍"的: 它只在没有消息时存在, 所以这里顺手把已经画着的那张也改掉
         if (els.heroName) els.heroName.textContent = name
         if (els.heroImg) els.heroImg.src = src
-        if (els.heroMark) els.heroMark.setAttribute('data-photo', avatar === '' ? 'off' : 'on')
-        identity = { name: name, avatar: src }
+        if (els.heroMark) els.heroMark.setAttribute('data-photo', photo ? 'on' : 'off')
+        identity = { name: name, avatar: src, photo: photo }
       }
 
       /** 设置页改完推过来的那一下: 重取一份 (没挂载时什么都不用做, 下一次挂载自己会取) */

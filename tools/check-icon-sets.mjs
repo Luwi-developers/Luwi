@@ -164,6 +164,26 @@ for (const relative of notifyFiles) {
   expectNot(`${relative} 没有写死的通知图标`, text, '.setSmallIcon(R.drawable.ic_notification)')
 }
 
+/* ── 四点五、回补 (2026-11-22): 通知随切随重投 / 门户那份紧裁填满 ──────────── */
+
+// 三条漏: ① 终端页那圈描边 ② 状态栏常驻通知不跟着换 ③ 内置鲸尾在门户里只有半个大。
+// 这里钉的是后两条的接线, 第一条 (identity.photo) 归 check-luwi-portal 第二十九节
+const hostService = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
+const wakeService = await read('app/src/main/java/io/github/yuloong07star/luwi/wake/WakeWordService.kt')
+const settingsScreen = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt')
+
+expect('IconTheme 有紧裁取图那一条', theme, 'fun markTightBitmap(')
+expect('紧裁先按大画布重绘矢量', theme, 'PORTAL_MARK_RAW_PX')
+expect('紧裁按 alpha 边界框收边', theme, 'private fun inkBox(')
+expect('门户那份走紧裁', theme, 'markTightBitmap(context, set, PORTAL_MARK_PX)')
+expectNot('门户那份不再吃画布原样', theme, 'markBitmap(context, set, PORTAL_MARK_PX)')
+expect('IconTheme 有换套听众', theme, 'fun watch(listener')
+expect('切成功才叫那一声', theme, 'publish()')
+expect('host 服务随切重投通知', hostService, 'IconTheme.watch {')
+expect('唤醒服务随切重投通知', wakeService, 'IconTheme.watch {')
+expect('球那条随心跳重投通知', overlay, 'if (restyled) announce(')
+expect('设置页缩略图吃紧裁那份', settingsScreen, 'IconTheme.markTightBitmap(')
+
 /* ── 五、生成脚本还在, 且产物名与上面那几份对得上 ────────────────────────── */
 
 const generator = await read('tools/make-icon-sets.py')

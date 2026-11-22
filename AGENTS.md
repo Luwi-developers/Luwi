@@ -154,8 +154,15 @@
   `MAID`), 冷启动 `IconTheme.sync` 对一次账 (JSON 是权威, PackageManager 可能被桌面改过), 切换失败回滚;
   ③ 每套的素材是 `IconSet` 的四个字段 (`markRes` / `markInkRatio` / `markTintWhite` / `notifyRes`) ——
   球与开屏的尺寸按 `boxDpForInk` 换算, 内置 0.46 那一档与旧算式逐字节相同。通知图标是单色白模 (系统模板
-  染色, 彩色图会糊成一团), `splash.json` 的 `icon` 仍是显式覆写 (优先于图标套)。判据
-  `tools/check-icon-sets.mjs` + `IconSetTest`; 方案 `docs/Luwi-图标切换-方案-2026-11-22.md`
+  染色, 彩色图会糊成一团), `splash.json` 的 `icon` 仍是显式覆写 (优先于图标套)。
+  **2026-11-22 当天下半场回补三条**: ① **常驻通知随切随重投** —— `IconTheme.watch` 这一声, host 服务与唤醒
+  词服务各订一个 (`repostNotification` / `announce(listeningText())`), 球那条并进已有的 `restyled` 判断;
+  切完不必重启, 失败回滚那条**不叫**; ② **门户那份 mark 是紧裁填满的** (`IconTheme.markTightBitmap`: 先按
+  1024 重绘矢量 → alpha 边界框裁紧 → 缩到 ≤384), 拿画布原样那份的话内置鲸尾只有女仆那张的一半大;
+  球的 / 开屏 / 组件仍走 `markBitmap` + `boxDpForInk`, 一个像素不动, 页面 `MARK_CACHE` 键带 `mark2` 作废旧缓存;
+  ③ **空态那圈描边只给自选头像** —— 页面 `identity.photo` 在终端清空 `avatar` 之后算, 别拿
+  `avatar !== MARK_PNG` 判 (图标套那张 data URL 会被误判成自选图, 终端页那圈框就是这么冒出来的)。
+  判据 `tools/check-icon-sets.mjs` + `IconSetTest`; 方案 `docs/Luwi-图标切换-方案-2026-11-22.md`
 - **门户那张脸归设置 → 外观**: 「背景」「背景透明度」落 `$DSH_HOME/lw/face.json` + `lw/face/<名字>.jpg`
   (`tool/PortalFace.kt` 唯一写者, 换图只留一张), 页面走 `PortalBridge.portalLook()` 取 data URL (键是文件名),
   改完调 `__LUWI_PORTAL__.reloadLook()`
