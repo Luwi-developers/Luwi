@@ -131,6 +131,14 @@ window.__ModuleLoader__.load({
     /** 探一次对端最多等这么久 / 弹窗开着时多久再探一次 */
     var TERMINAL_PROBE_MS = 6000
     var TERMINAL_POLL_MS = 5000
+    /**
+     * 那扇窗的门槛: **没连上不满这么久就不弹** (2026-11-22 主人: "终端还是一直会闪正在连接的窗口,
+     * 但只出现不到 1s, 要求若未连接超过 3s 才出现那个窗口")
+     *
+     * 从前一进终端就先摆一张「正在找电脑」, 首探多半一瞬就有读数, 于是那张卡一闪而过 —— 先黑着,
+     * 满 3 秒还连不上才弹. 判据 `check-luwi-portal` 终端那一段
+     */
+    var TERMINAL_GATE_GRACE_MS = 3000
     /** 电脑那几场会话的 cwd 的根 (`$DSH_HOME/lw/peer-workspaces`), 由原生报上来 */
     var TERMINAL_ROOT_KEY = 'shadowRoot'
     /**
@@ -1512,6 +1520,10 @@ window.__ModuleLoader__.load({
       var terminalProbe = { at: 0, ok: false, busy: false, why: '' }
       /** 弹窗现在为什么开着: '' 关着 | 'unpaired' | 'off' | 'offline' */
       var terminalGate = ''
+      /** 这一轮"没连上"从哪一刻开始算 (0 = 现在算得上连着 / 还没开始算); 见 [renderTerminalGate] 那 3 秒门槛 */
+      var terminalGateSince = 0
+      /** 3 秒门槛到点重画的那一拍 */
+      var terminalGateTimer = null
       /** 进终端之前那一场 (`{id}`), 退出回它; 也写进 `TERMINAL_KEY` 的 `back`, 页面重载之后回得去 */
       var terminalReturn = null
       /** 上一次自动进终端 (挑场或新建) 的时刻: 冷却用, 见 [TERMINAL_ENTER_COOLDOWN_MS] */
@@ -7437,9 +7449,13 @@ window.__ModuleLoader__.load({
        * **「正在找电脑」只有第一次探测才说** (2026-11-21 主人: "一直会反复闪这个弹窗"): 探针 5/15 秒一拍,
        * 每一拍都先把卡片翻成「正在找电脑」再翻回来就是那个闪。已经有过落定读数 (`probe.at > 0`) 时,
        * 重探那一拍按上一次的结论画 —— 掉线那张卡连原因都不闪 (`probe.why` 在重探期间保留)
+       *
+       * `probe` 那一格 (2026-11-22) = **这一档要靠活探测才有结论** (探测中 / 电脑没连上), 于是要过
+       * `renderTerminalGate` 那 3 秒门槛才许上屏; 没配对 / 终端关着 / 配对码缺口令那三档从配置读得出,
+       * 不闪, 也就不必让人对着黑屏等 3 秒
        * @param {object|null} info `portalTerminal()` 那一份
        * @param {{ok: boolean, busy: boolean, why: string, at: number}} probe 最近一次探测
-       * @returns {{state: string, title: string, body: string, note: string, install: boolean}} 界面照它画
+       * @returns {{state: string, title: string, body: string, note: string, install: boolean, probe: boolean}} 界面照它画
        */
       function terminalGateState(info, probe) {
         var paired = !!(info && info.paired === true)
@@ -7450,7 +7466,7 @@ window.__ModuleLoader__.load({
         var online = !firstProbe && !!(probe && probe.ok === true)
         // 探通了就是通: 配置里缺 `peerUrl` 之类只影响"能不能主动拨", 对端在线这件事以探测为准
         if (online && paired && info && info.syncOn === true) {
-          return { state: '', title: '', body: '', note: '', install: false }
+          return { state: '', title: '', body: '', note: '', install: false, probe: false }
         }
         if (!paired) {
           // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」"): 这一档才多那一颗钮
@@ -7460,6 +7476,7 @@ window.__ModuleLoader__.load({
             body: '还没连上电脑。\n在电脑上的 dsh 面板里生成一张配对码, 再用这里扫一下。\n电脑上还没装 luwi终端 的话, 先按下面那颗钮去装。',
             note: '',
             install: true,
+            probe: false,
           }
         }
         if (!info || info.syncOn !== true) {
@@ -7469,6 +7486,7 @@ window.__ModuleLoader__.load({
             body: '终端关着: 在 设置 → 终端 里打开它, 手机才能管电脑。\n也可以直接扫一张新的配对码。',
             note: '',
             install: false,
+            probe: false,
           }
         }
         if (info && info.terminalReady === false) {
@@ -7478,10 +7496,11 @@ window.__ModuleLoader__.load({
             body: '配对码里缺连接口令, 或者对端通道没开。\n在电脑上重新生成一张配对码, 再扫一次。',
             note: '',
             install: false,
+            probe: false,
           }
         }
         if (firstProbe) {
-          return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '', install: false }
+          return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '', install: false, probe: true }
         }
         var why = probe && typeof probe.why === 'string' ? probe.why : ''
         var who = info && typeof info.pcName === 'string' && info.pcName !== '' ? info.pcName : '电脑'
@@ -7491,6 +7510,7 @@ window.__ModuleLoader__.load({
           body: '配对过了, 但「' + who + '」那边没应答。\n确认电脑上的 dsh 开着、地址能通; 这里会自动再试。',
           note: why === '' ? '' : '(' + why + ')',
           install: false,
+          probe: true,
         }
       }
 
@@ -7590,6 +7610,9 @@ window.__ModuleLoader__.load({
             )
           terminalMode = true
           terminalAutoAt = 0
+          // 3 秒门槛从**进来这一拍**起算, 不从第一帧渲染起算 (渲染要等穿皮 / 清 DOM, 慢机上是零点几秒,
+          // 算在门槛里就白白多黑一会儿): 探通了当场清 0, 见 [renderTerminalGate]
+          terminalGateSince = Date.now()
           writeStored(TERMINAL_KEY, { on: true, back: terminalReturn })
         }
         applyTerminalMode()
@@ -7608,6 +7631,12 @@ window.__ModuleLoader__.load({
         if (!terminalMode) return
         terminalMode = false
         terminalGate = ''
+        // 3 秒门槛那一拍也撤掉: 退出之后它再画一次, 就没人管得住了 (下一次进来从自己那一拍重新算)
+        terminalGateSince = 0
+        if (terminalGateTimer !== null) {
+          clearTimeout(terminalGateTimer)
+          terminalGateTimer = null
+        }
         writeStored(TERMINAL_KEY, { on: false })
         if (terminalProbeTimer !== null) {
           clearTimeout(terminalProbeTimer)
@@ -7772,15 +7801,74 @@ window.__ModuleLoader__.load({
         }, online ? 15000 : TERMINAL_POLL_MS)
       }
 
-      /** 把那扇窗按当前读数重画; online 时顺手把终端带进"最近那一场" */
+      /**
+       * 那扇窗还要再等多久才许上屏 (纯函数, 判据抽出来真跑)
+       *
+       * `since` = 这一轮"没连上"的第一拍 ([terminalGateSince]); 返回 **0 表示当场就能弹**,
+       * 正数 = 还要先黑着的毫秒数. 门槛只算一次: 满 [TERMINAL_GATE_GRACE_MS] 之后每一拍都是 0
+       * (掉线卡不会自己再收回去). 还没开始算 (`since` 0 / 读数不全) 时给满门槛 —— 失败关闭
+       * @param {number} since 第一拍的时刻
+       * @param {number} now 现在
+       * @param {number} grace 门槛 (毫秒)
+       * @returns {number} 还要等的毫秒数
+       */
+      function terminalGateWait(since, now, grace) {
+        var started = typeof since === 'number' && isFinite(since) ? since : 0
+        var at = typeof now === 'number' && isFinite(now) ? now : 0
+        var span = typeof grace === 'number' && isFinite(grace) && grace > 0 ? grace : 0
+        if (span === 0) return 0
+        if (!(started > 0)) return span
+        var waited = at - started
+        if (!(waited > 0)) return span
+        return waited >= span ? 0 : span - waited
+      }
+
+      /**
+       * 把那扇窗按当前读数重画; online 时顺手把终端带进"最近那一场"
+       *
+       * **没连上不满 3 秒不弹** ([TERMINAL_GATE_GRACE_MS], 2026-11-22 主人): 一进终端先黑着 ——
+       * 首探多半一瞬就有读数, 从前那张「正在找电脑」就是这样一闪而过. 门槛从这一轮"没连上"的
+       * **第一拍**起算 ([terminalGateSince]), 探通了当场清 0; 黑着那段只挂一个到点重画的计时器,
+       * 不打轮询、也不提前上屏
+       *
+       * 门槛只管 `said.probe === true` 那两档 (探测中 / 电脑没连上 —— 它们要靠活探测才有结论);
+       * 没配对 / 终端关着 / 配对码缺口令是从配置读出来的, 不闪, 当场就画
+       */
       function renderTerminalGate() {
         if (!terminalMode || !els.termGate) return
         var said = terminalGateState(terminalInfo, terminalProbe)
         terminalGate = said.state
         if (said.state === '') {
+          terminalGateSince = 0
+          if (terminalGateTimer !== null) {
+            clearTimeout(terminalGateTimer)
+            terminalGateTimer = null
+          }
           els.termGate.hidden = true
           terminalEnter()
           return
+        }
+        var now = Date.now()
+        if (said.probe === true) {
+          if (!(terminalGateSince > 0)) terminalGateSince = now
+          var wait = terminalGateWait(terminalGateSince, now, TERMINAL_GATE_GRACE_MS)
+          if (wait > 0) {
+            // 还没到 3 秒: 先黑着, 到点再画一次 (这中间探通了就走上面那条, 这张卡一次都不上屏)
+            els.termGate.hidden = true
+            if (terminalGateTimer === null) {
+              terminalGateTimer = setTimeout(function () {
+                terminalGateTimer = null
+                renderTerminalGate()
+              }, wait)
+            }
+            return
+          }
+        } else {
+          terminalGateSince = 0
+        }
+        if (terminalGateTimer !== null) {
+          clearTimeout(terminalGateTimer)
+          terminalGateTimer = null
         }
         els.termGate.hidden = false
         if (els.termTitle) els.termTitle.textContent = said.title
