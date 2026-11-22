@@ -104,6 +104,63 @@ function check(name, got, want) {
   check('lib/term-channel.mjs 已经删掉', channelGone, true)
 }
 
+/* ── 2026-11-22 主人: "将仓库以下的面板全部删除" ───────────────────────── */
+
+{
+  const panel = await read('host-plugins/luwi-dsh-sync/lib/client.js')
+  check('面板只剩配对卡与仓库卡 (镜像读数 / 操作 / 对端 / P2P / 运行结果五块整块撤掉)', [
+    panel.includes('function renderOverview'),
+    panel.includes('function renderOpsCard'),
+    panel.includes('function renderPeerCard'),
+    panel.includes('function renderP2pCard'),
+    panel.includes('function renderAnswer'),
+    panel.includes('function renderRepoCard'),
+    panel.includes('function renderPairCard'),
+  ], [false, false, false, false, false, true, true])
+
+  check('配对卡排在仓库卡之前; 动作失败仍有一处出口 (状态条下面那一行)', [
+    panel.indexOf('renderPairCard(),') < panel.indexOf('renderRepoCard(),'),
+    panel.includes("h('div', { className: 'luwi-sync-bad', key: 'action-error' }, pairError)"),
+    panel.includes('setPairError(String(error ?? `HTTP ${status}`))'),
+  ], [true, true, true])
+
+  check('手机侧那块只读面板还在 (bridge runner 的读数不走这一刀)', [
+    panel.includes('function renderPhonePanel'),
+    panel.includes('renderPhonePanel(mount, config, deviceName)'),
+  ], [true, true])
+
+  // 2026-11-22: P2P 那三件跟着面板一起撤掉之后, 只剩 /sync p2p 这一条路 —— 命令在, 且与面板写的是
+  // 同一个文件 / 同一张信任表 (applyConfigure 的 p2p 段 + p2pConfirmPeer / p2pRevokePeer)
+  const host = await read('host-plugins/luwi-dsh-sync/index.mjs')
+  const renderer = await read('host-plugins/luwi-dsh-sync/lib/render.mjs')
+  const words = await read('host-plugins/luwi-dsh-sync/lib/command-words.mjs')
+  check('P2P 三件挪进 /sync p2p: 动作词中文为主 (英文留别名), 帮助里点得到', [
+    /action === 'p2p'/u.test(host),
+    host.includes('const what = normalizeP2pAction(rest[0])'),
+    words.includes("text === '状态'"),
+    words.includes("text === '开' || text === '打开'"),
+    words.includes("text === '关' || text === '关闭'"),
+    words.includes("text === '确认' || text === '确认换机'"),
+    words.includes("text === '吊销' || text === '撤销'"),
+    host.includes('/sync p2p [状态]'),
+    host.includes('/sync p2p 开|关'),
+  ], [true, true, true, true, true, true, true, true, true])
+  check('命令与面板写同一批口: applyConfigure 的 p2p 段 + 两张信任表函数', [
+    host.includes('await applyConfigure(syncConfigFile, { p2p: { enabled } })'),
+    host.includes('const answer = await p2pConfirmPeer(deviceId)'),
+    host.includes('const answer = await p2pRevokePeer(deviceId)'),
+    renderer.includes('export function renderP2pState'),
+    renderer.includes('开关: /sync p2p 开|关'),
+  ], [true, true, true, true, true])
+  check('P2P 那几行人话是中文 (状态 / 传输 / 信任 / 计数 / 冷却 / 等确认换机)', [
+    renderer.includes('`  信任: ${trust}${sas}`'),
+    renderer.includes('`  计数: 发出 ${state?.sent ?? 0}'),
+    renderer.includes("冷却中: 上一次没成"),
+    renderer.includes('等确认换机:'),
+    renderer.includes('最近错误:'),
+  ], [true, true, true, true, true])
+}
+
 /* ── 结果 ─────────────────────────────────────────────────────────────── */
 
 console.log(`\n${checks - failures}/${checks} passed`)

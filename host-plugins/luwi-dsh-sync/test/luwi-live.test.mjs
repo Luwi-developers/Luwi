@@ -261,11 +261,14 @@ test('a snapshot carries the device, the session and the two lists', () => {
     truncated: false,
     updatedAt: 123,
   })
-  assert.equal(snapshot.v, 2, 'v2 起 entries 里才有已经落定的回答 (读的一侧据此决定要不要重做投影)')
+  assert.equal(snapshot.v, 3, 'v3 起每一条多一格 media (图片与文件); 读的一侧据此决定要不要重做投影')
   assert.equal(snapshot.sessionId, 'session-abc')
   assert.equal(snapshot.running, true)
   assert.equal(snapshot.deviceName, 'PC')
-  assert.deepEqual(readLiveSnapshot(snapshot), snapshot, 'a snapshot we wrote reads back unchanged')
+  // 读回来的时候 entries 那一条会被补上 `media: []` (老快照没有这一格 = 空清单), 别的逐字不变
+  const back = readLiveSnapshot(snapshot)
+  assert.deepEqual(back.entries, [{ seq: 1, role: 'user', text: 'hi', at: 1, media: [] }])
+  assert.deepEqual({ ...back, entries: [] }, { ...snapshot, entries: [] })
 })
 
 test('a snapshot read from the peer is validated, not trusted', () => {
@@ -299,3 +302,72 @@ test('live file names and directories stay inside the repo', () => {
   assert.ok(liveDirectory('/repo', 'dev-1').includes('live/dev-1'))
   assert.throws(() => liveDirectory('/repo', '***'), /device id/u)
 })
+
+/* ── 2026-11-22 (2.8.1 #50): 条目带 media ─────────────────────────────── */
+
+test('每一条带的图与文件都进 media (附件块一路 + 附件段一路)', () => {
+  const events = [
+    {
+      seq: 2,
+      time: 11,
+      type: 'user/message',
+      data: {
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: '看图\n\n[附件 2 个, 图片用 read_image 打开]\n1. C:\\x\\lw-in\\a.png\n2. C:\\x\\lw-in\\b.pdf' },
+          { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', name: 'shot.png', bytes: 12 } },
+        ],
+      },
+    },
+    { seq: 4, time: 13, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '收到' }] } } },
+  ]
+  const [user, assistant] = condense(events, { running: false }).entries
+  assert.equal(user.role, 'user')
+  assert.deepEqual(user.media.map(one => [one.kind, one.name, one.image]), [
+    ['attachment', 'shot.png', true],
+    ['path', 'a.png', true],
+    ['path', 'b.pdf', false],
+  ])
+  assert.equal(user.media[0].attachmentId, 'att-1')
+  assert.equal(user.media[1].path, 'C:\\x\\lw-in\\a.png')
+  assert.deepEqual(assistant.media, [], '没有图的那一条是空清单')
+})
+
+test('只有一张图、一句话都没有的用户消息也算一条 (以前整条丢掉)', () => {
+  const events = [
+    {
+      seq: 2,
+      time: 11,
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: { attachmentId: 'att-9', mediaType: 'image/png', name: 'p.png' } }] },
+    },
+  ]
+  const entries = condense(events, { running: false }).entries
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].text, '[图片]', '纯图片那一句的正文是 `textOfContent` 给的占位')
+  assert.equal(entries[0].media.length, 1)
+  assert.equal(entries[0].media[0].attachmentId, 'att-9')
+})
+
+test('readLiveSnapshot: media 是不可信输入, 认不出的整项丢掉', () => {
+  const cleaned = readLiveSnapshot({
+    sessionId: 'session-x',
+    entries: [{
+      role: 'user',
+      text: 'x',
+      media: [
+        { kind: 'attachment', attachmentId: 'att-1', name: '../../a.png', image: true },
+        { kind: 'attachment', attachmentId: '', name: 'b.png' },
+        { kind: 'path', path: '', name: 'c.png' },
+        { kind: 'path', path: 'C:\\x\\lw-in\\d.pdf', name: 'd.pdf', image: false },
+        { kind: 'weird', name: 'e.png' },
+        null,
+      ],
+    }],
+  })
+  const media = cleaned.entries[0].media
+  assert.deepEqual(media.map(one => [one.kind, one.name]), [['attachment', 'a.png'], ['path', 'd.pdf']], '危险名字只留最后一段, 空 id 与空路径丢掉')
+  // 老快照没有这一格: 空清单
+  assert.deepEqual(readLiveSnapshot({ sessionId: 's', entries: [{ role: 'user', text: 'x' }] }).entries[0].media, [])
+})
+

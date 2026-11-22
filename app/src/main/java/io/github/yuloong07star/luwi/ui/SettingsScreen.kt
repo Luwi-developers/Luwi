@@ -39,6 +39,16 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import io.github.yuloong07star.luwi.tool.IconSet
+import io.github.yuloong07star.luwi.tool.IconTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -249,12 +259,13 @@ private val CollapsedSections = listSaver<Set<String>, String>(
 private const val SIGN_IN_URL = "https://luwi.dpdns.org/login"
 
 /**
- * 电脑上装的那份同步插件 (2026-10-24 主人: 同步板块后加上 dsh 的同步插件地址)
+ * 电脑上装的那份终端插件 (2026-10-24 主人: 同步板块后加上 dsh 的同步插件地址; 2026-11-22 收成一份)
  *
  * 手机这一端只负责扫码配对, 真正跑镜像与面板的是电脑 dsh 里这个插件; 这里只给一个可点开的地址,
- * 不做"一键安装" —— 装插件要在电脑上走 dsh 自己的插件安装
+ * 不做"一键安装" —— 装插件要在电脑上走 dsh 自己的插件安装。地址的正本在 [PortalTerminal.PC_INSTALL_URL]
+ * (门户那张未配对卡片上的「去给 PC 装 luwi终端」也是它), 这里只是同一个值的老名字
  */
-private const val SYNC_PLUGIN_URL = "https://github.com/yuloong07-star/luwi-dsh-sync"
+private const val SYNC_PLUGIN_URL = PortalTerminal.PC_INSTALL_URL
 
 /**
  * 缺省展开的白名单 (D1, 2026-10-17 主人拍板): 省电那一段 + 「常用」一级分组下那六段
@@ -1118,6 +1129,42 @@ private fun PortalFaceItems() {
     }
     var editingName by rememberSaveable { mutableStateOf(false) }
 
+    // Luwi 图标 (2026-11-22 主人: "在设置的外观里加上切换 luwi 图标的选项"): 桌面图标 / 球 / 开屏 /
+    // 桌面组件 / 门户头像五类位置一起换。桌面那一条靠 activity-alias (见 [IconTheme.apply]), 所以
+    // 切完不必重启 —— 球与开屏各自在心跳里读 `icon.json` 的 stamp
+    val iconSet = remember(revision) { IconTheme.current(context) }
+    var iconPickerOpen by remember { mutableStateOf(false) }
+    ArrowPreference(
+        title = stringResource(R.string.settings_luwi_icon),
+        summary = stringResource(R.string.settings_luwi_icon_summary, stringResource(iconSet.labelRes)),
+        onClick = {
+            haptic.contextClick()
+            iconPickerOpen = true
+        },
+    )
+    if (iconPickerOpen) {
+        IconPickerDialog(
+            current = iconSet,
+            onDismiss = { iconPickerOpen = false },
+            onPick = { picked ->
+                iconPickerOpen = false
+                scope.launch {
+                    val applied = withContext(Dispatchers.IO) { IconTheme.apply(context, picked) }
+                    message = if (applied) {
+                        context.getString(R.string.settings_luwi_icon_switched, context.getString(picked.labelRes))
+                    } else {
+                        context.getString(R.string.settings_luwi_icon_failed)
+                    }
+                    if (applied) {
+                        revision += 1
+                        // 门户缺省头像也吃这一套 (`portalLook` 的 `mark`): 推一次页面就换
+                        pushLook()
+                    }
+                }
+            },
+        )
+    }
+
     // 头像与昵称 (2026-11-10 主人: "对话层的 luwi 图标和 luwi 名可在外观设置中修改")
     ArrowPreference(
         title = stringResource(R.string.settings_portal_avatar),
@@ -1222,6 +1269,86 @@ private fun PortalFaceItems() {
         },
     )
     message?.let { PlaceholderItems(it) }
+}
+
+/**
+ * 「Luwi 图标」那个对话框 (2026-11-22)
+ *
+ * 两套并排, 选中那格描边用主色 —— **点一下就切** (不设确认键): 切图标是能回退的一步, 而且桌面图标
+ * 会重排一次; 那件事在下面的小字里已经说过, 再问一次"确定要改桌面吗"只是多按一下
+ *
+ * 缩略图走 [IconTheme.markBitmap] (与球 / 开屏同一份), 于是这里看到的就是切完的样子
+ */
+@Composable
+private fun IconPickerDialog(
+    current: IconSet,
+    onDismiss: () -> Unit,
+    onPick: (IconSet) -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+    val colors = MiuixTheme.colorScheme
+    InputDialog(
+        show = true,
+        title = stringResource(R.string.settings_luwi_icon),
+        summary = stringResource(R.string.settings_luwi_icon_dialog),
+        onDismissRequest = onDismiss,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp),
+        ) {
+            IconSet.values().forEach { set ->
+                val picked = set == current
+                val shape = RoundedCornerShape(16.dp)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(shape)
+                        .then(
+                            if (picked) {
+                                Modifier.border(2.dp, colors.primary, shape)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .clickable {
+                            haptic.contextClick()
+                            onPick(set)
+                        }
+                        .padding(vertical = 12.dp),
+                ) {
+                    val mark = remember(set) { IconTheme.markBitmap(context, set) }
+                    if (mark != null) {
+                        Image(
+                            bitmap = mark.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(56.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(set.labelRes),
+                        style = MiuixTheme.textStyles.body2,
+                        color = if (picked) colors.primary else colors.onSurface,
+                    )
+                }
+            }
+        }
+        PlaceholderItems(stringResource(R.string.settings_luwi_icon_desktop_note))
+        TextButton(
+            text = stringResource(R.string.button_cancel),
+            onClick = {
+                haptic.contextClick()
+                onDismiss()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 /**
@@ -2035,9 +2162,12 @@ private fun SyncItems() {
     var notice by remember { mutableStateOf<String?>(null) }
     // 换了一台机器再扫时先问一句: 重新配对会重置同步基线, 确认之后才写
     var pending by remember { mutableStateOf<PairPayload?>(null) }
+    // 取消配对那一问 (2026-11-22): 说清会断开什么、不会删什么, 确认之后才写
+    var unpairing by remember { mutableStateOf(false) }
     var interval by remember(snapshot.pullInterval) { mutableIntStateOf(snapshot.pullInterval) }
 
     val pairDone = stringResource(R.string.settings_sync_pair_done)
+    val unpairDone = stringResource(R.string.settings_sync_unpair_done)
     val switchedOn = stringResource(R.string.settings_sync_switched_on)
     val switchedOff = stringResource(R.string.settings_sync_switched_off)
     // 已配对那台机器的名字 (配对码里 from 是空的就按 PC 说)
@@ -2151,15 +2281,43 @@ private fun SyncItems() {
     )
 
     // ---- 电脑上的那个插件 (2026-10-24): 地址就是仓库, 点开用系统浏览器看 ----
-    ArrowPreference(
-        title = stringResource(R.string.settings_sync_plugin),
-        summary = stringResource(R.string.settings_sync_plugin_summary, SYNC_PLUGIN_URL),
-        onClick = {
-            openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
-                Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
-            }
-        },
-    )
+    // 2026-11-22: 未配对时这一行让位给下面那颗「去给 PC 装 luwi终端」—— 同一个地址, 但那一句是
+    // 照着"现在该干什么"说的 (当前这一行在配好之后当参考文档看)
+    if (snapshot.paired) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_plugin),
+            summary = stringResource(R.string.settings_sync_plugin_summary, SYNC_PLUGIN_URL),
+            onClick = {
+                openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    } else {
+        // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」")
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_install_pc),
+            summary = stringResource(R.string.settings_sync_install_pc_summary),
+            onClick = {
+                openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
+
+    // ---- 取消配对 (2026-11-22 主人: "设置里要有取消配对功能"): 只配对过的那一台才有这一行 ----
+    if (snapshot.paired) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_unpair),
+            summary = stringResource(R.string.settings_sync_unpair_summary, pairedName),
+            onClick = {
+                haptic.contextClick()
+                notice = null
+                unpairing = true
+            },
+        )
+    }
 
     // ---- 一句状态: 关着 / 已配对 / 没配对 ----
     if (!snapshot.syncOn) {
@@ -2223,6 +2381,44 @@ private fun SyncItems() {
                     onClick = {
                         haptic.confirm()
                         applyPairing(payload)
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
+
+    // 取消配对那一问 (2026-11-22): 说清断开什么、不删什么; 确认之后才写并重启 host
+    if (unpairing) {
+        OverlayDialog(
+            show = true,
+            title = stringResource(R.string.settings_sync_unpair_confirm_title),
+            summary = stringResource(R.string.settings_sync_unpair_confirm_body, pairedName),
+            defaultWindowInsetsPadding = false,
+            onDismissRequest = { unpairing = false },
+        ) {
+            Row(horizontalArrangement = Arrangement.SpaceBetween) {
+                TextButton(
+                    text = stringResource(R.string.button_cancel),
+                    onClick = {
+                        haptic.contextClick()
+                        unpairing = false
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    text = stringResource(R.string.settings_sync_unpair_ok),
+                    onClick = {
+                        haptic.confirm()
+                        val problem = SyncSetting.unpair(context)
+                        unpairing = false
+                        if (problem == null) {
+                            Toast.makeText(context, unpairDone, Toast.LENGTH_LONG).show()
+                            DshHost.restart(context)
+                        } else {
+                            notice = problem
+                        }
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.textButtonColorsPrimary(),

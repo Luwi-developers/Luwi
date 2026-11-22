@@ -21,6 +21,7 @@ import io.github.yuloong07star.luwi.channel.PrivilegedBridge
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
 import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.plugin.PluginManager
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -205,10 +206,11 @@ class DshHostService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.host_notification_title))
             .setContentText(getString(R.string.host_notification_text))
-            // 通知的小图标不是启动器图标: 它按模板染色, 只认 alpha 通道, 所以给的是一张纯白的
-            // 水花鲸尾剪影。原来这里用的是 `ic_launcher_foreground` (108dp 的启动器前景), 系统把它
-            // 缩进 24dp 的状态栏位里, 糊成一团
-            .setSmallIcon(R.drawable.ic_notification)
+            // 通知的小图标不是启动器图标: 它按模板染色, 只认 alpha 通道, 所以每套图标另带一张纯白
+            // 的水花鲸尾 / 女仆剪影 (`IconTheme.notificationIcon`, 2026-11-22 起跟着设置里那一套走)。
+            // 原来这里用的是 `ic_launcher_foreground` (108dp 的启动器前景), 系统把它缩进 24dp 的
+            // 状态栏位里, 糊成一团
+            .setSmallIcon(IconTheme.notificationIcon(this))
             .setContentIntent(open)
             .setOngoing(true)
             .build()

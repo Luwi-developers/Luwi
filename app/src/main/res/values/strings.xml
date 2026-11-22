@@ -121,6 +121,14 @@
     <string name="settings_theme_follow_system">Follow system</string>
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
+    <string name="settings_luwi_icon">Luwi icon</string>
+    <string name="settings_luwi_icon_summary">Now using %1$s</string>
+    <string name="settings_luwi_icon_dialog">Pick an icon; the launcher, the ball and the splash all follow</string>
+    <string name="settings_luwi_icon_builtin">Whale tail</string>
+    <string name="settings_luwi_icon_maid">Luwi portrait</string>
+    <string name="settings_luwi_icon_switched">Switched to %1$s</string>
+    <string name="settings_luwi_icon_failed">That icon could not be applied; still on the previous one</string>
+    <string name="settings_luwi_icon_desktop_note">The launcher icon may move to another screen after the switch</string>
     <string name="settings_portal_avatar">Change the avatar</string>
     <string name="settings_portal_avatar_none">Still Luwi\'s own mark</string>
     <string name="settings_portal_avatar_ready">Using the picture you picked</string>
@@ -951,6 +959,14 @@
     <string name="settings_sync_pair_reconfirm_body">Already paired with %1$s. Pairing again resets the sync baseline and clears old sessions in the repo</string>
     <string name="settings_sync_pair_reconfirm_ok">Pair again</string>
     <string name="settings_sync_pair_done">Paired; restarting the DSH host…</string>
+    <string name="settings_sync_install_pc">Install luwi terminal on the PC</string>
+    <string name="settings_sync_install_pc_summary">Install luwi-dsh-sync in the desktop dsh, then generate a QR code in its panel</string>
+    <string name="settings_sync_unpair">Unpair</string>
+    <string name="settings_sync_unpair_summary">Disconnect from %1$s: clears the address and token and turns the terminal off; conversations and files stay</string>
+    <string name="settings_sync_unpair_confirm_title">Disconnect from this computer?</string>
+    <string name="settings_sync_unpair_confirm_body">%1$s: the pairing code, the address and the token will be cleared and the terminal turned off. Conversations, downloaded pictures and files stay on this phone. To reconnect, have it generate a new QR code in its panel</string>
+    <string name="settings_sync_unpair_ok">Disconnect</string>
+    <string name="settings_sync_unpair_done">Unpaired; restarting the DSH host…</string>
 
     <string name="settings_tavern_title">Tavern</string>
     <string name="settings_tavern_summary_unbound">No tavern workspace bound yet</string>

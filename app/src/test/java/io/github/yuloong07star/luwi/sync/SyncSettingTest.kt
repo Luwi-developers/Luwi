@@ -395,4 +395,50 @@ class SyncSettingTest {
         assertNotNull(SyncSetting.applyPairingIn(target, paired(remote = "  "), now = 1L))
         assertFalse("拒了就不该写出文件", target.isFile)
     }
+
+    /* ── 取消配对 (2026-11-22) ─────────────────────────────── */
+
+    @Test
+    fun `取消配对之后 配对段与角色删掉, 地址与口令清掉, 同步停下来`() {
+        val root = dir()
+        val target = file(root)
+        assertNull(SyncSetting.applyPairingIn(target, paired(), now = 1L))
+        assertTrue(SyncSetting.snapshotOf(target).paired)
+
+        assertNull(SyncSetting.unpairIn(target))
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertFalse("配对段删掉之后就是未配对", snapshot.paired)
+        assertEquals("配对 id 也要没", "", snapshot.pairedId)
+        assertEquals("对端地址清掉", "", snapshot.peerUrl)
+        assertEquals("口令清掉", "", snapshot.peerToken)
+        assertFalse("通道关掉", snapshot.peerOn)
+        assertFalse("不再折投影", snapshot.peerProxy)
+        assertFalse("不同步了", snapshot.syncOn)
+        assertEquals("周期拉取归零", 0, snapshot.pullInterval)
+        assertFalse("工作区镜像仍是关的", snapshot.workspaceOn)
+        val text = target.readText()
+        assertFalse("pairing 整段都没了", text.contains("\"pairing\""))
+        assertFalse("role 标记也没了", text.contains("\"role\""))
+    }
+
+    @Test
+    fun `取消配对不碰用户自己填的东西与 peer 段别的键`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"deviceName":"我的手机","pullIntervalMinutes":30,"branch":"dev",""" +
+                """"pairing":{"v":1,"id":"pair-00000001","at":1760000000000,"from":"书房 电脑"},""" +
+                """"peer":{"listen":false,"acceptSend":false,"token":"0123456789abcdef","sendTimeoutMs":8000,""" +
+                """"url":"http://100.64.0.7:3080"}}""",
+        )
+        assertNull(SyncSetting.unpairIn(target))
+        val text = target.readText()
+        assertTrue("设备名留着", text.contains("我的手机"))
+        assertTrue("分支留着", text.contains("\"dev\""))
+        assertTrue("peer 段别的键 (sendTimeoutMs) 留着", text.contains("sendTimeoutMs"))
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertEquals("30 分钟那个值不再生效", 0, snapshot.pullInterval)
+        assertTrue("关掉时的值挪进 lw 段存着 (重新配对时还回得来)", text.contains("savedInterval"))
+        assertEquals("分支不被取消配对吃掉", "dev", snapshot.branch)
+    }
 }

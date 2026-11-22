@@ -18,6 +18,7 @@ import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.OutFile
 import io.github.yuloong07star.luwi.tool.OutPaths
@@ -403,12 +404,17 @@ internal class PortalBridge(private val context: Context) {
         val wall = if (wantWall) PortalFace.dataUrl(context).orEmpty() else ""
         // 头像与背景同一条规矩: 读数随时给, 图只在 wantWall 那一次搬 (2026-11-10 加的两样)
         val avatar = if (wantWall) PortalFace.avatarDataUrl(context).orEmpty() else ""
+        // 缺省那张脸是"当前那套图标" (2026-11-22): 页面里内嵌的 MARK_PNG 只是最后兜底, 主人换了图标
+        // 之后头栏与空态要跟着换 —— 与头像同一条闸, 不搬图时只给 `markVer`
+        val iconSet = IconTheme.current(context)
+        val mark = if (wantWall) IconTheme.markDataUrl(context).orEmpty() else ""
         // 一行读数: 背景为什么没上屏时, 这一行能分清"没配"与"配了但没搬过去"
         Log.i(
             LOOK_TAG,
             "portalLook alpha=${face.alpha} ver=${face.wall.ifEmpty { "-" }} wantWall=$wantWall" +
                 " wall=${wall.length} name=${face.name.ifEmpty { "-" }}" +
-                " avatarVer=${face.avatar.ifEmpty { "-" }} avatar=${avatar.length}",
+                " avatarVer=${face.avatar.ifEmpty { "-" }} avatar=${avatar.length}" +
+                " markVer=${iconSet.id} mark=${mark.length}",
         )
         return JSONObject().apply {
             put("alpha", face.alpha)
@@ -417,6 +423,8 @@ internal class PortalBridge(private val context: Context) {
             put("name", face.name)
             put("avatar", avatar)
             put("avatarVer", face.avatar)
+            put("mark", mark)
+            put("markVer", iconSet.id)
         }.toString()
     }
 
@@ -598,6 +606,18 @@ internal class PortalBridge(private val context: Context) {
     @JavascriptInterface
     fun portalTerminalPair(): String {
         PortalAsk.ask(PortalAsk.Target.PAIR)
+        return ""
+    }
+
+    /**
+     * 终端那个弹窗里点「去给 PC 装 luwi终端」(2026-11-22, 主人: "在没有配对时扫码配对下加一个")
+     *
+     * 打开系统浏览器只有界面层办得到 (页面里跳外链会把门户自己顶掉), 于是同样只落一个掷标,
+     * 由 `HostScreen` 消费后 `openPage` (见 [PortalAsk.Target.PC_INSTALL])
+     */
+    @JavascriptInterface
+    fun portalTerminalInstall(): String {
+        PortalAsk.ask(PortalAsk.Target.PC_INSTALL)
         return ""
     }
 

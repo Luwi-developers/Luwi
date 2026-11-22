@@ -16,6 +16,7 @@ import io.github.yuloong07star.luwi.channel.LwInput
 import io.github.yuloong07star.luwi.channel.LwServiceProtocol
 import io.github.yuloong07star.luwi.channel.LwServiceProxy
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwSystemCommand
 import java.util.concurrent.Executors
 import kotlinx.serialization.json.JsonObject
@@ -471,7 +472,7 @@ internal object LockReplay {
                 NotificationCompat.Builder(context, CHANNEL_ID)
                     .setContentTitle(title)
                     .setContentText(body)
-                    .setSmallIcon(R.drawable.ic_notification)
+                    .setSmallIcon(IconTheme.notificationIcon(context))
                     .setContentIntent(open)
                     .setAutoCancel(true)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(body))

@@ -57,7 +57,7 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, writeFileSync } from 'node:fs'
 import { readFile, readdir, rm, stat } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -102,7 +102,7 @@ import { EncryptedBackend, encryptTree, decryptTree, mergeTrees } from './lib/en
 import { selectEncryptionMode } from './lib/backend.mjs'
 import { detectAge, ageEncrypt, ageDecrypt } from './lib/age.mjs'
 import { collectStatus } from './lib/status.mjs'
-import { renderDiff, renderPeers, renderPull, renderPush, renderStatus, errorValue } from './lib/render.mjs'
+import { renderDiff, renderP2pState, renderPeers, renderPull, renderPush, renderStatus, errorValue } from './lib/render.mjs'
 import { confirmSync, hasOpenTurn, makeEventGate, maybeAppendSessionEvent, openTurnFromProjection } from './lib/gate.mjs'
 import { sessionSyncDomainSpec } from './lib/domain.mjs'
 import { luwiBridgeFromEnv, luwiWorktreeProblem, makeLuwiBridgeRunner, readLuwiSyncConfig } from './lib/luwi-bridge-runner.mjs'
@@ -122,7 +122,9 @@ import { materializeSyncShadows, readWorkspaceCards, writeWorkspaceCard } from '
 import { resolveLiveSpec, resolvePeerSpec, resolveRole, annotateWorkspaceNames, shadowDirName } from './lib/luwi-peer.mjs'
 import { condense, liveSnapshot, LIVE_SNAPSHOT_VERSION, LIVE_SNAPSHOT_VERSION_LEGACY } from './lib/luwi-live.mjs'
 import { appendTranscriptEntries, transcriptDir } from './lib/luwi-transcript.mjs'
-import { createPeerRuntime } from './lib/luwi-peer-runtime.mjs'
+import { createPeerRuntime, MAX_BLOB_BYTES } from './lib/luwi-peer-runtime.mjs'
+// 2026-11-22 (2.8.1 #50): 附件段的解析 / 名字去重, 与手机侧 `BallAttach` 同一串
+import { dedupeFileName, rewriteAttachPaths, safeFileName, stripAttach, withAttach } from './lib/luwi-attach.mjs'
 import { makeGithubApi, looksLikeNetworkFailure } from './lib/github-api.mjs'
 import { appendProxyEvents, proxyEventsFrom, proxyNoticeEvents, proxyTitleOf, proxyUserMessage } from './lib/luwi-proxy.mjs'
 // Luwi 加 (G1 收口): 只读自检的纯函数 —— peer 落点 / ② 层 extraneous / 汇总文本
@@ -576,6 +578,14 @@ export function losslessStatus(value) {
   }
   return out
 }
+
+/**
+ * `/sync p2p` 的动作词归一化 —— 词表在 `lib/command-words.mjs` (那边零依赖, 单测能直接跑),
+ * 这里 import 之后转出去, 命令那一侧与判据都按同一个名字找它
+ */
+import { normalizeP2pAction } from './lib/command-words.mjs'
+
+export { normalizeP2pAction }
 
 /**
  * sync_status 工具定义（read-only：不确认、不触网）。
@@ -2500,6 +2510,362 @@ function applyInner(ctx, config = {}) {
   /** 当前时刻 (测试与"相连那一条线"共用同一个入口) */
   const nowMs = () => Date.now()
 
+  // --- 2026-11-22 (2.8.1 #50): 图片与文件跨设备
+  //
+  // 三条路, 各自只管一件事:
+  //   · 对端把它那几份**先传上来** → [acceptPeerBlob] 落本机暂存区 (`<DSH_HOME>/lw/peer-inbox/<本机 id>`);
+  //     收那一句话时 [adoptStagedBlobs] 才把它们搬进**那一场工作区**的 `lw-in/` —— 那时才知道这一句
+  //     要落到哪一场, 也才搬得对 (手机永远不知道电脑的目录结构)
+  //   · 手机要取电脑这一侧的图 → [readAttachmentBytes] (按附件块 id, 走宿主附件仓) 或
+  //     [readWorkspaceFile] (按工作区里的绝对路径)
+  //
+  // 闸: 只写暂存区、只读**那一场工作区**之下的路径; 单份 [MAX_BLOB_BYTES]; 文件名只取最后一段
+  const peerInboxDirectory = () => {
+    const id = String(peerIdentity.deviceId ?? '').replace(/[^0-9A-Za-z._-]/gu, '').slice(0, 64) || 'own'
+    return join(configHome, 'lw', 'peer-inbox', id)
+  }
+
+  /** 一个目录里现成的名字 (目录不在 = 空; 绝不抛) */
+  async function namesIn(directory) {
+    try {
+      return await readdir(directory)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 收下对端先传上来的一份附件 (落在暂存区)。
+   * @param {string} rawName - 对端给的原始名字 (只取最后一段)。
+   * @param {Uint8Array} bytes - 字节。
+   * @returns {Promise<{path: string, name: string}>} 暂存路径与干净的名字。
+   */
+  async function acceptPeerBlob(rawName, bytes) {
+    const name = safeFileName(rawName)
+    if (name === '') throw new Error('the attachment needs a plain file name')
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error('the attachment is empty')
+    if (bytes.length > MAX_BLOB_BYTES) throw new Error(`the attachment is larger than ${MAX_BLOB_BYTES / (1024 * 1024)} MB`)
+    const dir = peerInboxDirectory()
+    mkdirSync(dir, { recursive: true })
+    // 名字前面挂一个时间戳: 暂存区是多份文件的落脚点, 同名不许互相盖掉
+    const stem = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    const finalName = dedupeFileName(`${stem}-${name}`, await namesIn(dir))
+    const target = join(dir, finalName)
+    writeFileSync(target, bytes)
+    const info = await stat(target).catch(() => null)
+    if (info === null || info.size !== bytes.length) throw new Error('the attachment did not land on disk')
+    return { path: target, name }
+  }
+
+  /**
+   * 那一场的工作目录 (`header.cwd`); 冷会话要先唤一次。
+   * @param {string} sessionId - 会话 id。
+   * @returns {Promise<string>} 目录 (取不到回空串)。
+   */
+  async function sessionCwdOf(sessionId) {
+    const live = ctx.sessions.get(sessionId)
+    if (live !== undefined) return String(live.header?.cwd ?? '')
+    const controller = ctx.get('sessionController')
+    if (controller !== undefined && typeof controller.resolveAgent === 'function') {
+      try {
+        const resolved = await controller.resolveAgent(sessionId)
+        if (resolved !== undefined && !('error' in resolved)) {
+          return String(resolved.agent?.session?.header?.cwd ?? '')
+        }
+      } catch { /* 唤不醒就退回下面那个兜底 */ }
+    }
+    return ''
+  }
+
+  /**
+   * 把暂存区那几份搬进这一场工作区的 `lw-in/` (收下对端那一句话时跑)。
+   *
+   * 只认**本机暂存区里**的路径 (对端能写的地方就那一处): 别处的一律不搬, 那个位置留空, 调用方
+   * 会把那一行原样留着 (不假装搬过)
+   * @param {string} sessionId - 那一场。
+   * @param {string[]} staged - 暂存路径 (对端回执里的 absolute path)。
+   * @returns {Promise<{paths: string[]}>} 与入参一一对应的落地路径 (搬不成的为空串)。
+   */
+  async function adoptStagedBlobs(sessionId, staged) {
+    const cwd = await sessionCwdOf(sessionId)
+    const root = cwd === '' ? '' : resolve(cwd)
+    const inbox = resolve(peerInboxDirectory())
+    const inside = (path) => path.startsWith(`${inbox}${sep}`) || path === inbox
+    const paths = []
+    for (const raw of Array.isArray(staged) ? staged : []) {
+      const source = resolve(String(raw ?? ''))
+      if (root === '' || !inside(source)) {
+        paths.push('')
+        continue
+      }
+      const info = await stat(source).catch(() => null)
+      if (info === null || !info.isFile() || info.size > MAX_BLOB_BYTES) {
+        paths.push('')
+        continue
+      }
+      const dir = join(root, 'lw-in')
+      mkdirSync(dir, { recursive: true })
+      const name = safeFileName(basename(source))
+      const finalName = dedupeFileName(name === '' ? 'file' : name, await namesIn(dir))
+      const target = join(dir, finalName)
+      try {
+        // 先试改名 (同一卷); 跨卷 (暂存区在 DSH_HOME, 工作区可能在 /sdcard) 时改成写一份再删
+        renameSync(source, target)
+      } catch {
+        writeFileSync(target, await readFile(source))
+        await rm(source, { force: true })
+      }
+      const written = await stat(target).catch(() => null)
+      paths.push(written === null ? '' : target)
+    }
+    return { paths }
+  }
+
+  /**
+   * 读这一场里某一张图的字节 (对端来取的时候用)。
+   * @param {string} sessionId - 那一场。
+   * @param {string} attachmentId - 附件 id。
+   * @returns {Promise<{bytes: Uint8Array, name: string}>} 字节与名字。
+   */
+  async function readAttachmentBytes(sessionId, attachmentId) {
+    const store = ctx.get('attachments')
+    if (store === undefined || typeof store.readImage !== 'function') throw new Error('this host has no attachment store')
+    const live = ctx.sessions.get(sessionId)
+    if (live === undefined) throw new Error('that session is not loaded here')
+    const ref = findImageRef(live, attachmentId)
+    if (ref === null) throw new Error('that attachment is not in this session')
+    const stored = await store.readImage(ref)
+    const bytes = stored?.data
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error('that image could not be read')
+    return { bytes, name: safeFileName(String(ref.name ?? '')) || 'image.png' }
+  }
+
+  /**
+   * 读这一场工作区里的一个文件 (对端来取的时候用): 只认 `cwd` 之下的路径。
+   * @param {string} sessionId - 那一场。
+   * @param {string} raw - 路径 (对端从快照里抄来的绝对路径)。
+   * @returns {Promise<{bytes: Uint8Array, name: string}>} 字节与名字。
+   */
+  async function readWorkspaceFile(sessionId, raw) {
+    const cwd = await sessionCwdOf(sessionId)
+    if (cwd === '') throw new Error('that session has no workspace directory')
+    const root = resolve(cwd)
+    const target = resolve(String(raw ?? ''))
+    if (!(target === root || target.startsWith(`${root}${sep}`))) throw new Error('that path is outside this workspace')
+    const info = await stat(target).catch(() => null)
+    if (info === null || !info.isFile()) throw new Error('no such file in this workspace')
+    if (info.size > MAX_BLOB_BYTES) throw new Error('that file is larger than the peer can take')
+    return { bytes: await readFile(target), name: basename(target) }
+  }
+
+  /**
+   * 正文里那一段附件名单: 把本机工作区 `lw-in/` 下的那几份**先传给对端** (2026-11-22)。
+   *
+   * 只传"归这条路管"的那几行 (`<HOME>/lw-in/` 之下): 名单里别的路径 (例如主人自己写的别处文件)
+   * 原样留着不动。**有一份没传过去就整条按原样发** —— 半换半不换的话, 对端那边两截路径哪种都读不到;
+   * 同时回一句人话说明为什么, 由调用方落进那一场 (人看得见, 模型不看)
+   * @param {string} text - 要发给对端的正文。
+   * @returns {Promise<{text: string, staged: string[], notice: string}>} 改写后的正文、暂存清单与要说的那句。
+   */
+  async function carryAttachments(text) {
+    const { paths } = stripAttach(text)
+    if (paths.length === 0) return { text, staged: [], notice: '' }
+    const home = typeof process.env.HOME === 'string' && process.env.HOME !== '' ? process.env.HOME : ''
+    if (home === '') return { text, staged: [], notice: '本机的 lw-in 目录定位不到, 图片与文件没有传过去' }
+    const root = resolve(join(home, 'lw-in'))
+    const mapping = new Map()
+    const staged = []
+    /** 传不动的那几份 */
+    const failed = []
+    let legacy = false
+    for (const path of paths) {
+      const source = resolve(path)
+      if (!(source === root || source.startsWith(`${root}${sep}`))) continue
+      const info = await stat(source).catch(() => null)
+      if (info === null || !info.isFile() || info.size > MAX_BLOB_BYTES) {
+        failed.push(basename(source))
+        continue
+      }
+      let bytes
+      try {
+        bytes = await readFile(source)
+      } catch {
+        failed.push(basename(source))
+        continue
+      }
+      const answer = await peerRuntime.uploadBlob(basename(source), bytes)
+      if (answer.ok === true && typeof answer.path === 'string' && answer.path !== '') {
+        mapping.set(path, answer.path)
+        staged.push(answer.path)
+        continue
+      }
+      if (answer.legacy === true) legacy = true
+      failed.push(basename(source))
+    }
+    if (failed.length > 0) {
+      const who = failed.slice(0, 2).join(', ') + (failed.length > 2 ? ' 等' : '')
+      const why = legacy ? '这台电脑的 luwi终端 太旧, 图片与文件传不过去' : `图片或文件没传过去 (${who})`
+      return { text, staged: [], notice: `${why} —— 这一句只有文字到了` }
+    }
+    if (staged.length === 0) return { text, staged: [], notice: '' }
+    return { text: rewriteAttachPaths(text, mapping), staged, notice: '' }
+  }
+
+  /** 取回来的媒体记在哪 (与 `peer-ledger.json` 同一层: 只记 `<名字> → 本地路径`, 坏了不拖死折入) */
+  function peerMediaFile() {
+    return configHome === '' ? '' : join(configHome, 'lw', 'peer-media.json')
+  }
+
+  /** 读那份账 (读不懂 = 空账; 绝不抛) */
+  async function readMediaLedger() {
+    const file = peerMediaFile()
+    const blank = { v: 1, at: 0, items: {}, dirty: false }
+    if (file === '') return blank
+    let text
+    try {
+      text = await readFile(file, 'utf8')
+    } catch {
+      return blank
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      return blank
+    }
+    const items = parsed !== null && typeof parsed === 'object' && parsed.items !== null && typeof parsed.items === 'object' ? parsed.items : {}
+    const kept = {}
+    for (const [key, value] of Object.entries(items)) {
+      if (value === null || typeof value !== 'object') continue
+      if (typeof value.path !== 'string' || value.path === '') continue
+      kept[key] = { path: value.path, bytes: Number.isFinite(value.bytes) ? Number(value.bytes) : 0, at: Number.isFinite(value.at) ? Number(value.at) : 0 }
+    }
+    return { v: 1, at: Number.isFinite(parsed?.at) ? Number(parsed.at) : 0, items: kept, dirty: false }
+  }
+
+  /** 写那份账 (原子改名; 写不动只 warn, 不能让"取媒体"拖死折入) */
+  async function writeMediaLedger(ledger) {
+    const file = peerMediaFile()
+    if (file === '') return
+    const body = { v: 1, at: nowMs(), items: ledger.items }
+    const tmp = `${file}.tmp`
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(tmp, JSON.stringify(body), 'utf8')
+      renameSync(tmp, file)
+      ledger.at = body.at
+      ledger.dirty = false
+    } catch (error) {
+      warn(`peer: writing the media ledger failed: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * 手机这一侧: 把对端那几条带的图与文件取回来, 落在本机工作区的 `lw-in/`, 再把正文那一段名单
+   * 换成**本机的路径** (2026-11-22, 2.8.1 #50)。
+   *
+   * 为什么非换不可: 门户画图与文件名走的是 `/lw-out/in/<名字>` (`host-plugin` 那一侧服务
+   * `<HOME>/lw-in`), 而投影里的路径本来是电脑的 —— 不换成本机那一份, 屏上永远是「图没取到」
+   * @param {object[]} entries - 对端快照的条目 (会被**就地改写**)。
+   * @param {string} peerSessionId - 对端那一场。
+   * @returns {Promise<{entries: object[], changed: number, notes: string[]}>} 改写后的条目与要说的那几句。
+   */
+  async function materializeEntryMedia(entries, peerSessionId) {
+    const list = Array.isArray(entries) ? entries : []
+    const notes = []
+    let changed = 0
+    const withMedia = list.filter(entry => Array.isArray(entry?.media) && entry.media.length > 0)
+    if (withMedia.length === 0) return { entries: list, changed, notes }
+    const home = typeof process.env.HOME === 'string' && process.env.HOME !== '' ? process.env.HOME : ''
+    if (home === '') {
+      return { entries: list, changed, notes: ['本机的 lw-in 目录定位不到, 电脑那边的图片与文件没有取回来'] }
+    }
+    const root = resolve(join(home, 'lw-in'))
+    const device = String(shadowDevice.id ?? '').replace(/[^0-9A-Za-z._-]/gu, '').slice(0, 8) || 'peer'
+    const ledger = await readMediaLedger()
+    let missing = 0
+    for (let index = 0; index < list.length; index += 1) {
+      const entry = list[index]
+      if (!Array.isArray(entry?.media) || entry.media.length === 0) continue
+      const { main, paths } = stripAttach(typeof entry.text === 'string' ? entry.text : '')
+      // 正文名单里已经写过的路径 (kind:'path') 不重复追加; 剩下那些 (别的目录里的) 原样留着
+      const covered = new Set(entry.media.filter(item => item.kind === 'path').map(item => String(item.path)))
+      const keptPaths = paths.filter(path => !covered.has(path))
+      const local = []
+      let failed = 0
+      for (const item of entry.media) {
+        const ref = item.kind === 'attachment'
+          ? { attachmentId: String(item.attachmentId ?? '') }
+          : { path: String(item.path ?? '') }
+        const cacheKey = `${device}|${peerSessionId}|${Number(entry.seq) || index}|${item.kind === 'attachment' ? ref.attachmentId : ref.path}`
+        const cached = ledger.items[cacheKey]
+        if (cached !== undefined && existsSync(cached.path)) {
+          local.push(cached.path)
+          continue
+        }
+        const answer = await peerRuntime.fetchBlob(peerSessionId, ref)
+        if (answer.ok !== true || !(answer.bytes instanceof Uint8Array) || answer.bytes.length === 0) {
+          failed += 1
+          missing += 1
+          continue
+        }
+        const name = safeFileName(String(item.name ?? '')) || safeFileName(String(answer.name ?? '')) || 'file'
+        try {
+          mkdirSync(root, { recursive: true })
+          const finalName = dedupeFileName(`peer-${device}-${name}`, await namesIn(root))
+          const target = join(root, finalName)
+          writeFileSync(target, answer.bytes)
+          const info = await stat(target).catch(() => null)
+          if (info === null || info.size !== answer.bytes.length) {
+            failed += 1
+            missing += 1
+            continue
+          }
+          ledger.items[cacheKey] = { path: target, bytes: answer.bytes.length, at: nowMs() }
+          ledger.dirty = true
+          local.push(target)
+        } catch (error) {
+          warn(`peer: storing a peer attachment failed: ${messageOf(error)}`)
+          failed += 1
+          missing += 1
+        }
+      }
+      if (local.length === 0) {
+        // 一条都没取回来: 正文原样留着 (那几行照实留在那里, 不假装取到了)
+        entry.media = failed > 0 ? [] : entry.media
+        continue
+      }
+      entry.text = withAttach(main, [...keptPaths, ...local])
+      entry.media = []
+      changed += 1
+    }
+    if (ledger.dirty) await writeMediaLedger(ledger)
+    if (missing > 0) notes.push(`电脑那边的图片与文件有 ${missing} 份没取回来`)
+    return { entries: list, changed, notes }
+  }
+
+  /**
+   * 会话日志里那一张图的引用 (宿主 `readImage` 要完整引用, 只给 id 不够)。
+   * @param {object} session - 宿主 Session。
+   * @param {string} attachmentId - 附件 id。
+   * @returns {object|null} 引用; 找不到 null。
+   */
+  function findImageRef(session, attachmentId) {
+    const events = typeof session.deriveEvents === 'function' ? session.deriveEvents() : []
+    const wanted = String(attachmentId)
+    for (const event of Array.isArray(events) ? events : []) {
+      const content = event?.data?.message?.content ?? event?.data?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        const attachment = block?.attachment
+        if (attachment !== null && typeof attachment === 'object' && String(attachment.attachmentId ?? '') === wanted) {
+          return attachment
+        }
+      }
+    }
+    return null
+  }
+
   const peerRuntime = createPeerRuntime({
     spec: peerSpec,
     live: liveSpec,
@@ -2530,6 +2896,11 @@ function applyInner(ctx, config = {}) {
     }),
     readState: readPluginState,
     writeState: patchPluginState,
+    // 2026-11-22 (2.8.1 #50): 图片与文件那一条 —— 先收进暂存区 / 收话时搬进工作区 / 对端来取字节
+    acceptBlob: acceptPeerBlob,
+    adoptStaged: adoptStagedBlobs,
+    readAttachmentBytes,
+    readWorkspaceFile,
     // 这里返回**真实结果**: 发消息那条路要拿它判断"这一句到底推上去没有" (queue 的 ok/pushError
     // 就是这里来的)。2026-10-22 一度改成 fire-and-forget, 结果 `send()` 收到 undefined,
     // 明明推成功了也写"推送失败" —— 要止住 pull 里的自锁, 改的是 consumeInbox 那一侧不 await
@@ -2816,6 +3187,8 @@ function applyInner(ctx, config = {}) {
   let liveFallbackNoted = ''
   /** 已经为哪一场说过"从对话账里补了历史"(一轮只打一行日志) */
   let transcriptFillerNoted = ''
+  /** 已经说过"电脑那边的图没取回来"的那几场 (只报一次, 不刷屏) */
+  const mediaNoted = new Set()
   /**
    * 排进仓库队列、还没等到回执的那几句话 (2026-10-20)。
    * 队列是"对端下次拉取才收到", 所以发出去的那一刻拿不到对端会话 id; 回执里带回来的那个 id
@@ -3657,6 +4030,20 @@ function applyInner(ctx, config = {}) {
         }
       }
     }
+    // 2026-11-22 (2.8.1 #50): 折之前先把对端那几条带的图与文件取回来 —— 折进投影的必须是**本机真存在**
+    // 的路径, 门户才画得出图 (它照 `lw-in/` 下的名字取字节, 见 `host-plugin` 的 `/lw-out/in/`)
+    if (peerSpec !== null && peerSpec.proxy === true) {
+      try {
+        const media = await materializeEntryMedia(entries, peerSessionId)
+        entries = media.entries
+        if (media.notes.length > 0 && !mediaNoted.has(peerSessionId)) {
+          mediaNoted.add(peerSessionId)
+          logger.info(`peer: ${peerSessionId} ${media.notes.join('; ')}`)
+        }
+      } catch (error) {
+        warn(`peer: materializing the media of ${peerSessionId} failed: ${messageOf(error)}`)
+      }
+    }
     const folded = proxyEventsFrom(entries, {
       lastSeq: record.lastSeq,
       openTurn: record.openTurn,
@@ -4440,8 +4827,17 @@ function applyInner(ctx, config = {}) {
             // 影子会话: cwd 是影子目录, basename 是 safeSegment 过的名字 (`Mobile-AI-dsh`);
             // 先问注册表要原始标题 (`Mobile-AI\dsh`), 问不到才退回 basename
             : workspaceNameForCwd(session?.header?.cwd) || basename(String(session?.header?.cwd ?? ''))
+        // 2026-11-22 (2.8.1 #50): 附件先传过去, 正文里那一段名单换成对端的暂存路径; 对端收话时
+        // 再搬进它那一场的工作区 `lw-in/`。传不动就整条按原样发 (与老对端一模一样), 并落一句人话
+        const carried = await carryAttachments(text)
+        if (carried.notice !== '') {
+          try {
+            appendProxyEvents(session, proxyNoticeEvents(carried.notice, shadowDevice.name || 'the peer'))
+          } catch { /* 通知落不下就算了: 文字那一条照常发 */ }
+        }
         const answer = await peerRuntime.send({
-          text,
+          text: carried.text,
+          staged: carried.staged,
           target: peerOwned !== ''
             ? { kind: 'session', id: peerOwned }
             : { kind: 'new', id: '', name: deliveryName },
@@ -4596,11 +4992,11 @@ function applyInner(ctx, config = {}) {
     const action = (target === TARGETS.WORKSPACE ? parts[1] : parts[0])?.toLowerCase() || 'status'
     const picked = makeTargetResolver({ sessions: engineFacade, workspace: engineFacade })(target)
     try {
-      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer')) {
+      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p')) {
         return {
           kind: 'success',
           text: [
-            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | doctor | help] · /sync ws <same actions>',
+            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | doctor | help] · /sync ws <same actions>',
             '  status  show mirror state (default): branch, remote, ahead/behind, dirty, forks',
             '  pull    fetch + merge remote changes (keep-both; confirms first)',
             '  push    mirror + commit + push local changes (confirms first)',
@@ -4608,6 +5004,7 @@ function applyInner(ctx, config = {}) {
             '  log     last commits in the sync repository',
             '  peers   device cards seen in the mirror (names, URLs, device ids)',
             '  peer    the cross-device channel: /sync peer [state] · /sync peer live · /sync peer send <text> [session <id> | workspace <name>]',
+            '  p2p     P2P 传输: /sync p2p [状态] · /sync p2p 开|关 · /sync p2p 确认 <设备 id> · /sync p2p 吊销 <设备 id>（英文 state|on|off|confirm|revoke 也认）',
             '  doctor  self-check: where each dsh peer resolves from, profile extraneous packages, git spawn',
             '  ws …    the same actions against the workspace mirror (its own repository, exclude list',
             '          and file size cap; a pull updates or trashes the local files the merge changed)',
@@ -4661,6 +5058,61 @@ function applyInner(ctx, config = {}) {
           }
         }
         return { kind: 'error', text: `sync: unknown peer action ${JSON.stringify(rest[0] ?? '')} (expected state|live|send)` }
+      }
+      // Luwi 加 (2026-11-22): 面板瘦身之后, P2P 那三件 (开关 / 确认换机 / 吊销) 只剩这一条路。
+      // 读面是 `/sync p2p [状态]`; 写面与面板那两下确认走的是**同一批函数** (`applyConfigure` 的
+      // p2p 段 / `p2pConfirmPeer` / `p2pRevokePeer`), 所以从哪边改都落在同一个文件、同一张信任表里。
+      // 动作词中文为主 (`状态` / `开` / `关` / `确认` / `吊销`), 英文 (state/on/off/confirm/revoke) 留作别名
+      if (action === 'p2p') {
+        const rest = target === TARGETS.WORKSPACE ? parts.slice(2) : parts.slice(1)
+        const what = normalizeP2pAction(rest[0])
+        if (what === 'state') {
+          let status
+          try {
+            status = await p2pService.status()
+          } catch (error) {
+            return { kind: 'error', text: `sync: p2p 状态读不出来: ${messageOf(error)}` }
+          }
+          return { kind: 'success', text: renderP2pState(status) }
+        }
+        if (what === 'on' || what === 'off') {
+          const enabled = what === 'on'
+          const result = await applyConfigure(syncConfigFile, { p2p: { enabled } })
+          if (result === null || result.ok !== true) {
+            return { kind: 'error', text: `sync: p2p.enabled 没写进去: ${result?.error ?? '配置没有被写下去'}` }
+          }
+          const changed = Array.isArray(result.changed) ? result.changed.join(', ') : 'p2p.enabled'
+          logger.info(`sync: /sync p2p ${what} wrote ${changed}`)
+          // 插件是挂载时读配置的: 与面板那句同一个口径, 写完要重启 host
+          return { kind: 'success', text: `sync: P2P 已${enabled ? '打开' : '关掉'}（写进去的是 ${changed}）; 重启 host 之后生效` }
+        }
+        if (what === 'confirm') {
+          const deviceId = (rest[1] ?? '').trim()
+          if (deviceId === '') {
+            return { kind: 'error', text: 'sync: /sync p2p 确认 要带上设备 id —— /sync peers 列得出来; /sync p2p 状态 的那一行会点名哪一台在等确认' }
+          }
+          const answer = await p2pConfirmPeer(deviceId)
+          return {
+            kind: answer.ok === true ? 'success' : 'error',
+            text: answer.ok === true
+              ? `sync: 已确认换机 ${deviceId}（节点 ${String(answer.nodeId ?? '').slice(0, 8)}…）, 信任表重新认这一台`
+              : `sync: 确认 ${deviceId} 没成: ${answer.error}`,
+          }
+        }
+        if (what === 'revoke') {
+          const deviceId = (rest[1] ?? '').trim()
+          if (deviceId === '') {
+            return { kind: 'error', text: 'sync: /sync p2p 吊销 要带上设备 id —— /sync peers 列得出来' }
+          }
+          const answer = await p2pRevokePeer(deviceId)
+          return {
+            kind: answer.ok === true ? 'success' : 'error',
+            text: answer.ok === true
+              ? `sync: 已吊销 ${deviceId}（信任表从此拒它; git 同步不受影响）`
+              : `sync: 吊销 ${deviceId} 没成: ${answer.error}`,
+          }
+        }
+        return { kind: 'error', text: `sync: 不认识 p2p 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 开 | 关 | 确认 <设备 id> | 吊销 <设备 id>; 英文 state|on|off|confirm|revoke 也认）` }
       }
       if (action === 'status') {
         const status = await active.status()

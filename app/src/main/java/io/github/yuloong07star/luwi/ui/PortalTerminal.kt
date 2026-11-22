@@ -32,6 +32,16 @@ import java.io.File
  */
 internal object PortalTerminal {
 
+    /**
+     * 电脑上要装的那个 dsh 插件 (2026-11-22, 主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」")
+     *
+     * 与设置 → 终端里那一行同一个地址: 手机上只负责扫码配对, 真正跑终端的是电脑 dsh 里这个插件,
+     * 装它只能走 dsh 自己的插件安装, 所以这两处都只给一个可点开的页面。
+     * **写的是现在真正的落点** (2026-11-22 真机: 老地址 `yuloong07-star/...` 会被 GitHub 跳到
+     * `Luwi-developers/...`, 直接写落点, 少一跳)
+     */
+    const val PC_INSTALL_URL = "https://github.com/Luwi-developers/luwi-dsh-sync"
+
     /** 终端开着没有 (页面每次进出都 [report] 一次) —— HostScreen 读它决定黑底与虚拟屏小窗 */
     var open by mutableStateOf(false)
 

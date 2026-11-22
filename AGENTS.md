@@ -143,7 +143,19 @@
 - **`has-bg` 必须由 JS 加**, 不能静态写进 index.html (否则第一帧全透明, 这台 vivo 只画第一下; 判据 `check-tavern`)
 - 聊天页首帧就对: 宿主填好 `__THEME__` (`themedIndexPage`), 骨架 `.stSkeleton` 用中性灰, 页面自举 `/status` 一发 +
   并发, **WebView 退出只摘不 `destroy()`** (`TavernWebViewCache`); 背景层恒在 Box 里, 别写 `if (picture != null)`
-- 三处图标同一份 `tools/brand/luwi-mark.png`; **`0.46` 是唯一个数别改**, 球那处 `GLYPH_INK_RATIO = 0.65`
+- 三处图标同一份 `tools/brand/luwi-mark.png`; **`0.46` 是唯一个数别改**, 球那处 `GLYPH_INK_RATIO = 0.65`;
+  第二套 (女仆, `tools/brand/luwi-maid.png`) 由 `tools/make-icon-sets.py` 生成, 见下面「图标可切」那一条
+- **图标可切** (2026-11-22 主人: "在设置的外观里加上切换 luwi 图标的选项…默认使用这张…所有用到图标的
+  情况都要切换"): 设置 → 外观 → 「Luwi 图标」两套 (`IconSet.MAID` 是缺省, `IconSet.BUILTIN` 是原鲸尾),
+  一次换**五类位置** —— 桌面入口 / 球 / 开屏 / 桌面组件 / 门户缺省头像 (含终端页) + 五处通知 small icon。
+  三条硬约束: ① **桌面只能靠 `activity-alias`**: 每套一个 alias (`icon` + `roundIcon`), **`MainActivity`
+  本体不再带 LAUNCHER** (留着就是两个桌面入口), 切序由 `IconSet.switchPlan` 定死 —— **先启用目标再停旧的**,
+  反过来的那一瞬间零入口, 部分 ROM 会就此把图标清掉; ② 落 `$DSH_HOME/lw/icon.json` (应用单写, 认不出回
+  `MAID`), 冷启动 `IconTheme.sync` 对一次账 (JSON 是权威, PackageManager 可能被桌面改过), 切换失败回滚;
+  ③ 每套的素材是 `IconSet` 的四个字段 (`markRes` / `markInkRatio` / `markTintWhite` / `notifyRes`) ——
+  球与开屏的尺寸按 `boxDpForInk` 换算, 内置 0.46 那一档与旧算式逐字节相同。通知图标是单色白模 (系统模板
+  染色, 彩色图会糊成一团), `splash.json` 的 `icon` 仍是显式覆写 (优先于图标套)。判据
+  `tools/check-icon-sets.mjs` + `IconSetTest`; 方案 `docs/Luwi-图标切换-方案-2026-11-22.md`
 - **门户那张脸归设置 → 外观**: 「背景」「背景透明度」落 `$DSH_HOME/lw/face.json` + `lw/face/<名字>.jpg`
   (`tool/PortalFace.kt` 唯一写者, 换图只留一张), 页面走 `PortalBridge.portalLook()` 取 data URL (键是文件名),
   改完调 `__LUWI_PORTAL__.reloadLook()`
@@ -260,6 +272,38 @@
   `withWebServer()` 拿不到服务时 `logger.error`, `/sync doctor` 打路由条数
   判据 `check-luwi-portal` 第二十七节 + `check-terminal` (回环 / 角色 / 沙盒终端已下线 / 侧边栏显示名与左座位) + `check-sync-setting` 第六节,
   方案 `docs/Luwi-终端-手机管电脑-方案-2026-11-21.md`
+- **终端里的图与文件: 双向传, 走「附件段」不走附件块** (2026-11-22, 2.8.1 #50; 插件 0.4.6):
+  手机侧 dsh 的附件在安卓上落不下, 手机 `lw-in/` 那一份才是门户画的东西 (`.lwp-image` / `.lwp-file` 读
+  `/lw-out/in/<名字>`)。所以跨设备只做两件事 —— **搬字节 + 换路径**, 形状照 `[附件 N 个, 图片用 read_image 打开]`
+  那一段 (`lib/luwi-attach.mjs` 是唯一解析器, 与 `tool/LwIn.kt` 的 `BallAttach` 逐字同一串, **前导空行不许 trim**)。
+  手机→电脑: `agent/pre-step` 的 `carryAttachments` 把 `<HOME>/lw-in/` 那几份 POST 到 `/luwi-sync/peer/blob` (电脑暂存区,
+  20 MB 上限), 收话时 `adoptStaged` 搬进**那一场工作区**的 `lw-in/` 再换路径 —— 电脑那边的模型 `read_image` 打得开;
+  一份没过去就整条按原样发 + 落一句人话。电脑→手机: 快照 v3 的条目多一格 `media`, `materializeEntryMedia` 取回写
+  `<HOME>/lw-in/peer-<设备8>-<名字>` (账在 `lw/peer-media.json`), 再把名单换成本机路径。**回声去重只比人话**
+  (`pendingKeyOf`) —— 本地那句带本机路径、折回来的带对端路径, 整串比会把一句画两遍。快照升 v3 会让老投影
+  重做一次 (`reopenProjection`, 旧场归档), 只为把媒体补进来
+- **未配对时的「去给 PC 装 luwi终端」与设置里的「取消配对」** (2026-11-22): 前者在终端卡片 (只在 `unpaired` 那一档出现,
+  `terminalGateState` 多一格 `install`) 与设置 → 终端两处, 都开同一个地址 (`PortalTerminal.PC_INSTALL_URL`, 门户经
+  `PortalAsk.Target.PC_INSTALL` 交给 `HostScreen` 去 `openPage`); 后者 `SyncSetting.unpairIn` 只断牵连 —— 删 `pairing`
+  与 `role`、清 `peer.url`/`peer.token`、四档闸全关、同步停掉 (远端挪进 `lw.savedRemote`), **对话 / 收下的附件 / 影子目录一个都不删**
+- **PC 面板只剩三条身子** (2026-11-22 主人: "将仓库以下的面板全部删除"): 状态条 (含同步总开关) → 配对卡 → 仓库卡
+  (含两次点击的确认条) → 自动刷新底栏。镜像读数 / 操作 / 对端 / P2P / 运行结果五块**整块撤掉** (`renderOverview` /
+  `renderOpsCard` / `renderPeerCard` / `renderP2pCard` / `renderAnswer` 连函数一起删), 那些读数仍在 `/sync doctor`、
+  `sync_*` 工具与 `/sync` 命令里; 动作失败原因落在状态条下面那一行 (`key: 'action-error'`), 别再加回"最底下那块回执"。
+  手机侧那块只读面板 (`runner: 'luwi-bridge'`) 不动; 判据 `check-terminal` 第四节三条
+- **P2P 那三件只剩 `/sync p2p`** (2026-11-22 主人: "挪到命令里"; 当晚又定 "那些命令你都改成中文"):
+  **中文是正写, 英文留作别名** —— `/sync p2p 状态` / `开` / `关` / `确认 <设备 id>` / `吊销 <设备 id>`
+  (`state` / `on` / `off` / `confirm` / `revoke` 照旧可用, 另认 `读数` / `打开` / `关闭` / `确认换机` / `撤销`);
+  词表在 `lib/command-words.mjs` (`normalizeP2pAction` / `P2P_ACTIONS`, 零依赖, 单测直接跑, `index.mjs` 只 import 再转出);
+  读数 `renderP2pState` 全中文 (`p2p: 开 · 传输 直连 9 ms` / `信任: 换机待确认 · SAS 123 456` / `计数: 发出 5` /
+  `等确认换机: …` / `冷却中` / `最近错误`), 信任五档映射成中文, **机器可读的错误码原样保留** (`P2P_TIMEOUT`)。
+  写面 `/sync p2p 开|关` 走 `applyConfigure(syncConfigFile, { p2p: { enabled } })` (写完要重启 host),
+  `确认` / `吊销` 走 `p2pConfirmPeer` / `p2pRevokePeer` —— **与面板原来那两下确认写的是同一个文件、同一张信任表**,
+  别另开一路。判据 `check-terminal` 第五/六/七条 + `test/render-p2p.test.mjs`
+
+
+
+
 - **历史窗** (`#lwp-history`) 画 dsh 自己的会话表 (`ctx.sessions.list`): 搜索 + 新到旧 + 当前置顶 + 点行走
   `follow()` + 底部「开始新的对话」, **不另建历史文件**; `historyRows(snapshot, query, currentId)` 由
   `check-luwi-portal` 真跑; 头像与昵称同落 `lw/face.json` (`name` / `avatar`), 页面侧 `applyIdentity()` 一处改头栏与空态
@@ -352,10 +396,13 @@
   清单 `MainActivity` **必须 `singleTop`** (否则同一 task 堆两个实例, 两份 renderer 把机器推进 lmkd 连环杀);
   判据 `tools/check-host-persistence.mjs`
 - **键盘避让**用 `ui/KeyboardInsets.kt` 的 `rememberImeLift` (只认贴底键盘); `adjustResize` 在 targetSdk 37 不管用
-- **门户盖着时只抬输入卡与对话区**: WebView 尺寸不动, 宿主推 `ime - nav` (`__LUWI_PORTAL__.setKeyboard` →
-  `--lwp-ime`), 只改 `#lwp-root` 的 padding-bottom (`#lwp-wall` 是 absolute inset:0, 包含块是 padding box, 背景图不动);
-  宿主另把 IME inset 从 WebView 吃掉, 否则 Chromium 再缩可视视口就整页平移; **门户收起时仍缩 WebView** (dsh 不认
-  `--lwp-ime`); 刷新那档靠 `LuwiPortal.portalIme()` 握手
+- **键盘让位两层都不缩 WebView** (2026-11-22 定; 门户 2026-11-09 起就是这样): 宿主把 `ime - nav` (dp) 推给页面,
+  门户写 `--lwp-ime` (只改 `#lwp-root` 的 padding-bottom, 背景图不动), **dsh 后台写 `--lw-dsh-ime`**
+  (`ui-fix` 第三节: `[data-mobile-nav="frame"]` 的 `height` 减掉它, 没有那一层壳时退到 `#root` 的 padding),
+  两处都经 `HostScreen` 的 `ImeLiftPusher` 推; 宿主另把 IME inset 从 WebView 吃掉, 否则 Chromium 再缩可视视口就整页平移。
+  **以前"门户收起时缩 WebView"那条已作废** —— 逐帧 resize 一次呼键盘二十来次换 surface, 就是卡顿的现场;
+  只有页面明说接不了 (`__LUWI_IME__` 不在, 见 `imeTakesLift`) 才退回缩边, 且**只用停稳的终值**。
+  门户刷新那档靠 `LuwiPortal.portalIme()` 握手; 判据 `check-ui-fix.mjs` 一之二/二 + `check-luwi-portal.mjs` 第六节
 - **门户预览窗的 Office 走 `renderOffice`**: docx / pptx / xlsx 由 `lw-docx-preview` 解 (与右栏同一函数), 进 shadow root;
   `/lw-out` 认三个 openxmlformats MIME, 超 12 MB 回 413; 老格式 doc / ppt / xls 与 zip 交系统应用
 - **球那侧的图 / 文件 / 预览窗**: 图上限与宿主同数 (**20 MB**, `BallMedia.MAX_BYTES`, 原借表情包 2 MB 档必挂),
