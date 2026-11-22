@@ -160,6 +160,19 @@ export const LIVE_LIMITS = Object.freeze({
   MAX_KEEP_MINUTES: 1440,
 })
 
+// Luwi 加 (2026-11-22 终端问答): `ask` 段 —— 电脑上的 `ask_user_question` 要不要传到手机,
+// 等多久, 以及要不要给"手机驱动的那一场"附一终端提示。四档模式见 lib/luwi-ask.mjs
+export const ASK_DEFAULTS = Object.freeze({
+  MODE: 'relay',
+  WAIT_MS: 120000,
+  BRIEF: true,
+})
+
+export const ASK_LIMITS = Object.freeze({
+  MIN_WAIT_MS: 5000,
+  MAX_WAIT_MS: 1800000,
+})
+
 // Luwi 加 (G1-2 对端)：影子工作区与投影会话的家。
 // 目录在 `$DSH_HOME/lw/` 底下 (从 sessionRoot 的父目录推出来, 不依赖 DSH_HOME 环境变量 ——
 // 桌面宿主没有那个变量, 见 docs/Luwi-dsh-sync-设计.md §11.10), 名字里带对端设备 id
