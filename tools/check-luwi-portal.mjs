@@ -372,14 +372,16 @@ const kotlinIdRule = /ch\.isLetterOrDigit\(\) && ch\.code < 128 \|\| ch == '\.' 
 if (hostIdRule && kotlinIdRule) notes.push('ok   out 文件名规则两侧同一套')
 else failures.push(`out 文件名规则对不上: host=${String(hostIdRule)} kotlin=${String(kotlinIdRule)}`)
 
-// ── 六、键盘那一格 (2026-11-09) ──────────────────────────────────────────────
+// ── 六、键盘那一格 (2026-11-09 门户 / 2026-11-22 dsh 后台) ────────────────────
 //
-// 主人: "呼出键盘时不应整个界面上移, 只要输入框和聊天记录向上移" —— 所以门户盖着时 WebView 尺寸
-// **一点都不动**, 高度只推给页面; 页面把它写成 `--lwp-ime` (只抬对话区与输入卡)。这三句话分在
-// Kotlin 与页面两边, 少一条就退回"整页被顶上去"
+// 主人: "呼出键盘时不应整个界面上移, 只要输入框和聊天记录向上移" —— 所以两层 WebView 的尺寸
+// **一点都不动**, 高度只推给页面: 门户写 `--lwp-ime`, dsh 后台写 `--lw-dsh-ime` (ui-fix 第三节)。
+// 以前门户收起时是宿主自己逐帧缩 WebView (一次呼键盘二十来次 resize), 2026-11-22 起那条作废:
+// 只有页面明说接不了 (`__LUWI_IME__` 不在) 才退回缩边, 而且只用"停稳"的终值。
 
 expect('HostScreen.kt', screen, 'val portalOpen = PortalState.open')
-expect('HostScreen.kt', screen, 'if (portalOpen) modifier else modifier.padding(bottom = imeLift)')
+expect('HostScreen.kt', screen, 'var pageTakesIme by remember { mutableStateOf<Boolean?>(null) }')
+expect('HostScreen.kt', screen, 'if (!portalOpen && pageTakesIme != true) modifier.padding(bottom = fallbackLift) else modifier')
 expect('HostScreen.kt', screen, 'setOnApplyWindowInsetsListener')
 expect('HostScreen.kt', screen, 'setInsets(WindowInsets.Type.ime(), Insets.NONE)')
 expect('HostScreen.kt', screen, 'PortalState.imePx =')
@@ -387,6 +389,11 @@ expect('HostScreen.kt', screen, 'PortalState.imePx =')
 // 输入卡会被顶到顶栏下面 (2026-11-09 真机踩到)
 expect('HostScreen.kt', screen, 'val imeLiftDp = imeLift.value.roundToInt()')
 expect('HostScreen.kt', screen, '__LUWI_PORTAL__.setKeyboard($imeLiftDp)')
+// dsh 后台那一路: 同一句话推给页面自己的入口 (ui-fix), 安全网那条只收停稳的终值
+expect('HostScreen.kt', screen, 'window.__LUWI_IME__ && window.__LUWI_IME__($imeLiftDp)')
+expect('HostScreen.kt', screen, 'suspend fun imeTakesLift(')
+expect('HostScreen.kt', screen, "typeof window.__LUWI_IME__ === 'function'")
+expect('HostScreen.kt', screen, 'if (settle[1] >= IME_SETTLE_FRAMES) onFallback(imeLift)')
 // 页面: 一个入口 + 一处 style + 挂载时自己来问
 expect('client.js', client, 'var hostRequire')
 expect('client.js', client, 'function applyIme')
@@ -1939,7 +1946,7 @@ expect('终端改完顺手重启 host', hostScreen, 'DshHost.restart(context)')
 expect('回到后台走页面那条入口', portalMenu, 'window.__LUWI_PORTAL__')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenu(): String')
 expect('PortalBridge.kt', portalBridge, 'fun portalMenuPick(id: String): String')
-expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC, PAIR }')
+expect('PortalAsk.kt', portalAsk, 'enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC, PAIR, PC_INSTALL }')
 expect('PortalAsk.kt', portalAsk, 'val pending = mutableStateOf<Target?>(null)')
 expect('前台浮球让位', hostScreen, 'if (!PortalState.open) {')
 expect('小窗那一格挪到进程里', hostScreen, 'ScreenWindow.hidden')
@@ -3218,6 +3225,12 @@ if (refsSource === '' || bubbleSource === '') {
   } else {
     fail('terminalGateState: 那一句人话没给 / 原因没带出来')
   }
+  // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」"): 那颗钮只在没配对那一档出现
+  if (unpaired.install === true && off.install === false && offline.install === false && online.install === false) {
+    note('terminalGateState: 「去给 PC 装 luwi终端」只在没配对那一档出现')
+  } else {
+    fail(`terminalGateState: install 那一格不对: ${JSON.stringify([unpaired.install, off.install, offline.install, online.install])}`)
+  }
 
   // ①b 进终端落哪一场 (2026-11-21): 1 小时窗口真跑一遍真值表
   const nowAt = 1_700_000_000_000
@@ -3345,6 +3358,10 @@ if (refsSource === '' || bubbleSource === '') {
   expect('client.js', client, "els.termPair = h('button', null, '扫码配对')")
   expect('client.js', client, "els.termExit = h('button', null, '返回')")
   expect('client.js', client, "els.termPair.onclick = function () { call('portalTerminalPair') }")
+  // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」")
+  expect('client.js', client, "els.termInstall = h('button', null, '去给 PC 装 luwi终端')")
+  expect('client.js', client, "els.termInstall.onclick = function () { call('portalTerminalInstall') }")
+  expect('client.js', client, 'if (els.termInstall) els.termInstall.hidden = said.install !== true')
   expect('client.js', client, "call('portalTerminalVisible', true)")
   expect('client.js', client, "call('portalTerminalVisible', false)")
   expect('client.js', client, 'function applyTerminalMode')
@@ -3553,6 +3570,10 @@ if (refsSource === '' || bubbleSource === '') {
   expect('PortalBridge.kt', portalBridge, 'fun portalTerminal(): String = PortalTerminal.status(context)')
   expect('PortalBridge.kt', portalBridge, 'fun portalTerminalVisible(open: Boolean): String')
   expect('PortalBridge.kt', portalBridge, 'fun portalTerminalPair(): String')
+  // 2026-11-22: 未配对卡片那颗钮走同一条掷标路 (PC_INSTALL), 由 HostScreen 开系统浏览器
+  expect('PortalBridge.kt', portalBridge, 'fun portalTerminalInstall(): String')
+  expect('PortalTerminal.kt', portalTerminalKt, 'const val PC_INSTALL_URL')
+  expect('HostScreen.kt', hostScreen, 'PortalAsk.Target.PC_INSTALL -> {')
   expect('HostScreen.kt', hostScreen, 'if (PortalTerminal.open) Color.Black else Color.Transparent')
   expect('HostScreen.kt', hostScreen, 'preview != null && !windowHidden && !PortalTerminal.open')
   expect('HostScreen.kt', hostScreen, 'PortalAsk.Target.PAIR -> {')
@@ -3757,6 +3778,35 @@ if (echoSameSource === '' || echoStateSource === '') {
 }
 expect('client.js', client, "row.setAttribute('data-pending', 'on')")
 expect('client.js', client, '.lwp-row[data-pending="on"] .lwp-bubble{opacity:.6}')
+
+// ── 第二十九节: 缺省那张脸跟着 Luwi 图标走 (2026-11-22) ───────────────────────
+
+expect('client.js', client, 'var MARK_CACHE')
+expect('client.js', client, "if (markVer !== '')")
+expect('client.js', client, "if (mark === '') mark = MARK_PNG")
+expect('client.js', client, 'writeStored(MARK_CACHE, { ver: markVer, url: mark })')
+expect('client.js', client, "var src = avatar === '' ? mark : avatar")
+
+const identitySource = sliceFunction('applyIdentity')
+if (identitySource === '') {
+  failures.push('client.js: 抽不出 applyIdentity (缺省那张脸)')
+} else if (!/terminalMode[\s\S]*?avatar = ''[\s\S]*?var src = avatar === '' \? mark : avatar/u.test(identitySource)) {
+  failures.push('applyIdentity: 终端里清空头像之后没有落到当前那套的 mark')
+} else {
+  notes.push('ok   applyIdentity: 终端页也吃当前那套图标')
+}
+
+// 图的搬运闸: 没配背景也没配头像的机器, fetchLook 会一直是"读数那一份" —— mark 必须自己算进这道闸,
+// 否则它永远是空, 页面永远回退到内嵌的 MARK_PNG (2026-11-22 真机踩到的那一条)
+const lookSource = sliceFunction('fetchLook')
+if (lookSource === '') {
+  failures.push('client.js: 抽不出 fetchLook (缺省那张脸的搬运闸)')
+} else if (!/var markReady = cachedMark && cachedMark\.ver === markVer/u.test(lookSource)
+  || !/markVer !== '' && !markReady/u.test(lookSource)) {
+  failures.push('fetchLook: mark 没进"要不要搬图"的闸 (没配背景的机器会永远画旧标记)')
+} else {
+  notes.push('ok   fetchLook: 换套才搬一次 mark')
+}
 
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 

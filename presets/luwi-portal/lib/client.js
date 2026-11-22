@@ -45,6 +45,13 @@ window.__ModuleLoader__.load({
      * 头像比背景小得多 (<=512px), 但它每次挂载都要用一次 —— 不缓存就是每次开都多搬一份 base64
      */
     var AVATAR_CACHE = 'dsh.luwi.portal.avatar'
+    /**
+     * 缺省那张脸 (当前那套图标) 的缓存键 (2026-11-22)
+     *
+     * 与头像同一个套路: `markVer` 是套的 id, 没换套就不搬图。它比头像更常被用到 —— 头像没配、
+     * 终端页 (那里头像被强制清空) 以及每次重挂都要画一次
+     */
+    var MARK_CACHE = 'dsh.luwi.portal.mark'
     /** 没有自定义昵称时头栏与空态显示的那个名字 (设置里留空 = 回这一个) */
     var DEFAULT_NAME = 'Luwi'
     /**
@@ -2910,13 +2917,17 @@ window.__ModuleLoader__.load({
           }
           var allowFallback = !luwiFlow() || outLines.length === 0
           if (allowFallback && !spoke && assistantOwner >= 0) {
+            // 2026-11-22: 正文里若带附件段 (电脑那边折回来的那种), 与 user 侧一样拆出来 ——
+            // 话在上、附件在下 (主人: "在前台里要若本次会话带文件, 要显示在消息下方")
+            var fallbackSplit = splitAttach(assistantFallback)
             extras.push({
               who: 'assistant',
               // 兜底行的身份挂在**它所依附的那条 user** 上 (方案 §2.2), 而它所依附的是
               // `assistantOwner` 那一轮的 user —— 不是"最新一条 user"
               id: users[assistantOwner].id === '' ? '' : 'fallback\u0001' + users[assistantOwner].id,
               time: Number(users[assistantOwner].time) || 0,
-              text: assistantFallback,
+              text: fallbackSplit.main,
+              attach: fallbackSplit.names,
               fallback: true,
               pinnedTo: assistantOwner,
             })
@@ -4404,7 +4415,18 @@ window.__ModuleLoader__.load({
           failRow.appendChild(diagButton)
           row.appendChild(failRow)
         } else {
-          row.appendChild(h('div', 'lwp-bubble', item.text))
+          // 她那一侧 (assistant 兜底行 / 老行): 2026-11-22 起正文里的附件段也拆出来 ——
+          // 电脑那边折回来的文件会走这一段, 主人要的是"话在上、文件在下"
+          if (item.text !== '') row.appendChild(h('div', 'lwp-bubble', item.text))
+          var extra = Array.isArray(item.attach) ? item.attach : []
+          for (var x = 0; x < extra.length; x += 1) {
+            var attachedName = extra[x]
+            if (isImageName(attachedName)) {
+              row.appendChild(imageBubble({ image: 'in/' + encodeURIComponent(attachedName) }))
+            } else {
+              row.appendChild(fileChip({ rel: 'in/' + encodeURIComponent(attachedName), name: attachedName }, 'out'))
+            }
+          }
         }
         var when = Number(item.time)
         if (isFinite(when) && when > 0) row.appendChild(h('span', 'lwp-time', clock(when)))
@@ -4688,18 +4710,27 @@ window.__ModuleLoader__.load({
         if (!meta || typeof meta !== 'object') return null
         var ver = typeof meta.ver === 'string' ? meta.ver : ''
         var avatarVer = typeof meta.avatarVer === 'string' ? meta.avatarVer : ''
+        // 缺省那张脸 (2026-11-22): 它也有自己的缓存键, 与背景 / 头像同一个套路 —— 换套才搬一次图。
+        // 不把它算进"要不要 full"这一条, 没配背景也没配头像的机器就永远是读数那一份, mark 永远是空
+        var markVer = typeof meta.markVer === 'string' ? meta.markVer : ''
         var cachedWall = ver === '' ? null : readStored(WALL_CACHE)
         var cachedAvatar = avatarVer === '' ? null : readStored(AVATAR_CACHE)
+        var cachedMark = markVer === '' ? null : readStored(MARK_CACHE)
         var wallReady = cachedWall && cachedWall.ver === ver && typeof cachedWall.url === 'string'
           && cachedWall.url !== ''
         var avatarReady = cachedAvatar && cachedAvatar.ver === avatarVer
           && typeof cachedAvatar.url === 'string' && cachedAvatar.url !== ''
+        var markReady = cachedMark && cachedMark.ver === markVer
+          && typeof cachedMark.url === 'string' && cachedMark.url !== ''
         if (ver !== '') meta.wall = wallReady ? cachedWall.url : ''
         if (avatarVer !== '') meta.avatar = avatarReady ? cachedAvatar.url : ''
-        if ((ver !== '' && !wallReady) || (avatarVer !== '' && !avatarReady)) {
+        if (markVer !== '') meta.mark = markReady ? cachedMark.url : ''
+        if ((ver !== '' && !wallReady) || (avatarVer !== '' && !avatarReady) || (markVer !== '' && !markReady)) {
           var full = call('portalLook', true)
           if (full && typeof full.wall === 'string') meta.wall = full.wall
           if (full && typeof full.avatar === 'string') meta.avatar = full.avatar
+          if (full && typeof full.mark === 'string') meta.mark = full.mark
+          if (full && typeof full.markVer === 'string') meta.markVer = full.markVer
         }
         return meta
       }
@@ -4750,13 +4781,23 @@ window.__ModuleLoader__.load({
           avatar = data.avatar
           writeStored(AVATAR_CACHE, { ver: avatarVer, url: avatar })
         }
+        // 缺省那张脸 = 设置 -> 外观里挑的那套图标 (2026-11-22): 页面内嵌的 MARK_PNG 降成最后兜底,
+        // 于是主人换了图标之后, 头栏、空态与终端页一起换
+        var markVer = typeof data.markVer === 'string' ? data.markVer : ''
+        var mark = typeof data.mark === 'string' ? data.mark : ''
+        if (markVer !== '') {
+          var cachedMark = readStored(MARK_CACHE)
+          if (!mark && cachedMark && cachedMark.ver === markVer) mark = cachedMark.url
+          if (mark) writeStored(MARK_CACHE, { ver: markVer, url: mark })
+        }
+        if (mark === '') mark = MARK_PNG
         // 2026-11-21 终端: 这一页里名字与头像**强制**——外观里改过的昵称与自选头像都不进终端
         // (主人: "头像强行改成luwi头像, 名称强行改成「luwi终端」")
         if (terminalMode) {
           name = TERMINAL_TITLE
           avatar = ''
         }
-        var src = avatar === '' ? MARK_PNG : avatar
+        var src = avatar === '' ? mark : avatar
         if (els.brandName) els.brandName.textContent = name
         if (els.markImg) els.markImg.src = src
         // 空态那张脸是"重新画一遍"的: 它只在没有消息时存在, 所以这里顺手把已经画着的那张也改掉
@@ -7341,7 +7382,7 @@ window.__ModuleLoader__.load({
        * 重探那一拍按上一次的结论画 —— 掉线那张卡连原因都不闪 (`probe.why` 在重探期间保留)
        * @param {object|null} info `portalTerminal()` 那一份
        * @param {{ok: boolean, busy: boolean, why: string, at: number}} probe 最近一次探测
-       * @returns {{state: string, title: string, body: string, note: string}} 界面照它画
+       * @returns {{state: string, title: string, body: string, note: string, install: boolean}} 界面照它画
        */
       function terminalGateState(info, probe) {
         var paired = !!(info && info.paired === true)
@@ -7352,14 +7393,16 @@ window.__ModuleLoader__.load({
         var online = !firstProbe && !!(probe && probe.ok === true)
         // 探通了就是通: 配置里缺 `peerUrl` 之类只影响"能不能主动拨", 对端在线这件事以探测为准
         if (online && paired && info && info.syncOn === true) {
-          return { state: '', title: '', body: '', note: '' }
+          return { state: '', title: '', body: '', note: '', install: false }
         }
         if (!paired) {
+          // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」"): 这一档才多那一颗钮
           return {
             state: 'unpaired',
             title: '连上电脑',
-            body: '还没连上电脑。\n在电脑上的 dsh 面板里生成一张配对码, 再用这里扫一下。',
+            body: '还没连上电脑。\n在电脑上的 dsh 面板里生成一张配对码, 再用这里扫一下。\n电脑上还没装 luwi终端 的话, 先按下面那颗钮去装。',
             note: '',
+            install: true,
           }
         }
         if (!info || info.syncOn !== true) {
@@ -7368,6 +7411,7 @@ window.__ModuleLoader__.load({
             title: '终端关着',
             body: '终端关着: 在 设置 → 终端 里打开它, 手机才能管电脑。\n也可以直接扫一张新的配对码。',
             note: '',
+            install: false,
           }
         }
         if (info && info.terminalReady === false) {
@@ -7376,10 +7420,11 @@ window.__ModuleLoader__.load({
             title: '终端还没配好',
             body: '配对码里缺连接口令, 或者对端通道没开。\n在电脑上重新生成一张配对码, 再扫一次。',
             note: '',
+            install: false,
           }
         }
         if (firstProbe) {
-          return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '' }
+          return { state: 'probing', title: '正在找电脑', body: '稍等一下…', note: '', install: false }
         }
         var why = probe && typeof probe.why === 'string' ? probe.why : ''
         var who = info && typeof info.pcName === 'string' && info.pcName !== '' ? info.pcName : '电脑'
@@ -7388,6 +7433,7 @@ window.__ModuleLoader__.load({
           title: '电脑没连上',
           body: '配对过了, 但「' + who + '」那边没应答。\n确认电脑上的 dsh 开着、地址能通; 这里会自动再试。',
           note: why === '' ? '' : '(' + why + ')',
+          install: false,
         }
       }
 
@@ -7681,6 +7727,7 @@ window.__ModuleLoader__.load({
         els.termGate.hidden = false
         if (els.termTitle) els.termTitle.textContent = said.title
         if (els.termBody) els.termBody.textContent = said.body
+        if (els.termInstall) els.termInstall.hidden = said.install !== true
         if (els.termNote) {
           els.termNote.textContent = said.note
           els.termNote.hidden = said.note === ''
@@ -8026,10 +8073,17 @@ window.__ModuleLoader__.load({
         els.termPair.type = 'button'
         els.termPair.setAttribute('data-primary', 'on')
         els.termPair.onclick = function () { call('portalTerminalPair') }
+        // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」"): 只在没配对那一档出现,
+        // 点它落一个掷标给原生, 由它开系统浏览器 (页面自己开不了外部浏览器)
+        els.termInstall = h('button', null, '去给 PC 装 luwi终端')
+        els.termInstall.type = 'button'
+        els.termInstall.hidden = true
+        els.termInstall.onclick = function () { call('portalTerminalInstall') }
         els.termExit = h('button', null, '返回')
         els.termExit.type = 'button'
         els.termExit.onclick = function () { closeTerminal() }
         termRow.appendChild(els.termPair)
+        termRow.appendChild(els.termInstall)
         termRow.appendChild(els.termExit)
         els.termCard.appendChild(termRow)
         els.termNote = h('div', 'lwp-term-note', '')

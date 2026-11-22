@@ -120,6 +120,14 @@
     <string name="settings_theme_follow_system">跟随系统</string>
     <string name="settings_theme_light">浅色</string>
     <string name="settings_theme_dark">深色</string>
+    <string name="settings_luwi_icon">Luwi 图标</string>
+    <string name="settings_luwi_icon_summary">现在用的是 %1$s</string>
+    <string name="settings_luwi_icon_dialog">挑一个图标, 桌面、球与开屏会一起换</string>
+    <string name="settings_luwi_icon_builtin">鲸尾</string>
+    <string name="settings_luwi_icon_maid">Luwi 头像</string>
+    <string name="settings_luwi_icon_switched">已经换成「%1$s」</string>
+    <string name="settings_luwi_icon_failed">这个图标这次换不过来, 还是原来那个</string>
+    <string name="settings_luwi_icon_desktop_note">换完之后桌面图标可能挪到另一屏</string>
     <string name="settings_portal_avatar">修改头像</string>
     <string name="settings_portal_avatar_none">还没换过, 现在是 Luwi 的标记</string>
     <string name="settings_portal_avatar_ready">用的是你自己选的那张</string>
@@ -950,6 +958,14 @@
     <string name="settings_sync_pair_reconfirm_body">已和 %1$s 配过对。重新配对会重置同步基线, 并清掉仓库里的旧会话</string>
     <string name="settings_sync_pair_reconfirm_ok">重新配对</string>
     <string name="settings_sync_pair_done">配对完成, 正在重启 DSH host…</string>
+    <string name="settings_sync_install_pc">去给 PC 装 luwi终端</string>
+    <string name="settings_sync_install_pc_summary">在电脑 dsh 里装 luwi-dsh-sync, 装完在它的面板里生成配对码</string>
+    <string name="settings_sync_unpair">取消配对</string>
+    <string name="settings_sync_unpair_summary">与 %1$s 断开: 清掉地址与口令, 关掉终端; 对话与文件都不删</string>
+    <string name="settings_sync_unpair_confirm_title">与这台电脑断开?</string>
+    <string name="settings_sync_unpair_confirm_body">%1$s: 会清掉配对码、连接地址与口令, 并关掉终端。本机的对话、收下的图片与文件都留着。要再连, 得让它在面板里重新生成一张配对码</string>
+    <string name="settings_sync_unpair_ok">断开</string>
+    <string name="settings_sync_unpair_done">已取消配对, 正在重启 DSH host…</string>
 
     <string name="settings_tavern_title">酒馆</string>
     <string name="settings_tavern_summary_unbound">还没绑定酒馆工作区</string>

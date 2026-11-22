@@ -273,7 +273,7 @@ test('面板渲染: 通道没开时画"通道没开"那一屏, 不抛', async ()
   }
 })
 
-test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊断板块与名片', async () => {
+test('面板渲染: 单页只剩配对卡与仓库卡, 配对在前; 镜像读数 / 操作 / 对端 / P2P / 运行结果都不画', async () => {
   const { definition, restore } = await loadBundle()
   const snapshot = {
     ok: true,
@@ -286,6 +286,17 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
     config: { deviceName: 'PC', remoteState: 'set', panelOps: true, panelSeats: 'both', branch: 'main' },
     peers: { cards: [{ deviceId: 'p1', name: 'PC' }], broken: 0 },
     op: null,
+    pairing: { paired: false, repoHost: 'github.com' },
+    peer: {
+      enabled: true,
+      token: '••••cdef',
+      url: { state: 'set', display: 'http://100.64.0.7:3080/' },
+      reachable: 'ok',
+      queue: { pending: 2, acks: 0 },
+      counters: { sent: 3, received: 1 },
+      workspace: { on: true, shadows: [{ key: 'a' }], proxies: [{ peerSessionId: 's1' }] },
+    },
+    p2p: { enabled: true, path: 'ip', rttMs: 12, trustState: 'trusted' },
     mirrors: [
       {
         target: 'sessions',
@@ -300,7 +311,7 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
       { target: 'workspace', label: '工作区', on: false, remote: { state: 'unset', display: '' }, cost: null, meta: {}, status: null },
     ],
   }
-  // useState 顺序: [bump(useLocaleTick), snap, fault, pending, answer, auto, busy, copied, actionTarget, loadedAt]
+  // useState 顺序: [bump(useLocaleTick), snap, fault, pending, auto, busy, copied, actionTarget, loadedAt]
   const React = fakeReact([0, snapshot, null])
   const services = sidebarServices()
   const restoreFetch = stubFetch({ handshake: 'luwi-dsh-sync/panel', config: { panelSeats: 'both', panelOps: true } })
@@ -316,10 +327,15 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
     // 2026-10-24: runner=subprocess 那个徽标改成中文了 (「本机进程」/「手机桥接」)
     assert.match(text, /本机进程/)
     assert.match(text, /v=0\.2\.24/)
-    assert.match(text, /会话/)
-    assert.match(text, /工作区/)
-    assert.match(text, /221/)
-    assert.match(text, /187\.8 MB/)
+    // 2026-11-22 主人: "将仓库以下的面板全部删除" —— 仓库卡以下五块整块撤掉
+    assert.match(text, /配对手机/, '配对卡还在')
+    assert.match(text, /仓库/, '仓库卡还在')
+    assert.doesNotMatch(text, /会话 · |工作区 · /, '镜像卡片不再画')
+    assert.doesNotMatch(text, /221/, '镜像体积那一行不在了')
+    assert.doesNotMatch(text, /操作/, '操作卡不在了')
+    assert.doesNotMatch(text, /跨设备对端/, '对端卡不在了')
+    assert.doesNotMatch(text, /P2P 直连/, 'P2P 卡不在了')
+    assert.doesNotMatch(text, /运行结果/, '运行结果那一块不在了')
     // 2026-10-22 主人: 配对操作放最上方 —— 配对卡必须排在仓库卡前面
     const atPair = text.indexOf('配对手机')
     const atRepo = text.indexOf('仓库')
@@ -337,7 +353,7 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
   }
 })
 
-test('面板渲染: 对端那一块按快照画出来 (令牌只有打码形态), 没有这一段时不多画', async () => {
+test('面板渲染: 对端那块读数整块撤掉 —— 快照里有 peer 也不画, 令牌一个字都不进面板', async () => {
   const { definition, restore } = await loadBundle()
   const base = {
     ok: true,
@@ -388,24 +404,19 @@ test('面板渲染: 对端那一块按快照画出来 (令牌只有打码形态)
   }
 
   try {
+    // 2026-11-22: 五块整块撤掉之后, peer 那些读数 (可达 / 地址 / 影子工作区 / 队列) 一个都不该上屏
     const withPeer = await run({ ...base, peer })
-    assert.match(withPeer, /跨设备对端/)
-    assert.match(withPeer, /可达/)
-    assert.match(withPeer, /••••cdef/)
+    assert.doesNotMatch(withPeer, /跨设备对端/)
+    assert.doesNotMatch(withPeer, /可达/)
+    assert.doesNotMatch(withPeer, /影子工作区/)
+    assert.doesNotMatch(withPeer, /等着过去/)
+    assert.doesNotMatch(withPeer, /••••cdef/, '打码的令牌也不该出现 —— 那一张卡整块没了')
     assert.doesNotMatch(withPeer, /0123456789abcdef/)
-    assert.match(withPeer, /影子工作区/)
-    assert.match(withPeer, /1 \/ 1/, '影子工作区那一行报的是 工作区数 / 投影会话数')
-    assert.match(withPeer, /等着过去/)
-    assert.match(withPeer, /发过去/, '写面开着时那一个发消息按钮在')
-
-    // panelOps 关掉时那一个输入框与按钮不出现 (读面照旧)
-    const readonly = await run({ ...base, peer, config: { ...base.config, panelOps: false } })
-    assert.match(readonly, /跨设备对端/)
-    assert.doesNotMatch(readonly, /发过去/)
-
-    // 没有 peer 块的宿主 (老版本那一侧) 那一张卡整块不画
+    // 没有 peer 块的宿主: 面板长得一模一样 (读数撤掉之后两者没区别)
     const without = await run(base)
     assert.doesNotMatch(without, /跨设备对端/)
+    assert.match(without, /配对手机/, '配对卡照旧在')
+    assert.match(without, /仓库/, '仓库卡照旧在')
   } finally {
     restore()
   }

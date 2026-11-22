@@ -121,6 +121,7 @@ import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.sync.SyncSetting
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwForge
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OpenFile
@@ -310,6 +311,13 @@ fun HostScreen(modifier: Modifier = Modifier) {
                     Manifest.permission.CAMERA,
                 ) == PackageManager.PERMISSION_GRANTED
                 if (granted) pairing = true else cameraPermission.launch(Manifest.permission.CAMERA)
+            }
+            // 终端那张未配对卡片上的「去给 PC 装 luwi终端」(2026-11-22): 开系统浏览器，
+            // 页面自己跳外链会把门户顶掉
+            PortalAsk.Target.PC_INSTALL -> {
+                openPage(context, PortalTerminal.PC_INSTALL_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
             }
             PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
                 if (name != null) {
@@ -1057,14 +1065,15 @@ private fun HostWebView(
     val ballRequest = BallReturn.request
     // WebView 实例与"这个文档加载完过几次": 切换那一步要拿它跑 JS, 还要等重载真的落地
     var page by remember { mutableStateOf<WebView?>(null) }
-    // 2026-10-28: 键盘起来时这块 WebView 让出贴底键盘那一段 (悬浮键盘不让), 否则会话输入框被压在键盘后面
-    // 2026-11-09: **门户盖着时不再让 WebView 变矮** —— 让位改由页面自己抬 (`--lwp-ime`), 见下面那段
-    val imeLift = rememberImeLift()
+    // 键盘那一格 (2026-11-22 起 dsh 后台也走门户那一套): **这块 WebView 的尺寸一次都不动** ——
+    // 上移交给页面自己 (门户 `--lwp-ime` / dsh 后台 `--lw-dsh-ime`), 于是背景图 / 头栏 / 会话区
+    // 都不重排。页面接不了 (`__LUWI_IME__` 不在) 才退回旧的缩边路, 用的数是"停稳"的终值
+    // (见 [ImeLiftPusher]), 不再逐帧 resize —— 那一串才是"呼出键盘卡一下"的现场
     val portalOpen = PortalState.open
-    // 推给页面的数**必须是 dp 而不是设备像素**: WebView 里 1 CSS px 就是 1 dp (393 宽的屏报 393 CSS px,
-    // 屏本身 1080 设备像素), 拿 `roundToPx()` 那笔 (922) 当 CSS px 写下去就是整屏高 —— 2026-11-09 真机
-    // 踩到, 输入卡被顶到顶栏下面
-    val imeLiftDp = imeLift.value.roundToInt()
+    /** 这一页认不认 `__LUWI_IME__`: null = 还没问出来, false = 退回缩 WebView 那条老路 */
+    var pageTakesIme by remember { mutableStateOf<Boolean?>(null) }
+    /** 安全网那条路的当前高度 (只在 [pageTakesIme] 不是 true 时才写, 页面自己抬的时候恒为 0) */
+    var fallbackLift by remember { mutableStateOf(0.dp) }
     var finishes by remember { mutableIntStateOf(0) }
     // renderer 是 Chrome 那边独立的一个进程: 它一死这块 WebView 就再也不能用, 只能整块重建 ——
     // generation 一变就换一块新的 (key 在 AndroidView 外面); halted 是"这一格现在不挂 WebView"
@@ -1152,11 +1161,12 @@ private fun HostWebView(
     // halted 那一档整块不挂, 所以不会有人再去用已经 destroy 的旧实例
     if (!halted) key(generation) {
         // 键盘那一格 (2026-11-09 主人: "呼出键盘时不应整个界面上移, 只要输入框和聊天记录向上移"):
-        // **门户盖着时这一块尺寸一点都不动** —— 变矮的是页面里那层 flex (对话区 + 输入卡), 于是
-        // 背景图 / 头栏 / 底下那屏 dsh 都不重排, 起落也就不卡了。门户收起时仍是旧做法: 缩 WebView
-        // (dsh 自己的输入框靠这个贴到键盘上沿, 它不认识 `--lwp-ime`)
+        // **这一块尺寸一点都不动** —— 变矮的是页面里那一层壳, 于是背景图 / 头栏 / 下面那屏一个像素
+        // 都不重排。2026-11-22 起门户与 dsh 后台都是这么办的 (门户 `--lwp-ime` / 后台 `--lw-dsh-ime`,
+        // 见 `ImeLiftPusher`); 只有页面明说接不了 (`pageTakesIme != true`) 才退回缩 WebView 那条老路,
+        // 而且用的数是"停稳"的终值, 不再逐帧 resize
         AndroidView(
-            modifier = if (portalOpen) modifier else modifier.padding(bottom = imeLift),
+            modifier = if (!portalOpen && pageTakesIme != true) modifier.padding(bottom = fallbackLift) else modifier,
             factory = { viewContext ->
                 CookieManager.getInstance().setAcceptCookie(true)
                 WebView(viewContext).apply {
@@ -1413,20 +1423,33 @@ private fun HostWebView(
         )
     }
 
-    // 键盘那一格 (2026-11-09): 门户盖着时只把这个数推给页面 —— 页面自己写 `--lwp-ime`, 抬的是对话区
-    // 与输入卡, **这一块 WebView 不动**。变了才推 (一次起落十来帧, 每帧一句 evaluateJavascript 就够;
-    // 页面那头同值直接返回)。`PortalState.imePx` 是给"页面刷新 / 收起再张"那一档留的: 那时页面挂载
-    // 会来问一次 (`LuwiPortal.portalIme()`), 正好补上错过的那一下
-    LaunchedEffect(portalOpen, imeLiftDp, page) {
-        // 门户收起时清 0: dsh 那一屏走的是缩 WebView 那条路, 与这个数无关
-        PortalState.imePx = if (portalOpen) imeLiftDp else 0
-        if (!portalOpen) return@LaunchedEffect
-        // 一行读数: "整页被顶上去 / 卡一下" 时先看这一行 (值与页面拿到的那个数逐字相同, 单位 dp)
-        Log.i(WEB_TAG, "ime lift ${imeLiftDp}dp portal=$portalOpen")
-        page?.evaluateJavascript(
-            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.setKeyboard($imeLiftDp)",
-            null,
-        )
+    // 键盘那一格 (2026-11-09 门户 / 2026-11-22 dsh 后台): 高度只推给页面, **这一块 WebView 不动** ——
+    // 推哪一路由 [ImeLiftPusher] 判, 这里只管"页面认不认 `__LUWI_IME__`"这一问
+    ImeLiftPusher(
+        page = page,
+        readyAt = readyAt,
+        portalOpen = portalOpen,
+        takesIme = pageTakesIme == true,
+        onFallback = { lift -> if (fallbackLift != lift) fallbackLift = lift },
+    )
+
+    // 页面认不认宿主推过去的键盘高度 (2026-11-22): 换一次文档就问一遍。ui-fix 是在 boot 里 apply 的,
+    // 比 onPageFinished 晚, 所以隔 300 ms 再问, 最多 20 次; 一直没有就只留一行 warn 并退回缩 WebView
+    // 那条老路 (这条探针答 false 也不会让键盘盖住输入框, 只是没用上"不缩边"那条快路)
+    LaunchedEffect(page) {
+        val view = page ?: return@LaunchedEffect
+        pageTakesIme = null
+        for (attempt in 0 until IME_PROBE_TRIES) {
+            if (attempt > 0) delay(IME_PROBE_EVERY_MS)
+            // 600 ms 就够: 探针只是读一个 typeof, 页面没起来时它会挂到那条超时上
+            if (imeTakesLift(view)) {
+                pageTakesIme = true
+                Log.i(WEB_TAG, "the page lifts its own composer (ime probe answered after ${attempt + 1} try/tries)")
+                return@LaunchedEffect
+            }
+        }
+        pageTakesIme = false
+        Log.w(WEB_TAG, "the page has no __LUWI_IME__ after ${IME_PROBE_TRIES} tries, the keyboard falls back to shrinking this view")
     }
 
     // 12 秒还没画出界面: 那就不是"慢", 是老 WebView 在解析期就死了 (或者别的硬故障) —— 弹窗说清,
@@ -1620,6 +1643,88 @@ private fun HostWebView(
         BallReturn.done(request.seq)
     }
 }
+
+/**
+ * 键盘高度的推送器 (2026-11-22)
+ *
+ * 以前这一格是 `modifier.padding(bottom = imeLift)`: IME inset 在 Compose 里是**逐帧**的动画值,
+ * 于是呼一次键盘这块 WebView 被 resize 二十来次 (每次换 surface + 全页重排 + 重栅格) —— 那就是
+ * "呼出键盘卡一下"的现场。现在与门户 (2026-11-09) 同一套: 高度只推给页面, 这一块尺寸一次都不动。
+ *
+ * 三条通道:
+ * 1. 门户盖着 -> `__LUWI_PORTAL__.setKeyboard` (与 2026-11-09 起逐字相同), 顺手把下面那屏清零
+ * 2. dsh 后台且页面认 `__LUWI_IME__` -> 推给页面 (ui-fix 写 `--lw-dsh-ime` + `data-lw-ime`)
+ * 3. 页面接不了 -> [onFallback] 收"停稳"的终值, 由外面缩 WebView (一步跳变, 不逐帧)
+ *
+ * 单独一个 composable 是有意的: 逐帧变的是这里, `HostWebView` 那一大段不该跟着重组
+ *
+ * @param page 当前那块 WebView (还没挂上时什么都不做)
+ * @param readyAt 页面画出来的次数: 它一变说明文档换过了, 当前值要补推一次 (html 上的属性随文档一起没了)
+ * @param portalOpen 门户是不是盖在上面
+ * @param takesIme 这一页认不认 `__LUWI_IME__`
+ * @param onFallback 安全网那条路要的"该缩多少"
+ */
+@Composable
+private fun ImeLiftPusher(
+    page: WebView?,
+    readyAt: Int,
+    portalOpen: Boolean,
+    takesIme: Boolean,
+    onFallback: (Dp) -> Unit,
+) {
+    // 推给页面的数**必须是 dp 而不是设备像素**: WebView 里 1 CSS px 就是 1 dp (393 宽的屏报 393
+    // CSS px, 屏本身 1080 设备像素), 拿 `roundToPx()` 那笔 (922) 当 CSS px 写下去就是整屏高 ——
+    // 2026-11-09 真机踩到, 输入卡被顶到顶栏下面
+    val imeLift = rememberImeLift()
+    val imeLiftDp = imeLift.value.roundToInt()
+    // 安全网那条的"停稳": 一次键盘动画里只有停下来的那个值算数 (与插件自己判可见带的口径相同)
+    val settle = remember { IntArray(2) }
+    LaunchedEffect(portalOpen, imeLiftDp, page, readyAt, takesIme) {
+        val view = page ?: return@LaunchedEffect
+        when {
+            portalOpen -> {
+                PortalState.imePx = imeLiftDp
+                view.evaluateJavascript(
+                    "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.setKeyboard($imeLiftDp)",
+                    null,
+                )
+                // 门户盖着时把下面那一屏清零: 两层一起抬就是"抬两次"
+                view.evaluateJavascript("window.__LUWI_IME__ && window.__LUWI_IME__(0)", null)
+            }
+            takesIme -> {
+                PortalState.imePx = 0
+                view.evaluateJavascript("window.__LUWI_IME__ && window.__LUWI_IME__($imeLiftDp)", null)
+            }
+            else -> {
+                PortalState.imePx = 0
+                if (settle[0] == imeLiftDp) {
+                    settle[1] += 1
+                } else {
+                    settle[0] = imeLiftDp
+                    settle[1] = 1
+                }
+                if (settle[1] >= IME_SETTLE_FRAMES) onFallback(imeLift)
+            }
+        }
+        // 一行读数: "整页被顶上去 / 卡一下" 时先看这一行 (值与页面拿到的那个数逐字相同, 单位 dp)
+        Log.i(WEB_TAG, "ime lift ${imeLiftDp}dp portal=$portalOpen page=$takesIme")
+    }
+}
+
+/**
+ * 问一句"这一页认不认 `window.__LUWI_IME__`" (2026-11-22)
+ *
+ * 超时 / 页面被换掉都回 false (那只是没用上"不缩边"那条快路), 要不要退回缩 WebView 由调用方的
+ * 重试次数决定
+ */
+private suspend fun imeTakesLift(view: WebView): Boolean = withTimeoutOrNull(IME_ASK_MS) {
+    suspendCancellableCoroutine { continuation ->
+        view.evaluateJavascript(IME_PROBE_JS) { answer ->
+            // 超时之后回调还会来一次, 已取消的续体不再喂值
+            if (continuation.isActive) continuation.resume(answer?.contains("true") == true)
+        }
+    }
+} ?: false
 
 /**
  * 「回应用」那一跳走到哪一步: 一行日志 + 一笔状态
@@ -1896,6 +2001,21 @@ private const val RETURN_TRIES = 2
  * 那一档 —— 挂得比它久就等于把返回键吃掉了, 而没答话时调用方会把这一下还给「再按一次退出」
  */
 private const val PAGE_BACK_MS = 500L
+
+/**
+ * 键盘让位那三笔 (2026-11-22)
+ *
+ * - [IME_PROBE_JS]: 问页面认不认宿主推过去的高度 (ui-fix 的 `__LUWI_IME__`, 见 `presets/ui-fix`)
+ * - [IME_ASK_MS]: 探针自己那句只读一个 `typeof`, 页面没起来时不该挂到 [RETURN_ASK_MS] 那么久
+ * - [IME_PROBE_TRIES] x [IME_PROBE_EVERY_MS]: 插件是在页面 boot 里 apply 的, 比 `onPageFinished` 晚, 所以要重试
+ * - [IME_SETTLE_FRAMES]: 安全网那条路只要"停稳"的终值 —— 一次键盘动画里连着的两帧一样才算数
+ */
+private const val IME_PROBE_JS =
+    "(function(){try{return typeof window.__LUWI_IME__ === 'function'}catch(e){return false}})()"
+private const val IME_ASK_MS = 600L
+private const val IME_PROBE_TRIES = 20
+private const val IME_PROBE_EVERY_MS = 300L
+private const val IME_SETTLE_FRAMES = 2
 
 /**
  * 选图那一路的四个词 (落实表 #35, 2026-11-12; 2.8.1 #13 收紧): 页面 `__LUWI_PORTAL__.pickState(state)`
@@ -2441,11 +2561,26 @@ private fun HostBootPanel(
                     modifier = Modifier.size(112.dp),
                 )
             } else {
-                Image(
-                    painter = painterResource(R.drawable.ic_launcher_foreground),
-                    contentDescription = null,
-                    modifier = Modifier.size(112.dp),
-                )
+                // 设置 -> 外观里挑的那一套图标 (2026-11-22): 上一支的 `splash.json` 是主人的显式覆写,
+                // 没配时画当前套的标记。盒子按"墨迹与内置那份一样大"倒推 —— 内置是 112dp 画布里
+                // 0.46 的墨迹, 女仆那张紧裁过 (inkRatio 1.0), 于是盒子只有 51dp
+                val iconStamp = remember { IconTheme.stamp(context) }
+                val iconSet = remember(iconStamp) { IconTheme.current(context) }
+                val mark = remember(iconStamp, iconSet) { IconTheme.markBitmap(context, iconSet) }
+                if (mark != null) {
+                    Image(
+                        bitmap = mark.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.size(IconTheme.splashBoxDp(iconSet).dp),
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(R.drawable.ic_launcher_foreground),
+                        contentDescription = null,
+                        modifier = Modifier.size(112.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             BootIndicator(

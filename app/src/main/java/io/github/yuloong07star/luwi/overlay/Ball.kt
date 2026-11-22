@@ -21,6 +21,8 @@ import android.graphics.Bitmap
 import io.github.yuloong07star.luwi.plugin.theme.BallFaceDrawable
 import io.github.yuloong07star.luwi.plugin.theme.BallTheme
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.tool.IconSet
+import io.github.yuloong07star.luwi.tool.IconTheme
 import kotlin.math.abs
 
 /**
@@ -392,16 +394,51 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
     }
 
     /**
-     * 空闲时球上画的是 Luwi 自己那个标记 (自适应图标的前景, **无背景**的那一份), 不写任何名字
+     * 空闲时球上画的是当前那套图标的标记 (2026-11-22 起可切, 见 [IconSet])
      *
-     * 它那块 view 比球体本身还大 (见 [GLYPH_DP]): 那份矢量里标记只占画布 0.46, 照抄进这颗球
-     * 只剩一小圈
+     * 它那块 view 比球体本身还大 (见 [GLYPH_DP]): 内置那份矢量里标记只占画布 0.46, 照抄进这颗球
+     * 只剩一小圈; 换图之后那个比例由 [IconSet.markInkRatio] 说了算 (见 [applyMark])
      */
     private val glyph = ImageView(context).apply {
-        setImageResource(R.drawable.ic_launcher_foreground)
-        // 那个标记原本是 #01B4FF (一圈水花里一只鲸尾), 在蓝紫球上看不清 —— 染成白的是同一份形状, 不是另一张图
-        imageTintList = ColorStateList.valueOf(TEXT)
         scaleType = ImageView.ScaleType.FIT_CENTER
+    }
+
+    /** 上一次贴上去的是哪一套 (换了才重贴, 心跳 400 ms 一拍) */
+    private var markKey: String = ""
+
+    /** 上一次贴上去那张位图: 换图时自己收, 免得 512px 的位图一张张留在堆上 */
+    private var markBitmap: Bitmap? = null
+
+    /** `lw/icon.json` 上一拍的读数 (与 [BallTheme.currentId] 同一条"读文件当信号"的路) */
+    private var markStamp: Long = -1L
+
+    /**
+     * 贴当前那套的标记
+     *
+     * 内置那份是单色矢量 (`#01B4FF` 的一圈水花), 在蓝紫球上看得清才染白; 女仆那张是彩色插画,
+     * 染白就成剪影了 —— 所以"染不染"是每套自己的属性, 不是一处写死的
+     */
+    private fun applyMark() {
+        val set = runCatching { IconTheme.current(context) }.getOrDefault(IconSet.DEFAULT)
+        if (set.id == markKey && glyph.drawable != null) return
+        markKey = set.id
+        markBitmap?.let { runCatching { it.recycle() } }
+        markBitmap = null
+        if (set.markTintWhite) {
+            glyph.setImageResource(set.markRes)
+            glyph.imageTintList = ColorStateList.valueOf(TEXT)
+        } else {
+            val bitmap = runCatching { IconTheme.markBitmap(context, set) }.getOrNull()
+            if (bitmap != null) {
+                markBitmap = bitmap
+                glyph.setImageBitmap(bitmap)
+            } else {
+                // 解不动就回那份资源本身 (它一定在, `check-icon-sets` 盯着), 大不了比例不对
+                glyph.setImageResource(set.markRes)
+            }
+            glyph.imageTintList = null
+        }
+        applyCoreSize()
     }
 
     /**
@@ -571,7 +608,8 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
 
     init {
         // 尺寸两档 (见 [BALL_THEME_DP]), 所以球体与标记那块 layout 交给 [applyCoreSize] 摆一次
-        applyCoreSize()
+        // 标记先贴一次 (2026-11-22): 首帧就该是主人选的那一套, 不该先闪一下内置那份
+        applyMark()
         addView(core, core.layoutParams)
         show(null, animate = false)
     }
@@ -580,7 +618,10 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
     private fun applyCoreSize() {
         val side = dp(ballDrawDp())
         core.layoutParams = LayoutParams(side, side, Gravity.CENTER)
-        val glyphSide = dp((ballDrawDp() * GLYPH_INK_RATIO / ICON_INK_RATIO).toInt())
+        // 标记的盒子按"墨迹占球体 GLYPH_INK_RATIO"倒推, 而每套素材自己的留白不同
+        // (内置矢量 0.46 / 女仆那张紧裁过是 1.0), 所以除的是当前那套的 markInkRatio
+        val set = runCatching { IconTheme.current(context) }.getOrDefault(IconSet.DEFAULT)
+        val glyphSide = dp(IconTheme.boxDpForInk(ballDrawDp() * GLYPH_INK_RATIO, set))
         glyph.layoutParams = LayoutParams(glyphSide, glyphSide, Gravity.CENTER)
     }
 
@@ -662,6 +703,11 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         val repeeked = peeked != lastPeeked
         lastPeeked = peeked
         themeKey = themeNow
+        // 图标套换了 (2026-11-22): `lw/icon.json` 那一行改了, 这一拍就重贴标记 (与外观插件那条
+        // "换了就当场看得见"同一套口径, 不必重启)
+        val markNow = runCatching { IconTheme.stamp(context) }.getOrDefault(0L)
+        val remarked = markNow != markStamp
+        markStamp = markNow
         word = next
         lastColor = color
         circle.setStroke(dp(STROKE_DP), color)
@@ -669,7 +715,7 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         breathe(color, next == BallWord.SPEAKING || next == BallWord.LISTENING)
         val text = next?.label(context).orEmpty()
         val size = if (next == null) LABEL_SP else WORD_SP
-        if (!changed && !recolored && !rethemed && !repeeked && label.text.isNotEmpty()) return
+        if (!changed && !recolored && !rethemed && !repeeked && !remarked && label.text.isNotEmpty()) return
         // 字换了才值得闪一下; 只换色 (会话轮换) 直接落色, 不该看着像闪了一下
         if (!changed || !animate) {
             // 先把可能还在跑的那一段掐掉: [apply] 最后会把透明度拉回满亮, 被掐在半路的淡入就落定了
@@ -755,6 +801,8 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
      * [color] 与描边那一个环色同源 (见 [show]) —— 空闲时它是那颗标的白 (文字不可见, 这个色用不上)
      */
     private fun apply(next: BallWord?, text: String, size: Float, color: Int, peeked: Boolean = false) {
+        // 标记先跟上当前那套 (它自己有 key 缓存, 没换套时只是一次字符串比较)
+        applyMark()
         val themed = applyTheme(next, peeked)
         glyph.visibility = if (next == null && !themed) VISIBLE else GONE
         label.visibility = if (next != null && (!themed || !hideBuiltinText)) VISIBLE else GONE
@@ -1055,20 +1103,14 @@ internal class BallView(context: Context, private val listener: Listener) : Fram
         /**
          * 球上那个标记的墨迹宽度占球体直径多少
          *
-         * 启动器图标那份是 0.46 ([ICON_INK_RATIO]), 照抄到球上只剩小小一圈 —— 主人 2026-10-10
-         * 换了标记之后点名"ball 的图案占比小, 放大一点", 两轮下来定的是 0.65 (先给 0.55, 主人
-         * 看过实机截图之后要 0.65)。**只有球这一处动**, 桌面与通知栏那份还是 0.46 (主人换标记时的
-         * 原话是"图案占比要和现在的一样")
+         * 启动器图标那份是 0.46 (`IconTheme.BASE_INK_RATIO`), 照抄到球上只剩小小一圈 —— 主人
+         * 2026-10-10 换了标记之后点名"ball 的图案占比小, 放大一点", 两轮下来定的是 0.65 (先给
+         * 0.55, 主人看过实机截图之后要 0.65)。**只有球这一处动**, 桌面与通知栏那份还是 0.46
+         *
+         * 2026-11-22 起换算的分母不再是常数: 每套图标自己的 `markInkRatio` 说了算 (内置 0.46,
+         * 女仆那张紧裁过是 1.0), 见 [applyCoreSize]
          */
         private const val GLYPH_INK_RATIO = 0.65f
-
-        /**
-         * 那份矢量里标记自己占画布多少 (与 `tools/vector-ink.py` 那面 `ink-width` 旗标同一个数)
-         *
-         * 它不是外观参数而是**分母**: 标记只占画布 0.46, 想让它占球体 0.65, 承载它的那块 view
-         * 就得比球还大 —— 多出来的透明边由 [BallView.core] 那圈圆裁掉
-         */
-        private const val ICON_INK_RATIO = 0.46f
 
         /** 承载标记那块 view 的边长, 由 [applyCoreSize] 按当前球体尺寸算 (见上面两个比例) */
 

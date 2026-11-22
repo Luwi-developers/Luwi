@@ -229,6 +229,9 @@ internal object SyncSetting {
     fun setSyncOn(context: Context, on: Boolean): String? =
         finish(setSyncOnIn(file(context), on))
 
+    /** 取消配对 (2026-11-22): 清对端地址与口令、删配对段与角色、关同步 —— 对话与文件一个都不删 */
+    fun unpair(context: Context): String? = finish(unpairIn(file(context)))
+
     /**
      * 把一张扫码配对得到的载荷写成配置 (2026-10-20)
      *
@@ -325,14 +328,7 @@ internal object SyncSetting {
                 (lw.remove(SAVED_AUTO_PUSH_KEY) as? JsonPrimitive)?.booleanOrNull?.let { next[AUTO_PUSH_KEY] = JsonPrimitive(it) }
                 (lw.remove(SAVED_INTERVAL_KEY) as? JsonPrimitive)?.intOrNull?.let { next[PULL_INTERVAL_KEY] = JsonPrimitive(it) }
             } else {
-                text(root, SESSION_REMOTE_KEY).ifBlank { null }?.let { lw[SAVED_REMOTE_KEY] = JsonPrimitive(it) }
-                next.remove(SESSION_REMOTE_KEY)
-                flag(root, AUTO_PULL_KEY)?.let { lw[SAVED_AUTO_PULL_KEY] = JsonPrimitive(it) }
-                flag(root, AUTO_PUSH_KEY)?.let { lw[SAVED_AUTO_PUSH_KEY] = JsonPrimitive(it) }
-                number(root, PULL_INTERVAL_KEY)?.let { lw[SAVED_INTERVAL_KEY] = JsonPrimitive(it) }
-                next[AUTO_PULL_KEY] = JsonPrimitive(false)
-                next[AUTO_PUSH_KEY] = JsonPrimitive(false)
-                next[PULL_INTERVAL_KEY] = JsonPrimitive(0)
+                stopSyncInto(root, lw, next)
             }
             if (lw.isEmpty()) next.remove(LW_KEY) else next[LW_KEY] = JsonObject(lw)
             // 2026-11-21 终端口径: 打开终端**永远**不带工作区镜像 —— luwi 的工作区不再同步到电脑,
@@ -349,6 +345,63 @@ internal object SyncSetting {
         section[WORKSPACE_ENABLED_KEY] = JsonPrimitive(false)
         return JsonObject(section)
     }
+
+    /**
+     * 「关同步」那一半: 远端地址挪进 `lw.savedRemote` 存着, 三个自动值一并挪进 `lw` 段再归零。
+     *
+     * 两处共用 (总开关关掉 / 取消配对): 插件的引擎是**无条件建**的 (远端为空照样建), 只清远端的话
+     * 周期拉取还在跑, 而那一轮要经 Linux 沙箱起 proot+git (2026-10-14 实测一条最轻的
+     * `git --version` 就 2.1 s), 白烧电
+     */
+    private fun stopSyncInto(
+        root: Map<String, JsonElement>,
+        lw: MutableMap<String, JsonElement>,
+        next: MutableMap<String, JsonElement>,
+    ) {
+        text(root, SESSION_REMOTE_KEY).ifBlank { null }?.let { lw[SAVED_REMOTE_KEY] = JsonPrimitive(it) }
+        next.remove(SESSION_REMOTE_KEY)
+        flag(root, AUTO_PULL_KEY)?.let { lw[SAVED_AUTO_PULL_KEY] = JsonPrimitive(it) }
+        flag(root, AUTO_PUSH_KEY)?.let { lw[SAVED_AUTO_PUSH_KEY] = JsonPrimitive(it) }
+        number(root, PULL_INTERVAL_KEY)?.let { lw[SAVED_INTERVAL_KEY] = JsonPrimitive(it) }
+        next[AUTO_PULL_KEY] = JsonPrimitive(false)
+        next[AUTO_PUSH_KEY] = JsonPrimitive(false)
+        next[PULL_INTERVAL_KEY] = JsonPrimitive(0)
+    }
+
+    /**
+     * 取消配对 (2026-11-22, 主人: "设置里要有取消配对功能")
+     *
+     * 一键把这一台与那台电脑的牵连全断掉, 但**一个用户数据都不删**:
+     *   · 对端: 地址与口令删掉, 四档闸 (enabled / proxy / listen / acceptSend) 全关 —— 插件下一次挂载
+     *     看到的是"没有对端", 于是不建影子、不折投影、不拨那一趟
+     *   · `pairing` 段与 `role` 标记一起删: 界面靠前者说「已配对: 谁」, 插件靠后者派生手机那一侧;
+     *     两样留着就是"文件里说配过、界面上说没配"这种自相矛盾的状态
+     *   · 同步: 与「关同步」同一条路 (远端挪进 `lw.savedRemote` 存着, 三个自动值归零), 于是以后
+     *     重新扫码配对时那几笔还在
+     *   · `lw-in/` 里已经收下的附件、会话本身、影子工作区目录**都不动** (历史是主人的)
+     * @return null 成功; 否则是一句能给人看的原因。
+     */
+    fun unpairIn(file: File): String? = runCatching {
+        val root = readOf(file)
+        val next = root.toMutableMap()
+        val lw = (root[LW_KEY] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+        stopSyncInto(root, lw, next)
+        val peer = (root[PEER_KEY] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+        peer[PEER_ENABLED_KEY] = JsonPrimitive(false)
+        peer[PEER_PROXY_KEY] = JsonPrimitive(false)
+        peer[PEER_LISTEN_KEY] = JsonPrimitive(false)
+        peer[PEER_ACCEPT_SEND_KEY] = JsonPrimitive(false)
+        peer.remove(PEER_URL_KEY)
+        peer.remove(PEER_TOKEN_KEY)
+        next[PEER_KEY] = JsonObject(peer)
+        next.remove(PAIRING_KEY)
+        next.remove(ROLE_KEY)
+        // 工作区镜像这一根照旧钉死成关 (2026-11-21 终端口径), 远端地址留着只是不启用
+        next[WORKSPACE_KEY] = workspaceOff(next[WORKSPACE_KEY])
+        if (lw.isEmpty()) next.remove(LW_KEY) else next[LW_KEY] = JsonObject(lw)
+        write(file, JsonObject(next))
+        null
+    }.getOrElse { "写入失败: ${it.message}" }
 
     /**
      * 扫码配对写盘那一半 (纯文件, 单测直接吃它)

@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-22
+
+### Added
+
+- **Pictures and files now travel both ways (2026-11-22, owner: "终端显示图片, 图片与文件都要传").**
+  Everything rides the existing attachment section (`[附件 N 个, 图片用 read_image 打开]` + `1. /abs/path`),
+  never an attachment block: the phone's `lw-in/` copy is what the portal draws (`.lwp-image` /
+  `.lwp-file` read `/lw-out/in/<name>`), so cross-device only needs "move the bytes, rewrite the paths".
+  - **Phone → PC**: `lib/luwi-attach.mjs` (new, pure) parses the section; `carryAttachments()` in
+    `agent/pre-step` uploads every `<HOME>/lw-in/` file to the peer's staging area through the new
+    `POST /luwi-sync/peer/blob` (octet-stream, 20 MB cap) and rewrites the section to the staging paths;
+    when the line arrives, `receive()` calls `adoptStaged({sessionId, staged})` which moves each staged
+    file into **that session's workspace** `lw-in/` (dedupe `_2`, no overwrite) and rewrites the section
+    to the real local paths — the model on the PC can then `read_image` / read them. One file failing keeps
+    the whole line as-is (no half-rewritten list) and lands a one-line notice in the projection.
+  - **PC → Phone**: snapshot entries (v3) carry `media` — image/file attachment refs plus paths from the
+    attachment section; `materializeEntryMedia()` fetches each one through `GET /luwi-sync/peer/blob`
+    (`attachmentId` via `ctx.attachments.readImage`, or a workspace `path`), stores it under the phone's
+    `<HOME>/lw-in/peer-<device8>-<name>`, and rewrites the entry text to those local paths. Cache:
+    `$DSH_HOME/lw/peer-media.json` (atomic rename; a broken one costs a re-download, nothing else).
+  - `pendingTexts` echo matching now compares **the words only** (`pendingKeyOf`): the local echo carries
+    the phone's paths and the folded copy carries the PC's, so a whole-string compare drew every line twice.
+  - An image-only user message is now an entry too (its text is the `[图片]` placeholder `textOfContent`
+    already produced) — media never gets dropped on the floor.
+- **Snapshot v3 is a one-off re-projection.** Reading a snapshot whose `v` is ahead re-opens the projection
+  (old session archived, new one folded from the current window) — the only way the older conversations get
+  their media. `readLiveSnapshot` validates `media` (unknown kinds dropped, `..`/NUL paths refused).
+- **"Install luwi terminal on the PC" from the unpaired card**, and **Unpair** in Settings → Terminal
+  (app side; see `docs/Luwi-终端图片与文件-方案-2026-11-22.md`).
+
+### Removed
+
+- **Everything below the repository card on the PC panel (2026-11-22, owner: "优化一下 PC 的 luwi 终端面板,
+  将仓库以下的面板全部删除").** The panel is now three things — the status bar, the pairing card and the
+  repository card (with the sync toggle in the status bar and the two-click confirm strip) — plus the
+  auto-refresh footer:
+  - gone: the mirror readouts (`renderOverview` / `renderMirror`), the operations card (pull / push), the
+    peer card (reachable / address / token mask / shadow workspaces / queue / counters / adb reverse),
+    the P2P card (path / trust / SAS / the three write buttons) and the "run result" block;
+  - the same readings stay reachable in `/sync doctor`, `sync_status` / `sync_peer` and the `/sync` command —
+    only the panel stopped repeating them;
+  - a failed action (pair / configure / prune) now says why on the one line under the status bar
+    (`key: 'action-error'`), since the receipt block that used to show it is gone;
+  - the phone-side read-only panel (`runner: 'luwi-bridge'`) is untouched;
+  - 83 now-unused translation entries removed; the two panel tests were rewritten to pin the new shape
+    (`check-terminal` grew three checks for it).
+- **The P2P switch and trust actions moved into `/sync p2p` (2026-11-22, owner: "挪到命令里").** With the
+  P2P card gone the panel had no entry left for them, so the command takes over — it writes through the
+  **same** seams the panel used, so both halves keep landing in `$DSH_HOME/lw/session-sync.json` and the
+  same trust table:
+  - `/sync p2p` (or `state`) — the card's lines, verbatim: switch, transport (`direct 12 ms` / `relay …` /
+    `falling back to git`), peer, trust + SAS, counters, cooling, last error, and **which device is waiting
+    for a re-confirmation**;
+  - `/sync p2p on|off` → `applyConfigure(syncConfigFile, { p2p: { enabled } })` (restart the host, same as
+    the panel said);
+  - `/sync p2p confirm <deviceId>` → `p2pConfirmPeer` (re-admits a machine whose node id changed);
+  - `/sync p2p revoke <deviceId>` → `p2pRevokePeer` (trust table rejects it; git sync is unaffected);
+  - `/sync p2p` and `p2p` are in the help block; `renderP2pState` in `lib/render.mjs` and five tests in
+    `test/render-p2p.test.mjs` cover the read side.
+- **`/sync p2p` speaks Chinese (2026-11-22 晚, owner: "那些命令你都改成中文").** Chinese is now the
+  canonical spelling, the old English words stay as aliases — `/sync p2p 状态` / `开` / `关` /
+  `确认 <设备 id>` / `吊销 <设备 id>` (`state` / `on` / `off` / `confirm` / `revoke` still work, `读数` /
+  `打开` / `关闭` / `确认换机` / `撤销` also accepted). The action-word table lives in the new zero-dependency
+  `lib/command-words.mjs` (`normalizeP2pAction`, `P2P_ACTIONS`) so the mapping has its own unit test;
+  `index.mjs` imports and re-exports it. The readout is Chinese all the way down (`p2p: 开 · 传输 直连 9 ms`,
+  `信任: 换机待确认 · SAS 123 456`, `计数: 发出 5 · 收到 2`, `等确认换机: …`, `冷却中: …`, `最近错误: …`),
+  the trust words are mapped (`已信任` / `新对端` / `换机待确认` / `已吊销`), and machine-readable error
+  codes stay verbatim (`P2P_TIMEOUT`).
+
 ## [0.4.5] - 2026-11-22
 
 ### Added

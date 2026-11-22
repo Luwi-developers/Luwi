@@ -193,13 +193,44 @@
             android:label="@string/app_name"
             android:launchMode="singleTop"
             android:theme="@style/Theme.Luwi"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 图标套的桌面入口 (2026-11-22, 设置 -> 外观 -> Luwi 图标): 启动器读的是 APK 里的资源,
+             系统没有"运行时替换自己 launcher icon"的 API, 于是每套图标预置一个 activity-alias,
+             切换 = enable 目标 + disable 别的 (见 tool/IconTheme.kt 的 apply / switchPlan)。
+             **MainActivity 本体因此不再带 LAUNCHER**: 留着就是同一个应用两个桌面入口。
+             两个 alias 的 android:enabled 是"还没写过 lw/icon.json"时的初值 —— 女仆那张是缺省
+             (主人 2026-11-22 点名), 内置鲸尾那一套要人自己切; 切过一次之后由 PackageManager 记住,
+             升级不重置。`am start -n …/.MainActivity` 与通知的 PendingIntent 照旧走 activity 本体 -->
+        <activity-alias
+            android:name=".IconBuiltin"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:roundIcon="@mipmap/ic_launcher_round"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconMaid"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_maid"
+            android:label="@string/app_name"
+            android:roundIcon="@mipmap/ic_launcher_maid_round"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- 球那块框上的 ＋: 挑一张图发给她 (2026-11-07). 它没有界面, 一闪就过 —— 透明主题见
              values/themes.xml 的 Theme.Luwi.Transparent -->

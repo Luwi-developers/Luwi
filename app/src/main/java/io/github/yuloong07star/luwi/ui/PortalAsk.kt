@@ -43,8 +43,11 @@ internal object PortalAsk {
      *
      * `PAIR` (2026-11-21, 终端): 门户那一页点「扫码配对」时, 相机权限与扫码窗都只有这一层有,
      * 于是同样只落一个掷标
+     *
+     * `PC_INSTALL` (2026-11-22, 终端): 未配对时卡片上那颗「去给 PC 装 luwi终端」要开系统浏览器 ——
+     * 页面自己跳外链会把门户顶掉, 所以也只落一个掷标
      */
-    enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC, PAIR }
+    enum class Target { SETTINGS, TAVERN, FEEDBACK, DEV, DEV_NEW, DEV_IMPORT, MIC, PAIR, PC_INSTALL }
 
     /** 待办的那一件; 读它就会跟着重组 */
     val pending = mutableStateOf<Target?>(null)

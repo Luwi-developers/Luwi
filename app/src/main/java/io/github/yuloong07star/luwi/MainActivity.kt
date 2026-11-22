@@ -22,6 +22,7 @@ import io.github.yuloong07star.luwi.host.DshHostService
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.overlay.OverlayService
 import io.github.yuloong07star.luwi.theme.ThemeStore
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
@@ -97,6 +98,12 @@ class MainActivity : ComponentActivity() {
         LwApps.attach(this)
         // The host deliberately outlives this activity, so the service owns its lifetime
         DshHostService.start(this)
+        // 图标套那笔账对一次 (2026-11-22): `lw/icon.json` 是权威, 而 PackageManager 里那两个
+        // activity-alias 的状态可能被桌面 / ROM 改过 —— 最坏是两套都停用, 桌面上一个入口都没有。
+        // 没有不一致时它一个字节都不写 (每次冷启动都写会让桌面重绘、图标闪一下)
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { runCatching { IconTheme.sync(this@MainActivity) } }
+        }
         // 冷启动自己查一次更新 (2.7.9 第 3 条): 晚 3 s 起查, 等 host 起来, 别和首屏抢那几秒;
         // 一天最多一次, 失败静默 —— 判据全在 AutoUpdate.shouldCheck, 弹窗那一份状态在 AutoUpdatePrompt
         lifecycleScope.launch {

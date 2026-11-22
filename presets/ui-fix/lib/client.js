@@ -104,6 +104,27 @@ window.__ModuleLoader__.load({
       '  }',
       '}',
       '',
+      '/* ── 三、键盘让位: 壳自己收一截, WebView 尺寸一次都不动 (2026-11-22) ──────────',
+      '   量到: 宿主以前按 IME inset 逐帧缩 WebView (一次呼键盘二十来次 resize: 换 surface + 全页',
+      '   重排 + 重栅格 —— 那就是"呼出键盘卡一下"的现场), 而 dsh-web-mobile 的手机壳把',
+      '   `html [data-mobile-nav="frame"]` 的高度写死成 --dsha-mobile-visible-vh (= 视口高), 于是',
+      '   "键盘抬起来"在页面这一侧根本没有入口。这里补上那个入口: 宿主推 dp 过来 (见 installIme',
+      '   与 HostScreen 的 ImeLiftPusher), 页面从壳的高度里减掉它 —— 与门户 `--lwp-ime` 同一套',
+      '   什么时候可以删: 插件自己收下宿主推来的键盘高度 (那时这两条与之重复)',
+      '*/',
+      '  html[data-lw-ime="on"] [data-mobile-nav="frame"] {',
+      '    height: calc(var(--dsha-mobile-visible-vh, 100dvh) - var(--lw-dsh-ime, 0px)) !important;',
+      '  }',
+      '/* 没有那一层壳 (插件没挂 / 宽屏平板 / 将来的布局换了): 退到 #root 的内边距, 照样不缩 WebView */',
+      '  html[data-lw-ime="on"] #root:not(:has([data-mobile-nav="frame"])) {',
+      '    box-sizing: border-box !important;',
+      '    padding-bottom: var(--lw-dsh-ime, 0px) !important;',
+      '  }',
+      '/* 壳比视口矮了, 键盘底下那一条露的是 body 底色: 画成 dsh 的页面色, 别露白 */',
+      '  html[data-lw-ime="on"] body {',
+      '    background: var(--dsw-alias-bg-base, #fff) !important;',
+      '  }',
+      '',
     ].join('\n')
 
     /** 注入一次样式表, 交回一个"把这段样式摘掉"的函数 (cordis 的 effect 认这个形状) */
@@ -117,10 +138,46 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 键盘高度那一条 (2026-11-22): 宿主推 dp 过来, 这里只写 `<html>` 上的两个东西
+     *
+     * 宿主以前是自己按 IME inset 逐帧缩 WebView, 逐帧 resize = 逐帧换 surface + 全页重排,
+     * 就是"呼出键盘卡一下"的现场; 现在与门户同一套 —— **WebView 一次都不动**, 上移只发生在
+     * 页面里 (上面第三节那两条选择器)。
+     *
+     * 上限按视口 75% 夹一下: 万一单位又搞错 (922 设备像素当 CSS px 写下来过一次), 最坏是
+     * "抬多了", 不是整块输入区被顶到顶栏下面。
+     */
+    function installIme() {
+      var root = document.documentElement
+      function applyIme(px) {
+        var viewport = window.innerHeight > 0 ? window.innerHeight : 0
+        var raw = Math.max(0, Math.round(Number(px) || 0))
+        var next = viewport > 0 ? Math.min(raw, Math.round(viewport * 0.75)) : raw
+        if (next !== raw) console.log('[luwi-ui-fix] ime lift clamped ' + String(raw) + ' -> ' + String(next))
+        root.style.setProperty('--lw-dsh-ime', String(next) + 'px')
+        // 一次起落只写两处 style / 属性, 不重建 DOM, 也不碰任何 React 状态
+        if (next > 0) root.setAttribute('data-lw-ime', 'on')
+        else root.removeAttribute('data-lw-ime')
+        return true
+      }
+      window.__LUWI_IME__ = applyIme
+      return function () {
+        delete window.__LUWI_IME__
+        root.removeAttribute('data-lw-ime')
+        root.style.removeProperty('--lw-dsh-ime')
+      }
+    }
+
     function apply(ctx) {
       // 客户端这份 context 有 effect; 万一哪天没有, 至少样式还在 (那也仍然只是一个 <style>)
-      if (ctx && typeof ctx.effect === 'function') ctx.effect(install)
-      else install()
+      if (ctx && typeof ctx.effect === 'function') {
+        ctx.effect(install)
+        ctx.effect(installIme)
+      } else {
+        install()
+        installIme()
+      }
     }
 
     exports.apply = apply
