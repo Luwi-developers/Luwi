@@ -277,16 +277,26 @@ export function collectLiveEntries(events, options = {}) {
  * 把一场会话的事件折成投影快照里的那两坨。
  *
  * @param {Array<{seq?: number, time?: number, type?: string, data?: unknown}>} events - 日志顺序的事件 (sessionQuery.readSurface / readSession 的产物)。
- * @param {{maxEntries?: number, maxChars?: number, running?: boolean}} [options] - 窗口 (缺省取 LIVE_LIMITS 的下界与常量缺省) 与"这一场此刻在不在跑" (在跑则最后那一轮的回答进 draft, 否则它也算落定)。
+ * @param {{maxEntries?: number, maxChars?: number, running?: boolean, extra?: Array<{seq: number, role: string, text: string, at: number, media?: Array<object>}>}} [options] - 窗口 (缺省取 LIVE_LIMITS 的下界与常量缺省)、"这一场此刻在不在跑" (在跑则最后那一轮的回答进 draft, 否则它也算落定), 以及**合成条目** (2026-11-22 问答中继: 手机要看的那一行问题; 只进 entries, 不进 all)
  * @returns {{entries: Array<{seq: number, role: string, text: string, at: number}>, draft: {seq: number, text: string}|null, truncated: boolean, all: Array<{seq: number, role: string, text: string, at: number}>}} 投影内容 (外加**不截窗口**的那一份 `all`: 对话账 conv/ 用它)。
  */
 export function condense(events, options = {}) {
   const maxEntries = clampInt(options.maxEntries, LIVE_LIMITS.MIN_MAX_ENTRIES, LIVE_LIMITS.MAX_MAX_ENTRIES, 40)
   const maxChars = clampInt(options.maxChars, LIVE_LIMITS.MIN_MAX_CHARS, LIVE_LIMITS.MAX_MAX_CHARS, 16000)
   const collected = collectLiveEntries(events, { running: options.running === true })
+  // 2026-11-22 (终端问答): 问题那一行不是这场会话的日志, 是"手机上要看的那一句"。它带着
+  // 那一笔 `tool/call` 的 seq (天然有序、天然幂等), 在**窗口裁剪之前**并进来 —— 与别的条目
+  // 同等对待 (裁掉就裁掉)。`all` 不动: 对话账 conv/ 只记真人说的话
+  const extra = Array.isArray(options.extra)
+    ? options.extra.filter(entry => entry !== null && typeof entry === 'object' && typeof entry.text === 'string' && entry.text !== '')
+    : []
+  const merged = extra.length === 0
+    ? collected.entries
+    : [...collected.entries, ...extra].sort((left, right) => Number(left?.seq ?? 0) - Number(right?.seq ?? 0)
+      || String(left?.role ?? '').localeCompare(String(right?.role ?? '')))
   // 窗口: 先按条数, 再按字数 (从最老的开始丢), 丢了就如实标记
   let truncated = false
-  let kept = collected.entries
+  let kept = merged
   if (kept.length > maxEntries) {
     kept = kept.slice(kept.length - maxEntries)
     truncated = true

@@ -129,6 +129,8 @@ import { makeGithubApi, looksLikeNetworkFailure } from './lib/github-api.mjs'
 import { appendProxyEvents, proxyEventsFrom, proxyNoticeEvents, proxyTitleOf, proxyUserMessage } from './lib/luwi-proxy.mjs'
 // Luwi 加 (G1 收口): 只读自检的纯函数 —— peer 落点 / ② 层 extraneous / 汇总文本
 import { formatDoctor, runDoctor } from './lib/luwi-doctor.mjs'
+// Luwi 加 (2026-11-22 终端问答): 问题条目 / 回答解析 / ask 段规格 (纯算术, 单测直接吃)
+import { TERMINAL_BRIEF, TERMINAL_BRIEF_LOCAL, autoAnswers, createAskRelay, renderAskState, resolveAskSpec } from './lib/luwi-ask.mjs'
 // 2026-11-22: adb reverse 那条管子的读数与修补 (手机回环口 -> 电脑这一趟的端口)
 import { parseReverseList, repairReverse } from './lib/lw-reverse.mjs'
 // Luwi 加 (P2P T2): sidecar 监管与它的配置段 —— 只定位/起停/读状态, 不实现同步协议
@@ -583,7 +585,7 @@ export function losslessStatus(value) {
  * `/sync p2p` 的动作词归一化 —— 词表在 `lib/command-words.mjs` (那边零依赖, 单测能直接跑),
  * 这里 import 之后转出去, 命令那一侧与判据都按同一个名字找它
  */
-import { normalizeP2pAction } from './lib/command-words.mjs'
+import { normalizeAskAction, normalizeP2pAction } from './lib/command-words.mjs'
 
 export { normalizeP2pAction }
 
@@ -1119,6 +1121,9 @@ function applyInner(ctx, config = {}) {
   // Luwi 加 (P2P T2): p2p 段与 peer/live 同一个形制 (主要住 JSON 层)
   if (config.p2p !== undefined) merged.p2p = config.p2p
   else if (fileLayer.p2p !== undefined) merged.p2p = fileLayer.p2p
+  // Luwi 加 (2026-11-22 终端问答): ask 段 (模式 / 等多久 / 终端提示) 同一个形制, 只住 JSON 层
+  if (config.ask !== undefined) merged.ask = config.ask
+  else if (fileLayer.ask !== undefined) merged.ask = fileLayer.ask
   // Luwi 加 (2026-11-21 终端): 角色是**顶层字符串键** (`phone` / `pc`), 与 peer/live 同一个形制 ——
   // 它不在 CONFIG_KEYS 里, 所以必须在这里显式并进来, 否则下面那条 `merged.role` 永远读到 undefined
   // (那样显式的 role 成了死代码, 只能靠 pairing + peer.url 回退, 两端都会误判)
@@ -1334,10 +1339,22 @@ function applyInner(ctx, config = {}) {
     peerSpec = null
     liveSpec = { ...liveSpec, enabled: false }
   }
+  // Luwi 加 (2026-11-22 终端问答): `ask` 段的规格。段坏了只关这一件 (与 peer/live 同一条降级口径),
+  // 两根镜像与终端照跑
+  let askSpec = resolveAskSpec(undefined)
+  if (merged.ask !== undefined) {
+    try {
+      askSpec = resolveAskSpec(merged.ask)
+    } catch (error) {
+      warn(`luwi-dsh-sync: ask config rejected, the phone relay stays at its defaults: ${messageOf(error)}`)
+    }
+  }
   // 对端那一段的启动读数 (与前面两个字段同一纪律: 地址里可能有凭据, 只报形态)
   const peerLine = peerSpec === null
     ? 'peer=off'
     : `peer=on role=${peerSpec.controller ? 'controller' : 'peer'} mode=${peerSpec.mode} listen=${peerSpec.listen ? 'on' : 'off'} accept=${peerSpec.acceptSend ? 'on' : 'off'} proxy=${peerSpec.proxy ? 'on' : 'off'} url=${peerSpec.url === '' ? 'card' : 'set'} live=${liveSpec.enabled ? 'on' : 'off'}`
+  // 2026-11-22: 问答中继只在电脑那一侧、且通道开着时才有意义 —— 这一行让人一眼看出它到底装没装上
+  const askLine = `ask=${askSpec.mode} wait=${Math.round(askSpec.waitMs / 1000)}s${askSpec.brief ? ' brief=on' : ''}`
   ctx.effect(() => {
     globalThis[MOUNT_KEY] = `${PLUGIN_NAME}@${PLUGIN_VERSION}`
     return () => {
@@ -1352,6 +1369,7 @@ function applyInner(ctx, config = {}) {
       + ` ws=${workspaceSources.length}`
       + ` baseline=${pairing === null ? 'legacy' : 'set'}`
       + ` ${peerLine}`
+      + ` ${askLine}`
       + ` plugin=${PLUGIN_NAME} v=${PLUGIN_VERSION}`,
   )
   // 工作区那根是第二棵工作树、第二个远端, 但它跟会话那根**共用同一条 runner** —— 桥那边的
@@ -1980,6 +1998,26 @@ function applyInner(ctx, config = {}) {
   /** 会话摘要的短缓存 (面板与 /peer/info 都会问, 一次拉取就够) */
   let summariesCache = { at: 0, value: [] }
 
+  // --- Luwi 加 (2026-11-22 终端问答): 手机那一头看不见 dsh 的问答卡片, 于是问一句就双方都卡着。
+  // 账本身在 `lib/luwi-ask.mjs` 的 `createAskRelay` (纯内存, 好单测); 这里只留三样本机记账:
+  //   · `askCalls`    —— 最近一次 `ask_user_question` 的 tool/call (callId 对答案, seq 让条目有序)
+  //   · `peerDriven`  —— 哪些会话是**手机在用的** (只对那些接管问答; 电脑本地那些一个字都不动)
+  //   · `askBriefed`  —— 上一次给这一场附终端提示的时间 (节流)
+  /** sessionId -> {callId, seq, at, questions} */
+  const askCalls = new Map()
+  /** sessionId -> 第一次发现它是手机驱动的时间 */
+  const peerDriven = new Map()
+  /** 上一次给这一场附终端提示的时间 (节流) */
+  const askBriefed = new Map()
+  /** 问答中继真正装上的那一档 (off / 不是电脑那一侧 / 通道没开 = 不装) */
+  const askRelayOn = askSpec.mode !== 'off' && controller === false && peerSpec !== null
+  /** 那一摊状态: 板上那几件 / 计数 / 快照里那两行 / 手机回的答案 */
+  const askRelay = createAskRelay(askSpec, { log: line => logger.info(line) })
+  /** 终端提示的节流 (同一场多久才再附一次) */
+  const ASK_BRIEF_AGAIN_MS = 30 * 60 * 1000
+  /** 那个会卡住的工具名 (上游 `@deepseek-ai/dsh-tool-ask-user` 的 legacy 与 timed 两个 schema 同名) */
+  const ASK_USER_QUESTION_TOOL = 'ask_user_question'
+
   /**
    * 本机工作区列表 (workspaceRegistry 是可选服务; 缺了就是空)。
    *
@@ -2155,14 +2193,18 @@ function applyInner(ctx, config = {}) {
           .map((item) => {
             const cwd = String(item.cwd ?? '')
             const workspace = workspaces.find(entry => entry.path !== '' && entry.path === cwd)
+            const id = String(item.sessionId ?? '')
+            // 2026-11-22 (终端问答): 问一句不改会话日志, 而对端的投影刷新判据就是这里的
+            // updatedAt (账上叫 revision) —— 不抬这一格, 手机上永远不会重新取快照
+            const askedAt = askRelayOn ? askRelay.askedAt(id) : 0
             return {
-              id: String(item.sessionId ?? ''),
+              id,
               title: String(item.title ?? item.projections?.values?.title ?? ''),
               cwd,
               workspace: workspace === undefined ? '' : workspace.title,
               running: item.running === true,
               blank: item.blank === true,
-              updatedAt: Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : 0,
+              updatedAt: Math.max(Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : 0, askedAt),
             }
           })
       } catch (error) {
@@ -2266,7 +2308,15 @@ function applyInner(ctx, config = {}) {
     if (events === null) return null
     // running 要进来: 主路载体 (readSurface) 里没有 turn/end, "最后那一轮落没落定"只有它说了算 ——
     // 少了这一句, 每一轮的回答都判成"还在流", 投影里就永远只有主人那几句话
-    const condensed = condense(events, { maxEntries: liveSpec.maxEntries, maxChars: liveSpec.maxChars, running })
+    //
+    // 2026-11-22 (终端问答): 手机上那张"电脑在问你"的一行是**合成条目** —— 它不在会话日志里
+    // (模型侧不该看见它), 只在快照里, 所以走 `extra` 并进窗口
+    const condensed = condense(events, {
+      maxEntries: liveSpec.maxEntries,
+      maxChars: liveSpec.maxChars,
+      running,
+      extra: askExtraEntries(sessionId),
+    })
     return {
       snapshot: liveSnapshot({
         deviceId: engine.deviceId === 'pending' ? '' : engine.deviceId,
@@ -2331,6 +2381,8 @@ function applyInner(ctx, config = {}) {
     if (controller === undefined || typeof controller.resolveAgent !== 'function') {
       throw new Error('this profile has no session controller, so a cross-device line has nowhere to go')
     }
+    // 2026-11-22 (终端问答): 这一句是从手机来的 —— 这一场从此算"手机在用", 它再问一句就走中继
+    markPeerDriven(sessionId)
     const run = async () => {
       const resolvedAgent = await controller.resolveAgent(sessionId)
       if (resolvedAgent !== undefined && 'error' in resolvedAgent) throw resolvedAgent.error
@@ -2866,6 +2918,153 @@ function applyInner(ctx, config = {}) {
     return null
   }
 
+  /**
+   * 这一场是不是**手机在用**的 (只有这几场会被问答中继接管, 电脑本地那一场一个字都不动)。
+   * @param {unknown} sessionId - 会话 id。
+   * @returns {boolean} 是就 true。
+   */
+  function isPeerDriven(sessionId) {
+    return peerDriven.has(String(sessionId ?? ''))
+  }
+
+  /**
+   * 记一笔"这一场是手机驱动的": 手机发来的那一句 (`source.via === 'peer'`) 与 `deliverToAgent`
+   * 都会调它, 于是"从终端进历史挑一场旧电脑会话继续用"也认得出来。
+   * @param {unknown} sessionId - 会话 id。
+   */
+  function markPeerDriven(sessionId) {
+    const id = String(sessionId ?? '')
+    if (id === '') return
+    if (peerDriven.has(id)) return
+    peerDriven.set(id, Date.now())
+  }
+
+  /**
+   * 记下最近一笔 `ask_user_question` 的 tool/call —— `callId` 用来对上手机的回答,
+   * `seq` 决定快照里那一行排在哪 (真实 seq 才幂等; 自造的号会被后一条真条目跳过)。
+   * @param {string} sessionId - 会话 id。
+   * @param {unknown} callId - 工具调用 id。
+   * @param {unknown} seq - 事件 seq。
+   * @param {unknown} at - 事件时间。
+   * @param {Array<object>} questions - 参数里解析出来的问题。
+   */
+  function noteAskCall(sessionId, callId, seq, at, questions) {
+    const id = String(sessionId ?? '')
+    if (id === '') return
+    askCalls.set(id, {
+      callId: String(callId ?? ''),
+      seq: Number.isFinite(seq) ? Math.max(0, Number(seq)) : 0,
+      at: Number.isFinite(at) ? Number(at) : Date.now(),
+      questions: Array.isArray(questions) ? questions : [],
+    })
+  }
+
+  /**
+   * 把登记的 tool/call 配给这次请求 (同一批问题、60 秒以内)。
+   * @param {string} sessionId - 会话 id。
+   * @param {Array<object>} questions - 这次请求里的问题。
+   * @returns {{callId: string, seq: number}|null} 配上的那一笔。
+   */
+  function takeAskCall(sessionId, questions) {
+    const id = String(sessionId ?? '')
+    const found = askCalls.get(id)
+    if (found === undefined) return null
+    askCalls.delete(id)
+    if (Date.now() - found.at > 60_000) return null
+    const same = found.questions.length === questions.length
+      && found.questions.every((question, index) => String(question?.id ?? '') === String(questions[index]?.id ?? ''))
+    return same ? found : null
+  }
+
+  /**
+   * 快照里那两行 (问题 + 回执) —— 交给 `condense` 的 `extra`, 不进对话账。
+   * @param {string} sessionId - 会话 id。
+   * @returns {Array<object>} 合成条目。
+   */
+  function askExtraEntries(sessionId) {
+    if (!askRelayOn) return []
+    return askRelay.extraEntries(sessionId)
+  }
+
+  /**
+   * 手机回的那一句话是不是在答这一场的问题 (由 `receive()` 在投递**之前**问一次)。
+   *
+   * 这一笔不能进 agent inbox: 那一轮正卡在工具里, steer 进去要等工具返回才被读 —— 而工具
+   * 等的就是这句答案, 于是双方互等到超时 (这正是手机端"有没有反应"的分水岭)。
+   * @param {string} sessionId - 目标会话。
+   * @param {string} text - 对端发来的正文。
+   * @returns {{answered: string}|{ok: false, note: string}|null} 命中就是回执, 没命中 null。
+   */
+  async function answerAskFromPeer(sessionId, text) {
+    if (!askRelayOn) return null
+    return askRelay.answer(sessionId, text)
+  }
+
+  /**
+   * 给"手机驱动的那一场"附一条终端上下文 (走 pre-step, 不是改主人那句话)。
+   *
+   * **不能改正文**: `pendingKeyOf` 只比人话, 正文动一个字, 手机就会把同一句画两遍。
+   * `source.kind` 也不是 `user`, 于是 `condense` 不会把它折成投影条目 —— 手机上不多一行。
+   * @param {object} payload - pre-step 载荷。
+   * @param {() => Promise<object>} next - 下一层。
+   * @param {string} text - 附哪一句 (中继开 / 关两份, 见 `TERMINAL_BRIEF` / `TERMINAL_BRIEF_LOCAL`)。
+   * @returns {Promise<object>} 决策。
+   */
+  async function briefTerminalStep(payload, next, text) {
+    const decision = await next()
+    if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
+    if (askSpec.brief !== true) return decision
+    if (payload?.signal?.aborted === true) return decision
+    const sessionId = String(payload?.agent?.session?.id ?? '')
+    if (sessionId === '' || !isPeerDriven(sessionId)) return decision
+    const last = askBriefed.get(sessionId) ?? 0
+    if (Date.now() - last < ASK_BRIEF_AGAIN_MS) return decision
+    askBriefed.set(sessionId, Date.now())
+    return {
+      ...decision,
+      messages: [
+        ...(Array.isArray(decision.messages) ? decision.messages : []),
+        createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: PLUGIN_NAME, form: 'snapshot', sections: [{ name: PLUGIN_NAME, text }] },
+        }),
+      ],
+    }
+  }
+
+  /**
+   * 接管一次问答请求 (只在"手机驱动的那一场 + 电脑这一侧 + 通道开着"时生效)。
+   * @param {object} request - `user-questions/request` 的载荷。
+   * @param {() => Promise<object>} next - 下一层 (电脑自己的问答卡片)。
+   * @returns {Promise<{answers: Array<object>}>} 答案批次。
+   */
+  async function handleUserQuestion(request, next) {
+    const session = request?.agent?.session
+    const sessionId = String(session?.id ?? '')
+    const questions = Array.isArray(request?.questions) ? request.questions : []
+    if (!askRelayOn || sessionId === '' || questions.length === 0) return next()
+    if (!isPeerDriven(sessionId)) return next()
+    const call = takeAskCall(sessionId, questions)
+    const ask = askRelay.publish(sessionId, questions, {
+      callId: call === null ? '' : call.callId,
+      seq: call === null ? Math.max(0, Number(session?.seq ?? 0)) : call.seq,
+    })
+    // 会话摘要 1 s 缓存: 不清掉的话, 头一拍报出去的还是老 updatedAt (手机就不会重新取快照)
+    summariesCache.at = 0
+    // notify: 只让手机看得见, 由电脑那边答 (答完把那两行摘掉)
+    if (askSpec.mode === 'notify') {
+      try {
+        return await next()
+      } finally {
+        askRelay.drop(sessionId)
+        summariesCache.at = 0
+      }
+    }
+    const settled = askRelay.wait(ask, request?.signal ?? undefined)
+    if (askSpec.mode === 'auto') askRelay.settle(ask, 'auto', autoAnswers(questions))
+    return await settled
+  }
+
   const peerRuntime = createPeerRuntime({
     spec: peerSpec,
     live: liveSpec,
@@ -2889,6 +3088,8 @@ function applyInner(ctx, config = {}) {
     writeTranscript,
     deliver: deliverToAgent,
     resolveTarget: resolvePeerTarget,
+    // 2026-11-22 (终端问答): 手机回的那一句先问这里 —— 命中的那件问题就地结算, 不进 agent inbox
+    answerAsk: answerAskFromPeer,
     makeUserMessage: async (text) => createUserMessage({
       content: [{ type: 'text', text }],
       // kind 必须留 user (它决定界面把这条画成"主人自己说的"), via 才是"从对端来的"那个标记
@@ -3061,6 +3262,63 @@ function applyInner(ctx, config = {}) {
         pending.clear()
       }
     }, `${PLUGIN_NAME}.live-projections`)
+  }
+
+  // --- Luwi 加 (2026-11-22 终端问答): 三条钩子, 只在"电脑这一侧 + 通道开着"时挂上
+  //
+  //   ① `session/event`  —— 记下"这一场是手机驱动的"与最近一笔 `ask_user_question` 的 tool/call
+  //      (callId 对答案, seq 决定快照里那一行排在哪)
+  //   ② `user-questions/request` (prepend) —— 手机驱动的那一场由这里接管: 问题进快照, 答案等手机
+  //      **必须 prepend**: dsh 自己的问答卡片也挂在这个 waterfall 上 (客户端 remote 监听),
+  //      谁先谁拿到请求。晚一步就只能眼看着 PC 的卡片弹出来而手机永远不知道
+  //   ③ `agent/pre-step` —— 给手机驱动的那一场附一终端提示 (不改主人那句话)。**与中继分开判**:
+  //      `ask.mode: off` 时手机照样看不见问答, 那句"自己定"的提示恰恰是最该在的时候
+  const askHooksOn = controller === false && peerSpec !== null && (askRelayOn || askSpec.brief === true)
+  if (askHooksOn) {
+    /** 提示正文按中继开没开分岔 (`off` / `notify` 时手机回不了, 别教它"回 1") */
+    const briefText = askRelayOn ? TERMINAL_BRIEF : TERMINAL_BRIEF_LOCAL
+    ctx.effect(() => {
+      const offSession = ctx.on('session/event', (session, event) => {
+        const sessionId = String(session?.id ?? '')
+        if (sessionId === '') return
+        if (event?.type === 'user/message') {
+          const source = event.data?.source
+          if (source !== null && typeof source === 'object' && source.via === 'peer') markPeerDriven(sessionId)
+          return
+        }
+        if (event?.type !== 'tool/call') return
+        const data = event.data ?? {}
+        if (data.name !== ASK_USER_QUESTION_TOOL) return
+        let questions = []
+        try {
+          const parsed = JSON.parse(String(data.arguments ?? '{}'))
+          if (Array.isArray(parsed?.questions)) questions = parsed.questions
+        } catch {
+          // 参数坏了解析不出问题清单: 照样记一笔 (答案那一侧还有请求体里的 questions)
+          questions = []
+        }
+        noteAskCall(sessionId, data.callId, event.seq, event.time, questions)
+      })
+      const offAsk = askRelayOn
+        ? ctx.on('user-questions/request', (request, next) => handleUserQuestion(request, next), { prepend: true })
+        : undefined
+      const offBrief = askSpec.brief === true
+        ? ctx.on('agent/pre-step', (payload, next) => briefTerminalStep(payload, next, briefText))
+        : undefined
+      return () => {
+        if (typeof offSession === 'function') offSession()
+        if (typeof offAsk === 'function') offAsk()
+        if (typeof offBrief === 'function') offBrief()
+        askRelay.dispose()
+        askCalls.clear()
+        peerDriven.clear()
+        askBriefed.clear()
+      }
+    }, `${PLUGIN_NAME}.ask-relay`)
+    if (askRelayOn && !liveSpec.enabled) {
+      warn('luwi-dsh-sync: ask relay is on but live.enabled is false — the phone will not see the question')
+    }
+    logger.info(`ask: relay ${askSpec.mode} (wait ${Math.round(askSpec.waitMs / 1000)}s, terminal brief ${askSpec.brief ? 'on' : 'off'})`)
   }
 
   // --- Luwi 加 (2026-10-20): pull 之后的两笔活, 各自 fail-soft (都不许把一次成功的 pull 变成失败):
@@ -4992,11 +5250,11 @@ function applyInner(ctx, config = {}) {
     const action = (target === TARGETS.WORKSPACE ? parts[1] : parts[0])?.toLowerCase() || 'status'
     const picked = makeTargetResolver({ sessions: engineFacade, workspace: engineFacade })(target)
     try {
-      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p')) {
+      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p' && action !== 'ask')) {
         return {
           kind: 'success',
           text: [
-            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | doctor | help] · /sync ws <same actions>',
+            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | ask | doctor | help] · /sync ws <same actions>',
             '  status  show mirror state (default): branch, remote, ahead/behind, dirty, forks',
             '  pull    fetch + merge remote changes (keep-both; confirms first)',
             '  push    mirror + commit + push local changes (confirms first)',
@@ -5005,6 +5263,7 @@ function applyInner(ctx, config = {}) {
             '  peers   device cards seen in the mirror (names, URLs, device ids)',
             '  peer    the cross-device channel: /sync peer [state] · /sync peer live · /sync peer send <text> [session <id> | workspace <name>]',
             '  p2p     P2P 传输: /sync p2p [状态] · /sync p2p 开|关 · /sync p2p 确认 <设备 id> · /sync p2p 吊销 <设备 id>（英文 state|on|off|confirm|revoke 也认）',
+            '  ask     终端问答: /sync ask [状态] · /sync ask 关|提示|中继|自动 — 电脑上的问答要不要传到手机、超时按自定义回答继续（英文 off|notify|relay|auto 也认）',
             '  doctor  self-check: where each dsh peer resolves from, profile extraneous packages, git spawn',
             '  ws …    the same actions against the workspace mirror (its own repository, exclude list',
             '          and file size cap; a pull updates or trashes the local files the merge changed)',
@@ -5113,6 +5372,42 @@ function applyInner(ctx, config = {}) {
           }
         }
         return { kind: 'error', text: `sync: 不认识 p2p 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 开 | 关 | 确认 <设备 id> | 吊销 <设备 id>; 英文 state|on|off|confirm|revoke 也认）` }
+      }
+      // Luwi 加 (2026-11-22 终端问答): `/sync ask [状态|关|提示|中继|自动]`
+      //   关   = 与今天一样 (电脑上弹卡, 手机看不见)
+      //   提示 = 传过去看得见, 但要回电脑上答
+      //   中继 = 缺省: 传过去 + 手机上能答 + 超时按自定义回答继续
+      //   自动 = 不问, 直接按自定义回答继续
+      // 写面与面板/JSON 同一个文件 (`applyConfigure` 的 ask 段), 写完重启 host 生效
+      if (action === 'ask') {
+        if (controller) {
+          return { kind: 'error', text: 'sync: 问答中继只在电脑那一侧成立（手机这一侧没有要接管的问答卡片）' }
+        }
+        const rest = target === TARGETS.WORKSPACE ? parts.slice(2) : parts.slice(1)
+        const what = normalizeAskAction(rest[0])
+        if (what === 'state') {
+          return {
+            kind: 'success',
+            text: renderAskState(askSpec, {
+              pending: askRelayOn ? askRelay.openCount() : 0,
+              answered: askRelay.counters.answered + askRelay.counters.auto,
+              expired: askRelay.counters.expired,
+              lastSessionId: askRelay.last.sessionId,
+            }),
+          }
+        }
+        if (what === 'off' || what === 'notify' || what === 'relay' || what === 'auto') {
+          const result = await applyConfigure(syncConfigFile, { ask: { mode: what } })
+          if (result === null || result.ok !== true) {
+            return { kind: 'error', text: `sync: ask.mode 没写进去: ${result?.error ?? '配置没有被写下去'}` }
+          }
+          logger.info(`sync: /sync ask ${what} wrote ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}`)
+          return {
+            kind: 'success',
+            text: `sync: 问答已切成 ${what}（写进去的是 ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}）; 重启 host 之后生效`,
+          }
+        }
+        return { kind: 'error', text: `sync: 不认识 ask 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 关 | 提示 | 中继 | 自动; 英文 state|off|notify|relay|auto 也认）` }
       }
       if (action === 'status') {
         const status = await active.status()
@@ -5258,6 +5553,13 @@ function applyInner(ctx, config = {}) {
     const routeLine = `路由: 面板 ${routeState.panel} 条 · 对端 ${routeState.peer} 条${routeState.error === '' ? '' : ` · ${routeState.error}`}`
     report.notes.push(routeLine)
     if (routeState.panel === 0 || routeState.error !== '') report.warnings.push(routeLine)
+    // 2026-11-22 (终端问答): 中继装没装上、此刻在等几件
+    if (!controller) {
+      const waiting = askRelayOn ? askRelay.openCount() : 0
+      report.notes.push(`问答: ${askSpec.mode} · 等 ${Math.round(askSpec.waitMs / 1000)}s · 终端提示 ${askSpec.brief ? '开' : '关'} · 此刻在等 ${waiting}`)
+      if (askSpec.mode !== 'off' && !askRelayOn) report.warnings.push('问答中继没装上: 对端通道关着 (peer.enabled / peer.token)')
+      if (askRelayOn && !liveSpec.enabled) report.warnings.push('问答中继开着但 live.enabled 是关的: 手机上不会出现那一行问题')
+    }
     return report
   }
 

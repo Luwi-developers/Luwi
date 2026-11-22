@@ -73,6 +73,7 @@ export const MAX_BLOB_BYTES = 20 * 1024 * 1024
  * @param {() => Promise<Array<{id: string, title: string, cwd: string, workspace: string, running: boolean, updatedAt: number}>>} deps.listSessions - 本机会话摘要 (给 /peer/info 用)。
  * @param {(sessionId: string) => Promise<object|null>} deps.projectSession - 现算一份投影快照 (index.mjs 里接 sessionQuery / live Session)。
  * @param {(sessionId: string) => Promise<object>} deps.deliver - 把一条用户消息投进某一轮 (index.mjs 里接 sessionController.resolveAgent + followup/steer)。
+ * @param {(sessionId: string, text: string) => Promise<{answered: string}|{ok: false, note: string}|null>} [deps.answerAsk] - 这一句是不是在回电脑上那张问答卡 (2026-11-22 终端问答: 命中就地结算, 不进 inbox)。
  * @param {(target: object) => Promise<string|null>} deps.resolveTarget - 把 {kind,id,name} 解析成一个会话 id (工作区目标要落到它最近那一场, 没有就新建)。
  * @param {(text: string) => Promise<object>} deps.makeUserMessage - 造用户消息 (index.mjs 传 createUserMessage 的包装)。
  * @param {() => Promise<object>} deps.readState - 读插件自己的账 (delivered / outbox)。
@@ -356,7 +357,7 @@ export function createPeerRuntime(deps) {
   /**
    * 收下对端发来的一句话 (投进它指定的那一场)。
    * @param {object} message - 队列消息或路由体的规范化形态。
-   * @returns {Promise<{ok: boolean, sessionId?: string, running?: boolean, error?: string}>} 结果。
+   * @returns {Promise<{ok: boolean, sessionId?: string, running?: boolean, answered?: string, attachments?: number, error?: string}>} 结果。
    */
   async function receive(message) {
     // 2026-11-21 终端: `acceptSend` 是**唯一**那道"收不收对端指令"的闸 —— 路由与队列两条路都过它。
@@ -374,6 +375,23 @@ export function createPeerRuntime(deps) {
     }
     if (typeof sessionId !== 'string' || sessionId === '') {
       return { ok: false, code: 'NO_TARGET', error: 'could not resolve the target to a session on this host' }
+    }
+    // 2026-11-22 (终端问答): 这一句是不是在回电脑上那张问答卡。**必须在投递之前问** ——
+    // 那一轮正卡在工具里, steer 进去要等工具返回才被读, 而工具等的就是这句答案
+    // (双方互等到超时, 正是手机端"没反应"的成因)。命中就地结算, 不投递, 也不改人家的正文
+    if (typeof deps.answerAsk === 'function') {
+      try {
+        const answered = await deps.answerAsk(sessionId, text)
+        if (answered !== null && answered !== undefined && typeof answered.answered === 'string') {
+          state.received += 1
+          return { ok: true, sessionId, running: true, answered: answered.answered }
+        }
+        if (answered !== null && answered !== undefined && typeof answered.note === 'string' && answered.note !== '') {
+          warn(`peer: ${answered.note}`)
+        }
+      } catch (error) {
+        warn(`peer: answering the pending question on ${sessionId} failed: ${messageOf(error)}`)
+      }
     }
     // 2026-11-22 (2.8.1 #50): 对端先传上来的那几份附件 —— 搬进**这一场的工作区** `lw-in/`,
     // 再把正文里那一段名单换成这边真实存在的路径。搬不动的不假装搬过 (那几行原样留着),
