@@ -34,6 +34,16 @@ export const TERMINAL_BRIEF = [
   '发图与发文件照旧 (附件段), 手机能收到并打开。',
 ].join('\n')
 
+/**
+ * 问答中继关着 (`off` / `notify`) 时那句终端提示 —— 这两档手机回不了问题, 提示就不该教它"回 1"。
+ */
+export const TERMINAL_BRIEF_LOCAL = [
+  '这一场是从手机终端发起的: 主人此刻在手机上, 看不到问答卡片, 只能看到你的正文。',
+  '需要确认时优着自己定 —— 直接按最合理的一档做, 并在正文里用「我替你定了：…」写清你定了什么、为什么。',
+  '实在必须问的时候, 把问题写在正文里, 别调用问答工具 (这一台现在把问答留在电脑上, 手机上回不了)。',
+  '发图与发文件照旧 (附件段), 手机能收到并打开。',
+].join('\n')
+
 /** 一条问题最多列几个选项 (再多手机那一行也读不完) */
 const MAX_OPTIONS_SHOWN = 8
 
@@ -194,7 +204,8 @@ function answerOne(question, text) {
     }
     if (picked.length > 0) {
       const selected = question?.multiSelect === true ? uniqueOf(picked) : [picked[0]]
-      return { id, selected, custom: selected.length < indexes.length ? raw : undefined }
+      // 单选却回了两个号 / 有的号越界: 选中项照给, 原文留在 custom 里 (话不吞, 也让模型看得见)
+      return selected.length < indexes.length ? { id, selected, custom: raw } : { id, selected }
     }
   }
   return { id, selected: [], custom: raw }
@@ -255,3 +266,239 @@ export function renderAskState(spec, counters) {
     pending === 0 || last === '' ? '在等: 没有' : `在等: ${last.slice(-8)}`,
   ].join('\n')
 }
+
+/** 一件问题在板上留多久 (答完那两行跟着投影窗口一起滑走) */
+const BOARD_KEEP_MS = 120000
+
+/**
+ * 问答中继的那一摊状态 (纯内存, 不进盘 —— host 一重启就没了, 那一笔工具调用本来也一起死了)。
+ *
+ * 由 `index.mjs` 建一个, 三处用它:
+ *   · `user-questions/request` 的接管   —— `publish` + `wait`
+ *   · `projectSession` 的快照           —— `extraEntries` (手机上那两行) 与 `askedAt` (/peer/info 的 revision)
+ *   · `receive()` 的回答                —— `answer`
+ *
+ * @param {{mode: string, waitMs: number, brief: boolean}} spec - `resolveAskSpec` 的产物。
+ * @param {{now?: () => number, log?: (line: string) => void, keepMs?: number}} [options] - 时间 / 日志 / 留多久 (测试注入)。
+ * @returns {object} 句柄。
+ */
+export function createAskRelay(spec, options = {}) {
+  const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  const log = typeof options.log === 'function' ? options.log : () => {}
+  const keepMs = Number.isFinite(options.keepMs) ? Number(options.keepMs) : BOARD_KEEP_MS
+  /** sessionId -> {ask, answeredAt, answer} */
+  const board = new Map()
+  const counters = { answered: 0, expired: 0, auto: 0, cancelled: 0 }
+  const last = { sessionId: '', at: 0 }
+  let disposed = false
+
+  /**
+   * 快照里那两行 (问题 + 回执)。不算进对话账: 它不是会话日志里的东西。
+   * @param {string} sessionId - 会话 id。
+   * @param {number} [at] - 现在。
+   * @returns {Array<{seq: number, role: string, text: string, at: number, media: Array<object>}>} 合成条目。
+   */
+  function extraEntries(sessionId, at = now()) {
+    const id = String(sessionId ?? '')
+    const item = board.get(id)
+    if (item === undefined) return []
+    const since = item.answeredAt > 0 ? item.answeredAt : item.ask.at
+    if (item.ask.state !== 'open' && at - since > keepMs) {
+      board.delete(id)
+      return []
+    }
+    const entries = [{
+      seq: item.ask.seq,
+      role: 'assistant',
+      text: askEntryText(item.ask, at),
+      at: item.ask.at,
+      media: [],
+    }]
+    if (item.answer !== null && item.answeredAt > 0) {
+      entries.push({
+        seq: item.ask.seq + 0.5,
+        role: 'assistant',
+        text: askAnsweredText(item.ask, item.answer),
+        at: item.answeredAt,
+        media: [],
+      })
+    }
+    return entries
+  }
+
+  /**
+   * 这一场有没有一件在等的问题 (值就是它的开始时刻, 给 `/peer/info` 的 revision 用)。
+   * @param {string} sessionId - 会话 id。
+   * @returns {number} 开始时刻; 没有就是 0。
+   */
+  function askedAt(sessionId) {
+    const item = board.get(String(sessionId ?? ''))
+    return item === undefined ? 0 : Number(item.ask.at) || 0
+  }
+
+  /**
+   * 这一场此刻有没有**在等**的问题。
+   * @param {string} sessionId - 会话 id。
+   * @returns {object|null} 那一件; 没有 null。
+   */
+  function pendingFor(sessionId) {
+    const item = board.get(String(sessionId ?? ''))
+    return item !== undefined && item.ask.state === 'open' ? item.ask : null
+  }
+
+  /**
+   * 把一件问题挂到板上。
+   * @param {string} sessionId - 会话 id。
+   * @param {Array<object>} questions - 问题清单。
+   * @param {{callId?: string, seq?: number}} [meta] - 工具调用 id 与事件 seq。
+   * @returns {object} 那一件 (交给 `wait`)。
+   */
+  function publish(sessionId, questions, meta = {}) {
+    const id = String(sessionId ?? '')
+    // 同一场又来一件: 旧的按 cancelled 收掉 (阻塞工具一次只有一件, 走到这里说明上一件没收干净)
+    const previous = board.get(id)
+    if (previous !== undefined && previous.ask.state === 'open') settle(previous.ask, 'cancelled', null)
+    const ask = {
+      sessionId: id,
+      callId: typeof meta.callId === 'string' ? meta.callId : '',
+      seq: Number.isFinite(meta.seq) ? Math.max(0, Number(meta.seq)) : 0,
+      at: now(),
+      questions: Array.isArray(questions) ? questions : [],
+      waitMs: spec.waitMs,
+      mode: spec.mode,
+      state: 'open',
+      timer: null,
+      onAbort: null,
+      signal: null,
+      resolve: null,
+      reject: null,
+    }
+    board.set(id, { ask, answeredAt: 0, answer: null })
+    return ask
+  }
+
+  /**
+   * 开等: 超时按自定义回答继续, 上游 abort 就按取消。
+   * @param {object} ask - `publish` 的那一件。
+   * @param {AbortSignal|undefined} [signal] - 上游请求的取消。
+   * @returns {Promise<{answers: Array<object>}>} 答案。
+   */
+  function wait(ask, signal) {
+    const promise = new Promise((resolve, reject) => {
+      ask.resolve = resolve
+      ask.reject = reject
+    })
+    ask.signal = signal ?? null
+    ask.timer = setTimeout(() => {
+      settle(ask, 'expired', autoAnswers(ask.questions))
+    }, spec.waitMs)
+    if (typeof ask.timer.unref === 'function') ask.timer.unref()
+    if (ask.signal !== null && typeof ask.signal.addEventListener === 'function') {
+      ask.onAbort = () => { settle(ask, 'cancelled', null) }
+      ask.signal.addEventListener('abort', ask.onAbort, { once: true })
+    }
+    return promise
+  }
+
+  /**
+   * 结算一件问题。
+   * @param {object} ask - 那一件。
+   * @param {string} state - `answered` / `expired` / `auto` / `cancelled`。
+   * @param {{answers: Array<object>}|null} answer - 答案 (cancelled 给 null)。
+   * @returns {boolean} 真的结算了才 true。
+   */
+  function settle(ask, state, answer) {
+    if (disposed || ask === null || ask === undefined || ask.state !== 'open') return false
+    ask.state = state
+    if (ask.timer !== null) {
+      clearTimeout(ask.timer)
+      ask.timer = null
+    }
+    if (ask.onAbort !== null && ask.signal !== null && typeof ask.signal.removeEventListener === 'function') {
+      ask.signal.removeEventListener('abort', ask.onAbort)
+    }
+    ask.onAbort = null
+    const item = board.get(ask.sessionId)
+    if (item !== undefined && item.ask === ask) {
+      item.answeredAt = state === 'cancelled' ? 0 : now()
+      item.answer = state === 'cancelled' ? null : answer
+      if (state === 'cancelled') board.delete(ask.sessionId)
+    }
+    last.sessionId = ask.sessionId
+    last.at = now()
+    if (state === 'answered') counters.answered += 1
+    else if (state === 'expired') counters.expired += 1
+    else if (state === 'auto') counters.auto += 1
+    else counters.cancelled += 1
+    log(`ask: ${ask.sessionId} settled as ${state}`)
+    if (state === 'cancelled') {
+      if (typeof ask.reject === 'function') {
+        const error = new Error('ask_user_question was aborted before the user answered')
+        error.name = 'UserQuestionError'
+        error.code = 'ASK_ABORTED'
+        ask.reject(error)
+      }
+      return true
+    }
+    if (typeof ask.resolve === 'function') ask.resolve(answer)
+    return true
+  }
+
+  /**
+   * 手机回的那一句话是不是在答这一场的问题。
+   * @param {string} sessionId - 目标会话。
+   * @param {string} text - 对端发来的正文。
+   * @returns {{answered: string}|{ok: false, note: string}|null} 命中就是回执, 没命中 null。
+   */
+  function answer(sessionId, text) {
+    const ask = pendingFor(sessionId)
+    if (ask === null) return null
+    const parsed = parseAskReply(ask.questions, text)
+    if (parsed.ok !== true) {
+      return { ok: false, note: `the line for ${sessionId} was not an answer (${parsed.reason}), delivering it as a message` }
+    }
+    const batch = { answers: parsed.answers }
+    if (!settle(ask, 'answered', batch)) return null
+    log(`ask: the phone answered ${ask.callId || 'the question'} on ${ask.sessionId}`)
+    return { answered: ask.callId !== '' ? ask.callId : 'answered' }
+  }
+
+  /**
+   * 摘掉这一场板上的那一件 (notify 档: 电脑上答完之后不再占屏)。
+   * @param {string} sessionId - 会话 id。
+   */
+  function drop(sessionId) {
+    board.delete(String(sessionId ?? ''))
+  }
+
+  /** @returns {number} 此刻在等几件。 */
+  function openCount() {
+    let count = 0
+    for (const item of board.values()) if (item.ask.state === 'open') count += 1
+    return count
+  }
+
+  /** 卸载 / 重挂: 定时器与等待一起撤 (不撤的话测试进程会被拖着不退出)。 */
+  function dispose() {
+    for (const item of board.values()) {
+      const ask = item.ask
+      if (ask === null || ask === undefined) continue
+      if (ask.state === 'open') {
+        ask.state = 'cancelled'
+        if (typeof ask.reject === 'function') {
+          const error = new Error('ask_user_question was aborted before the user answered')
+          error.name = 'UserQuestionError'
+          error.code = 'ASK_ABORTED'
+          ask.reject(error)
+        }
+      }
+      if (ask.timer !== null) clearTimeout(ask.timer)
+      ask.timer = null
+    }
+    board.clear()
+    disposed = true
+  }
+
+  return { spec, counters, last, publish, wait, settle, answer, drop, openCount, dispose, extraEntries, askedAt, pendingFor }
+}
+

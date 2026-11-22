@@ -352,6 +352,27 @@
   写面 `/sync p2p 开|关` 走 `applyConfigure(syncConfigFile, { p2p: { enabled } })` (写完要重启 host),
   `确认` / `吊销` 走 `p2pConfirmPeer` / `p2pRevokePeer` —— **与面板原来那两下确认写的是同一个文件、同一张信任表**,
   别另开一路。判据 `check-terminal` 第五/六/七条 + `test/render-p2p.test.mjs`
+- **电脑上的问答要传到手机, 答不回来就按自定义回答继续** (2026-11-22 主人: "pc端使用问答工具时，手机端没有反应…
+  是否可以在手机发给电脑的内容里加上提示词或者问答也要传并默认使用自定义回答"): 四档 `ask.mode`
+  (`off` / `notify` / **`relay` 缺省** / `auto`), 只对**手机驱动的那一场**生效 (收到过 `source.via === 'peer'`
+  的那一句, 或由 `target:{kind:'new'}` 新开的那场), 电脑本地一场一个字都不动。四条硬约束:
+  ① **接管必须 `prepend`** —— dsh 自己的问答卡片也挂在同一个 `user-questions/request` waterfall 上 (客户端
+  remote 监听), 晚一步就只能眼看 PC 弹卡而手机永远不知道; ② **问题那一行是合成条目** —— `condense` 的
+  `extra` 在窗口裁剪前并进 `entries`, **不进 `all`** (对话账只记人话), `seq` 取那一笔 `tool/call` 的真号
+  (天然有序且幂等), `LIVE_SNAPSHOT_VERSION` 不动 (老手机照样折得动); ③ **回答在投递之前结算** ——
+  `receive()` 先问 `deps.answerAsk`, 命中就地 resolve (那一轮正卡在工具里, steer 进去要等工具返回才被读,
+  双方互等到超时就是"手机没反应"的成因); ④ **正文一个字都不改** —— 终端提示走 `agent/pre-step` 追加的一条
+  上下文消息 (`source.kind` 不是 `user`, 不折成投影条目), 因为回声去重只比人话 (`pendingKeyOf`), 动了正文
+  同一句在手机上会画两遍。手机端零改动 (回答走已有 `POST /luwi-sync/peer/send`, 回执多一格 `answered`;
+  问题靠 `/peer/info` 抬 `updatedAt` 让手机来取)。命令 `/sync ask [状态|关|提示|中继|自动]` (英文别名照留),
+  算术全在 `lib/luwi-ask.mjs` (`resolveAskSpec` / `createAskRelay` / `parseAskReply` / `askEntryText`),
+  判据 `check-terminal` 问答那一节 (9 条) + `test/luwi-ask.test.mjs`; 方案见 `docs/Luwi-终端-问答中继-方案-2026-11-22.md`
+  **真机 A 读数 (2026-11-22 23:01, PC 重启 host 后 0.4.7 生效)**: 会话 `免审批问答工具测试`
+  (`session-99192eb9…`) 里 agent 问了一句 —— 中继接管, 快照 entries 出现 `seq=19` 的
+  「（电脑在等你回答，约 99 秒内没回应就按自定义回答继续）」; 手机端回了之后同场多出 `seq=19.5`
+  「（已按你在手机上的回答继续：1) 能看到卡片）」(是 answered 那一支, 不是超时那支的 AUTO_NOTICE),
+  随后 agent 续话「测试完成，结果正常」。同刻 `/sync doctor` 报 `问答: relay · 等 120s · 终端提示 开 ·
+  此刻在等 1`, 答完转 `此刻在等 0`; `/luwi-sync/peer/info` 的 `entryVersion` 仍是 3
 
 
 

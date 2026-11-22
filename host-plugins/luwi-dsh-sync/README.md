@@ -62,7 +62,10 @@ node --test "test/*.test.mjs"
   "deviceName": "Luwi 手机",       // 对面那个分组上显示成 名字（设备名）
   "peer": { "enabled": true, "listen": true, "proxy": true,
             "token": "<两端同一个, 至少 16 字>", "url": "http://<对端>:3080" },
-  "live": { "enabled": true, "maxEntries": 40, "maxChars": 16000, "keepMinutes": 30 }
+  "live": { "enabled": true, "maxEntries": 40, "maxChars": 16000, "keepMinutes": 30 },
+  // 2026-11-22 终端问答: 电脑上的 ask_user_question 传不传到手机
+  //   off = 与以前一样 / notify = 只传过去看得见 / relay = 传过去 + 手机上能答 + 超时自定义回答 / auto = 不问
+  "ask": { "mode": "relay", "waitMs": 120000, "brief": true }
 }
 ```
 
@@ -83,8 +86,16 @@ GitHub 那边没有 webhook 能打到 NAT 后面的手机 —— 想更接近即
 /sync status | pull | push | diff | peers        # 会话那一根
 /sync ws status|pull|push                        # 工作区那一根
 /sync peer state|live|send <一句话>               # 跨设备通道
+/sync ask 状态|关|提示|中继|自动                   # 终端问答: 电脑上的问句传不传到手机 (英文 off|notify|relay|auto 也认)
 /sync doctor                                      # 只读自检 (peer 解析落点 / ② 层多余包 / git 能不能跑)
 ```
+
+**终端问答** (2026-11-22): 电脑上的 `ask_user_question` 在手机那一头原本是隐形的 —— 卡片长在 dsh
+自己的会话界面上, 手机看的是只有文本的投影, 而且问一句不改会话日志, 手机连"来取快照"的判据都不动。
+现在 `relay` 档把它变成快照里的一行 (合成条目, 不进对话账), 手机直接在终端里回 `1` / `2` / 一句话即算
+答案; 到 `waitMs` 还没人答, 就按「自定义回答」继续 (模型在正文里写「我替你定了：…」)。手机端不用改。
+细节 (四档 / 谁是"手机驱动的那一场" / 为什么接管必须 prepend / 为什么不能改正文) 见
+[README-zh.md 那一节](README-zh.md#终端问答手机看得见电脑在问什么2026-11-22)。
 
 模型侧还有 `sync_status` / `sync_pull` / `sync_push` / `sync_doctor` / `sync_peer`。
 在官方侧边栏里另有一块「同步」面板 (总览 / 操作 / 诊断), 宿主没有 HTTP 服务时它安静不装。

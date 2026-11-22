@@ -161,6 +161,91 @@ function check(name, got, want) {
   ], [true, true, true, true, true])
 }
 
+/* ── 2026-11-22 终端问答: 电脑上的问答传到手机, 答不回来就按自定义回答继续 ────── */
+
+{
+  const host = await read('host-plugins/luwi-dsh-sync/index.mjs')
+  const ask = await read('host-plugins/luwi-dsh-sync/lib/luwi-ask.mjs')
+  const live = await read('host-plugins/luwi-dsh-sync/lib/luwi-live.mjs')
+  const runtime = await read('host-plugins/luwi-dsh-sync/lib/luwi-peer-runtime.mjs')
+  const words = await read('host-plugins/luwi-dsh-sync/lib/command-words.mjs')
+  const configure = await read('host-plugins/luwi-dsh-sync/lib/luwi-configure.mjs')
+  const askTest = await read('host-plugins/luwi-dsh-sync/test/luwi-ask.test.mjs')
+
+  check('问答中继的四档与那一句自定义回答都在 (纯算术只住一份)', [
+    ask.includes("export const ASK_MODES = Object.freeze(['off', 'notify', 'relay', 'auto'])"),
+    ask.includes('export function resolveAskSpec'),
+    ask.includes('export function createAskRelay'),
+    ask.includes('export function parseAskReply'),
+    ask.includes('我替你定了'),
+    ask.includes('export const TERMINAL_BRIEF'),
+    host.includes('createAskRelay(askSpec'),
+  ], [true, true, true, true, true, true, true])
+
+  // 必须 prepend: dsh 自己的问答卡片也挂在这个 waterfall 上 (客户端 remote 监听), 晚一步就
+  // 只能眼看着 PC 的卡片弹出来而手机永远不知道有这一问
+  check('接管请求走 prepend, 只对"手机驱动的那一场"生效, 电脑本地照旧 next()', [
+    /ctx\.on\('user-questions\/request', \(request, next\) => handleUserQuestion\(request, next\), \{ prepend: true \}\)/u.test(host),
+    host.includes('if (!isPeerDriven(sessionId)) return next()'),
+    host.includes('const askRelayOn = askSpec.mode !== \'off\' && controller === false && peerSpec !== null'),
+  ], [true, true, true])
+
+  // 手机上那一行: 合成条目走 condense 的 extra (进 entries, 不进 all), seq 取 tool/call 的
+  check('问题那一行进快照但不算对话账, seq 取 tool/call 的真号', [
+    host.includes('extra: askExtraEntries(sessionId)'),
+    live.includes('const extra = Array.isArray(options.extra)'),
+    host.includes('noteAskCall(sessionId, data.callId, event.seq, event.time, questions)'),
+    ask.includes('seq: item.ask.seq + 0.5'),
+  ], [true, true, true, true])
+
+  // 问一句不改会话日志: 不抬 /peer/info 的 updatedAt, 手机那一侧永远不会重新取快照
+  check('/peer/info 的 revision 被问题抬起来 (否则手机不来取)', [
+    host.includes('const askedAt = askRelayOn ? askRelay.askedAt(id) : 0'),
+    host.includes('updatedAt: Math.max(Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : 0, askedAt)'),
+    host.includes('summariesCache.at = 0'),
+  ], [true, true, true])
+
+  // 回答那一侧: 在投递之前问 answerAsk —— 卡在工具里的那一轮读不到 steer 进来的话
+  check('手机回的答案先问 answerAsk, 命中就不投递 (顺序不能反)', [
+    runtime.includes('const answered = await deps.answerAsk(sessionId, text)'),
+    runtime.indexOf('deps.answerAsk') < runtime.indexOf('deps.makeUserMessage'),
+    host.includes('answerAsk: answerAskFromPeer'),
+  ], [true, true, true])
+
+  // 终端提示只追加一条上下文消息, 绝不改主人发的那句话 (回声去重只比人话)
+  check('终端提示走 pre-step 的独立上下文消息, 正文一个字都不动', [
+    host.includes("source: { kind: PLUGIN_NAME, form: 'snapshot', sections: [{ name: PLUGIN_NAME, text }] }"),
+    host.includes('briefTerminalStep(payload, next, briefText)'),
+    host.includes('ASK_BRIEF_AGAIN_MS'),
+    // 中继关着时换那一份 (别教它"回 1"); 两份都在纯算术那一层
+    host.includes('const briefText = askRelayOn ? TERMINAL_BRIEF : TERMINAL_BRIEF_LOCAL'),
+    ask.includes('export const TERMINAL_BRIEF_LOCAL'),
+  ], [true, true, true, true, true])
+
+  check('/sync ask 四个动作 (中文为主) + ask 段写面 + doctor 读数', [
+    host.includes("if (action === 'ask')"),
+    host.includes('/sync ask [状态]'),
+    words.includes("text === '提示'"),
+    words.includes("text === '中继'"),
+    configure.includes("ASK: 'ask',"),
+    configure.includes('ask.mode must be one of'),
+    host.includes('问答: ${askSpec.mode}'),
+  ], [true, true, true, true, true, true, true])
+
+  // 快照版本不动: 条目形状没变, 老手机插件照样折得动 (升版本会让老投影重做一场)
+  check('LIVE_SNAPSHOT_VERSION 仍是 3 (问答条目不改快照形状)', [
+    live.includes('export const LIVE_SNAPSHOT_VERSION = 3'),
+    host.includes('LIVE_SNAPSHOT_VERSION, LIVE_SNAPSHOT_VERSION_LEGACY'),
+  ], [true, true])
+
+  check('那一份行为断言真能跑 (luwi-ask 的用例都在)', [
+    (askTest.match(/^test\(/gmu) ?? []).length >= 20,
+    askTest.includes('createAskRelay'),
+    askTest.includes('parseAskReply'),
+    askTest.includes('normalizeAskAction'),
+  ], [true, true, true, true])
+}
+
 /* ── 结果 ─────────────────────────────────────────────────────────────── */
 
 console.log(`\n${checks - failures}/${checks} passed`)

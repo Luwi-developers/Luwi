@@ -371,3 +371,35 @@ test('readLiveSnapshot: media 是不可信输入, 认不出的整项丢掉', () 
   assert.deepEqual(readLiveSnapshot({ sessionId: 's', entries: [{ role: 'user', text: 'x' }] }).entries[0].media, [])
 })
 
+
+// ---------------------------------------------------------------------------
+// 6 · 合成条目 (2026-11-22 终端问答)
+//
+// 电脑上那句 `ask_user_question` 不是会话日志里的文本, 手机又只认 entries。所以中继把它
+// 作为 `extra` 塞进窗口: **进 entries, 不进 all** (对话账 conv/ 只记真人说的话), 而且在
+// 窗口裁剪之前并进来 —— 与别的条目同等对待, 裁掉就裁掉。
+// ---------------------------------------------------------------------------
+
+test('extra 条目进 entries 并按 seq 插回原位, 但不进 all', () => {
+  const extra = [{ seq: 3.5, role: 'assistant', text: '（电脑在等你回答）', at: 12.5, media: [] }]
+  const { entries, all } = condense(EVENTS, { running: false, extra })
+  const text = [entries.map(entry => entry.text).join('|'), all.map(entry => entry.text).join('|')]
+  assert.match(entries.map(entry => entry.text).join('|'), /（电脑在等你回答）/u)
+  assert.doesNotMatch(all.map(entry => entry.text).join('|'), /（电脑在等你回答）/u, '对话账不记合成条目')
+  // 排在本轮回答之后 (seq 更大), 不是插在最前面
+  const at = entries.findIndex(entry => entry.text === '（电脑在等你回答）')
+  assert.ok(at > 0, `合成条目不该排在最前: ${text[0]}`)
+})
+
+test('extra 跟别的条目一起被窗口裁 (没有特权); 空 entries 或坏条目直接忽略', () => {
+  const extra = [
+    { seq: 3.5, role: 'assistant', text: '旧的合成条目', at: 12.5, media: [] },
+    { seq: 99, role: 'assistant', text: '最新的合成条目', at: 99, media: [] },
+    { seq: 100, role: 'assistant', text: '', at: 100 },
+    null,
+  ]
+  const one = condense(EVENTS, { running: false, maxEntries: 1, extra })
+  assert.deepEqual(one.entries.map(entry => entry.text), ['最新的合成条目'])
+  assert.equal(one.truncated, true)
+  assert.deepEqual(condense(EVENTS, { running: false, extra: [] }).all.map(entry => entry.text), condense(EVENTS, { running: false }).all.map(entry => entry.text))
+})

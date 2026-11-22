@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-22
+
+### Added
+
+- **Terminal questions reach the phone, and the phone can answer them (2026-11-22, owner: "手机端没有反应，有办法解决吗？…问答也要传并默认使用自定义回答").**
+  The question card lives in dsh's own session UI and answers travel over a client remote event, so the
+  phone (a different host, showing a text-only projection) never saw it — and `ask_user_question` is a
+  `tool/call`, which `condense` counts but never folds. Worse, a question does not touch the session log,
+  so `/peer/info`'s `updatedAt` (the projection `revision`) never moved and the phone never refetched.
+  - **Four modes** in the new `ask` section (`lib/luwi-ask.mjs`, pure): `off` / `notify` / `relay`
+    (default) / `auto`. PC side only, and only while the peer channel is on.
+  - **Handoff is `prepend`**: the client answerer rides the same `user-questions/request` waterfall, so
+    the relay has to claim the request first. Only sessions the phone drives (a `source.via === 'peer'`
+    line, or a session opened for `target: {kind:'new'}`) are claimed; PC-local sessions still `next()`.
+  - **The question becomes a snapshot entry**: `condense(events, {extra})` merges it before windowing, so it
+    lands in `entries` but never in the conversation ledger `all`. Its `seq` is the real `tool/call` seq
+    (ordered and idempotent for free). `LIVE_SNAPSHOT_VERSION` stays 3 — old phone plugins still fold it.
+  - **The phone is asked to refetch**: `ownSessions()` raises that session's `updatedAt` to the question's
+    timestamp, so the next poll (5 s) pulls the transcript again.
+  - **Answering reuses `/luwi-sync/peer/send`**: `receive()` asks the new `deps.answerAsk(sessionId, text)`
+    **before delivering** — the turn is blocked inside the tool, so a steered message would only be read
+    after it returns. Parse rules: `1`/`1,2` (indices), an exact option label, or free text as `custom`;
+    several questions split on `;` or newlines. Unknown text falls through and is delivered as a message.
+  - **Timeout continues on its own**: `ask.waitMs` (default 120 s) then a `custom` answer telling the model
+    to decide and say "我替你定了：…" in its reply. `auto` mode never waits.
+  - **The line from the phone carries a standing brief**: a second `agent/pre-step` listener appends one
+    context message (`source.kind` = the plugin, never `user`, so it never becomes a projection entry) at
+    most every 30 minutes. **The user's text itself is never rewritten** — echo dedupe compares the human
+    part only (`pendingKeyOf`), so one changed character would draw the same line twice on the phone.
+  - `/sync ask [状态|关|提示|中继|自动]` (English aliases kept), `ask` written through `applyConfigure`,
+    and a doctor line (`问答: relay · 等 120s · 终端提示 开 · 此刻在等 0`).
+  - No new route, no new snapshot version, and **nothing changes on the phone**.
+
 ## [0.4.6] - 2026-11-22
 
 ### Added

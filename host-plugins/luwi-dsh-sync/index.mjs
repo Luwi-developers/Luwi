@@ -130,7 +130,7 @@ import { appendProxyEvents, proxyEventsFrom, proxyNoticeEvents, proxyTitleOf, pr
 // Luwi 加 (G1 收口): 只读自检的纯函数 —— peer 落点 / ② 层 extraneous / 汇总文本
 import { formatDoctor, runDoctor } from './lib/luwi-doctor.mjs'
 // Luwi 加 (2026-11-22 终端问答): 问题条目 / 回答解析 / ask 段规格 (纯算术, 单测直接吃)
-import { ASK_MODES, AUTO_NOTICE, TERMINAL_BRIEF, askAnsweredText, askEntryText, autoAnswers, parseAskReply, renderAskState, resolveAskSpec } from './lib/luwi-ask.mjs'
+import { TERMINAL_BRIEF, TERMINAL_BRIEF_LOCAL, autoAnswers, createAskRelay, renderAskState, resolveAskSpec } from './lib/luwi-ask.mjs'
 // 2026-11-22: adb reverse 那条管子的读数与修补 (手机回环口 -> 电脑这一趟的端口)
 import { parseReverseList, repairReverse } from './lib/lw-reverse.mjs'
 // Luwi 加 (P2P T2): sidecar 监管与它的配置段 —— 只定位/起停/读状态, 不实现同步协议
@@ -1999,24 +1999,20 @@ function applyInner(ctx, config = {}) {
   let summariesCache = { at: 0, value: [] }
 
   // --- Luwi 加 (2026-11-22 终端问答): 手机那一头看不见 dsh 的问答卡片, 于是问一句就双方都卡着。
-  // 这里记三样东西, 都是**内存态** (host 一重启就没了, 那一笔工具调用本来也一起死了):
-  //   · `askBoard`    —— 最近一件问题 (sessionId -> {ask, answeredAt, answer}); 快照里那两行就是它
-  //   · `askCalls`    —— 最近一次 `ask_user_question` 的 tool/call (callId 与它的 seq, 条目排序要)
+  // 账本身在 `lib/luwi-ask.mjs` 的 `createAskRelay` (纯内存, 好单测); 这里只留三样本机记账:
+  //   · `askCalls`    —— 最近一次 `ask_user_question` 的 tool/call (callId 对答案, seq 让条目有序)
   //   · `peerDriven`  —— 哪些会话是**手机在用的** (只对那些接管问答; 电脑本地那些一个字都不动)
-  /** 这一场最近那一件问答 (每场只留最新一件) */
-  const askBoard = new Map()
+  //   · `askBriefed`  —— 上一次给这一场附终端提示的时间 (节流)
   /** sessionId -> {callId, seq, at, questions} */
   const askCalls = new Map()
   /** sessionId -> 第一次发现它是手机驱动的时间 */
   const peerDriven = new Map()
   /** 上一次给这一场附终端提示的时间 (节流) */
   const askBriefed = new Map()
-  /** 计数 (doctor 与 /sync ask 读它) */
-  const askCounters = { answered: 0, expired: 0, auto: 0, cancelled: 0, lastSessionId: '', lastAt: 0 }
   /** 问答中继真正装上的那一档 (off / 不是电脑那一侧 / 通道没开 = 不装) */
   const askRelayOn = askSpec.mode !== 'off' && controller === false && peerSpec !== null
-  /** 同一条问题的回执条目留多久: 过了这条线, 手机屏上那两行就跟着投影窗口一起滑走 */
-  const ASK_BOARD_KEEP_MS = 120000
+  /** 那一摊状态: 板上那几件 / 计数 / 快照里那两行 / 手机回的答案 */
+  const askRelay = createAskRelay(askSpec, { log: line => logger.info(line) })
   /** 终端提示的节流 (同一场多久才再附一次) */
   const ASK_BRIEF_AGAIN_MS = 30 * 60 * 1000
   /** 那个会卡住的工具名 (上游 `@deepseek-ai/dsh-tool-ask-user` 的 legacy 与 timed 两个 schema 同名) */
@@ -2200,7 +2196,7 @@ function applyInner(ctx, config = {}) {
             const id = String(item.sessionId ?? '')
             // 2026-11-22 (终端问答): 问一句不改会话日志, 而对端的投影刷新判据就是这里的
             // updatedAt (账上叫 revision) —— 不抬这一格, 手机上永远不会重新取快照
-            const askedAt = askBoard.get(id)?.ask?.at ?? 0
+            const askedAt = askRelayOn ? askRelay.askedAt(id) : 0
             return {
               id,
               title: String(item.title ?? item.projections?.values?.title ?? ''),
@@ -2945,7 +2941,7 @@ function applyInner(ctx, config = {}) {
 
   /**
    * 记下最近一笔 `ask_user_question` 的 tool/call —— `callId` 用来对上手机的回答,
-   * `seq` 用来决定快照里那一行排在哪儿 (真实 seq 才幂等, 自造的号会被后一条真条目跳过)。
+   * `seq` 决定快照里那一行排在哪 (真实 seq 才幂等; 自造的号会被后一条真条目跳过)。
    * @param {string} sessionId - 会话 id。
    * @param {unknown} callId - 工具调用 id。
    * @param {unknown} seq - 事件 seq。
@@ -2967,7 +2963,7 @@ function applyInner(ctx, config = {}) {
    * 把登记的 tool/call 配给这次请求 (同一批问题、60 秒以内)。
    * @param {string} sessionId - 会话 id。
    * @param {Array<object>} questions - 这次请求里的问题。
-   * @returns {{callId: string, seq: number, at: number}|null} 配上的那一笔。
+   * @returns {{callId: string, seq: number}|null} 配上的那一笔。
    */
   function takeAskCall(sessionId, questions) {
     const id = String(sessionId ?? '')
@@ -2981,153 +2977,42 @@ function applyInner(ctx, config = {}) {
   }
 
   /**
-   * 快照里那两行 (问题 + 回执)。不算进对话账: 它不是会话日志里的东西。
+   * 快照里那两行 (问题 + 回执) —— 交给 `condense` 的 `extra`, 不进对话账。
    * @param {string} sessionId - 会话 id。
-   * @returns {Array<{seq: number, role: string, text: string, at: number, media: Array<object>}>} 合成条目。
+   * @returns {Array<object>} 合成条目。
    */
   function askExtraEntries(sessionId) {
-    const id = String(sessionId ?? '')
-    const board = askBoard.get(id)
-    if (board === undefined) return []
-    const now = Date.now()
-    const since = board.answeredAt > 0 ? board.answeredAt : board.ask.at
-    if (board.ask.state !== 'open' && now - since > ASK_BOARD_KEEP_MS) {
-      askBoard.delete(id)
-      return []
-    }
-    const entries = [{
-      seq: board.ask.seq,
-      role: 'assistant',
-      text: askEntryText(board.ask, now),
-      at: board.ask.at,
-      media: [],
-    }]
-    if (board.answer !== null && board.answeredAt > 0) {
-      entries.push({
-        seq: board.ask.seq + 0.5,
-        role: 'assistant',
-        text: askAnsweredText(board.ask, board.answer),
-        at: board.answeredAt,
-        media: [],
-      })
-    }
-    return entries
-  }
-
-  /**
-   * 把一件问题挂到板上并让手机来取 (`/peer/info` 的 updatedAt 一起抬起来)。
-   * @param {object} ask - 那一件。
-   */
-  function publishAsk(ask) {
-    askBoard.set(ask.sessionId, { ask, answeredAt: 0, answer: null })
-    // 会话摘要 1 s 缓存: 不清掉的话, 头一拍报出去的还是老 updatedAt
-    summariesCache.at = 0
-  }
-
-  /**
-   * 开等: 定时器 (超时按自定义回答继续) + abort (上游取消)。
-   * @param {object} ask - 那一件。
-   * @returns {Promise<{answers: Array<object>}>} 手机/超时给出的答案。
-   */
-  function openAsk(ask) {
-    const promise = new Promise((resolve, reject) => {
-      ask.resolve = resolve
-      ask.reject = reject
-    })
-    // 同一场又来一件: 旧的按 cancelled 收掉 (阻塞工具一次只有一件, 走到这里说明上一件没收干净)
-    const previous = askBoard.get(ask.sessionId)
-    if (previous !== undefined && previous.ask !== ask && previous.ask.state === 'open') settleAsk(previous.ask, 'cancelled', null)
-    ask.timer = setTimeout(() => {
-      settleAsk(ask, 'expired', autoAnswers(ask.questions))
-    }, askSpec.waitMs)
-    if (typeof ask.timer.unref === 'function') ask.timer.unref()
-    if (ask.signal !== null && typeof ask.signal.addEventListener === 'function') {
-      ask.onAbort = () => { settleAsk(ask, 'cancelled', null) }
-      ask.signal.addEventListener('abort', ask.onAbort, { once: true })
-    }
-    return promise
-  }
-
-  /**
-   * 结算一件问题 (answered / expired / auto / cancelled), 定时器与 abort 一起摘掉。
-   * @param {object} ask - 那一件。
-   * @param {string} state - 终态。
-   * @param {{answers: Array<object>}|null} answer - 答案 (cancelled 给 null)。
-   * @returns {boolean} 真的结算了才 true (已经收过的那一件回 false)。
-   */
-  function settleAsk(ask, state, answer) {
-    if (ask === null || ask === undefined || ask.state !== 'open') return false
-    ask.state = state
-    if (ask.timer !== null) {
-      clearTimeout(ask.timer)
-      ask.timer = null
-    }
-    if (ask.onAbort !== null && ask.signal !== null && typeof ask.signal.removeEventListener === 'function') {
-      ask.signal.removeEventListener('abort', ask.onAbort)
-    }
-    ask.onAbort = null
-    const board = askBoard.get(ask.sessionId)
-    if (board !== undefined && board.ask === ask) {
-      board.answeredAt = state === 'cancelled' ? 0 : Date.now()
-      board.answer = state === 'cancelled' ? null : answer
-      if (state === 'cancelled') askBoard.delete(ask.sessionId)
-    }
-    summariesCache.at = 0
-    askCounters.lastSessionId = ask.sessionId
-    askCounters.lastAt = Date.now()
-    if (state === 'answered') askCounters.answered += 1
-    else if (state === 'expired') askCounters.expired += 1
-    else if (state === 'auto') askCounters.auto += 1
-    else askCounters.cancelled += 1
-    if (state === 'cancelled') {
-      if (typeof ask.reject === 'function') {
-        const error = new Error('ask_user_question was aborted before the user answered')
-        error.name = 'UserQuestionError'
-        error.code = 'ASK_ABORTED'
-        ask.reject(error)
-      }
-      return true
-    }
-    logger.info(`peer: ask ${ask.sessionId} settled as ${state}`)
-    if (typeof ask.resolve === 'function') ask.resolve(answer)
-    return true
+    if (!askRelayOn) return []
+    return askRelay.extraEntries(sessionId)
   }
 
   /**
    * 手机回的那一句话是不是在答这一场的问题 (由 `receive()` 在投递**之前**问一次)。
    *
    * 这一笔不能进 agent inbox: 那一轮正卡在工具里, steer 进去要等工具返回才被读 —— 而工具
-   * 等的就是这句答案, 于是双方互等到超时 (这正是手机端"没反应"的成因之一)。
+   * 等的就是这句答案, 于是双方互等到超时 (这正是手机端"有没有反应"的分水岭)。
    * @param {string} sessionId - 目标会话。
    * @param {string} text - 对端发来的正文。
-   * @returns {Promise<{answered: string}|{ok: false, note: string}|null>} 命中就是答案回执, 没命中 null。
+   * @returns {{answered: string}|{ok: false, note: string}|null} 命中就是回执, 没命中 null。
    */
   async function answerAskFromPeer(sessionId, text) {
     if (!askRelayOn) return null
-    const board = askBoard.get(String(sessionId ?? ''))
-    if (board === undefined || board.ask.state !== 'open') return null
-    const parsed = parseAskReply(board.ask.questions, text)
-    if (parsed.ok !== true) return { ok: false, note: `the line for ${sessionId} was not an answer (${parsed.reason}), delivering it as a message` }
-    const answer = { answers: parsed.answers }
-    if (!settleAsk(board.ask, 'answered', answer)) return null
-    const callId = board.ask.callId !== '' ? board.ask.callId : 'answered'
-    logger.info(`peer: the phone answered ${callId} on ${sessionId}`)
-    return { answered: callId }
+    return askRelay.answer(sessionId, text)
   }
 
   /**
    * 给"手机驱动的那一场"附一条终端上下文 (走 pre-step, 不是改主人那句话)。
    *
    * **不能改正文**: `pendingKeyOf` 只比人话, 正文动一个字, 手机就会把同一句画两遍。
-   * `source.kind` 也不是 `user`, 于是 `condense` 不会把它折成投影条目 —— 手机上不会多一行。
+   * `source.kind` 也不是 `user`, 于是 `condense` 不会把它折成投影条目 —— 手机上不多一行。
    * @param {object} payload - pre-step 载荷。
    * @param {() => Promise<object>} next - 下一层。
+   * @param {string} text - 附哪一句 (中继开 / 关两份, 见 `TERMINAL_BRIEF` / `TERMINAL_BRIEF_LOCAL`)。
    * @returns {Promise<object>} 决策。
    */
-  async function briefTerminalStep(payload, next) {
+  async function briefTerminalStep(payload, next, text) {
     const decision = await next()
-    if (decision === null || typeof decision !== 'object' || decision.kind === 'reject') return decision
-    if (decision.kind !== 'enter') return decision
+    if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
     if (askSpec.brief !== true) return decision
     if (payload?.signal?.aborted === true) return decision
     const sessionId = String(payload?.agent?.session?.id ?? '')
@@ -3140,8 +3025,8 @@ function applyInner(ctx, config = {}) {
       messages: [
         ...(Array.isArray(decision.messages) ? decision.messages : []),
         createUserMessage({
-          content: [{ type: 'text', text: TERMINAL_BRIEF }],
-          source: { kind: PLUGIN_NAME, form: 'snapshot', sections: [{ name: PLUGIN_NAME, text: TERMINAL_BRIEF }] },
+          content: [{ type: 'text', text }],
+          source: { kind: PLUGIN_NAME, form: 'snapshot', sections: [{ name: PLUGIN_NAME, text }] },
         }),
       ],
     }
@@ -3160,55 +3045,24 @@ function applyInner(ctx, config = {}) {
     if (!askRelayOn || sessionId === '' || questions.length === 0) return next()
     if (!isPeerDriven(sessionId)) return next()
     const call = takeAskCall(sessionId, questions)
-    const ask = {
-      sessionId,
+    const ask = askRelay.publish(sessionId, questions, {
       callId: call === null ? '' : call.callId,
       seq: call === null ? Math.max(0, Number(session?.seq ?? 0)) : call.seq,
-      at: Date.now(),
-      questions,
-      waitMs: askSpec.waitMs,
-      mode: askSpec.mode,
-      state: 'open',
-      timer: null,
-      onAbort: null,
-      signal: request?.signal ?? null,
-      resolve: null,
-      reject: null,
-    }
-    publishAsk(ask)
+    })
+    // 会话摘要 1 s 缓存: 不清掉的话, 头一拍报出去的还是老 updatedAt (手机就不会重新取快照)
+    summariesCache.at = 0
     // notify: 只让手机看得见, 由电脑那边答 (答完把那两行摘掉)
     if (askSpec.mode === 'notify') {
       try {
         return await next()
       } finally {
-        askBoard.delete(sessionId)
+        askRelay.drop(sessionId)
         summariesCache.at = 0
       }
     }
-    const settled = openAsk(ask)
-    if (askSpec.mode === 'auto') settleAsk(ask, 'auto', autoAnswers(questions))
+    const settled = askRelay.wait(ask, request?.signal ?? undefined)
+    if (askSpec.mode === 'auto') askRelay.settle(ask, 'auto', autoAnswers(questions))
     return await settled
-  }
-
-  /** 卸载/重挂时把挂在板上的那几件一起撤 (定时器不撤的话测试进程会被拖着不退出) */
-  function disposeAsks() {
-    for (const board of askBoard.values()) {
-      const ask = board.ask
-      if (ask === null || ask === undefined || ask.state !== 'open') continue
-      if (ask.timer !== null) clearTimeout(ask.timer)
-      ask.timer = null
-      ask.state = 'cancelled'
-      if (typeof ask.reject === 'function') {
-        const error = new Error('ask_user_question was aborted before the user answered')
-        error.name = 'UserQuestionError'
-        error.code = 'ASK_ABORTED'
-        ask.reject(error)
-      }
-    }
-    askBoard.clear()
-    askCalls.clear()
-    peerDriven.clear()
-    askBriefed.clear()
   }
 
   const peerRuntime = createPeerRuntime({
@@ -3410,15 +3264,19 @@ function applyInner(ctx, config = {}) {
     }, `${PLUGIN_NAME}.live-projections`)
   }
 
-  // --- Luwi 加 (2026-11-22 终端问答): 三条钩子, 只在"电脑这一侧 + 通道开着 + ask 没关"时挂上
+  // --- Luwi 加 (2026-11-22 终端问答): 三条钩子, 只在"电脑这一侧 + 通道开着"时挂上
   //
   //   ① `session/event`  —— 记下"这一场是手机驱动的"与最近一笔 `ask_user_question` 的 tool/call
   //      (callId 对答案, seq 决定快照里那一行排在哪)
   //   ② `user-questions/request` (prepend) —— 手机驱动的那一场由这里接管: 问题进快照, 答案等手机
   //      **必须 prepend**: dsh 自己的问答卡片也挂在这个 waterfall 上 (客户端 remote 监听),
   //      谁先谁拿到请求。晚一步就只能眼看着 PC 的卡片弹出来而手机永远不知道
-  //   ③ `agent/pre-step` —— 给手机驱动的那一场附一终端提示 (不改主人那句话)
-  if (askRelayOn) {
+  //   ③ `agent/pre-step` —— 给手机驱动的那一场附一终端提示 (不改主人那句话)。**与中继分开判**:
+  //      `ask.mode: off` 时手机照样看不见问答, 那句"自己定"的提示恰恰是最该在的时候
+  const askHooksOn = controller === false && peerSpec !== null && (askRelayOn || askSpec.brief === true)
+  if (askHooksOn) {
+    /** 提示正文按中继开没开分岔 (`off` / `notify` 时手机回不了, 别教它"回 1") */
+    const briefText = askRelayOn ? TERMINAL_BRIEF : TERMINAL_BRIEF_LOCAL
     ctx.effect(() => {
       const offSession = ctx.on('session/event', (session, event) => {
         const sessionId = String(session?.id ?? '')
@@ -3441,16 +3299,23 @@ function applyInner(ctx, config = {}) {
         }
         noteAskCall(sessionId, data.callId, event.seq, event.time, questions)
       })
-      const offAsk = ctx.on('user-questions/request', (request, next) => handleUserQuestion(request, next), { prepend: true })
-      const offBrief = ctx.on('agent/pre-step', (payload, next) => briefTerminalStep(payload, next))
+      const offAsk = askRelayOn
+        ? ctx.on('user-questions/request', (request, next) => handleUserQuestion(request, next), { prepend: true })
+        : undefined
+      const offBrief = askSpec.brief === true
+        ? ctx.on('agent/pre-step', (payload, next) => briefTerminalStep(payload, next, briefText))
+        : undefined
       return () => {
         if (typeof offSession === 'function') offSession()
         if (typeof offAsk === 'function') offAsk()
         if (typeof offBrief === 'function') offBrief()
-        disposeAsks()
+        askRelay.dispose()
+        askCalls.clear()
+        peerDriven.clear()
+        askBriefed.clear()
       }
     }, `${PLUGIN_NAME}.ask-relay`)
-    if (!liveSpec.enabled) {
+    if (askRelayOn && !liveSpec.enabled) {
       warn('luwi-dsh-sync: ask relay is on but live.enabled is false — the phone will not see the question')
     }
     logger.info(`ask: relay ${askSpec.mode} (wait ${Math.round(askSpec.waitMs / 1000)}s, terminal brief ${askSpec.brief ? 'on' : 'off'})`)
@@ -5385,11 +5250,11 @@ function applyInner(ctx, config = {}) {
     const action = (target === TARGETS.WORKSPACE ? parts[1] : parts[0])?.toLowerCase() || 'status'
     const picked = makeTargetResolver({ sessions: engineFacade, workspace: engineFacade })(target)
     try {
-      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p')) {
+      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p' && action !== 'ask')) {
         return {
           kind: 'success',
           text: [
-            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | doctor | help] · /sync ws <same actions>',
+            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | ask | doctor | help] · /sync ws <same actions>',
             '  status  show mirror state (default): branch, remote, ahead/behind, dirty, forks',
             '  pull    fetch + merge remote changes (keep-both; confirms first)',
             '  push    mirror + commit + push local changes (confirms first)',
@@ -5398,6 +5263,7 @@ function applyInner(ctx, config = {}) {
             '  peers   device cards seen in the mirror (names, URLs, device ids)',
             '  peer    the cross-device channel: /sync peer [state] · /sync peer live · /sync peer send <text> [session <id> | workspace <name>]',
             '  p2p     P2P 传输: /sync p2p [状态] · /sync p2p 开|关 · /sync p2p 确认 <设备 id> · /sync p2p 吊销 <设备 id>（英文 state|on|off|confirm|revoke 也认）',
+            '  ask     终端问答: /sync ask [状态] · /sync ask 关|提示|中继|自动 — 电脑上的问答要不要传到手机、超时按自定义回答继续（英文 off|notify|relay|auto 也认）',
             '  doctor  self-check: where each dsh peer resolves from, profile extraneous packages, git spawn',
             '  ws …    the same actions against the workspace mirror (its own repository, exclude list',
             '          and file size cap; a pull updates or trashes the local files the merge changed)',
@@ -5506,6 +5372,42 @@ function applyInner(ctx, config = {}) {
           }
         }
         return { kind: 'error', text: `sync: 不认识 p2p 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 开 | 关 | 确认 <设备 id> | 吊销 <设备 id>; 英文 state|on|off|confirm|revoke 也认）` }
+      }
+      // Luwi 加 (2026-11-22 终端问答): `/sync ask [状态|关|提示|中继|自动]`
+      //   关   = 与今天一样 (电脑上弹卡, 手机看不见)
+      //   提示 = 传过去看得见, 但要回电脑上答
+      //   中继 = 缺省: 传过去 + 手机上能答 + 超时按自定义回答继续
+      //   自动 = 不问, 直接按自定义回答继续
+      // 写面与面板/JSON 同一个文件 (`applyConfigure` 的 ask 段), 写完重启 host 生效
+      if (action === 'ask') {
+        if (controller) {
+          return { kind: 'error', text: 'sync: 问答中继只在电脑那一侧成立（手机这一侧没有要接管的问答卡片）' }
+        }
+        const rest = target === TARGETS.WORKSPACE ? parts.slice(2) : parts.slice(1)
+        const what = normalizeAskAction(rest[0])
+        if (what === 'state') {
+          return {
+            kind: 'success',
+            text: renderAskState(askSpec, {
+              pending: askRelayOn ? askRelay.openCount() : 0,
+              answered: askRelay.counters.answered + askRelay.counters.auto,
+              expired: askRelay.counters.expired,
+              lastSessionId: askRelay.last.sessionId,
+            }),
+          }
+        }
+        if (what === 'off' || what === 'notify' || what === 'relay' || what === 'auto') {
+          const result = await applyConfigure(syncConfigFile, { ask: { mode: what } })
+          if (result === null || result.ok !== true) {
+            return { kind: 'error', text: `sync: ask.mode 没写进去: ${result?.error ?? '配置没有被写下去'}` }
+          }
+          logger.info(`sync: /sync ask ${what} wrote ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}`)
+          return {
+            kind: 'success',
+            text: `sync: 问答已切成 ${what}（写进去的是 ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}）; 重启 host 之后生效`,
+          }
+        }
+        return { kind: 'error', text: `sync: 不认识 ask 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 关 | 提示 | 中继 | 自动; 英文 state|off|notify|relay|auto 也认）` }
       }
       if (action === 'status') {
         const status = await active.status()
@@ -5651,6 +5553,13 @@ function applyInner(ctx, config = {}) {
     const routeLine = `路由: 面板 ${routeState.panel} 条 · 对端 ${routeState.peer} 条${routeState.error === '' ? '' : ` · ${routeState.error}`}`
     report.notes.push(routeLine)
     if (routeState.panel === 0 || routeState.error !== '') report.warnings.push(routeLine)
+    // 2026-11-22 (终端问答): 中继装没装上、此刻在等几件
+    if (!controller) {
+      const waiting = askRelayOn ? askRelay.openCount() : 0
+      report.notes.push(`问答: ${askSpec.mode} · 等 ${Math.round(askSpec.waitMs / 1000)}s · 终端提示 ${askSpec.brief ? '开' : '关'} · 此刻在等 ${waiting}`)
+      if (askSpec.mode !== 'off' && !askRelayOn) report.warnings.push('问答中继没装上: 对端通道关着 (peer.enabled / peer.token)')
+      if (askRelayOn && !liveSpec.enabled) report.warnings.push('问答中继开着但 live.enabled 是关的: 手机上不会出现那一行问题')
+    }
     return report
   }
 

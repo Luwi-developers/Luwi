@@ -24,3 +24,22 @@ export function normalizeP2pAction(raw) {
   if (text === 'revoke' || text === '吊销' || text === '撤销') return 'revoke'
   return text
 }
+
+/** `ask` 认得的动作 (内部名): 状态 / 关 / 提示 (= 传过去但只在电脑上答) / 中继 / 自动 */
+export const ASK_ACTIONS = Object.freeze(['state', 'off', 'notify', 'relay', 'auto'])
+
+/**
+ * `/sync ask` 的动作词归一化。中文是正写, 英文留别名 (与 `/sync p2p` 同一口径)。
+ *
+ * @param {unknown} raw - 命令里那一格 (中文 / 英文都行; 空 = 状态)。
+ * @returns {string} `state` | `off` | `notify` | `relay` | `auto` | 原样的小写串 (认不出时)。
+ */
+export function normalizeAskAction(raw) {
+  const text = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (text === '' || text === 'state' || text === 'status' || text === '状态' || text === '读数') return 'state'
+  if (text === 'off' || text === '关' || text === '关闭') return 'off'
+  if (text === 'notify' || text === '提示' || text === '通知') return 'notify'
+  if (text === 'relay' || text === '中继' || text === '转发') return 'relay'
+  if (text === 'auto' || text === '自动' || text === '自定义') return 'auto'
+  return text
+}
