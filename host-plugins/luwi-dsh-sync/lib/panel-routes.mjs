@@ -22,6 +22,7 @@ import { join } from 'node:path'
 
 import { sanitizeRemote } from './sanitize.mjs'
 import { messageOf } from './errors.mjs'
+import { guardLocalWrite } from './panel-guard.mjs'
 
 /** 路由前缀 (webserver 的 path 不带尾斜杠)。 */
 export const PANEL_PREFIX = '/luwi-sync'
@@ -65,6 +66,9 @@ export const PANEL_OPS = Object.freeze({
   // Luwi 加 (2026-11-05): 终端面板 —— 在手机的沙盒里跑一条命令 (不是同步语义, 借这张面用同一套纪律)
   TERM: 'term',
 })
+
+/** 面板上不设门槛的只读动作 (`/luwi-sync/op` 里剩下的都要本机或对端令牌)。 */
+export const READ_ONLY_OPS = Object.freeze([PANEL_OPS.STATUS, PANEL_OPS.PEERS, PANEL_OPS.DOCTOR])
 
 /** 会改远端/本地工作树/配置的那几个: 要 confirm, 要单飞。 */
 export const WRITE_OPS = Object.freeze([PANEL_OPS.PULL, PANEL_OPS.PUSH, PANEL_OPS.CONFIGURE, PANEL_OPS.PRUNE, PANEL_OPS.P2P_CONFIRM, PANEL_OPS.P2P_REVOKE])
@@ -691,6 +695,16 @@ export function createPanel(deps) {
           sendJson(res, 400, { ok: false, error: messageOf(thrown) })
           return
         }
+        // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 会改东西/吐口令的动作一律要在本机 (或带对端令牌).
+        // 只读的 status / peers / doctor 不设门槛 —— 面板在局域网的浏览器里打开时也要能读.
+        const requested = typeof body?.op === 'string' ? body.op : ''
+        if (!READ_ONLY_OPS.includes(requested)) {
+          const gate = guardLocalWrite(req, { spec: typeof deps.peerSpec === 'function' ? deps.peerSpec() : null, what: `面板动作 ${requested || '(空)'}` })
+          if (gate !== null) {
+            sendJson(res, gate.status, gate.body)
+            return
+          }
+        }
         try {
           const { status, body: answer } = await runOp(body)
           sendJson(res, status, answer)
@@ -703,6 +717,12 @@ export function createPanel(deps) {
       kind: 'exact',
       path: `${PANEL_PREFIX}/term`,
       handler: async (req, res) => {
+        // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 这条能在本机跑命令, 只能在电脑本机用.
+        const termGate = guardLocalWrite(req, { spec: typeof deps.peerSpec === 'function' ? deps.peerSpec() : null, what: '终端面板' })
+        if (termGate !== null) {
+          sendJson(res, termGate.status, termGate.body)
+          return
+        }
         if (req.method !== 'POST') {
           sendJson(res, 405, { ok: false, error: `${PANEL_PREFIX}/term is POST-only` })
           return

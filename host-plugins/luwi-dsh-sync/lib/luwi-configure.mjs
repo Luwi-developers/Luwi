@@ -12,7 +12,8 @@
 //
 // 这一层只吃一个文件路径, 不碰 DSH 的任何东西, 所以能在临时目录上单测。
 
-import { readFile, writeFile, rename } from 'node:fs/promises'
+import { readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { WORKSPACE_LIMITS } from './constants.mjs'
 
@@ -93,18 +94,42 @@ export function branchProblem(value) {
  * @returns {Promise<object>} 解析出来的树。
  */
 export async function readSyncTree(file) {
+  const loaded = await readSyncTreeStrict(file)
+  return loaded.tree
+}
+
+/**
+ * 读那份文件, 并且**分得清「没有」和「坏了」**。
+ *
+ * Luwi 修 (2026-11-23, 审计 P0 第 3 条): 原来的 `readSyncTree` 把「读不动 / JSON 坏掉」
+ * 一律当成空树 `{}`, 而 `applyConfigure` 是「读整棵树 → 打补丁 → 整棵树写回」——
+ * 于是文件里半截 JSON 的那一刻, 一次保存就把 remote / remoteToken / branch / pairing /
+ * auto* 全抹掉, 还回 `ok: true`。修法是分开报: 调用方拿到 `broken` 就**不许写**。
+ *
+ * @param {string} file - 文件路径。
+ * @returns {Promise<{tree: object, state: 'ok'|'missing'|'broken'|'unreadable', error?: string}>} 状态与树。
+ *   `missing` 的 tree 是空树 (全新机器, 可以往上写); `broken`/`unreadable` 的 tree 只是占位, 用了会丢数据。
+ */
+export async function readSyncTreeStrict(file) {
   let text
   try {
     text = await readFile(file, 'utf8')
-  } catch {
-    return {}
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { tree: {}, state: 'missing' }
+    return { tree: {}, state: 'unreadable', error: `${file} could not be read: ${error?.message ?? error}` }
   }
+  // 空文件当「还没写过」: 手机侧 writeText("") 之后的情形
+  if (text.trim() === '') return { tree: {}, state: 'missing' }
+  let parsed
   try {
-    const parsed = JSON.parse(text)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
+    parsed = JSON.parse(text)
+  } catch (error) {
+    return { tree: {}, state: 'broken', error: `${file} is not valid JSON: ${error?.message ?? error}` }
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { tree: {}, state: 'broken', error: `${file} does not hold a JSON object` }
+  }
+  return { tree: parsed, state: 'ok' }
 }
 
 /**
@@ -114,9 +139,32 @@ export async function readSyncTree(file) {
  * @returns {Promise<void>} 写完就回。
  */
 export async function writeSyncTree(file, tree) {
-  const temporary = `${file}.tmp`
-  await writeFile(temporary, `${JSON.stringify(tree, null, 2)}\n`, 'utf8')
-  await rename(temporary, file)
+  // Luwi 修 (2026-11-23): 固定临时名在「面板与手机同时写」时会互相踩 —— 两边都写
+  // `<file>.tmp` 再 rename, 一个 rename 走另一个就 ENOENT。随机名 + 失败清残留。
+  const temporary = `${file}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(tree, null, 2)}\n`, 'utf8')
+    await rename(temporary, file)
+  } catch (error) {
+    try { await rm(temporary, { force: true }) } catch { /* 清不掉就算了, 别盖住原始错误 */ }
+    throw error
+  }
+}
+
+/**
+ * 把坏掉的那份配置挪到一边, 留给用户/排查用 (不删, 不覆盖)。
+ * @param {string} file - 原路径。
+ * @returns {Promise<string>} 挪到哪儿了 (挪不动就回空串)。
+ */
+export async function parkBrokenSyncFile(file) {
+  const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
+  const aside = `${file}.bak-broken-${stamp}`
+  try {
+    await rename(file, aside)
+    return aside
+  } catch {
+    return ''
+  }
 }
 
 /** 取一个布尔键 (非布尔当没有). */
@@ -179,8 +227,21 @@ function applyOn(tree, on) {
  * @returns {Promise<{ok: boolean, changed: string[], error?: string}>} 结果; 一处被拒就停在那一条上。
  */
 export async function applyConfigure(file, patch) {
-  const tree = await readSyncTree(file)
+  // Luwi 修 (2026-11-23, 审计 P0 第 3 条): 读坏一次不许整棵覆盖 —— 原样留着, 把坏文件挪到一边再报错.
+  const loaded = await readSyncTreeStrict(file)
   const changed = []
+  if (loaded.state === 'broken') {
+    const aside = await parkBrokenSyncFile(file)
+    return {
+      ok: false,
+      changed,
+      error: aside === ''
+        ? `${loaded.error}. 没有写任何东西 (那份坏文件原地没动, 请手工检查后再保存)`
+        : `${loaded.error}. 没有覆盖它: 已把那份坏文件挪到 ${aside}, 请检查后再保存一次`,
+    }
+  }
+  if (loaded.state === 'unreadable') return { ok: false, changed, error: loaded.error }
+  const tree = loaded.tree
 
   if (Object.prototype.hasOwnProperty.call(patch, 'remote')) {
     const raw = typeof patch.remote === 'string' ? patch.remote.trim() : String(patch.remote ?? '')

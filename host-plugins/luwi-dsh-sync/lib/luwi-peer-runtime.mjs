@@ -36,6 +36,7 @@ import {
 import { liveDirectory, liveFileName, readLiveSnapshot, LIVE_SNAPSHOT_VERSION } from './luwi-live.mjs'
 import { TRANSCRIPT_DIR, readTranscriptEntries, transcriptDir } from './luwi-transcript.mjs'
 import { maskSecret, peerHeaders, peerUrlState, sameSecret } from './luwi-peer.mjs'
+import { guardLocalWrite } from './panel-guard.mjs'
 import { readJsonBody, sendJson } from './panel-routes.mjs'
 
 /** 对端在线判据: 最近一次成功调用在这么久之内 (超过就报 unreachable, 但错误面照旧保留) */
@@ -800,6 +801,9 @@ export function createPeerRuntime(deps) {
         path: '/luwi-sync/peer-live',
         handler: async (req, res) => {
           // 本机界面读对端进行中的回答: 同源那一路, 令牌留在宿主里
+          // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 「同源」得真的查 —— 原来谁都能读对端的实时回答
+          const liveGate = guardLocalWrite(req, { spec, what: '读对端实时回答' })
+          if (liveGate !== null) return sendJson(res, liveGate.status, liveGate.body)
           if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: '/luwi-sync/peer-live is GET-only' })
           try {
             sendJson(res, 200, await peerLive())
@@ -813,6 +817,9 @@ export function createPeerRuntime(deps) {
         path: '/luwi-sync/send',
         handler: async (req, res) => {
           // 本机面板发起的发送: 同源 (浏览器) 那一侧, 令牌不出宿主
+          // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 这是"以本机身份给对端发消息", 只能本机发起
+          const sendGate = guardLocalWrite(req, { spec, what: '面板发送' })
+          if (sendGate !== null) return sendJson(res, sendGate.status, sendGate.body)
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '/luwi-sync/send is POST-only' })
           let body
           try {

@@ -3,8 +3,8 @@
 // 钉的是四件事: 保留未知键 / 「关」= 地址挪进 lw 段 + 三档归零 / 「开」= 填回来 / 写前校验
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { applyConfigure, branchProblem, KEYS, readSyncTree, remoteProblem, syncConfigPath } from '../lib/luwi-configure.mjs'
@@ -154,18 +154,39 @@ test('a bad address or a bad interval is refused before anything is written', as
   }
 })
 
-test('a missing file and a corrupt file both count as an empty tree', async () => {
+test('a corrupt config is parked, never overwritten (审计 P0 第 3 条)', async () => {
   const home = mkdtempSync(join(tmpdir(), 'luwi-configure-'))
   try {
+    // 读这一层仍然宽松: 面板要能在空白上起步
     assert.deepEqual(await readSyncTree(join(home, 'lw', 'session-sync.json')), {})
     const file = syncConfigPath(home)
     mkdirSync(join(home, 'lw'), { recursive: true })
     writeFileSync(file, '{ this is not json')
     assert.deepEqual(await readSyncTree(file), {})
-    // 坏文件也照写: 面板要能在一片废墟上把地址填进去
+    // 但写这一层必须 fail-closed: 半截 JSON 那一刻整棵树写回, 会把 remote/token/pairing 全抹掉
     const result = await applyConfigure(file, { remote: 'https://github.com/you/repo.git' })
-    assert.equal(result.ok, true)
-    assert.equal(JSON.parse(readFileSync(file, 'utf8'))[KEYS.REMOTE], 'https://github.com/you/repo.git')
+    assert.equal(result.ok, false)
+    assert.match(String(result.error), /not valid JSON|挪到/u)
+    assert.equal(existsSync(file), false, '坏文件应该被挪走, 不是原地覆盖')
+    const parked = readdirSync(dirname(file)).filter(name => name.startsWith('session-sync.json.bak-broken-'))
+    assert.equal(parked.length, 1)
+    assert.equal(readFileSync(join(dirname(file), parked[0]), 'utf8'), '{ this is not json', '坏内容要原样留着')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a config that is valid JSON but not an object is also left alone', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'luwi-configure-'))
+  try {
+    const file = syncConfigPath(home)
+    mkdirSync(join(home, 'lw'), { recursive: true })
+    writeFileSync(file, '["not", "an", "object"]')
+    const result = await applyConfigure(file, { branch: 'main' })
+    assert.equal(result.ok, false)
+    const parked = readdirSync(dirname(file)).filter(name => name.startsWith('session-sync.json.bak-broken-'))
+    assert.equal(parked.length, 1)
+    assert.equal(readFileSync(join(dirname(file), parked[0]), 'utf8'), '["not", "an", "object"]')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

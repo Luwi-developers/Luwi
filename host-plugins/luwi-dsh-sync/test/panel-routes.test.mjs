@@ -95,6 +95,11 @@ function makePanel(opts = {}) {
     termInterrupt: opts.termInterrupt,
     // Luwi 修 (2026-11-23): 配置面与卡片 remote 的即时读数口
     readConfig: opts.readConfig,
+    // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 写口径的门槛看对端通道的 spec
+    peerSpec: opts.peerSpec,
+    // 写配置 / 出配对码这两个口 (面板路由层要能测到)
+    configure: opts.configure,
+    buildPairing: opts.buildPairing,
     info: {
       plugin: 'luwi-dsh-sync',
       version: '0.2.24',
@@ -125,6 +130,9 @@ function makePanel(opts = {}) {
 function fakeRequest(text, extra = {}) {
   return {
     method: 'POST',
+    // 默认按"来自本机"造 —— 真跑起来时浏览器面板就是回环地址;
+    // 想演远端的, 传 extra.socket.remoteAddress 覆盖
+    socket: { remoteAddress: '127.0.0.1' },
     async *[Symbol.asyncIterator]() {
       if (text !== null) yield Buffer.from(text, 'utf8')
     },
@@ -456,6 +464,57 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   await panelRoute.handler(fakeRequest(null, { method: 'GET' }), snap)
   assert.equal(snap.statusCode, 200)
   assert.equal(JSON.parse(snap.body).handshake, PANEL_HANDSHAKE)
+})
+
+test('routes: 写操作与终端只在电脑本机可用 (审计 P0 第 1 条)', async () => {
+  const { panel } = makePanel({
+    runTerm: async () => ({ ok: true, text: 'ran\n' }),
+    configure: async () => ({ ok: true, changed: ['remote = x'] }),
+    buildPairing: async () => ({ ok: true, text: 'luwi-sync://pair?d=xxx', svg: '<svg/>' }),
+  })
+  const routes = panel.routes()
+  const op = routes[3]
+  const term = routes[4]
+  const lan = { socket: { remoteAddress: '192.168.31.145' } }
+
+  // 别的设备: 改配置 / 出配对码 / 跑命令 全部拒
+  for (const body of ['{"op":"configure","confirm":true,"remote":"https://attacker/x.git"}', '{"op":"pair"}']) {
+    const res = fakeResponse()
+    await op.handler(fakeRequest(body, lan), res)
+    assert.equal(res.statusCode, 403, body)
+    assert.equal(JSON.parse(res.body).ok, false)
+    assert.match(JSON.parse(res.body).error, /本机/u)
+  }
+  const termLan = fakeResponse()
+  await term.handler(fakeRequest('{"command":"whoami"}', lan), termLan)
+  assert.equal(termLan.statusCode, 403)
+
+  // 只读的那几条不设门槛: 局域网浏览器打开面板也要能读
+  for (const body of ['{"op":"status"}', '{"op":"peers"}', '{"op":"doctor"}']) {
+    const res = fakeResponse()
+    await op.handler(fakeRequest(body, lan), res)
+    assert.notEqual(res.statusCode, 403, body)
+  }
+
+  // 本机照旧
+  const local = fakeResponse()
+  await op.handler(fakeRequest('{"op":"configure","confirm":true,"remote":"https://github.com/a/b.git"}'), local)
+  assert.equal(local.statusCode, 200)
+
+  // 别的设备带对端共享令牌也放行 —— 手机端走这条
+  const withToken = makePanel({
+    peerSpec: () => ({ token: 'shared-secret', listen: true }),
+    configure: async () => ({ ok: true, changed: [] }),
+  })
+  const res2 = fakeResponse()
+  await withToken.panel.routes()[3].handler(
+    fakeRequest('{"op":"configure","confirm":true,"remote":"https://github.com/a/b.git"}', {
+      socket: { remoteAddress: '192.168.31.145' },
+      headers: { authorization: 'Bearer shared-secret' },
+    }),
+    res2,
+  )
+  assert.equal(res2.statusCode, 200)
 })
 
 test('routes: /term 的 status / run / interrupt 三档 (2.8.0 #32)', async () => {

@@ -4537,6 +4537,9 @@ function applyInner(ctx, config = {}) {
     // Luwi 修 (2026-11-23): 配置面每次快照重读文件 (审计 P1 第 9/11 条); 面板先等它刷新，
     // 卡片上的 remote 与 info.config 用的都是这一次读到的树
     readConfig: readConfigForPanel,
+    // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 面板那几条会改东西的路由要有门槛 ——
+    // 本机 (回环) 放行, 别的设备要带对端共享令牌 (手机端走这条)
+    peerSpec: () => peerRuntime.spec,
     buildPairing,
     // Luwi 加 (2026-10-23): 账号登录 (只给 P2P 收费闸供到期) 与权益刷新/退出
     readLicense: () => readLicenseStatus(),

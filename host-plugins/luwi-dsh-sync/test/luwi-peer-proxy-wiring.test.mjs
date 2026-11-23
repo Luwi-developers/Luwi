@@ -134,6 +134,8 @@ function makeReq({ method = 'GET', url = '/', body } = {}) {
   return {
     method,
     url,
+    // luwi fix (2026-11-23, audit P0 #1): panel-local routes need a loopback peer
+    socket: { remoteAddress: '127.0.0.1' },
     headers: {},
     async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk },
   }
