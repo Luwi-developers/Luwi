@@ -301,7 +301,8 @@ export function createPanel(deps) {
     } catch (thrown) {
       error = error ?? messageOf(thrown)
     }
-    const remote = describeRemote(mirror.remote)
+    // Luwi 修 (2026-11-23): 远端读数取即时值 (mirror.readRemote 由宿主侧给), 没有就退回挂载值
+    const remote = describeRemote(typeof mirror.readRemote === 'function' ? mirror.readRemote() : mirror.remote)
     const ts = now()
     return {
       target: mirror.target,
@@ -333,6 +334,17 @@ export function createPanel(deps) {
   async function snapshot(opts = {}) {
     const withStatus = opts.withStatus !== false
     const ts = now()
+    // Luwi 修 (2026-11-23): 配置面**先**读一次文件里的即时值 (审计 P1 第 9 条: 从前这里拿的是
+    // 挂载那一刻的快照, 于是保存之后面板仍显示"未配置 / 令牌还没存")。顺序也重要 ——
+    // 卡片上的 remote 读的是同一份读数, 所以这一趟要先刷。
+    let config = deps.info.config
+    if (typeof deps.readConfig === 'function') {
+      try {
+        config = await deps.readConfig()
+      } catch {
+        // 读不动就退回挂载快照, 不让整块面板报错
+      }
+    }
     const mirrors = []
     for (const mirror of deps.mirrors) mirrors.push(await cardOf(mirror, { withStatus }))
     let peers = null
@@ -392,7 +404,7 @@ export function createPanel(deps) {
         runner: deps.info.runner ?? '',
         disabledReason: deps.info.disabledReason ?? undefined,
       },
-      config: deps.info.config,
+      config,
       mirrors,
       peers,
       ...(peer === null ? {} : { peer }),

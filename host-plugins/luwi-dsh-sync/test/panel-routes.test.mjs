@@ -69,7 +69,7 @@ function makePanel(opts = {}) {
   const workspaceEngine = opts.workspaceEngine === undefined ? null : opts.workspaceEngine
   const deps = {
     mirrors: [
-      { target: 'sessions', label: '会话', engine, repoDir: opts.repoDir ?? '', remote: opts.remote ?? '', mirrorDir: 'sessions' },
+      { target: 'sessions', label: '会话', engine, repoDir: opts.repoDir ?? '', remote: opts.remote ?? '', mirrorDir: 'sessions', readRemote: opts.readRemote },
       { target: 'workspace', label: '工作区', engine: workspaceEngine, repoDir: '', remote: '', mirrorDir: 'workspace' },
     ],
     readMetaFor: () => async () => ({
@@ -93,6 +93,8 @@ function makePanel(opts = {}) {
     runTerm: opts.runTerm,
     termStatus: opts.termStatus,
     termInterrupt: opts.termInterrupt,
+    // Luwi 修 (2026-11-23): 配置面与卡片 remote 的即时读数口
+    readConfig: opts.readConfig,
     info: {
       plugin: 'luwi-dsh-sync',
       version: '0.2.24',
@@ -238,6 +240,45 @@ test('snapshot: 握手标记 / 两根镜像 / 元数据 / 名片 / 成本预告'
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('snapshot: 配置面每趟重读文件, 卡片 remote 也取即时值 (不在挂载快照上冻住)', async () => {
+  // 症状 (2026-11-23 真机): 面板里刚保存完仓库地址, 仓库那张卡仍写"未配置"、按钮还是灰的;
+  // 二维码里的设备名也是旧的。根因: 快照里的 config 与 mirrors[].remote 都来自挂载那一刻的
+  // resolved —— 保存写进文件, 但读数不重读。
+  let reads = 0
+  const { panel } = makePanel({
+    remote: '', // 挂载时还没配
+    readConfig: async () => {
+      reads += 1
+      return {
+        repoDir: '', branch: 'main', deviceName: 'PC', backend: 'git', confirmVia: 'auto',
+        autoPullOnStart: true, autoPushOnTurnEnd: true, pullIntervalMinutes: 0,
+        remoteState: 'set', hasRemoteToken: true, panelSeats: 'both', panelOps: true,
+        workspace: { enabled: false, root: '', device: '', name: '', mirrorDir: '', maxFiles: null, maxBytes: null },
+        sessions: { currentWindowMinutes: 0 },
+        pairing: { paired: true, id: 'id-from-file' },
+      }
+    },
+    readRemote: () => 'https://x-access-token:secret@github.com/o/r.git',
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(reads, 1, '每趟快照都要重读一次文件')
+  assert.equal(snap.config.remoteState, 'set', '保存之后不该还写未配置')
+  assert.equal(snap.config.hasRemoteToken, true)
+  assert.equal(snap.config.pairing.id, 'id-from-file')
+  assert.equal(snap.mirrors[0].remote.state, 'set', '卡片上的远端也要是即时值')
+  assert.ok(!JSON.stringify(snap).includes('secret'), '即时值同样不许把令牌带出去')
+})
+
+test('snapshot: 重读失败时退回挂载快照, 整块不报错', async () => {
+  const { panel } = makePanel({
+    remote: 'https://example.com/r.git',
+    readConfig: async () => { throw new Error('file unreadable') },
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(snap.ok, true)
+  assert.equal(snap.config.remoteState, describeRemote('https://example.com/r.git').state)
 })
 
 test('snapshot: withStatus:false 不跑 git', async () => {

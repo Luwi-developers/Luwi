@@ -441,7 +441,7 @@ export function makeRunGit(subprocess, opts) {
       }
       const stdout = raw ?? handle.collected.stdout.readFrom(0).text
       const stderr = handle.collected.stderr.readFrom(0).text
-      return { code: outcome.exitCode ?? (outcome.signal !== null ? 128 : 0), stdout, stderr }
+      return { code: outcome.exitCode ?? (outcome.signal == null ? 0 : 128), stdout, stderr }
     } finally {
       clearTimeout(timer)
       if (runOpts.signal !== undefined) {
@@ -495,7 +495,7 @@ export function makeRunAge(subprocess, opts) {
       }
       const stdout = handle.collected.stdout.readFrom(0).text
       const stderr = handle.collected.stderr.readFrom(0).text
-      return { code: outcome.exitCode ?? (outcome.signal !== null ? 128 : 0), stdout, stderr }
+      return { code: outcome.exitCode ?? (outcome.signal == null ? 0 : 128), stdout, stderr }
     } finally {
       clearTimeout(timer)
       if (runOpts.signal !== undefined) {
@@ -650,12 +650,17 @@ export function makeSyncStatusTool(resolveTarget, readMeta, readPeerCount) {
                 beforeBaseline: { type: 'integer' },
                 neverSynced: { type: 'integer' },
                 skipped: { type: 'integer' },
+                // Luwi 修 (2026-11-23): 引擎实发 {files, bytes, over}, 这里只声明了两个 ——
+                // 工具结果的校验当场判非法 (审计 P1 第 13 条, 手机上每次必炸)
                 budget: {
                   type: 'object',
                   additionalProperties: false,
                   properties: {
                     maxFiles: { type: 'integer' },
                     maxBytes: { type: 'integer' },
+                    files: { type: 'integer' },
+                    bytes: { type: 'integer' },
+                    over: { type: 'boolean' },
                   },
                 },
               },
@@ -732,6 +737,12 @@ export function makeSyncPullTool(deps) {
           diverged: { type: 'integer' },
           forks: { type: 'array', items: { type: 'string' } },
           head: { type: 'string' },
+          // Luwi 修 (2026-11-23): 下面这几个是返回值里真有、schema 里没声明的键 —— 走
+          // api.github.com 的那条路 (Android 恒走它) 每次都因此被判非法 (审计 P1 第 13 条)
+          via: { type: 'string' },
+          purged: { type: 'integer' },
+          skipped: { type: 'integer' },
+          failed: { type: 'array', items: { type: 'string' } },
           error: { type: 'string' },
           warnings: { type: 'array', items: { type: 'string' } },
         },
@@ -817,18 +828,25 @@ export function makeSyncPushTool(deps) {
                 beforeBaseline: { type: 'integer' },
                 neverSynced: { type: 'integer' },
                 skipped: { type: 'integer' },
+                // Luwi 修 (2026-11-23): 引擎实发 {files, bytes, over}, 这里只声明了两个 ——
+                // 工具结果的校验当场判非法 (审计 P1 第 13 条, 手机上每次必炸)
                 budget: {
                   type: 'object',
                   additionalProperties: false,
                   properties: {
                     maxFiles: { type: 'integer' },
                     maxBytes: { type: 'integer' },
+                    files: { type: 'integer' },
+                    bytes: { type: 'integer' },
+                    over: { type: 'boolean' },
                   },
                 },
               },
             },
           },
           remote: { type: 'string' },
+          // Luwi 修 (2026-11-23): API 那条路的返回值带 via:'api' (审计 P1 第 13 条)
+          via: { type: 'string' },
           error: { type: 'string' },
           warnings: { type: 'array', items: { type: 'string' } },
         },
@@ -4239,9 +4257,16 @@ function applyInner(ctx, config = {}) {
     const nextRemote = typeof patch.remote === 'string' ? patch.remote.trim() : currentRemote
     const hasPairing = current.pairing !== null && typeof current.pairing === 'object' && typeof current.pairing.id === 'string'
     // 令牌单独一格: 只给令牌 (地址没变) 时也该生成新的配对 id —— 二维码里的地址会因此变
-    const nextToken = typeof patch.remoteToken === 'string' ? patch.remoteToken.trim() : (typeof current.remoteToken === 'string' ? current.remoteToken : '')
-    if (nextRemote !== '' && (request.pairing === true || request.repair === true || nextRemote !== currentRemote || nextToken !== (typeof current.remoteToken === 'string' ? current.remoteToken : '') || !hasPairing)) {
-      patch.pairing = { v: 1, id: randomUUID(), at: Date.now(), from: resolved.deviceName }
+    const currentToken = typeof current.remoteToken === 'string' ? current.remoteToken.trim() : ''
+    const nextToken = typeof patch.remoteToken === 'string' ? patch.remoteToken.trim() : currentToken
+    // Luwi 修 (2026-11-23): 幂等。面板每次"保存"都带 pairing:true (client.js:1228 在地址框非空
+    // 时无条件带上它), 从前于是无条件换一个配对 id —— 地址一个字没改, 手机侧记的 id 就作废了,
+    // 扫码时弹「已和别的电脑配过对」(审计 P1 第 10 条)。
+    // 现在只有真的换了目的地 (地址/令牌变了)、还没有配对、或显式 repair 时才写新 id。
+    const destinationChanged = nextRemote !== '' && (nextRemote !== currentRemote || nextToken !== currentToken)
+    if (nextRemote !== '' && (request.repair === true || destinationChanged || !hasPairing)) {
+      const deviceName = typeof current.deviceName === 'string' && current.deviceName.trim() !== '' ? current.deviceName.trim() : resolved.deviceName
+      patch.pairing = { v: 1, id: randomUUID(), at: Date.now(), from: deviceName }
     }
     // 2026-10-20: 保存仓库 (pairing) 这一下就把 PC 这一侧也设成"该自动的自动" —— 与手机扫码
     // 写进去的那一组同值, 否则 PC 只会在手动点推送时才动
@@ -4250,8 +4275,16 @@ function applyInner(ctx, config = {}) {
       if (patch.autoPushOnTurnEnd === undefined) patch.autoPushOnTurnEnd = true
     }
     const result = await applyConfigure(syncConfigFile, patch)
-    if (result.ok === true) logger.info(`panel configure wrote ${result.changed.join(', ')} (restart the host to take effect)`)
-    else warn(`panel configure refused: ${result.error}`)
+    if (result.ok === true) {
+      logger.info(`panel configure wrote ${result.changed.join(', ')} (restart the host to take effect)`)
+      // Luwi 修 (2026-11-23): 写完立刻刷新面板那份即时读数 —— 否则用户下一次刷新面板之前
+      // 还会看到保存前的"未配置" (审计 P1 第 9 条)
+      try {
+        panelConfigTree = await readSyncTree(syncConfigFile)
+      } catch {
+        // 读不动就保留上一次的读数
+      }
+    } else warn(`panel configure refused: ${result.error}`)
     return result
   }
 
@@ -4287,7 +4320,8 @@ function applyInner(ctx, config = {}) {
       // 否则面板让人填了地址却怎么都不生效 (与 G1 收口时 remote 那一条是同一个坑)
       peerUrl: typeof tree.publicUrl === 'string' && tree.publicUrl.trim() !== '' ? tree.publicUrl.trim() : resolved.publicUrl,
       peerToken: peerSpec?.token ?? '',
-      from: resolved.deviceName,
+      // Luwi 修 (2026-11-23): from 取文件里的即时设备名 (审计 P1 第 11 条: 从前取的是挂载快照)
+      from: typeof tree.deviceName === 'string' && tree.deviceName.trim() !== '' ? tree.deviceName.trim() : resolved.deviceName,
       at: Date.now(),
     })
     const text = encodePairing(payload)
@@ -4369,7 +4403,87 @@ function applyInner(ctx, config = {}) {
     }
   }
 
-  /** 配对摘要 (快照里那一块; 不带载荷、不带口令) */  async function readPairing() {
+  // --- Luwi 修 (2026-11-23): 面板读数取文件里的**即时值**，不再用挂载那一刻的 resolved。
+  // 审计 P1 第 9 条: info.config 全是启动快照，保存后不重启就永远显示"未配置 / 令牌还没存"；
+  // 第 11 条: 二维码与对端卡里的 from 同样停在旧设备名。这里留一份"最近一次读到的配置树"，
+  // 由面板快照开头调用 [readConfigForPanel] 刷新 (每 5 秒一次，读的是本地几百字节的小文件)。
+  let panelConfigTree = null
+
+  /** 文件里那一项 (字符串) —— 空/缺省时退回挂载值。 */
+  function liveStringOf(key, fallback) {
+    const value = panelConfigTree !== null && typeof panelConfigTree === 'object' ? panelConfigTree[key] : undefined
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
+  }
+  /** 文件里那一项 (布尔) —— 缺省时退回挂载值。 */
+  function liveBoolOf(key, fallback) {
+    const value = panelConfigTree !== null && typeof panelConfigTree === 'object' ? panelConfigTree[key] : undefined
+    return typeof value === 'boolean' ? value : fallback
+  }
+  /** 文件里那一项 (数字) —— 缺省时退回挂载值。 */
+  function liveNumberOf(key, fallback) {
+    const value = panelConfigTree !== null && typeof panelConfigTree === 'object' ? panelConfigTree[key] : undefined
+    return Number.isFinite(value) ? value : fallback
+  }
+  /** 当前该交给 git 的干净地址 (文件优先，缺了退回启动值)。 */
+  function liveRemoteOf() {
+    const value = panelConfigTree !== null && typeof panelConfigTree === 'object' ? panelConfigTree.remote : undefined
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : resolved.remote
+  }
+  /** 当前设备名 (二维码的 from 与对端卡的名片用的都是它)。 */
+  function liveDeviceName() {
+    return liveStringOf('deviceName', resolved.deviceName)
+  }
+  /** 当前令牌 (文件优先，缺了退回启动值)。**只用来判"有没有"，绝不外发。** */
+  function liveTokenOf() {
+    const value = panelConfigTree !== null && typeof panelConfigTree === 'object' ? panelConfigTree.remoteToken : undefined
+    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+    return remoteToken
+  }
+  /**
+   * 面板看到的配置面 (即时值)。
+   * 值里可能带令牌的只有"拼好的地址"，所以这里只报 set/unset 与脱敏后的展示。
+   * @returns {Promise<object>} 与 info.config 同形状的快照。
+   */
+  async function readConfigForPanel() {
+    try {
+      panelConfigTree = await readSyncTree(syncConfigFile)
+    } catch {
+      // 读不动就留上一次的读数 (或者挂载值)；面板宁可显示旧值，也不能整块报错
+    }
+    const remote = liveRemoteOf()
+    const token = liveTokenOf()
+    const section = panelConfigTree !== null && typeof panelConfigTree.pairing === 'object' ? panelConfigTree.pairing : null
+    const paired = section !== null && typeof section.id === 'string' && section.id !== ''
+    return {
+      repoDir,
+      branch: liveStringOf('branch', resolved.branch),
+      deviceName: liveDeviceName(),
+      backend: resolved.backend,
+      confirmVia: resolved.confirmVia,
+      autoPullOnStart: liveBoolOf('autoPullOnStart', resolved.autoPullOnStart),
+      autoPushOnTurnEnd: liveBoolOf('autoPushOnTurnEnd', resolved.autoPushOnTurnEnd),
+      pullIntervalMinutes: liveNumberOf('pullIntervalMinutes', resolved.pullIntervalMinutes),
+      remoteState: describeRemote(remote).state,
+      // 令牌既可以单独一格，也可能本来就拼在地址里 (手机扫码得到的那一份就是这样)
+      hasRemoteToken: token !== '' || /^https?:\/\/[^/@]*:[^/@]+@/iu.test(remote),
+      panelSeats: resolved.panelSeats,
+      panelOps: resolved.panelOps === true,
+      workspace: {
+        enabled: workspaceSources.length > 0,
+        root: workspaceSources[0]?.root ?? '',
+        device: workspaceSources[0]?.device ?? '',
+        name: workspaceSources[0]?.title ?? '',
+        mirrorDir: workspaceSources[0]?.mirrorDir ?? '',
+        maxFiles: workspaceSources[0]?.budget?.maxFiles ?? null,
+        maxBytes: workspaceSources[0]?.budget?.maxBytes ?? null,
+      },
+      sessions: { currentWindowMinutes },
+      pairing: { paired, id: paired ? section.id : '' },
+    }
+  }
+
+  /** 配对摘要 (快照里那一块; 不带载荷、不带口令) */
+  async function readPairing() {
     const tree = await readSyncTree(syncConfigFile)
     const section = tree.pairing !== null && typeof tree.pairing === 'object' ? tree.pairing : null
     const paired = section !== null && typeof section.id === 'string' && section.id !== ''
@@ -4396,6 +4510,9 @@ function applyInner(ctx, config = {}) {
         engine: engineFacade,
         repoDir,
         remote: resolved.remote,
+        // Luwi 修 (2026-11-23): 卡片上的"远端已配置/未配置"也取即时值 —— 挂载快照会让
+        // 面板在保存之后仍然显示"未配置" (审计 P1 第 9 条的第二处代码点)
+        readRemote: liveRemoteOf,
         mirrorDir: MIRROR_DIR,
       },
     ],
@@ -4417,6 +4534,9 @@ function applyInner(ctx, config = {}) {
     p2pRevoke: p2pRevokePeer,
     // Luwi 加 (2026-10-20): 配对摘要与"生成配对码"那一条口
     readPairing,
+    // Luwi 修 (2026-11-23): 配置面每次快照重读文件 (审计 P1 第 9/11 条); 面板先等它刷新，
+    // 卡片上的 remote 与 info.config 用的都是这一次读到的树
+    readConfig: readConfigForPanel,
     buildPairing,
     // Luwi 加 (2026-10-23): 账号登录 (只给 P2P 收费闸供到期) 与权益刷新/退出
     readLicense: () => readLicenseStatus(),
