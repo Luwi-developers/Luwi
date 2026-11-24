@@ -5742,7 +5742,9 @@ window.__ModuleLoader__.load({
         try {
           els.input.dispatchEvent(new Event('input', { bubbles: true }))
         } catch (_noEvent) {
+          // 事件派不出去的那台机器: 两道都当场补上 (门与高度)
           updateSendGate()
+          autoSizeInput()
         }
         try { els.input.setSelectionRange(next.length, next.length) } catch (_noSelection) { /* 老 WebView */ }
         updateSendGate()
@@ -7101,6 +7103,94 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /* ── 输入框高度: 长文本发完要回一行 (2.8.1 #51) ────────────────────────────────
+       *
+       * 之前高度只挂在 `input` 事件上, 而**清空是程序改 `value`** —— 那一趟不会来事件, 于是
+       * 打满十几行发出去之后, 框还留着上一次那一截, 要等下一次敲键才收回去 (2026-11-24 主人报)
+       *
+       * 现在三条路都走同一个 [autoSizeInput]: `input` 事件 / `send()` 清空之后 / 失败还草稿之后。
+       * 换算与"清不清"是纯函数 ([inputHeightPx] / [inputResetsToLine]), 判据直接抽出来真跑
+       */
+      /** 一行多高 / 至多几行: 与 CSS 的 `#lwp-input` 的 line-height 与 max-height 同一档 */
+      var INPUT_LINE_PX = 24
+      var INPUT_MAX_LINES = 14
+      /** 上一次写进去的高度: 只有变了才在 logcat 上留一行读数 (逐键一句会刷屏) */
+      var inputPx = 0
+
+      /**
+       * 清空之后要不要回 CSS 的一行默认高 (纯函数)
+       *
+       * 只有**真的空**才算: 全是空白的草稿仍按内容量, 那也就是一行
+       * @param value 输入框里的原文
+       * @returns 空草稿 true
+       */
+      function inputResetsToLine(value) {
+        return String(value === null || value === undefined ? '' : value) === ''
+      }
+
+      /**
+       * 有字的输入框该多高 (纯函数)
+       *
+       * 折行由 `scrollHeight` 自己算, 这一层只管两头: 一行以下不缩、封顶行数以上不长
+       * @param measured 量出来的内容高 (`scrollHeight`, 含内边距与 min-height)
+       * @param linePx 一行多高
+       * @param maxLines 至多几行
+       * @returns 该写进 `style.height` 的像素数
+       */
+      function inputHeightPx(measured, linePx, maxLines) {
+        var line = Number(linePx) > 0 ? Number(linePx) : INPUT_LINE_PX
+        var lines = Number(maxLines) >= 1 ? Math.floor(Number(maxLines)) : INPUT_MAX_LINES
+        var raw = Number(measured)
+        if (!isFinite(raw) || raw < line) raw = line
+        var cap = line * lines
+        return raw > cap ? cap : raw
+      }
+
+      /**
+       * 一行多高: 取算出来的 line-height
+       *
+       * 字号那一档会跟着 `--dsh-content-font-delta` 走, 所以不写死量出来的那一份;
+       * 取不到 (还没上屏 / 老 WebView) 就回 [INPUT_LINE_PX]
+       */
+      function inputLinePx(node) {
+        try {
+          var css = window.getComputedStyle(node)
+          var px = css ? parseFloat(css.lineHeight) : 0
+          if (isFinite(px) && px > 0) return px
+        } catch (_noStyle) {
+          // 取不到就用 CSS 那一档, 与 `#lwp-input` 的 line-height 同一个数
+        }
+        return INPUT_LINE_PX
+      }
+
+      /**
+       * 把输入框的高度按内容重算一次
+       *
+       * 空草稿把 inline height 写回 `''` —— 回 CSS 那一行 (min-height 36 / rows=1), 不留上一次
+       * 那一截。有字时先放回 `auto` 再量: inline height 还钉着上一次那一份的时候, `scrollHeight`
+       * 读到的就是那一份, 直接拿去算等于把旧高度又写一遍
+       * @returns 这一拍的高度 (空草稿回 0)
+       */
+      function autoSizeInput() {
+        if (!els.input) return 0
+        if (inputResetsToLine(els.input.value)) {
+          els.input.style.height = ''
+          if (inputPx !== 0) {
+            inputPx = 0
+            console.log('[luwi-portal] input height reset 1 行')
+          }
+          return 0
+        }
+        els.input.style.height = 'auto'
+        var px = inputHeightPx(els.input.scrollHeight, inputLinePx(els.input), INPUT_MAX_LINES)
+        els.input.style.height = String(px) + 'px'
+        if (px !== inputPx) {
+          inputPx = px
+          console.log('[luwi-portal] input height ' + String(px) + 'px')
+        }
+        return px
+      }
+
       /**
        * 交给 dsh 自己投递: 与输入框同一条路 (beginSubmission 的 echo 让"发送中"也能画)
        *
@@ -7152,6 +7242,8 @@ window.__ModuleLoader__.load({
         sending = true
         setSendBusy(true)
         els.input.value = ''
+        // 清空是程序改 value —— 不会来 `input` 事件, 高度必须在这一拍自己收回去 (#51)
+        autoSizeInput()
         // 本机先占一行: dsh 的回显要等 Host 收下 prompt 才进快照, 这几拍屏上不该是空的
         pendingEcho = pendingEchoStart(text, attach)
         // 每发一句都把这一场写进账本 (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"):
@@ -7209,7 +7301,11 @@ window.__ModuleLoader__.load({
               if (promptErrorOf() === '') pushSendFail(failed)
               showNote(failed, true)
               // 草稿只在这一刻还回去 (成了就不还): 人接着改、接着发
-              if (els.input && els.input.value === '') els.input.value = text
+              if (els.input && els.input.value === '') {
+                els.input.value = text
+                // 还回来的是一整段长文本: 高度跟着它, 不然那一段留在屏上 (#51)
+                autoSizeInput()
+              }
             }
             sending = false
             setSendBusy(false)
@@ -8331,9 +8427,8 @@ window.__ModuleLoader__.load({
         })
         els.input.addEventListener('input', function () {
           updateSendGate()
-          // 高度跟着内容长, 上限那一档写在 CSS 的 max-height 里 (14 行)
-          els.input.style.height = 'auto'
-          els.input.style.height = String(els.input.scrollHeight) + 'px'
+          // 高度跟着内容长, 上限那一档写在 CSS 的 max-height 里 (14 行); 换算只有 [autoSizeInput] 一份
+          autoSizeInput()
         })
         /* ── 长按空输入框 = 当场开录 (2026-11-20 主人: "长按不是显示语音输入，而是直接开始录音") ──
          *

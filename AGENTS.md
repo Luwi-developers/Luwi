@@ -225,6 +225,13 @@
   15 s 不认就撤); `prompt()` 回 `{ok:false}` / 抛错改成时间线上一行红字 (`sendFails`, 与图片失败同一档) +
   输入卡一句提示, **草稿只在这一刻还回去**; 发送钮三个监听器走 `sendGesture` (轻点 queue / 按住 550 ms steer,
   一次按下只投一次); 判据 `check-luwi-portal` 第二十八节
+- **发完长文本, 输入框当场回一行** (2.8.1 #51): 高度只有一处换算 —— `autoSizeInput` (`inputHeightPx` /
+  `inputResetsToLine` 是纯函数, 判据真跑), **三条路都调它**: `input` 事件 / `send()` 清空之后 / 失败还草稿之后
+  (清空是程序改 `value`, 不会来 `input` 事件 —— 以前就卡在这里, 框留着上一截). 空草稿写回 `style.height=''`
+  回 CSS 那一行 (`min-height:36px` + `rows=1`); 有字先放 `auto` 再量 `scrollHeight` (旧 inline height 会让
+  量出来的是它自己), 封顶 `INPUT_MAX_LINES` = 14 行、一行 `INPUT_LINE_PX` = 24px (与 `#lwp-input` 的
+  `line-height` / `max-height` 逐数相同, 判据对表); 高度变了才在 logcat 落一行 `[luwi-portal] input height …`;
+  判据 `check-luwi-portal` 第三十节
 - 设置页右上 ⋮ 五条 (反馈 / 检测更新 / 账号 / 关于 / 重启 host), 同一刻只开一个; **material3 不是本项目依赖**
 - **门户语音输入** (2026-11-20, 主人给的三张官方手机端截图): 输入框灰字是 **「发消息或长按说话」**;
   **空草稿长按 450 ms 就当场开录**, 没有"进语音态"那个中间步: 手指按住那一刻起音频就在往 `voiceChunks` 走,
