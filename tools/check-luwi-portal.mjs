@@ -3902,6 +3902,117 @@ if (identitySource !== '' && !/avatar = ''[\s\S]{0,600}?var photo = avatar !== '
 }
 expect('client.js', client, "'dsh.luwi.portal.mark2'")
 
+// ── 三十、长文本发完, 输入框高度回到一行 (2.8.1 #51) ───────────────────────────
+//
+// 主人报的是"打满十几行发出去, 输入框还是那么高, 要再敲一个字才收回去". 根因: 高度只挂在
+// `input` 事件上, 而清空是**程序改 `value`** —— 那一趟没有事件, 框就停在上一份高度.
+//
+// 现在三条路都走同一个 `autoSizeInput`: `input` 事件 / `send()` 清空之后 / 失败还草稿之后.
+// 换算与"清不清"是纯函数 (`inputHeightPx` / `inputResetsToLine`), 这里把源码原样抽出来真跑:
+// 1 行 / 5 行 / 20 行的换算 (20 行封顶 14 行)、清空后回 CSS 的一行默认高、再输入重新长高、
+// 失败还回来的长文本高度对得上
+
+const inputLineConst = Number(grab(client, /var INPUT_LINE_PX = (\d+)/u))
+const inputMaxConst = Number(grab(client, /var INPUT_MAX_LINES = (\d+)/u))
+// 这两个数与 CSS 那一档必须是同一份 (漂了就会出现"封顶是 14 行, 而框长到 20 行")
+const cssInputBox = /max-height:calc\((?<lines>\d+) \* \((?<line>\d+)px \+ var\(--dsh-content-font-delta,0px\)\)\)/u.exec(client)
+if (cssInputBox !== null && Number(cssInputBox.groups.lines) === inputMaxConst
+  && Number(cssInputBox.groups.line) === inputLineConst) {
+  notes.push(`ok   输入框的 ${String(inputMaxConst)} 行封顶 / 一行 ${String(inputLineConst)}px 与 CSS 逐数相同`)
+} else {
+  failures.push(`输入框的封顶行数 / 一行高与 CSS 对不上 (JS ${String(inputMaxConst)} 行 / ${String(inputLineConst)}px,`
+    + ` CSS ${String(cssInputBox?.groups.lines)} 行 / ${String(cssInputBox?.groups.line)}px)`)
+}
+
+const heightPxSource = sliceFunction('inputHeightPx')
+const resetsSource = sliceFunction('inputResetsToLine')
+const autoSizeSource = sliceFunction('autoSizeInput')
+if (heightPxSource === '' || resetsSource === '' || autoSizeSource === '') {
+  failures.push('client.js: 抽不出 inputHeightPx / inputResetsToLine / autoSizeInput (输入框高度那一段)')
+} else {
+  const inputHeightPx = new Function('INPUT_LINE_PX', 'INPUT_MAX_LINES',
+    `${heightPxSource}\nreturn inputHeightPx`)(inputLineConst, inputMaxConst)
+  const inputResetsToLine = new Function(`${resetsSource}\nreturn inputResetsToLine`)()
+  // `autoSizeInput` 在页面里读闭包里的 `els` / 这一份 `inputPx` / 两个常量, 这里原样喂进去
+  const autoSizeOf = (box) => new Function(
+    'els', 'inputHeightPx', 'inputResetsToLine', 'inputLinePx', 'INPUT_LINE_PX', 'INPUT_MAX_LINES',
+    `var inputPx = 0\n${autoSizeSource}\nreturn autoSizeInput`,
+  )(
+    { input: box }, inputHeightPx, inputResetsToLine, () => inputLineConst, inputLineConst, inputMaxConst,
+  )
+
+  const line = inputLineConst
+  const heights = [
+    ['1 行', inputHeightPx(line, line, inputMaxConst), line],
+    ['5 行', inputHeightPx(line * 5, line, inputMaxConst), line * 5],
+    ['20 行封顶 14 行', inputHeightPx(line * 20, line, inputMaxConst), line * inputMaxConst],
+    ['量不出 (0) 也要有一行', inputHeightPx(0, line, inputMaxConst), line],
+  ]
+  const wrongHeights = heights.filter((one) => one[1] !== one[2]).map((one) => `${one[0]}: ${String(one[1])} ≠ ${String(one[2])}`)
+  if (wrongHeights.length === 0) {
+    notes.push(`ok   inputHeightPx: 1 行 ${String(line)} / 5 行 ${String(line * 5)} / 20 行封顶 ${String(line * inputMaxConst)}`)
+  } else {
+    failures.push(`输入框高度换算错了: ${wrongHeights.join(' / ')}`)
+  }
+
+  // 清空 → 高度回 CSS 那一行 (写回 ''), 也就是"发完长文本那一拍"
+  const cleared = { value: '', scrollHeight: line * 10, style: { height: `${String(line * 10)}px` } }
+  const clearedPx = autoSizeOf(cleared)()
+  if (cleared.style.height === '' && clearedPx === 0) {
+    notes.push('ok   清空回一行: 发完那一拍 inline height 写回 CSS 的一行默认高')
+  } else {
+    failures.push(`清空之后高度没回去 (style.height=${JSON.stringify(cleared.style.height)} / 回 ${String(clearedPx)})`)
+  }
+  // 清空之后接着打字: 从一行重新往上长
+  const retyped = { value: '五行的\n第二行\n第三行\n第四行\n第五行', scrollHeight: line * 5, style: { height: '' } }
+  if (autoSizeOf(retyped)() === line * 5 && retyped.style.height === `${String(line * 5)}px`) {
+    notes.push('ok   再输入长高: 清空之后打 5 行, 高度从一行重新长到 5 行')
+  } else {
+    failures.push(`清空之后再输入没长高 (style.height=${JSON.stringify(retyped.style.height)})`)
+  }
+  // 失败还草稿那一路: 还回来的那一整段要对得上内容, 不能停在清空后的一行
+  const restored = { value: '十行的草稿\n'.repeat(10).trim(), scrollHeight: line * 10, style: { height: '' } }
+  if (autoSizeOf(restored)() === line * 10 && restored.style.height === `${String(line * 10)}px`) {
+    notes.push('ok   失败还草稿: 还回来的长文本高度跟着内容 (不停在一行)')
+  } else {
+    failures.push(`失败还草稿之后高度没对齐 (style.height=${JSON.stringify(restored.style.height)})`)
+  }
+  // 全是空白的草稿不算"清空": 仍按内容量, 那一行还在
+  if (inputResetsToLine('   ') === false && inputResetsToLine('') === true) {
+    notes.push('ok   inputResetsToLine: 只有真的空才算清空 (空白草稿仍按内容量)')
+  } else {
+    failures.push('inputResetsToLine: 把空白草稿也当成清空了')
+  }
+}
+
+// 三条路必须真的都调那一处换算 (少一条就有一路停在旧高度)
+const sendClearAt = sendSource.indexOf("els.input.value = ''")
+if (sendClearAt >= 0 && sendSource.slice(sendClearAt, sendClearAt + 400).includes('autoSizeInput()')) {
+  notes.push('ok   send(): 清空草稿的那一拍当场重算高度')
+} else {
+  failures.push('client.js: send() 清空草稿之后没有重算高度 —— 发出去还留着上一截')
+}
+const sendFailAt = sendSource.indexOf('if (failed !== \'\')')
+const sendFailBranch = sendFailAt < 0 ? '' : sendSource.slice(sendFailAt)
+if (/els\.input\.value = text[\s\S]{0,200}?autoSizeInput\(\)/u.test(sendFailBranch)) {
+  notes.push('ok   send(): 失败还草稿之后高度跟着还回来的那一段')
+} else {
+  failures.push('client.js: 失败还回来的草稿没有重算高度')
+}
+const inputWiring2 = /els\.input\.addEventListener\('input'[\s\S]{0,400}?\n        \}\)/u.exec(client)?.[0] ?? ''
+if (inputWiring2.includes('autoSizeInput()') && !inputWiring2.includes('scrollHeight')) {
+  notes.push('ok   input 事件也走 autoSizeInput (换算只有一份, 两处不会漂)')
+} else {
+  failures.push('client.js: input 事件里还在自己算 scrollHeight —— 与 autoSizeInput 两处漂')
+}
+// 只有 autoSizeInput 一处写 `#lwp-input` 的高度
+const inputHeightWrites = (client.match(/els\.input\.style\.height = String\(/gu) ?? []).length
+if (inputHeightWrites === 1) {
+  notes.push('ok   输入框写高度的地方只有 autoSizeInput 一处')
+} else {
+  failures.push(`client.js: 写输入框高度的地方有 ${String(inputHeightWrites)} 处 (应该只有 autoSizeInput)`)
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
