@@ -170,6 +170,11 @@ internal object LwWakeWord {
     private fun keywordsFile(directory: File): File = File(directory, KEYWORDS_FILE)
 
     /**
+     * 词表在哪儿 (给不握着原始 intent 的调用方: 服务被系统按 START_STICKY 重新拉起来时 extras 是空的)
+     */
+    internal fun keywordsFileFor(directory: File): File = keywordsFile(directory)
+
+    /**
      * 设置页那一份词表: 存的格式与人输入的一样 (`词=带音调数字拼音`), **没存过就是空的**
      *
      * **它不再回退到缺省那一句** (2026-10-06 修的那条: "设置说明的唤醒词和真实的唤醒词不一致"):

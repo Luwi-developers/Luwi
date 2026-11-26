@@ -226,7 +226,7 @@ internal object SyncSetting {
 
     // --- 纯文件那一半 (单测直接吃它) -------------------------------------------
 
-    /** 读一份配置的取值 (文件不在或读不懂时全按缺省, 与插件"坏文件 = 没有配置"同一个口径) */
+    /** 读一份配置的取值 (纯读: 文件不在或读不懂时全按缺省, 不动文件; 写盘那几条路径另有 broken 保护) */
     fun snapshotOf(file: File): Snapshot = runCatching {
         val root = readOf(file)
         val workspace = root[WORKSPACE_KEY] as? JsonObject
@@ -273,7 +273,7 @@ internal object SyncSetting {
      * @return null 成功; 否则是一句能给人看的原因。
      */
     fun setSyncOnIn(file: File, on: Boolean): String? {
-        val root = readOf(file)
+        val root = runCatching { readOf(file, parkWhenBroken = true) }.getOrElse { return "写入失败: ${it.message}" }
         val lwNow = (root[LW_KEY] as? JsonObject)?.toMap() ?: emptyMap()
         if (on && text(root, SESSION_REMOTE_KEY).ifBlank { text(lwNow, SAVED_REMOTE_KEY) }.isBlank()) {
             // 2026-10-20 起手机侧不再有「仓库地址」那一行: 地址只有一个来处 = 扫码配对
@@ -312,7 +312,7 @@ internal object SyncSetting {
     fun applyPairingIn(file: File, payload: PairPayload, now: Long = System.currentTimeMillis()): String? {
         if (payload.remote.isBlank()) return "配对码里没有仓库地址"
         return runCatching {
-            val root = readOf(file).toMutableMap()
+            val root = readOf(file, parkWhenBroken = true).toMutableMap()
             root[SESSION_REMOTE_KEY] = JsonPrimitive(payload.remote)
             root[BRANCH_KEY] = JsonPrimitive(payload.branch.ifBlank { "main" })
             // 对端那一段: 别的键 (listen / sendTimeoutMs / …) 都留着, 只改这三件
@@ -411,19 +411,46 @@ internal object SyncSetting {
 
     // --- 读写 -----------------------------------------------------------------
 
-    private fun readOf(file: File): Map<String, JsonElement> {
+    /**
+     * 一份配置的取值
+     *
+     * **读不懂时不再当成空树**: 旧版把解析失败当作"没有配置", 于是下一次保存拿着一个空树整份覆盖回去,
+     * 仓库地址、令牌、`lw` 段一起没了, 而且一句提示都没有。现在的口径与电脑端插件 (luwi-configure.mjs
+     * 的 readSyncTreeStrict) 一致: 文件在但读不懂 → 抛 [BrokenConfig], 由调用方回一句人话; 写盘那几条
+     * 路径 ([patchTop] / [patchSection] / [setSyncOnIn] / [applyPairingIn]) 还会先把那份读不懂的挪到
+     * `<文件名>.bak-broken-<时间戳>`, 一个字节都不覆盖。纯读的 [snapshotOf] 只兜缺省, 不动文件
+     */
+    private fun readOf(file: File, parkWhenBroken: Boolean = false): Map<String, JsonElement> {
         if (!file.isFile) return emptyMap()
-        return runCatching { Json.parseToJsonElement(file.readText()).jsonObject.toMap() }.getOrElse { emptyMap() }
+        val raw = runCatching { file.readText() }.getOrElse {
+            throw BrokenConfig("配置读不出来 (${it.message ?: "未知原因"}), 没有覆盖它: ${file.absolutePath}")
+        }
+        if (raw.isBlank()) return emptyMap()
+        return runCatching { Json.parseToJsonElement(raw).jsonObject.toMap() }.getOrElse {
+            val parked = if (parkWhenBroken) parkBrokenOf(file) else null
+            val where = parked?.let { "已把那份读不懂的挪到 ${it.absolutePath}" } ?: "它还在原位, 请自己检查"
+            throw BrokenConfig("配置不是合法的 JSON, 没有覆盖它: $where")
+        }
     }
 
+    /** 配置读不懂的信号 (写盘路径转成一句人话, 纯读路径 runCatching 兜成缺省) */
+    private class BrokenConfig(message: String) : IllegalStateException(message)
+
+    /** 把读不懂的配置挪开 (挪得动就挪; 挪不动就留着, 绝不删) */
+    private fun parkBrokenOf(file: File): File? = runCatching {
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+        val parked = File(file.parentFile, "${file.name}.bak-broken-$stamp")
+        if (!file.renameTo(parked)) null else parked
+    }.getOrNull()
+
     private fun patchTop(file: File, key: String, value: JsonElement?) {
-        val root = readOf(file).toMutableMap()
+        val root = readOf(file, parkWhenBroken = true).toMutableMap()
         if (value == null) root.remove(key) else root[key] = value
         write(file, JsonObject(root))
     }
 
     private fun patchSection(file: File, section: String, key: String, value: JsonElement?) {
-        val root = readOf(file).toMutableMap()
+        val root = readOf(file, parkWhenBroken = true).toMutableMap()
         val current = root[section] as? JsonObject ?: JsonObject(emptyMap())
         val next = current.toMutableMap()
         if (value == null) next.remove(key) else next[key] = value
@@ -431,9 +458,40 @@ internal object SyncSetting {
         write(file, JsonObject(root))
     }
 
+    /**
+     * 原子写: 先写同目录的临时文件并落盘, 再一步 rename 覆盖
+     *
+     * 旧版直接 [File.writeText] 截断原文件, 写一半被杀掉 (设置页滑走、系统回收、断电) 就留下半截 JSON,
+     * 下一次读就成了上面那个 broken —— 一条链上自己把自己写坏。临时名带 UUID, 并发两次写不会互相踩;
+     * 失败时把半截临时文件删掉, 原文件保持上一份完好的内容
+     */
     private fun write(file: File, root: JsonObject) {
-        file.parentFile?.mkdirs()
-        file.writeText(json.encodeToString(JsonObject.serializer(), root) + "\n")
+        val parent = file.parentFile
+        parent?.mkdirs()
+        val payload = (json.encodeToString(JsonObject.serializer(), root) + "\n").toByteArray()
+        val temporary = File(parent, "${file.name}.${java.util.UUID.randomUUID()}.tmp")
+        try {
+            java.io.FileOutputStream(temporary).use { out ->
+                out.write(payload)
+                out.flush()
+                out.fd.sync()
+            }
+            val moved = runCatching {
+                java.nio.file.Files.move(
+                    temporary.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                )
+            }
+            if (moved.isFailure) {
+                java.nio.file.Files.move(
+                    temporary.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete()
+        }
     }
 
     private fun text(root: Map<String, JsonElement>, key: String): String =
