@@ -1914,6 +1914,17 @@ expect('client.js', client, "call('portalMenuPick', item.id)")
 expect('client.js', client, 'function portalRow')
 expect('client.js', client, 'function renderScreenDrawer')
 expect('client.js', client, "drawer === 'screen'")
+// **屏清单的签名必须带上 title 与 enabled** (#F10 判据单点名的那一条, 与 F6 同一条线):
+// 签名只拼 id / on 的话, 原生把某一行**改名**或**置灰** (`enabled:false`) 时签名不变 → 抽屉不重画,
+// 屏上停着一份旧清单 (点了没反应 / 灰着的行还亮着). 函数还没并进来时**明确记一句**, 不当作绿
+const panelSignatureSource = sliceFunction('screenPanelSignature')
+if (panelSignatureSource === '') {
+  notes.push('ok   本工位还没有 F6 的 screenPanelSignature (F6 合入后这一条自动盯 title / enabled)')
+} else if (panelSignatureSource.includes('title') && panelSignatureSource.includes('enabled')) {
+  notes.push('ok   screenPanelSignature 同时拼了 title 与 enabled (改名 / 置灰都会换签名)')
+} else {
+  failures.push('client.js: screenPanelSignature 漏了 title 或 enabled —— 那一行改名 / 置灰时抽屉不会重画')
+}
 expect('client.js', client, "drawerRow('判断'")
 expect('client.js', client, "drawerRow('探索'")
 // 2026-11-17 主人: 探索下面多一行「开发」, 点进去是原生开发面板
@@ -4106,20 +4117,47 @@ expectOrder('那颗钮的 handler 里真的切了层', recLiveWire, 'var onTapLi
 // **收起态不许收事件** (审查 ①): 条子收起只是 opacity:0, 命中区还在输入卡顶上就点不进输入框 ——
 // 钮与波形默认 `pointer-events:none`, 只有 `[data-on="on"]` (条子升起来) 才 auto.
 // 第三轮补反向断言 (审查 B2): 光查"有没有那两条 auto 行"挡不住有人在别处补一条同义规则
-// (specificity 更高、pointer-events 又是继承属性, 收起态命中区原样回来) —— 所以数**行数**
+// (specificity 更高、pointer-events 又是继承属性, 收起态命中区原样回来)
+// **#F10 判据单第四轮: 不数行, 数规则.** 数行有两处躲得过 —— 同义规则写在**同一行**上行数不变;
+// 就算抽成规则, 往那条规则的选择器表里**加一条不带闸的选择器**也是全绿 (选择器表命中任意一条就生效).
+// 所以从 client.js 里抽出所有 CSS 规则, 要求: 命中小录条三兄弟且声明 `pointer-events:auto` 的规则
+// **恰好 1 条**, 而且它的**每一条**选择器都从 `#lwp-rec[data-on="on"]` 起头
 const waveRule = grab(client, /'\.lwp-rec-wave\{([^']*)'/u) ?? ''
 const waveRowRule = grab(client, /'\.lwp-rec-wave-row\{([^']*)'/u) ?? ''
 const liveBtnRule = /'\.lwp-rec-live-btn\{[\s\S]{0,240}?pointer-events:none/u.test(client)
-const autoLines = client.split('\n').filter((line) => line.includes('pointer-events:auto')
-  && (line.includes('.lwp-rec-wave') || line.includes('.lwp-rec-live-btn') || line.includes('.lwp-rec-wave-row')))
+// 规则抽法: 先把 CSS 数组那些 `',\n      '` 的拼接缝抹平 (数组是 join('') 进去的), 再去掉注释,
+// 剩下的 `选择器{声明}` 就是真规则
+const flatCss = client
+  .replace(/\/\*[\s\S]*?\*\//gu, '')
+  .replace(/^\s*\/\/.*$/gmu, '')
+  .replace(/',\s*\n\s*'/gu, '')
+const cssRules = []
+{
+  const rulePattern = /([^{}]*)\{([^{}]*)\}/gu
+  for (;;) {
+    const one = rulePattern.exec(flatCss)
+    if (one === null) break
+    cssRules.push({ selector: one[1], body: one[2] })
+  }
+}
+const REC_HIT_CLASSES = ['.lwp-rec-wave-row', '.lwp-rec-wave', '.lwp-rec-live-btn']
+const autoRules = cssRules.filter((rule) => /pointer-events\s*:\s*auto/u.test(rule.body)
+  && REC_HIT_CLASSES.some((one) => rule.selector.includes(one)))
+const autoParts = autoRules.length === 1
+  ? autoRules[0].selector.split(',').map((one) => one.trim()).filter((one) => one !== '')
+  : []
+const autoGated = autoParts.length > 0 && autoParts.every((one) => one.startsWith('#lwp-rec[data-on="on"]'))
+const autoCovers = autoRules.length === 1 && REC_HIT_CLASSES.every((one) => autoRules[0].selector.includes(one))
 if (waveRule.includes('pointer-events:none') && liveBtnRule && waveRowRule.includes('pointer-events:none')
-  && autoLines.length === 1
-  && autoLines[0].includes('#lwp-rec[data-on="on"]')
-  && autoLines[0].includes('.lwp-rec-live-btn')) {
-  notes.push('ok   收起态不收事件: 三兄弟默认 none, 命中小录条的 auto 行恰好 1 行且带 data-on="on"')
+  && autoRules.length === 1 && autoGated && autoCovers) {
+  notes.push(`ok   收起态不收事件: 三兄弟默认 none, 命中它们的 pointer-events:auto 规则恰好 1 条`
+    + ` (${String(autoParts.length)} 条选择器, 每条都带 data-on="on" 的闸)`)
 } else {
-  failures.push(`client.js: 收起态命中区挡不住 —— 命中小录条的 pointer-events:auto 有 ${String(autoLines.length)} 行`
-    + '(必须恰好 1 行, 且是 #lwp-rec[data-on="on"] 那一条)')
+  const why = autoRules.length !== 1
+    ? `命中三兄弟的 auto 规则有 ${String(autoRules.length)} 条`
+    : `那 1 条的选择器表里 ${autoGated ? '漏了' : '混进了不带闸的'}选择器: ${JSON.stringify(autoParts.join(' , '))}`
+  failures.push(`client.js: 收起态命中区挡不住 —— ${why}`
+    + ' (必须恰好 1 条规则, 且每条选择器都从 #lwp-rec[data-on="on"] 起头)')
 }
 
 // ③ `VOICE_CHUNK_MS = 0` 一块都不送 (回到整段转写): 节拍那条纯函数真跑 + 闸的次序与位置
@@ -4189,6 +4227,17 @@ if (dueSource === '' || pumpChunkSource === '' || sendChunkSource === '' || join
       failures.push('client.js: 切块 / cursor 推进不对 (同一段会被反复送, 或者越界)')
     }
   }
+  // **cursor 那一行右值必须真的往前推** (#F10 判据单): `includes()` 挡不住
+  // `voiceChunkCursor += cut.count * 0` —— 字面一模一样, 同一段每 1.5 s 被重送一遍
+  const cursorRhs = (grab(sendChunkSource, /voiceChunkCursor \+= ([^;\n]+)/u) ?? '').trim()
+  const cursorStill = cursorRhs === ''
+    || /^0+(?:\.0+)?$/u.test(cursorRhs)
+    || /\*\s*0(?:\.0+)?$/u.test(cursorRhs)
+  if (!cursorStill) {
+    notes.push(`ok   cursor 每次送块都往前推 (${cursorRhs}), 同一段不会被反复送`)
+  } else {
+    failures.push(`client.js: 送块之后的 cursor 推进量是 ${JSON.stringify(cursorRhs)} —— 没有前进, 同一段会被每 1.5 s 重送`)
+  }
   const join = new Function(`${joinSource}\nreturn voiceLiveJoin`)()
   const joinCases = [
     ['第一块', join('', '你好'), '你好'],
@@ -4241,12 +4290,34 @@ if (chunkFn === '') {
     failures.push('PortalVoice.kt: 块没有 pending 判重 / busy 回执 —— 一串块会排队排到松手之后')
   }
   // **阈值要钉取值** (审查 B4): 只查符号名的话 3 改成 99 也全绿, 那道闸等于不存在
-  const hostPending = Number(grab(portalVoice, /const val MAX_PENDING_CHUNKS = (\d+)/u))
-  const jsInflight = Number(grab(client, /var VOICE_CHUNK_INFLIGHT_MAX = (\d+)/u))
+  // #F10 判据单: 换成**读常量那一行**再取值 —— 全文正则会连注释里举的例子一起抓, 注释写 `= 3`、
+  // 代码写 `= 99` 时那种抓法照样绿
+  const hostPendingLine = (portalVoice.split('\n').find((line) => /const val MAX_PENDING_CHUNKS\b/u.test(line)) ?? '').trim()
+  const jsInflightLine = (client.split('\n').find((line) => /var VOICE_CHUNK_INFLIGHT_MAX\s*=/u.test(line)) ?? '').trim()
+  const hostPending = Number(grab(hostPendingLine, /const val MAX_PENDING_CHUNKS\s*(?::\s*Int)?\s*=\s*(\d+);?$/u))
+  const jsInflight = Number(grab(jsInflightLine, /var VOICE_CHUNK_INFLIGHT_MAX\s*=\s*(\d+);?$/u))
   if (hostPending === 3 && jsInflight === 2 && jsInflight < hostPending) {
-    notes.push('ok   背压阈值钉住: 页面在途 2 / 宿主在途 3 (页面先停, 宿主那一侧才有余量)')
+    notes.push('ok   背压阈值钉住取值: 页面在途 2 / 宿主在途 3 (页面先停, 宿主那一侧才有余量)')
   } else {
-    failures.push(`背压阈值不对: 页面=${String(jsInflight)} 宿主=${String(hostPending)} (应当 2 / 3, 且页面 < 宿主)`)
+    failures.push(`背压阈值不对: 页面=${String(jsInflight)} 宿主=${String(hostPending)}`
+      + ` (应当 2 / 3, 且页面 < 宿主; 读的是 ${JSON.stringify(jsInflightLine)} / ${JSON.stringify(hostPendingLine)})`)
+  }
+  // **调用点必须用这个常量** (#F10 判据单): 常量对了但闸上写死 `>= 2`, 改常量等于没改
+  const inflightAtCallSite = /voiceChunkSeq\s*-\s*voiceChunkSeen\s*>=\s*VOICE_CHUNK_INFLIGHT_MAX/u.test(pumpChunkSource)
+  const inflightLiteral = /voiceChunkSeq\s*-\s*voiceChunkSeen\s*>=\s*\d/u.test(pumpChunkSource)
+  if (inflightAtCallSite && !inflightLiteral) {
+    notes.push('ok   背压那道闸读的是 VOICE_CHUNK_INFLIGHT_MAX 这个常量 (不是写死的数字)')
+  } else {
+    failures.push('client.js: 背压的调用点用了字面量 (或者压根没有这道闸) —— 改 VOICE_CHUNK_INFLIGHT_MAX 等于没改')
+  }
+  // 宿主那条单测: **取值**要用 assertEquals 钉着; `assertTrue(x >= 2)` 那种改成 99 也全绿
+  const voiceTest = read('app/src/test/java/io/github/yuloong07star/luwi/ui/PortalVoiceTest.kt')
+  const pendingPinned = /assertEquals\(\s*3\s*,\s*PortalVoice\.MAX_PENDING_CHUNKS\s*\)/u.test(voiceTest)
+  const pendingLoose = /MAX_PENDING_CHUNKS\s*>=\s*\d/u.test(voiceTest)
+  if (pendingPinned && !pendingLoose) {
+    notes.push('ok   PortalVoiceTest 用 assertEquals 钉住 MAX_PENDING_CHUNKS 的取值 (不是 >= 2 那种)')
+  } else {
+    failures.push('PortalVoiceTest.kt: MAX_PENDING_CHUNKS 没有用 assertEquals 钉取值 —— 改成 99 也全绿')
   }
   // 失败块带 `failed`: 与"认出空串"不再同形 (审查 ⑤)
   if (chunkFn.includes('put("failed", true)')) {
@@ -4276,8 +4347,18 @@ if (pumpChunkSource === '' || sendChunkSource === '' || sliceFunction('voiceChun
   } else {
     failures.push('client.js: busy 支记了失败 / 关了流式 —— 宿主慢一点实时层就没了')
   }
+  // busy 支**一个字都不许给连败记账** (#F10 判据单点名的那一下): 宿主稍慢就连着三次 busy,
+  // 记了失败就把流式关了 —— 这里单独认 `voiceChunkFails +=` 这个形态, 别只靠上面那条复合条件
+  const busyBumpsFails = /voiceChunkFails\s*\+=/u.test(busySlice)
+  if (busySlice !== '' && !busyBumpsFails) {
+    notes.push('ok   busy 支没有 `voiceChunkFails +=` (宿主慢不折成连败)')
+  } else {
+    failures.push('client.js: busy 支给连败记账了 —— 宿主慢一点就把流式关掉')
+  }
   // 连败那条: 阈值钉 3、比较式是 >=、成功一块要清零 (审查 ⑧: 注释写"连着", 实际是累计)
-  const failMax = Number(grab(client, /var VOICE_CHUNK_FAIL_MAX = (\d+)/u))
+  // #F10: 取值改成读常量那一行 (全文正则抓不到"注释里 3 / 代码里 99"这种)
+  const failMaxLine = (client.split('\n').find((line) => /var VOICE_CHUNK_FAIL_MAX\s*=/u.test(line)) ?? '').trim()
+  const failMax = Number(grab(failMaxLine, /var VOICE_CHUNK_FAIL_MAX\s*=\s*(\d+);?$/u))
   const failAt = chunkAnswerSource.indexOf('voiceChunkFails += 1')
   const failSlice = failAt < 0 ? '' : chunkAnswerSource.slice(failAt, failAt + 160)
   const okResetAt = chunkAnswerSource.lastIndexOf('voiceChunkFails = 0')
