@@ -5451,6 +5451,15 @@ window.__ModuleLoader__.load({
        */
       var voiceSettledTake = -1
       var voiceFallbackText = ''
+      /** 这一趟的号发出去没有: 第一块采样到手才抬号 (按下去那一下只是 press, 不是一趟) */
+      var voiceTakeOpen = false
+      /**
+       * 手指按住、还没开录时回来的整段结果 (先压在这儿)
+       *
+       * 那一刻面板正升着、新一趟随时会开: 直接落草稿会把面板关掉; 直接丢又白等一句 ——
+       * 所以 press 收尾 (没进录音) 时再按正常那条路落一遍 (`flushDeferredVoice`)
+       */
+      var voiceDefer = null
       /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
       var pressTimer = null
       /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
@@ -5509,9 +5518,6 @@ window.__ModuleLoader__.load({
         voiceChunkFails = 0
         voiceLiveText = ''
         voiceStreamOff = false
-        voiceLanded = false
-        voiceSettledTake = -1
-        voiceFallbackText = ''
         fitRecPanel()
         if (els.rec) {
           els.rec.setAttribute('data-on', 'on')
@@ -5756,8 +5762,12 @@ window.__ModuleLoader__.load({
       /**
        * 转写等太久的闸 (45 s): 只认**这一趟** (`take`), 跨趟残留一个字节都不许写
        *
-       * 兜底那一支落完草稿就**作废这一趟** (`voiceId += 1` + `voiceLanded`): 迟到的整段结果带着旧号,
-       * 到了 `voiceAnswer` 就被丢掉 —— 否则同一句会进草稿两遍 (2026-11-27 审查 B1)
+       * 两种结局 (2026-11-27 第四轮):
+       *
+       * - **实时层里有字**: 先把预览落进草稿 (明说是预览), 记下这一趟的号与那句原文 —— 迟到的整段
+       *   回来时**替换**草稿尾巴上那一句, 不追加第二句; 号作废 (普通分支走不到)
+       * - **实时层里一个字都没有**: **不许抬号** —— 草稿本来就空着, 双写风险为零, 抬了号只会让
+       *   几秒后回来的真整段被当陈旧丢掉, 用户说的那句话就彻底没了
        * @param take 开这一趟时的 `voiceId`
        */
       function armVoiceWatch(take) {
@@ -5769,11 +5779,13 @@ window.__ModuleLoader__.load({
           var said = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
           voiceLanded = said !== ''
-          // 号作废 (迟到的整段走不到普通那条分支), 但**把号与那句原文留下**:
-          // 它回来时是替换草稿尾巴上那一句, 不是再追加一句
-          voiceSettledTake = said !== '' ? take : -1
-          voiceFallbackText = said
-          voiceId += 1
+          // **只有已经把预览写进草稿那一支才作废这一趟**: 记下号与那句原文 (迟到的整段拿它做替换),
+          // 再把号抬走; 实时层是空的时候草稿本来就空着, 抬号只会让真整段被当陈旧丢掉 (第四轮)
+          if (said !== '') {
+            voiceSettledTake = take
+            voiceFallbackText = said
+            voiceId += 1
+          }
           hideRecPanel()
           if (said !== '') {
             insertDraft(said)
@@ -5797,7 +5809,8 @@ window.__ModuleLoader__.load({
         voiceChunkSeen = 0
         voiceChunkFails = 0
         voiceLiveText = ''
-        voiceLanded = false
+        // **不清 voiceLanded** (2026-11-27 第四轮): 它记的是"这一趟的结果已经落过草稿",
+        // 面板收起只是界面收摊 —— 在这里清零的话那道闸永远为假, 同 id 重推会把同一句再插一遍
         if (recFrame !== 0) {
           try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
           recFrame = 0
@@ -5931,13 +5944,9 @@ window.__ModuleLoader__.load({
         closeFileMenu()
         recStartY = 0
         voiceHeld = true
-        // **按下去就作废上一趟** (2026-11-27 审查 ⑨): 上一趟的整段结果若在这个 press 窗口里回来,
-        // 它会带着旧号, 一进 `voiceAnswer` 就被丢掉 —— 不许插进这一趟的草稿、把新面板关掉;
-        // 上一趟的"迟到替换"也一并收摊 (草稿尾巴从这一刻起归这一趟)
-        voiceId += 1
-        voiceLanded = false
-        voiceSettledTake = -1
-        voiceFallbackText = ''
+        // **按下去不抬号** (2026-11-27 第四轮): 这一下可能只是误触 (太短 / 上滑取消 / 麦克风没给),
+        // 三条空收尾都不产生新草稿 —— 按下去就作废上一趟的话, 上一趟还在路上的整段就白等了.
+        // 抬号挪到"第一块采样到手"那一刻 (见 `onaudioprocess`)
         if (voiceWatch !== null) {
           clearTimeout(voiceWatch)
           voiceWatch = null
@@ -5996,12 +6005,26 @@ window.__ModuleLoader__.load({
           stopRecording(recCancel)
           return
         }
-        // 还在等麦克风时抬手: 这一趟从没开始, 面板收起就行
+        // 还在等麦克风时抬手: 这一趟从没开始, 面板收起就行 —— 上一趟压住的那份结果照旧落
         if (voiceState === 'press') {
           voiceHeld = false
           voiceState = 'idle'
           hideRecPanel()
+          flushDeferredVoice()
         }
+      }
+
+      /**
+       * press 收尾 (这一下没进录音): 把刚才压住的那份整段结果按正常那条路落一遍
+       *
+       * 已经真开录 (抬过号) 的那几支不用管: 压住那份带着旧号, `voiceAnswer` 自己会丢
+       */
+      function flushDeferredVoice() {
+        var queued = voiceDefer
+        voiceDefer = null
+        if (queued === null) return
+        if (voiceState === 'recording' || voiceState === 'working') return
+        voiceAnswer(queued)
       }
 
       /** 抬手 / 上滑那几个监听一次性的, 收尾时全部摘掉 */
@@ -6068,15 +6091,19 @@ window.__ModuleLoader__.load({
         if (voiceState === 'recording' || voiceState === 'working') return
         voiceState = 'press'
         var begin = function (stream) {
+          // 这一下没进录音 (没拿到流 / 抬手了 / 这版 WebView 录不了): 面板落下去之后,
+          // 上一趟压住的那份整段结果要照旧落进草稿 (2026-11-27 第四轮: 误触不该白扔一句)
           if (!stream) {
             voiceState = 'idle'
             hideRecPanel()
+            flushDeferredVoice()
             return
           }
           // 抬手发生在流回来之前: 那时候**不开始录** —— 否则这一趟会一直录到 `VOICE_MAX_MS`
           if (!voiceHeld) {
             voiceState = 'idle'
             hideRecPanel()
+            flushDeferredVoice()
             return
           }
           var Ctor = window.AudioContext || window.webkitAudioContext
@@ -6084,6 +6111,7 @@ window.__ModuleLoader__.load({
             toast('这一版 WebView 录不了音', true)
             voiceState = 'idle'
             hideRecPanel()
+            flushDeferredVoice()
             return
           }
           try {
@@ -6095,6 +6123,7 @@ window.__ModuleLoader__.load({
             toast('录音起不来', true)
             voiceState = 'idle'
             hideRecPanel()
+            flushDeferredVoice()
             return
           }
           voiceSourceRate = voiceContext.sampleRate
@@ -6107,6 +6136,16 @@ window.__ModuleLoader__.load({
           voiceProcessor = voiceContext.createScriptProcessor(4096, 1, 1)
           voiceProcessor.onaudioprocess = function (event) {
             if (voiceChunks === null) return
+            // **第一块采样到手 = 这一趟真的在录了**: 这一刻才抬号作废上一趟 (2026-11-27 第四轮) ——
+            // 抬早了的话, 误触 (太短 / 上滑取消 / 麦克风没给) 会把上一趟还在路上的整段白扔掉
+            if (!voiceTakeOpen) {
+              voiceTakeOpen = true
+              voiceId += 1
+              voiceLanded = false
+              voiceSettledTake = -1
+              voiceFallbackText = ''
+              voiceDefer = null
+            }
             var channel = event.inputBuffer.getChannelData(0)
             voiceChunks.push(new Float32Array(channel))
             // 波形要的是"这一块里最响的那一下": 峰值比 RMS 更贴耳朵, 也不会把一串辅音抹平
@@ -6132,9 +6171,9 @@ window.__ModuleLoader__.load({
           voiceChunkFails = 0
           voiceLiveText = ''
           voiceStreamOff = false
-          voiceLanded = false
-          // 上一趟的看门狗不许跨趟动手: 先收掉 (号已经在 `beginHoldRecording` 按下去那一刻抬过,
-          // 这一趟从头到尾就用那一个)
+          // 一趟还没真正开录 (第一块采样未到): 这一趟的号还没发, 上一趟的结果仍可正常落地
+          voiceTakeOpen = false
+          // 上一趟的看门狗不许跨趟动手: 先收掉
           if (voiceWatch !== null) clearTimeout(voiceWatch)
           voiceWatch = null
           voiceState = 'recording'
@@ -6154,6 +6193,7 @@ window.__ModuleLoader__.load({
         if (voiceStreamAsk === null) {
           voiceState = 'idle'
           hideRecPanel()
+          flushDeferredVoice()
           return
         }
         voiceStreamAsk.then(begin)
@@ -6274,6 +6314,12 @@ window.__ModuleLoader__.load({
         if (payload.kind === 'chunk') {
           if (typeof payload.id === 'number' && payload.id !== voiceId) return
           voiceChunkAnswer(payload)
+          return
+        }
+        // 手指按住、还没真正开录 (第一块采样未到): 面板正升着, 这一刻不动 DOM —— 先压住,
+        // press 收尾时没进录音的话再按正常那条路落一遍 (2026-11-27 第四轮)
+        if (voiceState === 'press' || (voiceState === 'recording' && voiceTakeOpen !== true)) {
+          voiceDefer = payload
           return
         }
         // 整段转写的结果只可能出现在"已经松手"之后: 还在录的时候来的一律当陈旧回推
@@ -9615,6 +9661,9 @@ window.__ModuleLoader__.load({
         voiceWatch = null
         voiceHeld = false
         voiceState = 'idle'
+        // 压住的那份整段结果也一起清掉: 重挂之后是新 DOM, 谁都不许往新草稿里写 (2026-11-27 第四轮)
+        voiceDefer = null
+        voiceTakeOpen = false
         // 下一次挂载是新的 DOM: 落进工作区那条腿若正等着, 让它自然超时 (不跨挂载落地);
         // 那条 15 s 的补试也一起撤掉 —— 重挂之后 autoStart 会再走一遍
         entering = false
