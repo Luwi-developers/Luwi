@@ -12,7 +12,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { condense, liveDirectory, liveFileName, liveSnapshot, readLiveSnapshot } from '../lib/luwi-live.mjs'
+import { condense, liveDirectory, liveFileName, liveSnapshot, PLAN_ANSWER_PREFIX, readLiveSnapshot } from '../lib/luwi-live.mjs'
 
 /** 一场会话: 第一轮有思考与工具, 第二轮还在流 */
 const EVENTS = [
@@ -122,6 +122,90 @@ test('一条只有工具调用的回答不算回答', () => {
   assert.equal(toolOnly.draft, null, '只有工具调用的那一轮没有草稿可看')
 })
 
+// ---------------------------------------------------------------------------
+// 2026-11-21: 一轮没有文本回答时也要有条目 (主人报的"当前会话没有收到回复")
+//   · 计划那一档: exit_plan_mode 的 plan 正文当回答 (手机上才看得到计划卡)
+//   · 其余工具轮: 一行「这一轮在电脑上跑了 N 次工具，没有文字回复」
+//   · 工具名 / 参数一个字都不进 (与上面那条同一条纪律)
+// ---------------------------------------------------------------------------
+
+/** 一轮纯工具 (settled) 的事件 */
+function toolOnlyTurn(tools = 3, extra = []) {
+  const events = [
+    { seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '看一下' }] } },
+  ]
+  for (let index = 0; index < tools; index += 1) {
+    events.push({ seq: 2 + index * 2, time: 2 + index, type: 'tool/call', data: { turn: 1, step: 1, name: 'pwsh', arguments: '{"command":"Get-ChildItem"}' } })
+    events.push({ seq: 3 + index * 2, time: 2 + index, type: 'tool/result', data: { turn: 1, step: 1 } })
+  }
+  events.push({ seq: 90, time: 90, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  events.push(...extra)
+  return events
+}
+
+test('一张只有工具、没有文本的轮落下"跑了 N 次工具"那一行 (不带工具名)', () => {
+  const { entries } = condense(toolOnlyTurn(3))
+  const answer = entries.filter(entry => entry.role === 'assistant')
+  assert.equal(answer.length, 1, '结算过的一轮必须留下一行回答')
+  assert.equal(answer[0].text, '（这一轮在电脑上跑了 3 次工具，没有文字回复）')
+  assert.equal(answer[0].seq, 6, '合成的回答用这一轮最后一个工具调用的 seq')
+  const joined = entries.map(entry => entry.text).join('|')
+  assert.ok(!joined.includes('pwsh'), '工具名不进投影')
+  assert.ok(!joined.includes('Get-ChildItem'), '工具参数不进投影')
+})
+
+test('exit_plan_mode 的计划正文当这一轮的回答', () => {
+  const plan = '# 修一下\n\n1. 先看账本\n2. 再落盘'
+  const events = toolOnlyTurn(1, [
+    {
+      seq: 7,
+      time: 7,
+      type: 'tool/call',
+      data: { turn: 1, step: 1, name: 'exit_plan_mode', arguments: JSON.stringify({ plan }) },
+    },
+    { seq: 8, time: 8, type: 'turn/end', data: { turn: 1 } },
+  ])
+  const { entries } = condense(events)
+  const answer = entries.filter(entry => entry.role === 'assistant')
+  assert.deepEqual(answer.map(entry => entry.seq), [7], '计划那一轮用 exit_plan_mode 自己的 seq')
+  assert.ok(answer[0].text.startsWith(PLAN_ANSWER_PREFIX), '计划正文带上一句前缀')
+  assert.ok(answer[0].text.includes('先看账本'), '计划正文逐字折进来')
+  assert.ok(!answer[0].text.includes('exit_plan_mode'), '工具名不进正文')
+})
+
+test('计划参数坏了 / 空计划 → 退回工具占位 (不假装有计划)', () => {
+  const broken = toolOnlyTurn(2, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: '{not json' } },
+  ])
+  const { entries } = condense(broken)
+  const answer = entries.find(entry => entry.role === 'assistant')
+  assert.equal(answer.text, '（这一轮在电脑上跑了 3 次工具，没有文字回复）')
+
+  const empty = toolOnlyTurn(1, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '   ' }) } },
+  ])
+  const second = condense(empty).entries.find(entry => entry.role === 'assistant')
+  assert.equal(second.text, '（这一轮在电脑上跑了 2 次工具，没有文字回复）')
+})
+
+test('有文本时文本优先: 计划与工具占位都不出', () => {
+  const events = toolOnlyTurn(2, [
+    { seq: 7, time: 7, type: 'tool/call', data: { name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '计划正文' }) } },
+    { seq: 8, time: 8, type: 'assistant/message', data: { turn: 1, step: 2, message: { content: [{ type: 'text', text: '真回答' }] } } },
+  ])
+  const { entries } = condense(events)
+  const answers = entries.filter(entry => entry.role === 'assistant')
+  assert.deepEqual(answers.map(entry => [entry.seq, entry.text]), [[8, '真回答']])
+})
+
+test('还在跑的工具轮不出占位 (只留下一轮的用户消息)', () => {
+  const events = toolOnlyTurn(2).filter(event => event.type !== 'turn/end')
+  const { entries, draft } = condense(events, { running: true })
+  assert.deepEqual(entries.map(entry => entry.role), ['user'])
+  assert.equal(draft, null, '工具占位要等落定, 不能随分片改')
+})
+
+
 test('a turn/end still settles its turn when the fallback carrier supplies one', () => {
   const withEnd = [
     { seq: 1, time: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '问题' }] } },
@@ -177,11 +261,14 @@ test('a snapshot carries the device, the session and the two lists', () => {
     truncated: false,
     updatedAt: 123,
   })
-  assert.equal(snapshot.v, 2, 'v2 起 entries 里才有已经落定的回答 (读的一侧据此决定要不要重做投影)')
+  assert.equal(snapshot.v, 3, 'v3 起每一条多一格 media (图片与文件); 读的一侧据此决定要不要重做投影')
   assert.equal(snapshot.sessionId, 'session-abc')
   assert.equal(snapshot.running, true)
   assert.equal(snapshot.deviceName, 'PC')
-  assert.deepEqual(readLiveSnapshot(snapshot), snapshot, 'a snapshot we wrote reads back unchanged')
+  // 读回来的时候 entries 那一条会被补上 `media: []` (老快照没有这一格 = 空清单), 别的逐字不变
+  const back = readLiveSnapshot(snapshot)
+  assert.deepEqual(back.entries, [{ seq: 1, role: 'user', text: 'hi', at: 1, media: [] }])
+  assert.deepEqual({ ...back, entries: [] }, { ...snapshot, entries: [] })
 })
 
 test('a snapshot read from the peer is validated, not trusted', () => {
@@ -214,4 +301,105 @@ test('live file names and directories stay inside the repo', () => {
   assert.equal(liveFileName('x'.repeat(200)).length, 128)
   assert.ok(liveDirectory('/repo', 'dev-1').includes('live/dev-1'))
   assert.throws(() => liveDirectory('/repo', '***'), /device id/u)
+})
+
+/* ── 2026-11-22 (2.8.1 #50): 条目带 media ─────────────────────────────── */
+
+test('每一条带的图与文件都进 media (附件块一路 + 附件段一路)', () => {
+  const events = [
+    {
+      seq: 2,
+      time: 11,
+      type: 'user/message',
+      data: {
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: '看图\n\n[附件 2 个, 图片用 read_image 打开]\n1. C:\\x\\lw-in\\a.png\n2. C:\\x\\lw-in\\b.pdf' },
+          { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', name: 'shot.png', bytes: 12 } },
+        ],
+      },
+    },
+    { seq: 4, time: 13, type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '收到' }] } } },
+  ]
+  const [user, assistant] = condense(events, { running: false }).entries
+  assert.equal(user.role, 'user')
+  assert.deepEqual(user.media.map(one => [one.kind, one.name, one.image]), [
+    ['attachment', 'shot.png', true],
+    ['path', 'a.png', true],
+    ['path', 'b.pdf', false],
+  ])
+  assert.equal(user.media[0].attachmentId, 'att-1')
+  assert.equal(user.media[1].path, 'C:\\x\\lw-in\\a.png')
+  assert.deepEqual(assistant.media, [], '没有图的那一条是空清单')
+})
+
+test('只有一张图、一句话都没有的用户消息也算一条 (以前整条丢掉)', () => {
+  const events = [
+    {
+      seq: 2,
+      time: 11,
+      type: 'user/message',
+      data: { source: { kind: 'user' }, content: [{ type: 'image', attachment: { attachmentId: 'att-9', mediaType: 'image/png', name: 'p.png' } }] },
+    },
+  ]
+  const entries = condense(events, { running: false }).entries
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].text, '[图片]', '纯图片那一句的正文是 `textOfContent` 给的占位')
+  assert.equal(entries[0].media.length, 1)
+  assert.equal(entries[0].media[0].attachmentId, 'att-9')
+})
+
+test('readLiveSnapshot: media 是不可信输入, 认不出的整项丢掉', () => {
+  const cleaned = readLiveSnapshot({
+    sessionId: 'session-x',
+    entries: [{
+      role: 'user',
+      text: 'x',
+      media: [
+        { kind: 'attachment', attachmentId: 'att-1', name: '../../a.png', image: true },
+        { kind: 'attachment', attachmentId: '', name: 'b.png' },
+        { kind: 'path', path: '', name: 'c.png' },
+        { kind: 'path', path: 'C:\\x\\lw-in\\d.pdf', name: 'd.pdf', image: false },
+        { kind: 'weird', name: 'e.png' },
+        null,
+      ],
+    }],
+  })
+  const media = cleaned.entries[0].media
+  assert.deepEqual(media.map(one => [one.kind, one.name]), [['attachment', 'a.png'], ['path', 'd.pdf']], '危险名字只留最后一段, 空 id 与空路径丢掉')
+  // 老快照没有这一格: 空清单
+  assert.deepEqual(readLiveSnapshot({ sessionId: 's', entries: [{ role: 'user', text: 'x' }] }).entries[0].media, [])
+})
+
+
+// ---------------------------------------------------------------------------
+// 6 · 合成条目 (2026-11-22 终端问答)
+//
+// 电脑上那句 `ask_user_question` 不是会话日志里的文本, 手机又只认 entries。所以中继把它
+// 作为 `extra` 塞进窗口: **进 entries, 不进 all** (对话账 conv/ 只记真人说的话), 而且在
+// 窗口裁剪之前并进来 —— 与别的条目同等对待, 裁掉就裁掉。
+// ---------------------------------------------------------------------------
+
+test('extra 条目进 entries 并按 seq 插回原位, 但不进 all', () => {
+  const extra = [{ seq: 3.5, role: 'assistant', text: '（电脑在等你回答）', at: 12.5, media: [] }]
+  const { entries, all } = condense(EVENTS, { running: false, extra })
+  const text = [entries.map(entry => entry.text).join('|'), all.map(entry => entry.text).join('|')]
+  assert.match(entries.map(entry => entry.text).join('|'), /（电脑在等你回答）/u)
+  assert.doesNotMatch(all.map(entry => entry.text).join('|'), /（电脑在等你回答）/u, '对话账不记合成条目')
+  // 排在本轮回答之后 (seq 更大), 不是插在最前面
+  const at = entries.findIndex(entry => entry.text === '（电脑在等你回答）')
+  assert.ok(at > 0, `合成条目不该排在最前: ${text[0]}`)
+})
+
+test('extra 跟别的条目一起被窗口裁 (没有特权); 空 entries 或坏条目直接忽略', () => {
+  const extra = [
+    { seq: 3.5, role: 'assistant', text: '旧的合成条目', at: 12.5, media: [] },
+    { seq: 99, role: 'assistant', text: '最新的合成条目', at: 99, media: [] },
+    { seq: 100, role: 'assistant', text: '', at: 100 },
+    null,
+  ]
+  const one = condense(EVENTS, { running: false, maxEntries: 1, extra })
+  assert.deepEqual(one.entries.map(entry => entry.text), ['最新的合成条目'])
+  assert.equal(one.truncated, true)
+  assert.deepEqual(condense(EVENTS, { running: false, extra: [] }).all.map(entry => entry.text), condense(EVENTS, { running: false }).all.map(entry => entry.text))
 })

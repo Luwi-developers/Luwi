@@ -1,6 +1,21 @@
 {
   "branches": [
     {
+      "name": "backup/38-0130",
+      "why": "三条内容都已在 main: packHostTree 原生崩溃补跑按文件精搬进 tools/pack-host.mjs (2026-11-13 那段注释就是它), #38 的门户主动投递被 PR #67 重做取代; 分支留作对照",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.0-38",
+      "why": "同一个 #38: 两次派单的成果被 PR #67 重做取代, 分支 tip 只是 main 的旧 merge 提交",
+      "since": "v2.7.10"
+    },
+    {
+      "name": "public/main",
+      "why": "公开树导出 (只读镜像, 内容随 PR 走, 本身不进 main)",
+      "since": "v2.7.10"
+    },
+    {
       "name": "agent/sa-950a18dd98b944973866dcadbf56498b",
       "why": "superagent 工作分支, 成果已由 PR 的 merge 提交进 main",
       "since": "v2.7.10"
@@ -214,6 +229,51 @@
       "name": "patch/scroll-and-shell",
       "why": "已合 (PR squash 或按文件精搬), 分支留作对照",
       "since": "v2.7.10"
+    },
+    {
+      "name": "agent/2.8.1-37-r4",
+      "since": "v2.8.1",
+      "why": "同一单 #37 的旧工位分支：成果由 PR #153 进 main（cc61912 压成单提交，merge 47ed344），这一支只是它合并前的中间态"
+    },
+    {
+      "name": "agent/2.8.1-37",
+      "since": "v2.8.1",
+      "why": "#37 的前两轮分支（81cca04 / 5ebe087 / 6e99c3f），内容已被 PR #153 的 cc61912 整体吸收"
+    },
+    {
+      "name": "agent/2.8.1-34",
+      "since": "v2.8.1",
+      "why": "拖放附件那份的中间分支：内容已随整合线进 main（与 main 逐文件无差），原 PR #132 关闭；tip 只是旧 merge 提交"
+    },
+    {
+      "name": "agent/2.8.1-48",
+      "since": "v2.8.1",
+      "why": "终端=手机管电脑（#48）：PR #141 整条线压成单提交进 main，分支留作对照"
+    },
+    {
+      "name": "agent/2.8.1-46",
+      "since": "v2.8.1",
+      "why": "活动板块情感化 P1–P3（#45/#46/#47）：PR #137 压平进 main，分支留作对照"
+    },
+    {
+      "name": "agent/2.8.1-integ",
+      "since": "v2.8.1",
+      "why": "整合线（#34/#45/#49 那批的中间态）：成果由 PR #143 / #145 进 main"
+    },
+    {
+      "name": "agent/2.8.1-portal-head",
+      "since": "v2.8.1",
+      "why": "头像=历史入口那份：内容已被后续整合线整块重做进 main（「已开新对话」浮层在 main 上），分支不单独合"
+    },
+    {
+      "name": "agent/2.8.1-wake-pool",
+      "since": "v2.8.1",
+      "why": "还没进 main 的下一批：兜底池按周去重轮转（主人 2026-11-21 定），2.8.1 发版包不含它，留到 2.8.2 周期合并"
+    },
+    {
+      "name": "backup/agent-2.8.1-29-133af6e",
+      "since": "v2.8.1",
+      "why": "#29 的备份分支：成果已由 PR #119 进 main"
     }
   ]
 }

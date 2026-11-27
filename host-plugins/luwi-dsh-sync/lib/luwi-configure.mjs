@@ -15,7 +15,9 @@
 import { readFile, writeFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { WORKSPACE_LIMITS } from './constants.mjs'
+import { WORKSPACE_LIMITS, ASK_LIMITS } from './constants.mjs'
+// 2026-11-22 (终端问答): 模式词表只留一份 (与 `resolveAskSpec` 同一份), 写面与读面不会走岔
+import { ASK_MODES } from './luwi-ask.mjs'
 
 /** 顶层键 (与 app 的 SyncSetting.kt 逐字对齐; tools/check-sync-setting.mjs 也在钉这几个). */
 export const KEYS = Object.freeze({
@@ -37,6 +39,12 @@ export const KEYS = Object.freeze({
   PAIRING: 'pairing',
   WORKSPACE: 'workspace',
   SESSIONS: 'sessions',
+  // Luwi 加 (2026-11-21 终端): 这一台是哪一侧 (`phone` = 手机/控制器, `pc` = 被管的电脑)
+  ROLE: 'role',
+  // 2026-11-21 晚: P2P 传输段 (面板那颗开关写的就是这里的 enabled)
+  P2P: 'p2p',
+  // 2026-11-22 (终端问答): 问答中继段 (`mode` / `waitMs` / `brief`), 只住 JSON 层
+  ASK: 'ask',
 })
 
 /** 配对段里的键 */
@@ -315,6 +323,64 @@ export async function applyConfigure(file, patch) {
     changed.push(patch.pairing === null ? 'pairing = (cleared)' : `pairing.id = ${patch.pairing.id}`)
   }
 
+  // 2026-11-21 终端: 这一台是哪一侧。面板保存/重新配对时写 `pc` —— 手机那一侧由 App 扫码时写 `phone`
+  // (不能拿 `pairing` 判: 电脑生成码时也写那份)
+  if (Object.prototype.hasOwnProperty.call(patch, 'role')) {
+    const value = String(patch.role ?? '').trim().toLowerCase()
+    if (value !== 'pc' && value !== 'phone') return { ok: false, changed, error: 'role must be "pc" or "phone"' }
+    tree[KEYS.ROLE] = value
+    changed.push(`role = ${value}`)
+  }
+
+  // 2026-11-21 晚: P2P 那段只让面板改两个键 —— enabled (开/关) 与 binaryPath (非常规安装)。
+  // 其余档位 (power / 心跳 / 超时) 仍走 JSON 手写, 面板不替人做主
+  if (Object.prototype.hasOwnProperty.call(patch, 'p2p')) {
+    const next = patch.p2p
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) return { ok: false, changed, error: 'p2p must be an object' }
+    const section = sectionOf(tree, KEYS.P2P)
+    if (Object.prototype.hasOwnProperty.call(next, 'enabled')) {
+      if (typeof next.enabled !== 'boolean') return { ok: false, changed, error: 'p2p.enabled must be true or false' }
+      section.enabled = next.enabled
+      changed.push(`p2p.enabled = ${next.enabled}`)
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'binaryPath')) {
+      const raw = typeof next.binaryPath === 'string' ? next.binaryPath.trim() : String(next.binaryPath ?? '')
+      if (raw.length > 1024) return { ok: false, changed, error: 'p2p.binaryPath is longer than 1024 characters' }
+      if (raw === '') delete section.binaryPath
+      else section.binaryPath = raw
+      changed.push(raw === '' ? 'p2p.binaryPath = (auto)' : `p2p.binaryPath = ${raw}`)
+    }
+    tree[KEYS.P2P] = section
+  }
+
+  // 2026-11-22 (终端问答): 只让命令/配置写三个键 —— mode (四档) / waitMs / brief。
+  // 与 `lib/luwi-ask.mjs` 的 `resolveAskSpec` 同一套边界, 一处被拒就停在那一条上
+  if (Object.prototype.hasOwnProperty.call(patch, 'ask')) {
+    const next = patch.ask
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) return { ok: false, changed, error: 'ask must be an object' }
+    const section = sectionOf(tree, KEYS.ASK)
+    if (Object.prototype.hasOwnProperty.call(next, 'mode')) {
+      const mode = typeof next.mode === 'string' ? next.mode.trim().toLowerCase() : ''
+      if (!ASK_MODES.includes(mode)) return { ok: false, changed, error: `ask.mode must be one of ${ASK_MODES.join(', ')}` }
+      section.mode = mode
+      changed.push(`ask.mode = ${mode}`)
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'waitMs')) {
+      const wait = Number(next.waitMs)
+      if (!Number.isInteger(wait) || wait < ASK_LIMITS.MIN_WAIT_MS || wait > ASK_LIMITS.MAX_WAIT_MS) {
+        return { ok: false, changed, error: `ask.waitMs must be an integer in [${ASK_LIMITS.MIN_WAIT_MS}, ${ASK_LIMITS.MAX_WAIT_MS}]` }
+      }
+      section.waitMs = wait
+      changed.push(`ask.waitMs = ${wait}`)
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'brief')) {
+      if (typeof next.brief !== 'boolean') return { ok: false, changed, error: 'ask.brief must be true or false' }
+      section.brief = next.brief
+      changed.push(`ask.brief = ${next.brief}`)
+    }
+    tree[KEYS.ASK] = section
+  }
+
   if (Object.prototype.hasOwnProperty.call(patch, 'on')) {
     const value = patch.on
     if (typeof value !== 'boolean') return { ok: false, changed, error: 'on must be true or false' }
@@ -324,7 +390,7 @@ export async function applyConfigure(file, patch) {
   }
 
   if (changed.length === 0) {
-    return { ok: false, changed, error: 'nothing to change: pass remote, branch, publicUrl, workspace, sessions, pairing, autoPullOnStart, autoPushOnTurnEnd, pullIntervalMinutes or on' }
+    return { ok: false, changed, error: 'nothing to change: pass remote, branch, publicUrl, workspace, sessions, pairing, p2p, ask, autoPullOnStart, autoPushOnTurnEnd, pullIntervalMinutes or on' }
   }
 
   // 目录可能还不存在 (全新机器上 lw/ 还没建)

@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -15,6 +16,7 @@ import android.widget.Toast
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,11 +33,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import io.github.yuloong07star.luwi.tool.IconSet
+import io.github.yuloong07star.luwi.tool.IconTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +74,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.scaffolds.InputDialog
 import io.github.yuloong07star.luwi.automation.AutomationEngine
 import io.github.yuloong07star.luwi.automation.AutomationRule
 import io.github.yuloong07star.luwi.automation.AutomationStore
@@ -83,7 +97,6 @@ import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreStatus
 import io.github.yuloong07star.luwi.tool.ExploreTask
 import io.github.yuloong07star.luwi.tool.ProactiveGate
-import io.github.yuloong07star.luwi.tool.ProactiveSchedule
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.Wishes
@@ -104,6 +117,7 @@ import java.io.File
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.voice.VoiceSettings
 import io.github.yuloong07star.luwi.voice.SpeechModelDownload
+import io.github.yuloong07star.luwi.voice.VoiceSource
 import io.github.yuloong07star.luwi.constants.UiSpacing
 import io.github.yuloong07star.luwi.host.AppSkills
 import io.github.yuloong07star.luwi.host.DshHost
@@ -140,6 +154,8 @@ import io.github.yuloong07star.luwi.scaffolds.SuperTextField
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsHairline
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsNote
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsPanel
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSectionBar
+import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSectionEntry
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsSpace
 import io.github.yuloong07star.luwi.scaffolds.settings.SettingsTabs
 import io.github.yuloong07star.luwi.sync.ModeModel
@@ -148,10 +164,12 @@ import io.github.yuloong07star.luwi.sync.SyncSetting
 import io.github.yuloong07star.luwi.theme.ThemeSettings
 import io.github.yuloong07star.luwi.theme.ThemeStore
 import io.github.yuloong07star.luwi.tool.LwEdgeSpeech
+import io.github.yuloong07star.luwi.tool.LwDeepseekSpeech
 import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwPlugin
 import io.github.yuloong07star.luwi.tool.LwPower
 import io.github.yuloong07star.luwi.tool.LwSpeak
+import io.github.yuloong07star.luwi.tool.PortalCrop
 import io.github.yuloong07star.luwi.tool.PortalFace
 import io.github.yuloong07star.luwi.tool.LwTts
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -241,12 +259,13 @@ private val CollapsedSections = listSaver<Set<String>, String>(
 private const val SIGN_IN_URL = "https://luwi.dpdns.org/login"
 
 /**
- * 电脑上装的那份同步插件 (2026-10-24 主人: 同步板块后加上 dsh 的同步插件地址)
+ * 电脑上装的那份终端插件 (2026-10-24 主人: 同步板块后加上 dsh 的同步插件地址; 2026-11-22 收成一份)
  *
  * 手机这一端只负责扫码配对, 真正跑镜像与面板的是电脑 dsh 里这个插件; 这里只给一个可点开的地址,
- * 不做"一键安装" —— 装插件要在电脑上走 dsh 自己的插件安装
+ * 不做"一键安装" —— 装插件要在电脑上走 dsh 自己的插件安装。地址的正本在 [PortalTerminal.PC_INSTALL_URL]
+ * (门户那张未配对卡片上的「去给 PC 装 luwi终端」也是它), 这里只是同一个值的老名字
  */
-private const val SYNC_PLUGIN_URL = "https://github.com/yuloong07-star/luwi-dsh-sync"
+private const val SYNC_PLUGIN_URL = PortalTerminal.PC_INSTALL_URL
 
 /**
  * 缺省展开的白名单 (D1, 2026-10-17 主人拍板): 省电那一段 + 「常用」一级分组下那六段
@@ -262,12 +281,13 @@ internal val SettingsSectionsAlwaysOpenKeys = listOf(
 internal val SettingsSectionsAlwaysOpen: Set<String> = SettingsSectionsAlwaysOpenKeys.toSet()
 
 /**
- * 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern;
- * 活动那一段 2026-11-07 由「探索」与「定时对话」合成 —— 她的日程、她开口的时机都在同一个入口里)
+ * 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末; 酒馆那一段 2026-10-29 归 LuwiTavern;
+ * 活动那一段 2026-11-07 由「探索」与「定时对话」合成 —— 她的日程、她开口的时机都在同一个入口里;
+ * 开发那一段 2026-11-16 加在接口后面 —— 两件伴侣软件由用户自己下)
  */
 private val AbilitySectionKeys = listOf(
     "notifications", "screenshot", "look", "lock",
-    "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+    "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api", "dev",
 )
 
 /**
@@ -279,6 +299,90 @@ private val AbilitySectionKeys = listOf(
  */
 internal val SettingsSectionKeys: List<String> = (SettingsSectionsAlwaysOpenKeys + AbilitySectionKeys)
     .filter { it != "tavern" || LuwiTavern.enabled }
+
+/**
+ * 顶部段名索引条用的段名 (2026-11-14 主人: "在 luwi 设置界面顶部加上可选的版块名, 点击后跳转到对应板块")
+ *
+ * 键与顺序必须与 [SettingsSectionKeys] 一致 —— 那一份管"页面上有哪些段", 这一份只负责段名资源,
+ * 两份走岔了就是"点某一段跳到另一段", 界面上一点异常都看不出来, 所以
+ * `tools/check-settings-sections.mjs` 逐个对齐 (顺序也管)
+ *
+ * 酒馆那一段的段名不叫 `settings_section_tavern` (它是 `settings_tavern_title`, 与它自己那一页同键),
+ * 两把键都在共享的 `strings.xml` 里, 所以这里不必碰 `LuwiTavern`
+ */
+internal val SettingsSectionTitleRes: Map<String, Int> = linkedMapOf(
+    "power" to R.string.settings_section_power,
+    "appearance" to R.string.settings_section_appearance,
+    "channel" to R.string.settings_section_channel,
+    "ball" to R.string.settings_section_ball,
+    "wake" to R.string.settings_section_wake,
+    "speak" to R.string.settings_section_speak,
+    "notifications" to R.string.settings_section_notifications,
+    "screenshot" to R.string.settings_section_screenshot,
+    "look" to R.string.settings_section_look,
+    "lock" to R.string.settings_section_lock,
+    "activity" to R.string.settings_section_activity,
+    "automation" to R.string.settings_section_automation,
+    "quick" to R.string.settings_section_quick,
+    "plugin" to R.string.settings_section_plugin,
+    "skills" to R.string.settings_section_skills,
+    "linux" to R.string.settings_section_linux,
+    "sync" to R.string.settings_section_sync,
+    "tavern" to R.string.settings_tavern_title,
+    "permissions" to R.string.settings_section_permissions,
+    "api" to R.string.settings_section_api,
+    "dev" to R.string.settings_section_dev,
+)
+
+/**
+ * 列表顶上那条「检查所需依赖」占掉的下标数
+ *
+ * 索引条要把"段名"翻成 [androidx.compose.foundation.lazy.LazyListState] 的 item 下标, 而那一条不是
+ * 段落, 于是它先吃掉一个下标 (见 [settingsSectionRowIndex])
+ */
+internal const val SettingsListLeadingItems = 1
+
+/**
+ * 组标题站在哪两段之前: 它们各占一个 item, 于是段的下标要为此多挪一格
+ *
+ * 页面上的 `GroupTitle` 只有「常用」与「能力」两处 (分别在 `appearance` 与 `notifications` 之前),
+ * 这一份与页面实况由 `tools/check-settings-sections.mjs` 对齐 —— 页面新插一处组标题而这里忘了写,
+ * 索引条就会整体偏一格
+ */
+internal val SettingsGroupTitleBefore: Set<String> = setOf("appearance", "notifications")
+
+/**
+ * 段名 → 它在列表里的下标; 不认识的段名回 null
+ *
+ * 纯算术: 前面每多一段就多一个 item, 遇到 [SettingsGroupTitleBefore] 里的段再多一个 (组标题自己)
+ */
+internal fun settingsSectionRowIndex(keys: List<String>, key: String): Int? {
+    var row = SettingsListLeadingItems
+    for (each in keys) {
+        if (each in SettingsGroupTitleBefore) row += 1
+        if (each == key) return row
+        row += 1
+    }
+    return null
+}
+
+/**
+ * 下标 → 那一段的段名: 索引条的高亮跟着纵向滚动走
+ *
+ * 组标题那一行算它上面那一段 (看的是"我现在正读到哪一段"), 顶上那条提示 (下标 0) 回 null
+ */
+internal fun settingsSectionAtRow(keys: List<String>, row: Int): String? {
+    if (row < SettingsListLeadingItems) return null
+    var at = SettingsListLeadingItems
+    var found: String? = null
+    for (each in keys) {
+        if (each in SettingsGroupTitleBefore) at += 1
+        if (at > row) break
+        found = each
+        at += 1
+    }
+    return found
+}
 
 /**
  * 缺省收起来的那几段 = 页面上所有段 - 白名单
@@ -393,6 +497,8 @@ fun SettingsScreen() {
     // ⋮ 里那几件事 (反馈 / 检测更新 / 关于 …) 共用这一个"现在开着哪一页"的记号, null = 都没开
     // 同一刻只画一个对话框, 见 AboutDialogs 的文件头
     var about by remember { mutableStateOf<AboutPage?>(null) }
+    // 自检与上报 (2026-11-08 主人: 出事先自检, 修不了再由他自己决定要不要发)
+    var doctor by remember { mutableStateOf(false) }
     // 捐赠页那一行要跟着"刚填过的那个地址"变, 而它在偏好里 —— 对话框关掉时重新读一次
     // 收起来的那几段 (主人 2026-10-08: "把各设置版块设置为可折叠的"; 2026-10-16 第 1 条: 进页面只展开
     // 省电与「常用」那六段, 能力那 13 段收着): **缺省只展开白名单那七段** ([SettingsSectionsAlwaysOpen]),
@@ -407,6 +513,33 @@ fun SettingsScreen() {
         sessionCollapsed = collapsed
     }
 
+    // 顶部那条段名索引条 (2026-11-14 主人: "顶部加上可选的版块名, 点击后跳转到对应板块, 可以左右滑"):
+    // 它要能把列表滚过去, 于是滚动位置提到这一层; 高亮再由"现在最上面那一项"反推 —— 列表与条共用
+    // 同一个 [listState], 两边才不会各说各的
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // 高亮 = **视口最上面那一段**, 不是"上一次点了哪一颗": 点「接口」时列表已经到底, 它挤不到顶部,
+    // 这时亮着的是"现在正读的那一段" (快捷指令), 于是条上的高亮与眼睛看到的内容永远一致
+    val activeSection by remember {
+        derivedStateOf { settingsSectionAtRow(SettingsSectionKeys, listState.firstVisibleItemIndex) }
+    }
+    // 段名只在这里取一次: 条的 lambda 不在组合上下文里, stringResource 进不去
+    val sectionEntries: List<SettingsSectionEntry> = buildList {
+        SettingsSectionKeys.forEach { key ->
+            SettingsSectionTitleRes[key]?.let { add(SettingsSectionEntry(key, stringResource(it))) }
+        }
+    }
+    // 点段名: 收着的先展开 (跳到一条收着的标题上没有意义), 再滚到它
+    val jumpToSection: (String) -> Unit = { key ->
+        if (key in collapsed) {
+            collapsed = collapsed - key
+            sessionCollapsed = collapsed
+        }
+        settingsSectionRowIndex(SettingsSectionKeys, key)?.let { row ->
+            scope.launch { listState.animateScrollToItem(row) }
+        }
+    }
+
     // 「检查所需依赖」那一行弹出来的那张体检表 (2026-11-04 主人 #1②/#2): 与首启那个对话框是同一个
     // ([ReadyCardDialog]), 只是这里随时打得开
     var readyOpen by remember { mutableStateOf(false) }
@@ -419,105 +552,123 @@ fun SettingsScreen() {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
-                title = stringResource(R.string.settings_title),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = navigator.pop) {
-                        Icon(
-                            imageVector = MiuixIcons.Back,
-                            contentDescription = stringResource(R.string.settings_back),
-                        )
-                    }
-                },
-                // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 账号 / 关于 / 要重启 host 才
-                // 生效的改动
-                // 页面上就不必每个面板各放一个按钮 (2026-10-08 加了前三条, 见开发计划 2.4 与 2.14)
-                // **G1-D 那几行「打开 <对端名>」2026-10-17 撤掉了** (主人: "没用就删掉"): 它载入的
-                // 是对端名片里手填的 publicUrl, 而电脑侧填的是回环地址 —— 手机上 127.0.0.1 指的是
-                // 自己 (实测那台真机只在 127.0.0.1:3080 上听本机 host, 也没有 adb reverse 隧道),
-                // 点开必白页; 真要看/操作电脑那份 GUI, 走浏览器与「（PC）」影子工作区那两条路
-                // (插件侧名片与 `/sync peers` 不受影响, 那两样是 G1-D 的读数面)
-                actions = {
-                    // 「更多」左边那一个刷新 2026-11-04 撤了 (主人 #4): 这一页的设置各段自己会读,
-                    // 而"当场重读一遍"与「检查所需依赖」那一行说的是同一件事
-                    OverlayIconDropdownMenu(
-                        entry = DropdownEntry(
-                            items = listOf(
-                                DropdownItem(
-                                    // 2.7.9 第 10 条 (2026-10-19 主人: 反馈入口放 ⋮ 的第一条):
-                                    // 后端还没就绪, 这一条走"复制 + 打开 New Issue 页"的本地兜底
-                                    text = stringResource(R.string.settings_menu_feedback),
-                                    summary = stringResource(R.string.settings_menu_feedback_summary),
-                                    onClick = { about = AboutPage.FEEDBACK },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_funnel),
-                                    summary = stringResource(R.string.settings_menu_funnel_summary),
-                                    // 只复制, 不上报: 这是给人回答"我到底卡在哪一步"用的那张表
-                                    onClick = {
-                                        context.getSystemService(ClipboardManager::class.java)
-                                            ?.setPrimaryClip(
-                                                ClipData.newPlainText(
-                                                    "Luwi funnel",
-                                                    Funnel.report(context),
-                                                ),
-                                            )
-                                        Toast.makeText(
-                                            context,
-                                            R.string.settings_api_copied,
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_update),
-                                    summary = stringResource(R.string.settings_about_update_summary),
-                                    onClick = {
-                                        UpdateCheck.reset()
-                                        about = AboutPage.UPDATE
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_account),
-                                    summary = stringResource(R.string.settings_menu_account_summary),
-                                    // 2026-10-25: 文案改成「账号」—— 打开的是官网登录页,
-                                    // 未登录先登录, 已登录会被那一页送去账号页, 从那里进酒馆签到或购买
-                                    onClick = {
-                                        openPage(context, SIGN_IN_URL)?.let { problem ->
-                                            Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_menu_about),
-                                    summary = stringResource(
-                                        R.string.settings_about_version,
-                                        UpdateCheck.localVersionOf(context),
-                                        UpdateCheck.localCodeOf(context),
+            Column {
+                TopAppBar(
+                    title = stringResource(R.string.settings_title),
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = navigator.pop) {
+                            Icon(
+                                imageVector = MiuixIcons.Back,
+                                contentDescription = stringResource(R.string.settings_back),
+                            )
+                        }
+                    },
+                    // 这一页里"不用常驻"的事全收在这里: 反馈 / 检测更新 / 账号 / 关于 / 要重启 host 才
+                    // 生效的改动
+                    // 页面上就不必每个面板各放一个按钮 (2026-10-08 加了前三条, 见开发计划 2.4 与 2.14)
+                    // **G1-D 那几行「打开 <对端名>」2026-10-17 撤掉了** (主人: "没用就删掉"): 它载入的
+                    // 是对端名片里手填的 publicUrl, 而电脑侧填的是回环地址 —— 手机上 127.0.0.1 指的是
+                    // 自己 (实测那台真机只在 127.0.0.1:3080 上听本机 host, 也没有 adb reverse 隧道),
+                    // 点开必白页; 真要看/操作电脑那份 GUI, 走浏览器与「（PC）」影子工作区那两条路
+                    // (插件侧名片与 `/sync peers` 不受影响, 那两样是 G1-D 的读数面)
+                    actions = {
+                        // 「更多」左边那一个刷新 2026-11-04 撤了 (主人 #4): 这一页的设置各段自己会读,
+                        // 而"当场重读一遍"与「检查所需依赖」那一行说的是同一件事
+                        OverlayIconDropdownMenu(
+                            entry = DropdownEntry(
+                                items = listOf(
+                                    DropdownItem(
+                                        // 2026-11-08 主人: 自检排第一条 —— 它答的是"我这一层对不对",
+                                        // 而反馈答的是"我要说点什么", 先有读数再说话
+                                        text = stringResource(R.string.doctor_menu),
+                                        summary = stringResource(R.string.doctor_menu_summary),
+                                        onClick = { doctor = true },
                                     ),
-                                    onClick = { about = AboutPage.ABOUT },
-                                ),
-                                DropdownItem(
-                                    text = stringResource(R.string.settings_restart_host),
-                                    summary = stringResource(R.string.settings_restart_host_summary),
-                                    onClick = { DshHost.restart(context) },
+                                    DropdownItem(
+                                        // 2.7.9 第 10 条 (2026-10-19 主人: 反馈入口放 ⋮ 的第一条):
+                                        // 后端还没就绪, 这一条走"复制 + 打开 New Issue 页"的本地兜底
+                                        text = stringResource(R.string.settings_menu_feedback),
+                                        summary = stringResource(R.string.settings_menu_feedback_summary),
+                                        onClick = { about = AboutPage.FEEDBACK },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_funnel),
+                                        summary = stringResource(R.string.settings_menu_funnel_summary),
+                                        // 只复制, 不上报: 这是给人回答"我到底卡在哪一步"用的那张表
+                                        onClick = {
+                                            context.getSystemService(ClipboardManager::class.java)
+                                                ?.setPrimaryClip(
+                                                    ClipData.newPlainText(
+                                                        "Luwi funnel",
+                                                        Funnel.report(context),
+                                                    ),
+                                                )
+                                            Toast.makeText(
+                                                context,
+                                                R.string.settings_api_copied,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_update),
+                                        summary = stringResource(R.string.settings_about_update_summary),
+                                        onClick = {
+                                            UpdateCheck.reset()
+                                            about = AboutPage.UPDATE
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_account),
+                                        summary = stringResource(R.string.settings_menu_account_summary),
+                                        // 2026-10-25: 文案改成「账号」—— 打开的是官网登录页,
+                                        // 未登录先登录, 已登录会被那一页送去账号页, 从那里进酒馆签到或购买
+                                        onClick = {
+                                            openPage(context, SIGN_IN_URL)?.let { problem ->
+                                                Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_menu_about),
+                                        summary = stringResource(
+                                            R.string.settings_about_version,
+                                            UpdateCheck.localVersionOf(context),
+                                            UpdateCheck.localCodeOf(context),
+                                        ),
+                                        onClick = { about = AboutPage.ABOUT },
+                                    ),
+                                    DropdownItem(
+                                        text = stringResource(R.string.settings_restart_host),
+                                        summary = stringResource(R.string.settings_restart_host_summary),
+                                        onClick = { DshHost.restart(context) },
+                                    ),
                                 ),
                             ),
-                        ),
-                    ) {
-                        Icon(
-                            imageVector = MiuixIcons.More,
-                            contentDescription = stringResource(R.string.settings_more),
-                        )
-                    }
-                },
-            )
+                        ) {
+                            Icon(
+                                imageVector = MiuixIcons.More,
+                                contentDescription = stringResource(R.string.settings_more),
+                            )
+                        }
+                    },
+                )
+                // 顶部段名索引条 (2026-11-14 主人): 点段名跳过去, 左右滑着看全部 ——
+                // 二十段都收着的时候, 只有它是这一页的目录
+                SettingsSectionBar(
+                    entries = sectionEntries,
+                    activeKey = activeSection,
+                    onPick = jumpToSection,
+                )
+            }
         },
     ) { innerPadding ->
         LazyColumn(
             contentPadding = innerPadding,
             scrollBehavior = scrollBehavior,
+            // 顶栏那条段名索引条要能把这一页滚过去, 所以滚动位置提到外面那一层 (jumpToSection)
+            state = listState,
             // 2026-11-08 重做排版: 段与段之间的距离改由每一段自己给 (一条细线 + 展开态那 20dp),
             // 骨架这一层不再统一加 12dp - 否则收起态那二十行会被拉开, 一页装不下几个段, "目录"
             // 这个形态就没了。左右缩进也从全局那 12dp 收到本页自己的 16dp (SettingsSpace.Inset)
@@ -696,12 +847,11 @@ fun SettingsScreen() {
                     ExploreOverview()
                     SettingsPanel { ExploreItems() }
                     SectionSmallTitle(stringResource(R.string.settings_activity_speak))
-                    ProactiveOverview()
                     SettingsPanel { ProactiveItems() }
                     SectionSmallTitle(stringResource(R.string.settings_activity_knows))
                     SettingsPanel { KnowsItems() }
                     // 更多设置 (2026-11-07 晚): 潜水与唤醒 / 开口节奏 / 判断层那一套参数 —— 与 QQ 桥接
-                    // 的二代仿真同一个口径; 敲钟之后"看什么"由探索自己加, 这一行只把入口摆出来
+                    // 的二代仿真同一个口径; 唤醒之后"看什么"由探索自己加, 这一行只把入口摆出来
                     //
                     // 弹窗而不是二级页 (主人当天: "改成像选择权限那样的弹窗"): 它是一页参数, 不值得
                     // 占一次跳转; 状态记在段内, 收起这一段就等于把它关掉
@@ -828,11 +978,35 @@ fun SettingsScreen() {
             ) {
                 ApiItems()
             }
+
+            // 开发那一段 (2.8.1 #16, 主人 2026-11-16: "在 luwi 设置里加个开发板块, 上面加上可以让
+            // 用户自行下载'安卓开发工具'和'luwi 开发台'伴侣软件"): 两行下载入口, **不代装** —— 包下
+            // 下来交给系统安装器, 装不装由人在那一页点的那一下定 (见 [DevItems] 与 [DevTools])
+            settingsSection(
+                key = "dev",
+                title = R.string.settings_section_dev,
+                summary = R.string.settings_section_dev_summary,
+                collapsed = collapsed,
+                onToggle = toggleSection,
+            ) {
+                DevItems()
+            }
         }
 
         // 最上面那一行「检查所需依赖」点出来的那张体检表 (2026-11-04 主人 #1②): 与首启自动弹的
         // 那一次是同一个对话框, 只是这里随时打得开
-        if (readyOpen) ReadyCardDialog(onDismiss = { readyOpen = false })
+        if (readyOpen) {
+            ReadyCardDialog(
+                onDismiss = { readyOpen = false },
+                onReport = {
+                    readyOpen = false
+                    doctor = true
+                },
+            )
+        }
+
+        // ⋮ 第一条那颗自检: 八项读数全在本机, 点上报才发
+        if (doctor) DoctorDialog(onDismissRequest = { doctor = false })
 
         // ⋮ 里那几件事的对话框: 同一刻只画一个, 由那一个 [about] 记号决定是哪一页 (见 AboutDialogs)
         when (about) {
@@ -877,36 +1051,119 @@ private fun PortalFaceItems() {
         PortalState.run?.invoke("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.reloadLook()")
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val next = withContext(Dispatchers.IO) { PortalFace.setWall(context, uri) }
-                if (next == null) {
-                    message = context.getString(R.string.settings_portal_wall_failed)
-                } else {
-                    message = null
-                    revision += 1
-                    pushLook()
+    // 选完图先解码, 再进裁剪窗 (2026-11-15 主人: "头像选择时没有选择裁剪尺寸的弹窗, 背景应当也加上")
+    // 两条路只在"落到哪一格"上不同, 解码 / 裁剪 / 落盘是同一套
+    var cropKind by remember { mutableStateOf<PortalCropKind?>(null) }
+    var cropSource by remember { mutableStateOf<Bitmap?>(null) }
+
+    fun failureOf(kind: PortalCropKind): String = context.getString(
+        if (kind == PortalCropKind.AVATAR) {
+            R.string.settings_portal_avatar_failed
+        } else {
+            R.string.settings_portal_wall_failed
+        },
+    )
+
+    fun startCrop(kind: PortalCropKind, uri: Uri) {
+        scope.launch {
+            val decoded = withContext(Dispatchers.IO) { PortalFace.decodeBounded(context, uri) }
+            if (decoded == null) {
+                message = failureOf(kind)
+                return@launch
+            }
+            cropSource = decoded
+            cropKind = kind
+        }
+    }
+
+    fun commitCrop(kind: PortalCropKind, source: Bitmap, rect: PortalCrop.Rect) {
+        scope.launch {
+            val next = withContext(Dispatchers.IO) {
+                val piece = PortalFace.cut(source, rect) ?: return@withContext null
+                try {
+                    if (kind == PortalCropKind.AVATAR) {
+                        PortalFace.setAvatar(context, piece)
+                    } else {
+                        PortalFace.setWall(context, piece)
+                    }
+                } finally {
+                    runCatching { piece.recycle() }
                 }
             }
+            // 那份预览图只在裁剪窗活着的时候有用: 关窗之后它就是一整张几 MB 的位图
+            runCatching { source.recycle() }
+            if (next == null) {
+                message = failureOf(kind)
+            } else {
+                message = null
+                revision += 1
+                pushLook()
+            }
         }
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) startCrop(PortalCropKind.WALL, uri)
     }
     // 头像走同一个选择器 (2026-11-10): 它与背景是两笔账, 换一样不该动另一样
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val next = withContext(Dispatchers.IO) { PortalFace.setAvatar(context, uri) }
-                if (next == null) {
-                    message = context.getString(R.string.settings_portal_avatar_failed)
-                } else {
-                    message = null
-                    revision += 1
-                    pushLook()
-                }
-            }
-        }
+        if (uri != null) startCrop(PortalCropKind.AVATAR, uri)
+    }
+    val croppingKind = cropKind
+    val croppingSource = cropSource
+    if (croppingKind != null && croppingSource != null) {
+        PortalCropDialog(
+            kind = croppingKind,
+            source = croppingSource,
+            onDismiss = {
+                cropKind = null
+                cropSource = null
+                runCatching { croppingSource.recycle() }
+            },
+            onDone = { rect ->
+                cropKind = null
+                cropSource = null
+                commitCrop(croppingKind, croppingSource, rect)
+            },
+        )
     }
     var editingName by rememberSaveable { mutableStateOf(false) }
+
+    // Luwi 图标 (2026-11-22 主人: "在设置的外观里加上切换 luwi 图标的选项"): 桌面图标 / 球 / 开屏 /
+    // 桌面组件 / 门户头像五类位置一起换。桌面那一条靠 activity-alias (见 [IconTheme.apply]), 所以
+    // 切完不必重启 —— 球与开屏各自在心跳里读 `icon.json` 的 stamp
+    val iconSet = remember(revision) { IconTheme.current(context) }
+    var iconPickerOpen by remember { mutableStateOf(false) }
+    ArrowPreference(
+        title = stringResource(R.string.settings_luwi_icon),
+        summary = stringResource(R.string.settings_luwi_icon_summary, stringResource(iconSet.labelRes)),
+        onClick = {
+            haptic.contextClick()
+            iconPickerOpen = true
+        },
+    )
+    if (iconPickerOpen) {
+        IconPickerDialog(
+            current = iconSet,
+            onDismiss = { iconPickerOpen = false },
+            onPick = { picked ->
+                iconPickerOpen = false
+                scope.launch {
+                    val applied = withContext(Dispatchers.IO) { IconTheme.apply(context, picked) }
+                    message = if (applied) {
+                        context.getString(R.string.settings_luwi_icon_switched, context.getString(picked.labelRes))
+                    } else {
+                        context.getString(R.string.settings_luwi_icon_failed)
+                    }
+                    if (applied) {
+                        revision += 1
+                        // 门户缺省头像也吃这一套 (`portalLook` 的 `mark`): 推一次页面就换
+                        pushLook()
+                    }
+                }
+            },
+        )
+    }
 
     // 头像与昵称 (2026-11-10 主人: "对话层的 luwi 图标和 luwi 名可在外观设置中修改")
     ArrowPreference(
@@ -1015,6 +1272,88 @@ private fun PortalFaceItems() {
 }
 
 /**
+ * 「Luwi 图标」那个对话框 (2026-11-22)
+ *
+ * 两套并排, 选中那格描边用主色 —— **点一下就切** (不设确认键): 切图标是能回退的一步, 而且桌面图标
+ * 会重排一次; 那件事在下面的小字里已经说过, 再问一次"确定要改桌面吗"只是多按一下
+ *
+ * 缩略图走 [IconTheme.markTightBitmap] (与门户那张缺省头像同一份, 紧裁填满), 于是两套并排一样大
+ */
+@Composable
+private fun IconPickerDialog(
+    current: IconSet,
+    onDismiss: () -> Unit,
+    onPick: (IconSet) -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+    val colors = MiuixTheme.colorScheme
+    InputDialog(
+        show = true,
+        title = stringResource(R.string.settings_luwi_icon),
+        summary = stringResource(R.string.settings_luwi_icon_dialog),
+        onDismissRequest = onDismiss,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp),
+        ) {
+            IconSet.values().forEach { set ->
+                val picked = set == current
+                val shape = RoundedCornerShape(16.dp)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(shape)
+                        .then(
+                            if (picked) {
+                                Modifier.border(2.dp, colors.primary, shape)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .clickable {
+                            haptic.contextClick()
+                            onPick(set)
+                        }
+                        .padding(vertical = 12.dp),
+                ) {
+                    // 与门户同一份"紧裁填满"的图 (2026-11-22): 内置那套的鲸尾只占画布 0.46, 拿
+                    // `markBitmap` 那画布原样的一份, 两格缩略图一大一小; 球与开屏按比值换算, 不吃这份
+                    val mark = remember(set) { IconTheme.markTightBitmap(context, set, 192) }
+                    if (mark != null) {
+                        Image(
+                            bitmap = mark.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.size(56.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(set.labelRes),
+                        style = MiuixTheme.textStyles.body2,
+                        color = if (picked) colors.primary else colors.onSurface,
+                    )
+                }
+            }
+        }
+        PlaceholderItems(stringResource(R.string.settings_luwi_icon_desktop_note))
+        TextButton(
+            text = stringResource(R.string.button_cancel),
+            onClick = {
+                haptic.contextClick()
+                onDismiss()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
  * 「修改昵称」那一下 (2026-11-10)
  *
  * 一个文本框就够: 名字是短的一行字, 不值得再占一页。**留空 = 回到 `Luwi`** —— 那句话写在
@@ -1023,11 +1362,10 @@ private fun PortalFaceItems() {
 @Composable
 private fun PortalNameDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_portal_name),
         summary = stringResource(R.string.settings_portal_name_dialog),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -1082,7 +1420,6 @@ private fun ChannelItems() {
     val context = LocalContext.current
     val state = ChannelSetting.state
     val routes = ChannelSetting.routes
-    val working = ChannelSetting.working
     LaunchedEffect(Unit) { ChannelSetting.refresh() }
     // fillMaxWidth 是必要的: 这一段的子项里有纯文字, 撑不满宽度, 而 Miuix 的 Card 是包着内容的 ——
     // 不填满, 卡片就比这一页别的卡片窄一截 (设置项自己会撑开, 所以别处不用管)。
@@ -1119,23 +1456,11 @@ private fun ChannelItems() {
                 )
             }
         }
+        // 「刷新状态」按钮 (2026-11-19 主人: 不要「用 root 连接」那个开关, 改成在「允许 DSH 通过
+        // 无障碍服务读取屏幕内容」上方一颗按钮 —— 点一下确认 root 与 shizuku 的可用状态, 优先 shizuku)
+        RefreshRow()
         AccessibilityRows()
         OcrRows()
-        if (state?.connected != true) {
-            Button(
-                onClick = { ChannelSetting.connect() },
-                enabled = !working,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
-            ) {
-                Text(
-                    text = stringResource(
-                        if (working) R.string.settings_channel_connecting else R.string.settings_channel_connect,
-                    ),
-                )
-            }
-        }
         ArrowPreference(
             title = stringResource(R.string.settings_channel_autostart),
             summary = stringResource(R.string.settings_channel_autostart_summary),
@@ -1184,6 +1509,49 @@ private fun KeepAliveRow() {
             whitelisted = BatteryWhitelist.ignored(context)
         },
     )
+}
+
+/**
+ * 「刷新状态」那一颗按钮 (2.8.1 #30 改口径, 2026-11-19 主人定)
+ *
+ * 主人: "最好不用加这个用 root 的按钮, 而是在『允许…内容』上方加一个刷新状态按钮, 点击后确认 root 和
+ * shizuku 的可用状态, 优先 shizuku" —— 于是原来那个「用 root 连接」开关整行撤掉: "要不要去问 root"
+ * 这件事改由**点这一下**表态, 问完就收回, 不落盘 (见 [ChannelSetting.reprobe])
+ *
+ * 位置就是读数块与无障碍那一行之间: 读数在上、按钮居中、两条路各自的状态同时在上面那几行里看得见
+ *
+ * 上一次刷新里 root 被拒时, 按钮下面留一句去哪儿办 (那件事只能在 root 管理器里做) —— 这里不放开关,
+ * 也就没必要把"被拒"藏进任何一行 Setting 的副标题里
+ */
+@Composable
+private fun RefreshRow() {
+    val working = ChannelSetting.working
+    val refused = ChannelSetting.rootRefused
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { ChannelSetting.reprobe() },
+            enabled = !working,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Medium),
+        ) {
+            Text(
+                text = stringResource(
+                    if (working) R.string.settings_channel_refreshing else R.string.settings_channel_refresh,
+                ),
+            )
+        }
+        if (refused) {
+            Text(
+                text = stringResource(R.string.settings_channel_refresh_refused),
+                modifier = Modifier.padding(
+                    start = UiSpacing.Large,
+                    end = UiSpacing.Large,
+                    bottom = UiSpacing.Medium,
+                ),
+            )
+        }
+    }
 }
 
 /**
@@ -1493,11 +1861,10 @@ private fun LockPasswordDialog(
     onSave: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_inject_password_dialog),
         summary = stringResource(R.string.settings_lock_inject_password_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -1549,11 +1916,10 @@ private fun LockScriptDialog(
     onImport: (String, String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_script_dialog),
         summary = stringResource(R.string.settings_lock_script_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -1613,11 +1979,10 @@ private fun LockRecordDialog(
     onStart: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_lock_record_dialog),
         summary = stringResource(R.string.settings_lock_record_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -1799,9 +2164,16 @@ private fun SyncItems() {
     var notice by remember { mutableStateOf<String?>(null) }
     // 换了一台机器再扫时先问一句: 重新配对会重置同步基线, 确认之后才写
     var pending by remember { mutableStateOf<PairPayload?>(null) }
+    // 取消配对那一问 (2026-11-22): 说清会断开什么、不会删什么, 确认之后才写
+    var unpairing by remember { mutableStateOf(false) }
+    // 「现在重启 dsh 吗」那一问 (2026-11-22 主人: "成功配对或关闭终端等需要重新启动的情况, 要弹出
+    // 重启 dsh 启动终端的弹窗"): 非空时就是开着那一扇 [RestartHostDialog], 标题按场景换 ——
+    // 配对成功 / 终端已打开 / 终端已关闭 / 已取消配对这四件都是"写完要重启才生效"的
+    var restartAsk by remember { mutableStateOf<String?>(null) }
     var interval by remember(snapshot.pullInterval) { mutableIntStateOf(snapshot.pullInterval) }
 
     val pairDone = stringResource(R.string.settings_sync_pair_done)
+    val unpairDone = stringResource(R.string.settings_sync_unpair_done)
     val switchedOn = stringResource(R.string.settings_sync_switched_on)
     val switchedOff = stringResource(R.string.settings_sync_switched_off)
     // 已配对那台机器的名字 (配对码里 from 是空的就按 PC 说)
@@ -1809,7 +2181,7 @@ private fun SyncItems() {
     // 状态那一句里的"仓库在哪": 有主机名就报主机名, 本机路径就报那一段路径
     val repoWhere = snapshot.repoHost.ifBlank { snapshot.sessionRemote }
 
-    /** 一张合法配对码落到配置里: 写 → 说一声 → 重启 host → 关窗 (一个动作四件事) */
+    /** 一张合法配对码落到配置里: 写 → 问一句要不要现在重启 → 关窗 (重启那一问见文件末尾那扇窗) */
     fun applyPairing(payload: PairPayload) {
         val problem = SyncSetting.applyPairing(context, payload)
         if (problem != null) {
@@ -1819,8 +2191,7 @@ private fun SyncItems() {
         notice = null
         pending = null
         scanning = false
-        Toast.makeText(context, pairDone, Toast.LENGTH_LONG).show()
-        DshHost.restart(context)
+        restartAsk = pairDone
     }
 
     PlaceholderItems(stringResource(R.string.settings_sync_note))
@@ -1838,8 +2209,8 @@ private fun SyncItems() {
         onCheckedChange = { wanted ->
             val problem = SyncSetting.setSyncOn(context, wanted)
             if (problem == null) {
-                Toast.makeText(context, if (wanted) switchedOn else switchedOff, Toast.LENGTH_LONG).show()
-                DshHost.restart(context)
+                // 开与关都要重启 host 才生效 (插件挂载时读配置): 问一句, 不替人掀页面
+                restartAsk = if (wanted) switchedOn else switchedOff
             } else {
                 // 没有仓库地址可开: 把那句原因照实说 (它同时是一条"先去配对"的指路)
                 Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
@@ -1915,15 +2286,43 @@ private fun SyncItems() {
     )
 
     // ---- 电脑上的那个插件 (2026-10-24): 地址就是仓库, 点开用系统浏览器看 ----
-    ArrowPreference(
-        title = stringResource(R.string.settings_sync_plugin),
-        summary = stringResource(R.string.settings_sync_plugin_summary, SYNC_PLUGIN_URL),
-        onClick = {
-            openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
-                Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
-            }
-        },
-    )
+    // 2026-11-22: 未配对时这一行让位给下面那颗「去给 PC 装 luwi终端」—— 同一个地址, 但那一句是
+    // 照着"现在该干什么"说的 (当前这一行在配好之后当参考文档看)
+    if (snapshot.paired) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_plugin),
+            summary = stringResource(R.string.settings_sync_plugin_summary, SYNC_PLUGIN_URL),
+            onClick = {
+                openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    } else {
+        // 2026-11-22 (主人: "在没有配对时扫码配对下加一个「去给PC装luwi终端」")
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_install_pc),
+            summary = stringResource(R.string.settings_sync_install_pc_summary),
+            onClick = {
+                openPage(context, SYNC_PLUGIN_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
+
+    // ---- 取消配对 (2026-11-22 主人: "设置里要有取消配对功能"): 只配对过的那一台才有这一行 ----
+    if (snapshot.paired) {
+        ArrowPreference(
+            title = stringResource(R.string.settings_sync_unpair),
+            summary = stringResource(R.string.settings_sync_unpair_summary, pairedName),
+            onClick = {
+                haptic.contextClick()
+                notice = null
+                unpairing = true
+            },
+        )
+    }
 
     // ---- 一句状态: 关着 / 已配对 / 没配对 ----
     if (!snapshot.syncOn) {
@@ -1995,6 +2394,43 @@ private fun SyncItems() {
         }
     }
 
+    // 取消配对那一问 (2026-11-22): 说清断开什么、不删什么; 确认之后才写并重启 host
+    if (unpairing) {
+        OverlayDialog(
+            show = true,
+            title = stringResource(R.string.settings_sync_unpair_confirm_title),
+            summary = stringResource(R.string.settings_sync_unpair_confirm_body, pairedName),
+            defaultWindowInsetsPadding = false,
+            onDismissRequest = { unpairing = false },
+        ) {
+            Row(horizontalArrangement = Arrangement.SpaceBetween) {
+                TextButton(
+                    text = stringResource(R.string.button_cancel),
+                    onClick = {
+                        haptic.contextClick()
+                        unpairing = false
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    text = stringResource(R.string.settings_sync_unpair_ok),
+                    onClick = {
+                        haptic.confirm()
+                        val problem = SyncSetting.unpair(context)
+                        unpairing = false
+                        if (problem == null) {
+                            restartAsk = unpairDone
+                        } else {
+                            notice = problem
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
+
     if (showRaw) {
         OverlayDialog(
             show = true,
@@ -2019,6 +2455,19 @@ private fun SyncItems() {
                 )
             }
         }
+    }
+
+    // 「现在重启 dsh 吗」(2026-11-22): 上面四个写入点 (配对 / 总开关开 / 总开关关 / 取消配对)
+    // 写完都落到这一扇窗 —— 终端是 dsh 插件, 挂载时读配置, 不重启就什么都不变
+    restartAsk?.let { said ->
+        RestartHostDialog(
+            title = said,
+            onDismissRequest = { restartAsk = null },
+            onRestart = {
+                restartAsk = null
+                DshHost.restart(context)
+            },
+        )
     }
 }
 
@@ -2719,11 +3168,10 @@ private fun PluginLinkDialog(
     onInstall: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = title,
         summary = summary,
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -2819,11 +3267,10 @@ private fun PluginIndexDialog(
             }
         }
     }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_plugin_browse),
         summary = stringResource(R.string.settings_plugin_browse_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         SuperTextField(
@@ -3361,11 +3808,10 @@ private fun QuickCreateDialog(
     onCreate: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_quick_new_title),
         summary = stringResource(R.string.settings_quick_new_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -3427,13 +3873,12 @@ private fun clockStamp(at: Long): String =
     if (at <= 0L) "—" else SimpleDateFormat("HH:mm", Locale.US).format(Date(at))
 
 /**
- * 「探索」那一段 (2.7.8 批次 8)
+ * 「探索」那一段 (2.7.8 批次 8; 2026-11-21 起只由判断层触发)
  *
- * 主人 2026-10-17: "探索应该是定时的由用户决定开始时间，不要手动开始探索" —— 所以这里**一个手动
- * 入口都没有**: 开不开 / 每天几点 / 下一场那张任务卡 (可手改), 外加两行读数
- * (下一次与上一次那趟的结果)。每日总次数上限 2.8.0 起取消 (B4-b), 这里不再有那一栏
- *
- * 卡不在这里改写; 它在每次探索收尾时由宿主按 `nextTask` 覆盖 (见 [ExploreTask])
+ * 主人 2026-10-17 的口径是"定时由用户决定开始时间", 2026-11-21 改成"由判断层挑时机开": 于是这一段
+ * **既没有手动入口, 也没有开关与时刻** —— 只剩她真正会用到的两格 (每场多少步 / 到锁屏时允不允许解)
+ * 与下一场那张任务卡 (可手改)。卡不在这里改写; 每次收尾由宿主按 `nextTask` 覆盖 (见 [ExploreTask]),
+ * 下一场开场前由宿主 `readExploreTask` 读回来当正文
  */
 /**
  * 「日常」那一组的段首读数 (2026-11-07 晚, 主人: "活动里第一个选项被小字挡住了")
@@ -3447,18 +3892,12 @@ private fun ExploreOverview() {
     val context = LocalContext.current
     val plan = remember { ExploreSchedule.plan(context) }
     val running = remember { ExploreTask.running(context) }
-    val nextAt = remember { ExploreSchedule.nextAt(plan.at, System.currentTimeMillis()) }
     val overview = buildString {
-        append(
-            if (plan.enabled) {
-                context.getString(R.string.settings_explore_next, scheduleStamp(nextAt ?: 0L))
-            } else {
-                context.getString(R.string.settings_explore_off)
-            },
-        )
-        // 预算那一截 (2.7.9 第 8 条 T2): 段首这一句就要说清下一场是多少分多少步
+        // 2026-11-21: 探索不再按时间排闹钟, 改由判断层挑时机开 —— 不再有"下一次几点"
+        append(context.getString(R.string.settings_explore_by_router))
+        // 预算只按步数 (时间预算那一路已撤, 宿主内部 deadline 只是看门狗)
         append(" · ")
-        append(context.getString(R.string.settings_explore_budget, plan.minutes, plan.steps))
+        append(context.getString(R.string.settings_explore_steps_summary, plan.steps))
         running?.let {
             append(" · ")
             append(context.getString(R.string.settings_explore_running, clockStamp(it.deadline)))
@@ -3500,11 +3939,12 @@ private fun ExploreOverview() {
 }
 
 @Composable
-private fun ExploreItems() {
+// internal 而不是 private: 门户判断/探索面板那颗「设置」弹的窗里也要这两段 (2026-11-13),
+// 而**同一份 composable 只许一处定义** —— 搬出去复制一份就是两个参数页
+internal fun ExploreItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
-    var editingAt by rememberSaveable { mutableStateOf(false) }
     var editingCard by rememberSaveable { mutableStateOf(false) }
     var editingSummary by rememberSaveable { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -3518,22 +3958,10 @@ private fun ExploreItems() {
         revision += 1
     }
 
-    SwitchPreference(
-        title = stringResource(R.string.settings_explore_toggle),
-        summary = stringResource(R.string.settings_explore_toggle_summary),
-        checked = plan.enabled,
-        onCheckedChange = { save(plan.copy(enabled = it)) },
-    )
-    ArrowPreference(
-        title = stringResource(R.string.settings_explore_at),
-        summary = stringResource(R.string.settings_explore_at_summary, plan.at),
-        onClick = {
-            haptic.contextClick()
-            editingAt = true
-        },
-    )
-    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 夜里到点那一下手机多半是锁着的, 这一条让排期用「锁屏」
-    // 那一段录的解把屏让开 —— 与那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (喊一声 / 到点了)
+    // 2026-11-21: 「每天几点」「启用探索」两行都撤了 —— 探索由判断层挑时机开, 这里没有总闸可拨;
+    // 留下的是她真正会用到的两格 (步数 / 到锁屏时允不允许解) 与那张卡
+    // 允许锁屏解锁 (2.7.10, 主人 2026-10-25): 探索里手机多半是锁着的, 这一条让 `lw_lock op=unlock`
+    // 放行 —— 与「锁屏」那段里的「唤醒时自动解锁」是两个开关, 各管一条路 (探索里那一次 / 喊一声)
     SwitchPreference(
         title = stringResource(R.string.settings_explore_unlock),
         summary = stringResource(R.string.settings_explore_unlock_summary),
@@ -3548,34 +3976,9 @@ private fun ExploreItems() {
             }
         },
     )
-    // 每场预算 (2.7.9 第 8 条 T2): 两条都在这里, 仍然**没有"现在开一场"** —— 主人 2026-10-17 那条口径
-    // 一个字没动。分钟用滑块 (拖动时只改草稿, 松手才落盘, 免得每一帧都写一次文件并重排闹钟)
-    var minutesDraft by remember(revision) { mutableIntStateOf(plan.minutes) }
-    ArrowSlider(
-        title = stringResource(R.string.settings_explore_minutes),
-        summary = stringResource(R.string.settings_explore_minutes_summary, minutesDraft),
-        value = minutesDraft.toFloat(),
-        onValueChange = { raw ->
-            minutesDraft = ExploreSchedule.clamp(raw.roundToInt(), ExploreSchedule.MINUTES_RANGE)
-        },
-        valueRange = 1f..180f,
-        steps = 0,
-        unit = "分",
-        onValueChangeFinished = {
-            if (minutesDraft != plan.minutes) save(plan.copy(minutes = minutesDraft))
-        },
-        // 点标题那一行可以手打: 收起之后按同一个范围夹, 打出来的越界值不会写进文件
-        // (按 float 认而不是 toIntOrNull: 输入框允许小数点, "45." 这种写法 ArrowSlider 那一关是过的,
-        // 2026-10-19 在模拟器上量到的就是它 —— Int 那一关悄悄吃掉了这一次确认)
-        onInputConfirm = { text ->
-            val typed = text.trim().toFloatOrNull()?.roundToInt()
-            if (typed != null) {
-                minutesDraft = ExploreSchedule.clamp(typed, ExploreSchedule.MINUTES_RANGE)
-                save(plan.copy(minutes = minutesDraft))
-            }
-        },
-    )
-    // 步数也是滑块 + 手打 (档位只当吸附点): 验收那条要的是"5 分 / 10 步"能真的设出来, 只给四个档位
+    // 每场预算 (2026-11-21): 时间预算那一路已撤, 只留步数 —— 探索跑到步数上限就收尾.
+    // **这一格判断层那条路真的读**: 宿主 `readExploreSchedule` 每场开场前现读, 拨 10 步就只跑 10 步
+    // 步数用滑块 + 手打 (档位只当吸附点): 验收那条要的是"10 步"能真的设出来, 只给四个档位
     // 就做不到 —— 10 步不在 30 / 60 / 120 / 200 里
     var stepsDraft by remember(revision) { mutableIntStateOf(plan.steps) }
     ArrowSlider(
@@ -3609,25 +4012,8 @@ private fun ExploreItems() {
             editingCard = true
         },
     )
-    plan.last?.let { last ->
-        val said = if (last.outcome == "started") {
-            // `why` 里可能有两件事 (卡是空的 / 到点屏是锁着的), 有就跟着这一行一起说
-            val note = last.why
-            if (note.isNullOrBlank()) {
-                context.getString(R.string.settings_explore_last_started, scheduleStamp(last.at))
-            } else {
-                context.getString(R.string.settings_explore_last_started_note, scheduleStamp(last.at), note)
-            }
-        } else {
-            context.getString(
-                if (last.outcome == "skipped") R.string.settings_explore_last_skipped
-                else R.string.settings_explore_last_failed,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-        }
-        PlaceholderItems(said)
-    }
+    // 2026-11-21 起这里不再有「上一次」那一行: 那个读数只有到点那一趟 (`fire`) 会写, 而排期已经撤了;
+    // 想知道上一场干了什么, 看下面那份摘要
     // 宿主那四项读数 (2.7.9 T5): 预设 / 为什么是它 / 省电探针读没读到 / 上一次出错 —— 它们原来只在
     // `lw_explore op=status` 里, 现在宿主每次落盘都写进 `lw/explore.json` 的 `status` 段
     val status = remember(revision) { ExploreStatus.read(context) }
@@ -3652,21 +4038,6 @@ private fun ExploreItems() {
     PlaceholderItems(message ?: stringResource(R.string.settings_explore_card_note))
     PlaceholderItems(stringResource(R.string.settings_explore_note))
 
-    if (editingAt) {
-        ExploreTimeDialog(
-            current = plan.at,
-            onDismiss = { editingAt = false },
-            onSave = { text ->
-                editingAt = false
-                if (AutomationRule.minutesOf(text) == null) {
-                    message = context.getString(R.string.settings_explore_at_bad)
-                } else {
-                    message = null
-                    save(plan.copy(at = text.trim()))
-                }
-            },
-        )
-    }
     if (editingCard) {
         ExploreCardDialog(
             initial = cardText,
@@ -3729,57 +4100,14 @@ private fun ExploreSummaryDialog(file: File, onDismiss: () -> Unit) {
     }
 }
 
-/** 每天几点: 一个 `HH:mm` 的文本框 (校验在 [ExploreItems] 里做) */
-@Composable
-private fun ExploreTimeDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    val haptic = LocalHapticFeedback.current
-    OverlayDialog(
-        show = true,
-        title = stringResource(R.string.settings_explore_at),
-        summary = stringResource(R.string.settings_explore_at_dialog_summary),
-        defaultWindowInsetsPadding = false,
-        onDismissRequest = onDismiss,
-    ) {
-        var text by rememberSaveable { mutableStateOf(current) }
-        SuperTextField(
-            modifier = Modifier.padding(bottom = 16.dp),
-            value = text,
-            onValueChange = { text = it },
-            label = stringResource(R.string.settings_explore_at_hint),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-        )
-        Row(horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(
-                text = stringResource(R.string.button_cancel),
-                onClick = {
-                    haptic.contextClick()
-                    onDismiss()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(20.dp))
-            TextButton(
-                text = stringResource(R.string.button_confirm),
-                onClick = {
-                    haptic.confirm()
-                    onSave(text)
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-            )
-        }
-    }
-}
-
-/** 下一场那张任务卡: 多行编辑框 (留空 = 到点自由探索) */
+/** 下一场那张任务卡: 多行编辑框 (留空 = 自由探索) */
 @Composable
 private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_explore_card),
         summary = stringResource(R.string.settings_explore_card_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -3815,47 +4143,17 @@ private fun ExploreCardDialog(initial: String, onDismiss: () -> Unit, onSave: (S
 }
 
 /**
- * 「定时对话」那一段 (2.8.0 B4-c)
+ * 「她什么时候开口」那一段 (2026-11-21 起只有判断层挑时机)
  *
- * ⑩: 排期与自动指令**摆在同一段里** —— 两路共用 [ProactiveGate] 那一道 30 分钟闸, 看"为什么这一场
- * 没开口"要同时看这两笔账; ⑪: 下一场什么时候、最近一次被拦是什么时候为什么, 都写在上面;
- * ⑫: 30 s 内再进设置页只刷新一次 UI, 读数与日志都在 [SchedulePanel] 那一层, 这一段只画它
- *
- * 这一页能改的三样 (开不开 / 一天那几个时刻 / 到点允不允许解屏) 都走 [ProactiveSchedule.save]:
- * 落盘与重排闹钟是同一件事, 改完 `SchedulePanel.invalidate()` 一下, 下一眼才看得到新值
- */
-/**
- * 「她什么时候开口」那一组的段首读数 (2026-11-07 晚, 与 [ExploreOverview] 同一处修法)
- *
- * 原来它在 `Card` 里第一行, 小字与第一个开关挤在一起; 现在卡片外, 卡片第一行就是开关
+ * 按时间的主动对话排期已撤: 这一段只剩判断层开关 / 主动场能做什么 / 30 分钟闸 / 自动指令读数.
+ * 30 s 内再进设置页只刷新一次 UI, 读数与日志都在 [SchedulePanel] 那一层, 这一段只画它
  */
 @Composable
-private fun ProactiveOverview() {
-    val context = LocalContext.current
-    val plan = remember { SchedulePanel.read(context).proactive }
-    val next = remember { SchedulePanel.read(context).proactiveNext }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = UiSpacing.Large, vertical = UiSpacing.Small),
-    ) {
-        Text(
-            text = if (plan.enabled && next != null) {
-                context.getString(R.string.settings_proactive_next, scheduleStamp(next))
-            } else {
-                context.getString(R.string.settings_proactive_no_next)
-            },
-            color = colorScheme.onSurfaceVariantActions,
-        )
-    }
-}
-
-@Composable
-private fun ProactiveItems() {
+// internal 同上: 门户那颗「设置」弹的窗里也要这一段, 一份定义两个入口
+internal fun ProactiveItems() {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var revision by remember { mutableIntStateOf(0) }
-    var editingTimes by rememberSaveable { mutableStateOf(false) }
     var confirmingFull by rememberSaveable { mutableStateOf(false) }
     // 「能做什么」那三档: 一行 + 一个弹窗 (2026-11-10 主人)
     var pickingActing by rememberSaveable { mutableStateOf(false) }
@@ -3864,20 +4162,9 @@ private fun ProactiveItems() {
     var tickOn by remember { mutableStateOf(RouterTick.enabled(context)) }
 
     val reading = remember(revision) { SchedulePanel.read(context) }
-    val plan = reading.proactive
 
-    fun save(next: ProactiveSchedule.Plan) {
-        ProactiveSchedule.save(context, next)
-        SchedulePanel.invalidate()
-        revision += 1
-    }
-
-    SwitchPreference(
-        title = stringResource(R.string.settings_proactive_toggle),
-        summary = stringResource(R.string.settings_proactive_toggle_summary),
-        checked = plan.enabled,
-        onCheckedChange = { save(plan.copy(enabled = it)) },
-    )
+    // 按时间的主动对话排期 2026-11-21 已撤: 不再有排期开关 / 时刻 / 解锁那几行,
+    // 主动开口只由下面这道判断层开关挑时机; 排期场那一路不再存在
     // 记住自己挑时机 (2026-11-07): 打开之后每 25~55 分钟看一眼"该不该开口" —— 说不说、说什么由
     // 宿主那侧的判断层定 (打游戏久了 / 记着的事到点 / 太久没说话)。**缺省关着**: 一个"会自己开口"
     // 的东西, 装上就开始说比装上不说话糟得多
@@ -3893,29 +4180,6 @@ private fun ProactiveItems() {
             }
         },
     )
-    ArrowPreference(
-        title = stringResource(R.string.settings_proactive_times),
-        summary = stringResource(R.string.settings_proactive_times_summary, plan.times.joinToString(", ")),
-        onClick = {
-            haptic.contextClick()
-            editingTimes = true
-        },
-    )
-    // 与探索那一段同一个开关口径: 夜里到点那一下手机多半是锁着的, 用「锁屏」那一段录的解让开
-    SwitchPreference(
-        title = stringResource(R.string.settings_proactive_unlock),
-        summary = stringResource(R.string.settings_proactive_unlock_summary),
-        checked = plan.unlock,
-        onCheckedChange = { on ->
-            save(plan.copy(unlock = on))
-            message = if (on && !LockSetting.unlockable(context)) {
-                context.getString(R.string.settings_proactive_unlock_missing)
-            } else {
-                null
-            }
-        },
-    )
-
     // 主动场能做什么 (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md` §4):
     // 落 `sim.json` 的 `proactive.acting`, 宿主那道三表硬闸读它, 改完 3 秒内生效.
     // **三档并成一行** (主人 2026-11-10: "三权限合成一行, 点击那行后弹出弹窗选择"):
@@ -3973,51 +4237,14 @@ private fun ProactiveItems() {
         )
     }
 
-    // 上一场那趟
-    plan.last?.let { last ->
-        val said = when (last.outcome) {
-            "started" -> {
-                val note = last.why
-                if (note.isNullOrBlank()) {
-                    context.getString(R.string.settings_proactive_last_started, scheduleStamp(last.at))
-                } else {
-                    context.getString(R.string.settings_proactive_last_started_note, scheduleStamp(last.at), note)
-                }
-            }
-
-            "skipped" -> context.getString(
-                R.string.settings_proactive_last_skipped,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-
-            else -> context.getString(
-                R.string.settings_proactive_last_failed,
-                scheduleStamp(last.at),
-                last.why.orEmpty(),
-            )
-        }
-        PlaceholderItems(said)
-    }
-
-    // 最近一次被拦 (⑪): 排期自己记的那一笔比 `last` 活得久, 自动指令那一笔从历史上取
-    val proactiveBlock = plan.blocked
-        ?: plan.last?.takeIf { it.outcome == "skipped" }
-            ?.let { ProactiveSchedule.Blocked(it.at, it.why.orEmpty()) }
+    // 最近一次被拦 (⑪): 排期那一路已撤, 现在只看自动指令从历史上取的那一笔
     val autoBlock = reading.autoBlocked
-    if (proactiveBlock == null && autoBlock == null) {
+    if (autoBlock == null) {
         PlaceholderItems(stringResource(R.string.settings_proactive_blocked_none))
     } else {
-        proactiveBlock?.let {
-            PlaceholderItems(
-                context.getString(R.string.settings_proactive_blocked_recent, scheduleStamp(it.at), it.why),
-            )
-        }
-        autoBlock?.let {
-            PlaceholderItems(
-                context.getString(R.string.settings_proactive_rules_blocked, scheduleStamp(it.at), it.reason),
-            )
-        }
+        PlaceholderItems(
+            context.getString(R.string.settings_proactive_rules_blocked, scheduleStamp(autoBlock.at), autoBlock.reason),
+        )
     }
 
     // 30 分钟闸此刻开没开 (与自动指令共用的那一笔账)
@@ -4053,74 +4280,7 @@ private fun ProactiveItems() {
         }
     }
 
-    // 探索那一路也在这张排期表上: 下一次与上一次都摆出来, 一眼能对"两个定时器各在哪天"
-    PlaceholderItems(
-        context.getString(
-            R.string.settings_proactive_explore,
-            reading.exploreNext?.let { scheduleStamp(it) } ?: "—",
-            reading.exploreLast?.let { scheduleStamp(it.at) } ?: "—",
-        ),
-    )
     PlaceholderItems(message ?: stringResource(R.string.settings_proactive_note))
-
-    if (editingTimes) {
-        ProactiveTimesDialog(
-            current = plan.times.joinToString(", "),
-            onDismiss = { editingTimes = false },
-            onSave = { text ->
-                editingTimes = false
-                val times = ProactiveSchedule.parseTimes(text)
-                if (times == null) {
-                    message = context.getString(R.string.settings_proactive_times_bad)
-                } else {
-                    message = null
-                    save(plan.copy(times = times))
-                }
-            },
-        )
-    }
-}
-
-/** 一天那几个时刻: 一个文本框, 逗号隔开 (校验在 [ProactiveItems] 里做) */
-@Composable
-private fun ProactiveTimesDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    val haptic = LocalHapticFeedback.current
-    OverlayDialog(
-        show = true,
-        title = stringResource(R.string.settings_proactive_times),
-        summary = stringResource(R.string.settings_proactive_times_dialog_summary),
-        defaultWindowInsetsPadding = false,
-        onDismissRequest = onDismiss,
-    ) {
-        var text by rememberSaveable { mutableStateOf(current) }
-        SuperTextField(
-            modifier = Modifier.padding(bottom = 16.dp),
-            value = text,
-            onValueChange = { text = it },
-            label = stringResource(R.string.settings_proactive_times_hint),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-        )
-        Row(horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(
-                text = stringResource(R.string.button_cancel),
-                onClick = {
-                    haptic.contextClick()
-                    onDismiss()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(20.dp))
-            TextButton(
-                text = stringResource(R.string.button_confirm),
-                onClick = {
-                    haptic.confirm()
-                    onSave(text)
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-            )
-        }
-    }
 }
 
 /**
@@ -4181,7 +4341,7 @@ private fun ProactiveActingPicker(current: String, onDismiss: () -> Unit, onPick
 /**
  * 「全放开」那一下的确认 (方案 §4: 选 `full` 时弹一次, **默认按钮是取消**)
  *
- * 与 [ProactiveTimesDialog] 同一套壳; 两个按钮位置反过来 (取消在前, 在左边那一位), 于是"手快按一下"
+ * 与别的确认弹窗同一套壳; 两个按钮位置反过来 (取消在前, 在左边那一位), 于是"手快按一下"
  * 落在取消上, 不是落在"她会自己点屏"上
  */
 @Composable
@@ -4548,11 +4708,10 @@ private fun sendAutomationSetup(context: Context, line: String): String {
 @Composable
 private fun AutomationCreateDialog(onDismiss: () -> Unit, onCreate: (String, Int) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_new_title),
         summary = stringResource(R.string.settings_automation_new_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -4743,11 +4902,10 @@ private fun AutomationBrokenDialog(
 @Composable
 private fun AutomationEditDialog(name: String, onDismiss: () -> Unit, onEdit: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_edit_title),
         summary = stringResource(R.string.settings_automation_edit_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf("") }
@@ -4792,11 +4950,10 @@ private fun AutomationEditDialog(name: String, onDismiss: () -> Unit, onEdit: (S
 @Composable
 private fun AutomationCooldownDialog(current: Int, onDismiss: () -> Unit, onSave: (Int) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_cooldown_title),
         summary = stringResource(R.string.settings_automation_cooldown_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current.toString()) }
@@ -4835,11 +4992,10 @@ private fun AutomationCooldownDialog(current: Int, onDismiss: () -> Unit, onSave
 @Composable
 private fun AutomationQuietDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_automation_quiet_title),
         summary = stringResource(R.string.settings_automation_quiet_dialog_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         var text by rememberSaveable { mutableStateOf(current) }
@@ -5344,11 +5500,10 @@ private fun ModeEndpointDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val snapshot = remember(ModeModel.revision) { ModeModel.snapshot(context) }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_mode_endpoint),
         summary = stringResource(R.string.settings_mode_endpoint_note),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         val screenHeight = LocalConfiguration.current.screenHeightDp
@@ -5452,11 +5607,10 @@ private fun ModeModelDialog(onDismiss: () -> Unit) {
     val snapshot = remember(ModeModel.revision) { ModeModel.snapshot(context) }
     // 目录要么整份可用 (有候选), 要么整个退回手填 —— "半份目录"不拿来假装是列表
     val listed = catalog?.takeIf { it.ok && it.items.isNotEmpty() }
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_mode_model),
         summary = stringResource(R.string.settings_section_look_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismiss,
     ) {
         val screenHeight = LocalConfiguration.current.screenHeightDp
@@ -5614,6 +5768,8 @@ private fun SpeakItems() {
     val onDevice = SpeakSettings.engine == SpeakSettings.Engine.ON_DEVICE
     val edge = SpeakSettings.usesEdge()
     val api = SpeakSettings.engine == SpeakSettings.Engine.API
+    // 第五条 (2026-11-15, 2.8.1 #5): DeepSeek 官方 TTS —— **登录即可用**, 不填地址也不填密钥
+    val deepseek = SpeakSettings.usesDeepseek()
     ArrowPreference(
         title = stringResource(R.string.settings_speak_engine_system),
         summary = stringResource(
@@ -5655,6 +5811,19 @@ private fun SpeakItems() {
             else -> stringResource(R.string.settings_speak_engine_api_summary)
         },
         onClick = { SpeakSettings.setEngine(context, SpeakSettings.Engine.API) },
+    )
+    ArrowPreference(
+        title = stringResource(R.string.settings_speak_engine_deepseek),
+        summary = if (deepseek) {
+            val label = LwDeepseekSpeech.VOICES
+                .firstOrNull { it.first == SpeakSettings.deepseekVoice }
+                ?.second
+                ?: SpeakSettings.deepseekVoice
+            stringResource(R.string.settings_speak_engine_deepseek_using, label)
+        } else {
+            stringResource(R.string.settings_speak_engine_deepseek_summary)
+        },
+        onClick = { SpeakSettings.setEngine(context, SpeakSettings.Engine.DEEPSEEK) },
     )
 
     if (onDevice) {
@@ -5883,6 +6052,50 @@ private fun SpeakItems() {
         ArrowPreference(
             title = stringResource(R.string.settings_speak_volume),
             summary = stringResource(R.string.settings_speak_online_volume),
+            onClick = { openSoundSettings(context) },
+        )
+    } else if (deepseek) {
+        // DeepSeek 官方那条 (2026-11-15, 2.8.1 #5): 这一页只定音色 —— 地址与密钥都在宿主那边 (账号那枚
+        // 令牌不出宿主进程), 所以这里没有输入框, 只有"登录着没有"与两个官方音色。没登录不是死路:
+        // 念的时候宿主会回一句"还没登录", 与本段第一行说的是同一件事
+        val signedIn = PortalAccount.phase == AccountPhase.SIGNED_IN
+        ArrowPreference(
+            title = stringResource(R.string.settings_speak_deepseek_account),
+            summary = when (PortalAccount.phase) {
+                AccountPhase.SIGNED_IN -> stringResource(
+                    R.string.settings_speak_deepseek_signed_in,
+                    PortalAccount.label.ifBlank { "DeepSeek" },
+                )
+
+                AccountPhase.SIGNED_OUT -> stringResource(R.string.settings_speak_deepseek_signed_out)
+                else -> stringResource(R.string.settings_speak_deepseek_login_unknown)
+            },
+            // 点一下现问一次 (页面在就答; 页面还没起来时它自己也有一句"界面还没起来")
+            onClick = { PortalAccount.refresh() },
+        )
+        if (!signedIn) {
+            // 没登录时把话说全: 这条引擎的音源在官方那侧, 没有本地兜底
+            ArrowPreference(
+                title = stringResource(R.string.settings_speak_deepseek_where),
+                summary = stringResource(R.string.settings_speak_deepseek_where_summary),
+                onClick = { PortalAccount.refresh() },
+            )
+        }
+        LwDeepseekSpeech.VOICES.forEach { (id, label) ->
+            ArrowPreference(
+                title = label,
+                summary = if (SpeakSettings.deepseekVoice == id) {
+                    stringResource(R.string.settings_speak_voice_current)
+                } else {
+                    stringResource(R.string.settings_speak_voice_pick)
+                },
+                onClick = { SpeakSettings.setDeepseekVoice(context, id) },
+            )
+        }
+        // 响度与节奏都不在应用手里: 这一行说实话, 点它去系统声音设置 (媒体音量在那里)
+        ArrowPreference(
+            title = stringResource(R.string.settings_speak_volume),
+            summary = stringResource(R.string.settings_speak_deepseek_volume),
             onClick = { openSoundSettings(context) },
         )
     } else {
@@ -6443,6 +6656,9 @@ private fun WakeItems() {
     var ready by remember { mutableStateOf(WakeWordDownload.readyCount(context)) }
     // 语音模型 (SenseVoice + VAD) 的下载状态: 与唤醒词那一行各一套, 但同一个段里
     var speechReady by remember { mutableStateOf(SpeechModelDownload.readyCount(context)) }
+    // 语音输入用哪一条 (2026-11-15, 2.8.1 #6): 引导里选过一次, 这里随时能换 —— 换的是
+    // `lw/voice-source.json`, 页面那颗麦克风与常驻链都认它
+    var voiceSource by remember { mutableStateOf(VoiceSource.read(context)) }
     var note by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf(false) }
     val total = WakeWordDownload.files.size
@@ -6466,6 +6682,7 @@ private fun WakeItems() {
             powerSave = LwWakeWord.powerSave(context)
             ready = WakeWordDownload.readyCount(context)
             speechReady = SpeechModelDownload.readyCount(context)
+            voiceSource = VoiceSource.read(context)
             names = LwWakeWord.names(context)
             delay(POLL_MS)
         }
@@ -6578,6 +6795,10 @@ private fun WakeItems() {
             WakeWordDownload.phase == WakeWordDownload.Phase.FAILED ->
                 stringResource(R.string.settings_wake_failed, WakeWordDownload.detail)
 
+            // 暂停 (2026-11-15): 与体检卡那行同一句话 —— 再按一下就从断点接着下
+            WakeWordDownload.phase == WakeWordDownload.Phase.PAUSED ->
+                stringResource(R.string.ready_paused)
+
             ready == total -> stringResource(R.string.settings_wake_model_ready, total)
             ready == 0 -> stringResource(
                 R.string.settings_wake_model_missing,
@@ -6632,6 +6853,10 @@ private fun WakeItems() {
             SpeechModelDownload.phase == SpeechModelDownload.Phase.FAILED ->
                 stringResource(R.string.settings_wake_failed, SpeechModelDownload.detail)
 
+            // 暂停 (2026-11-15): 同上一行那一条
+            SpeechModelDownload.phase == SpeechModelDownload.Phase.PAUSED ->
+                stringResource(R.string.ready_paused)
+
             speechReady == speechTotal -> stringResource(
                 R.string.settings_wake_speech_ready,
                 "%.1f MB".format(speechBytes / 1024.0 / 1024.0),
@@ -6652,6 +6877,31 @@ private fun WakeItems() {
                         .getOrElse { it.message ?: it.toString() }
                 }
             }
+        },
+    )
+    // 语音输入用哪一条 (2026-11-15, 2.8.1 #6): 两行并排, 一行是本地模型, 一行是官方那一档 —— 与
+    // 「说话」那五条引擎同一个手感 (点一下就是选它), 换的就是引导里那一份 `lw/voice-source.json`
+    val accountVoice = voiceSource == VoiceSource.DEEPSEEK
+    ArrowPreference(
+        title = stringResource(R.string.settings_voice_source_local),
+        summary = stringResource(
+            if (accountVoice) R.string.settings_voice_source_local_pick
+            else R.string.settings_voice_source_local_using,
+        ),
+        onClick = {
+            voiceSource = VoiceSource.choose(context, VoiceSource.LOCAL)
+            note = "语音输入改用本地模型了; 下一次说话就按它认"
+        },
+    )
+    ArrowPreference(
+        title = stringResource(R.string.settings_voice_source_deepseek),
+        summary = stringResource(
+            if (accountVoice) R.string.settings_voice_source_deepseek_using
+            else R.string.settings_voice_source_deepseek_pick,
+        ),
+        onClick = {
+            voiceSource = VoiceSource.choose(context, VoiceSource.DEEPSEEK)
+            note = "语音输入改用 DeepSeek 官方了; 账号登录着就能出字, 那段录音会交给 DeepSeek"
         },
     )
     ArrowPreference(
@@ -6712,11 +6962,10 @@ private fun WakeWordDialog(
     onConfirm: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_wake_words),
         summary = stringResource(R.string.settings_wake_words_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -6764,11 +7013,10 @@ private fun PowerWindowDialog(
     onConfirm: (String) -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = stringResource(R.string.settings_wake_power_window),
         summary = stringResource(R.string.settings_wake_power_window_summary),
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }
@@ -6845,11 +7093,10 @@ private fun SpeakTextFieldDialog(
         SpeakText.EDGE_VOICE -> SpeakSettings.edgeVoice
     }
     val haptic = LocalHapticFeedback.current
-    OverlayDialog(
+    InputDialog(
         show = true,
         title = title,
         summary = summary,
-        defaultWindowInsetsPadding = false,
         onDismissRequest = onDismissRequest,
     ) {
         var text by rememberSaveable(initial) { mutableStateOf(initial) }

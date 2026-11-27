@@ -17,7 +17,7 @@
 
 import { connect } from 'node:net'
 
-import { existsSync, mkdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { appendFile, copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -27,6 +27,11 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { defineTool as registerTool } from '@deepseek-ai/dsh-tools'
+
+// 情感状态与共情策略 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`)
+// 纯函数都放那一个文件里: 宿主这一侧只负责"喂读数 / 拼进提示词", 判据可以直接 import 它真跑
+import * as emotion from './emotion/state.mjs'
+import { appendJsonl, readJsonl, writeJsonl } from './emotion/ledger.mjs'
 
 /** Set by the app when it starts the host; both absent everywhere else */
 const ENDPOINT_VARIABLE = 'LW_CHANNEL_ENDPOINT'
@@ -83,6 +88,22 @@ export const inject = ['tools', 'agents', 'sessions']
 export function apply(ctx) {
   hostCtx = ctx
   for (const tool of TOOLS) ctx.tools.register(tool)
+
+  // 首启那一刻就把「Luwi」工作区**备好并注册上** (主人 2026-11-13 改口径, 原 #37 的"只认已有"作废)
+  //
+  // 客户端开屏那一拍要看见 ≥1 个工作区: 看见了就直接落进去, 看不见它只能自己去问系统 Documents ——
+  // 安卓上那条必失败 (`system Documents directory is unavailable`), 界面上是一张空态, 一句也发不
+  // 出去. 所以这里不再"只认已有": 目录不在就建 (<工作区根>/Luwi), 建完就注册, 与探索投递那条路
+  // (`ensureExploreWorkspace`) 合流 —— 门户那一侧于是没有"选工作区"这一档, 首启直接可用
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['workspaceRegistry'], (workspaceCtx) => {
+      void ensureExploreWorkspace(workspaceCtx)
+        .then((workspace) => {
+          console.log(`luwi-channel: the explore workspace at boot is ${workspace?.path ?? '(not registered)'}`)
+        })
+        .catch((error) => warn(ctx, `the explore workspace could not be registered at boot: ${error?.message ?? error}`))
+    })
+  }
 
   // 两道闸 (批次 3, 需求 17 与需求 3): 视频模式里屏幕类工具一律拒; 相机与视频模式同时只许一场会话用。
   // 名单外的工具在这道闸里只多一次 Set 查找 (见 [cameraAndModeGate])
@@ -178,6 +199,17 @@ export function apply(ctx) {
     warn(ctx, `the persona card variable was not registered: ${error?.message ?? error}`)
   }
 
+  // 她的表情目录 (2026-11-15): 预设 prefix 里引用 `{{lw_stickers}}` —— 名字 + 标签 + 用过几次, 外加
+  // 设置页那一格给的密度。为什么要进提示词: 她原来得先调 `lw_sticker op=list` 才知道自己有什么,
+  // 于是"贴表情"的第一步就卡住了 (主人 2026-11-15: 概率太小)
+  try {
+    ctx.inject(['systemPrompt'], (scope) => {
+      scope.systemPrompt.variable('lw_stickers', stickersFor)
+    })
+  } catch (error) {
+    warn(ctx, `the sticker list variable was not registered: ${error?.message ?? error}`)
+  }
+
   // 「看余额」那一档 (2026-10-16): 账号缝里那个数只有宿主拿得到, 落成文件应用才看得见 ——
   // **只有应用点「看余额」写出来的那个请求记号能触发它** (见 startBalance), 宿主自己不按节拍刷
   try {
@@ -191,6 +223,14 @@ export function apply(ctx) {
     startModeModel(ctx)
   } catch (error) {
     warn(ctx, `the mode model correction was not started: ${error?.message ?? error}`)
+  }
+
+  // 情感状态 (2026-11-20, 方案 §5.5): 每轮开始把〔此刻〕算一遍落 `lw/memory/affect.json`, 对话场与
+  // 主动场读的都是那一份 —— 她"此刻什么状态"只有一个源头, 两条路不会各说各的
+  try {
+    startAffectSnapshot(ctx)
+  } catch (error) {
+    warn(ctx, `the affect snapshot was not started: ${error?.message ?? error}`)
   }
 
   // 探索那一档的预算 (2.7.8 批次 7): 数步那道闸 (只数不拒) 与到点那一拍 (5 s), 与上面两道闸并列
@@ -258,6 +298,84 @@ export function apply(ctx) {
     }
   } catch (error) {
     warn(ctx, `the lw/out route was not registered: ${error?.message ?? error}`)
+  }
+
+  // 账号那条路 (2026-11-14): 原生引导里的「登录 DeepSeek 账号 / 填一把 API Key」借它直接进宿主服务。
+  // 页面那侧的 `remote.account` 是 dsh 给自家账号页开的缝, 第三方插件调不动 (真机 12 s 无回音)
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_ACCOUNT_ROUTE,
+            handler: serveLwAccount(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-account.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/account route was not registered: ${error?.message ?? error}`)
+  }
+
+  // 语音合成那条路 (2026-11-15, 2.8.1 #5): 应用把稿子交过来, 这一侧带上账号那枚令牌去调 DeepSeek 官方
+  // TTS, 音频原样转回去。令牌不出宿主进程, 所以应用那边"选这条引擎 = 登录过就能念"
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_TTS_ROUTE,
+            handler: serveLwTts(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-tts.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/tts route was not registered: ${error?.message ?? error}`)
+  }
+
+  // 语音输入那条路 (2026-11-15, 2.8.1 #6): 应用把一段 wav 交过来, 这一侧带上令牌去打 DeepSeek 官方
+  // `/v1/tools/asr`, 回来的那句话原样转回去 —— 与上面那条合成同一套分工 (令牌只住在这个进程里)
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
+        webCtx.effect(() => {
+          const off = webCtx.webServer.register({
+            kind: 'exact',
+            path: LW_ASR_ROUTE,
+            handler: serveLwAsr(ctx),
+          })
+          return () => {
+            try {
+              off()
+            } catch {
+              // 已经摘掉了
+            }
+          }
+        }, 'lw-asr.routes')
+      })
+    }
+  } catch (error) {
+    warn(ctx, `the lw/asr route was not registered: ${error?.message ?? error}`)
   }
 }
 
@@ -933,16 +1051,145 @@ function packedPersonaText() {
   }
 }
 
-/** 这一步的人设: 设备卡 -> 包内默认 -> 四行兜底; 非 luwi 档一个字都不给 */
+/** 会说话的那两档 (2026-11-20): 同一个人格, 两种场合 —— 探索 / 酒馆照旧一个字都不给 */
+const PERSONA_PRESETS = new Set(['luwi', 'proactive'])
+
+/** 内核那一节的开头 (方案 §4.2 的「二之二」): 主动场只给它, 全文留给对话场 */
+const PERSONA_CORE_HEAD = '## 二之二'
+
+/**
+ * 整张卡 → 内核那一段 (方案 §4.3)
+ *
+ * 切不到就退全文 —— **宁可多给, 不可空着**: 人格断层的代价比多几百字大得多
+ */
+function personaCoreOf(card) {
+  const text = String(card ?? '')
+  const at = text.indexOf(PERSONA_CORE_HEAD)
+  if (at < 0) return text
+  const rest = text.slice(at + PERSONA_CORE_HEAD.length)
+  const next = rest.indexOf('\n## ')
+  return (next < 0 ? text.slice(at) : text.slice(at, at + PERSONA_CORE_HEAD.length + next)).trim()
+}
+
+/**
+ * 主动场只要内核, 对话场要全文 (方案 §4.1 / §4.3)
+ *
+ * 主动场一场只说一两句, 而开场正文已经带着状态 / 策略 / 记着的事; 2371 字全文在那里既贵又容易
+ * 让她复述卡里的句子. 对话场照旧全文 —— 那是"她是谁"唯一的地方
+ */
+function personaForPreset(preset, full, core) {
+  return preset === 'proactive' ? core : full
+}
+
+/** `lw/memory/affect.json` 里那一段〔此刻〕的缓存 (path + mtime + size -> 文本) */
+const affectPromptCache = { key: '', text: '' }
+
+/**
+ * 这一步要拼在人格卡后面的〔此刻〕(2026-11-20, 方案 §5.5)
+ *
+ * 为什么读文件而不是现算: 这一步是**同步**求值 (dsh 每轮组提示词调一次 provider), 而算状态要读
+ * 五份文件. 宿主在 turn/start 与判断层那几拍已经算过一遍落成 `affect.json`, 这里只取那段成品文本
+ * —— 与 `{{lw_stickers}}` 同一个手法 (那一个也是宿主先算好)
+ *
+ * 读不到 / 文件坏了回空串: 状态是加分项, 不许因为它让整段人设消失
+ */
+function readAffectBlock() {
+  const path = homePath('lw', 'memory', 'affect.json')
+  if (path === null) return ''
+  let info
+  try {
+    info = statSync(path)
+  } catch {
+    return ''
+  }
+  if (!info.isFile() || info.size === 0) return ''
+  const key = `${path}:${info.mtimeMs}:${info.size}`
+  if (affectPromptCache.key === key) return affectPromptCache.text
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const text = String(parsed?.block ?? '').trim()
+    affectPromptCache.key = key
+    affectPromptCache.text = text
+    return text
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 这一步的人设: 设备卡 -> 包内默认 -> 四行兜底; 只有 luwi / proactive 两档给
+ *
+ * 2026-11-20 (方案 §4): 主动场以前在这里拿空串, 于是"手机里有两个人格"; 现在两档共用同一张卡,
+ * 主动场取内核那一段. 对话场末尾再拼一段宿主算好的〔此刻〕(§5.5) —— 状态是**读**出来的, 不是
+ * 让她"回忆"出来的
+ */
 function personaFor(context) {
   try {
     const session = context?.agent?.session
     const preset = session?.meta?.agentPreset ?? session?.agentPreset
-    if (typeof preset === 'string' && preset !== '' && preset !== 'luwi') return ''
-    return readPersonaCard() || packedPersonaText() || PERSONA_FALLBACK
+    if (typeof preset === 'string' && preset !== '' && !PERSONA_PRESETS.has(preset)) return ''
+    const full = readPersonaCard() || packedPersonaText() || PERSONA_FALLBACK
+    if (preset === 'proactive') return personaForPreset(preset, full, personaCoreOf(full))
+    const state = readAffectBlock()
+    return state === '' ? full : `${full}\n\n${state}`
   } catch (error) {
     console.warn(`luwi-channel: the persona card could not be read: ${error?.message ?? error}`)
     return PERSONA_FALLBACK
+  }
+}
+
+/**
+ * 她库里有什么 (提示词变量 `{{lw_stickers}}`, 2026-11-15)
+ *
+ * 与 [personaFor] 同一个机制: 每一步组提示词都求值一次, 于是主人往目录里丢一张、她自己 `op=fetch`
+ * 攒一张, 下一次请求就看得见 —— 原来她得先调一次 `lw_sticker op=list` 才知道自己有什么, 这一步的
+ * 摩擦比任何一句"多贴点表情"都更劝退
+ *
+ * 只给会说话的那两档 (luwi / proactive): 探索 / 酒馆里这一句只是噪声
+ *
+ * 3 s 缓存管目录那一半 ("有几张"), 密度那一句每次现算 —— 主人拨完设置就该在下一次请求里生效
+ */
+function stickersFor(context) {
+  try {
+    const session = context?.agent?.session
+    const preset = session?.meta?.agentPreset ?? session?.agentPreset
+    if (typeof preset === 'string' && preset !== '' && preset !== 'luwi' && preset !== 'proactive') return ''
+    const home = process.env.DSH_HOME
+    if (!home) return ''
+    const folder = join(home, 'lw', 'stickers')
+    const now = Date.now()
+    if (stickerPromptCache.key !== folder || now - stickerPromptCache.at >= 3000) {
+      const names = (() => {
+        try {
+          return readdirSync(folder)
+        } catch {
+          return []
+        }
+      })().filter((one) => STICKER_FILE_OK.test(one))
+      const tags = readStickerTagsSync(folder)
+      const entries = names.map((name) => ({
+        name,
+        tags: tags[name]?.tags ?? [],
+        used: tags[name]?.used ?? 0,
+      }))
+      stickerPromptCache.key = folder
+      stickerPromptCache.at = now
+      const untagged = stickerUntaggedText(entries)
+      stickerPromptCache.text = entries.length === 0
+        ? '【她的表情】文件夹 lw/stickers 还是空的: 贴不了。想贴就用 lw_sticker op=fetch 给一个 https'
+          + ' 图链接攒一张, 之后 lw_say {sticker:"名字"} 贴出去'
+        : `【她的表情】${entries.length} 张: ${stickerCatalogText(entries)}。贴的时候不用先列清单, 直接`
+          + ' lw_say {sticker:"开心"} 给一句情绪或场景词, 宿主按标签和名字挑一张 (同一个词对得上好几张'
+          + '就随机一张), 也可以给准确文件名'
+          + (untagged === '' ? '' : `\n【还没标签】${stickerUntaggedOf(entries).length} 张: ${untagged} ——`
+            + ' 只认得它们的文件名。贴中了一张没标签的, 说完那句之后顺手发一次'
+            + ' lw_sticker op=tag (id + 1~3 个词, 按你当时那句话的口气), 一次一张就够; 标过之后'
+            + ' 「无语」「赞」这类词才找得到它')
+    }
+    return `${stickerPromptCache.text}\n【这一场的表情密度】${stickerMoodLine(readLwStickerEveryNSync(home))}`
+  } catch (error) {
+    console.warn(`luwi-channel: the sticker list could not be read: ${error?.message ?? error}`)
+    return ''
   }
 }
 
@@ -1800,6 +2047,8 @@ function startModeModel(ctx) {
   onSessionEvent(ctx, (session, event) => {
     if (event.type !== 'turn/start') return
     if (session.meta?.origin === 'subagent') return
+    // 登录之后模型那一笔的兜底: 每轮一次 (幂等 + 60 s 节流), 视频模式里它自己会跳过
+    void lwAccountAdoptModel(ctx).catch(() => {})
     // 对端投影的那一轮不是在这台机器上跑的: 它不该换本地那一对模型 (见 isPeerProjection)
     if (isPeerProjection(session)) return
     const mode = activeMode()
@@ -1823,6 +2072,10 @@ function startModeModel(ctx) {
   })
   void writeModelCatalog(ctx).catch((error) => {
     warn(ctx, `the model catalog was not written: ${error?.message ?? error}`)
+  })
+  // 已经登录的机器: 起来就把默认与会话收到账号模型上 (读不到就只记一笔, 不挡启动)
+  void lwAccountAdoptModel(ctx).catch((error) => {
+    warn(ctx, `the account model was not adopted: ${error?.message ?? error}`)
   })
   // 应用配了自建端点的话, 起来就把它挂上 (第一次进视频模式不必等那 3 s 轮询)
   void ensureVideoRoute(ctx).catch((error) => {
@@ -1993,6 +2246,16 @@ async function pluginAnswer(result) {
   }
   return { text, images }
 }
+
+/**
+ * 画像只认这几个键 (方案 §6.1: 作息 / 称呼 / 雷区 / 偏好怎么被安慰)
+ *
+ * **必须放在 `const TOOLS` 之前** (2026-11-20 审查抓到的 blocker): `lw_memory` 的参数描述在
+ * **模块求值**时就拼这个数组, 而 TOOLS 数组在两千行处就求值了 —— 声明留在后面会让整个插件
+ * `Cannot access 'PROFILE_KEYS' before initialization`, 39 个工具一个都不注册 (预设引用
+ * `{{lw_persona}}` 的那几档还会 fail loud)
+ */
+const PROFILE_KEYS = Object.freeze(['call', 'sleep', 'work', 'taboo', 'comfort', 'like', 'dislike', 'note'])
 
 const TOOLS = [
   defineTool({
@@ -2475,8 +2738,13 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
-      return formatUi(await call('ui', drop(args)))
+    async execute(args, exec) {
+      const result = await call('ui', drop(args))
+      // 跨应用记忆 (2.8.1 #36): 这一眼看的是哪个应用, 账上就切到哪个 (切走 / 切回来记在这里)
+      // 归属要过 [exploreMemorySeen]: 通知栏 / 权限弹窗 / 桌面与主屏那一块都不算 (审查 M5),
+      // 认不下来就交空串, 账上只更新手里这个应用的时间
+      exploreMemoryNote(exec, exploreMemorySeen(args?.displayId, result?.package), 'read', '')
+      return formatUi(result)
     },
   }),
 
@@ -2488,7 +2756,9 @@ const TOOLS = [
       + 'WebGL view - has no control tree, but its text is still on the screen. Every line comes '
       + 'back with the rectangle it occupies in the screen\'s own pixels, so lw_tap(x=..., y=...) '
       + 'can press it; the centre is given too. It reads Chinese and English, runs on the device '
-      + 'with no network and no cloud, and unlike lw_screenshot it does **not** scale the picture '
+      + 'with no network and no cloud - the engine is always "local" and the picture never leaves '
+      + 'the phone, because 2.x has no cloud reader at all - and unlike lw_screenshot it does '
+      + '**not** scale the picture '
       + 'down, so small text stays readable. Prefer lw_ui whenever that answers: it is exact and '
       + 'free, while this is a reading of a picture, and it can mistake an icon for a character '
       + '(those come back with a low score).',
@@ -2500,6 +2770,17 @@ const TOOLS = [
           + ' = kept, red box + x = dropped as an icon, each with its score) and answer with the'
           + ' two file paths. Off by default because it costs a full-screen PNG per read - turn it'
           + ' on only when the filter itself is in question',
+      },
+      route: {
+        type: 'string',
+        enum: ['calibrated', 'legacy'],
+        description: 'Which filter decides what counts as a line. `calibrated` (the default) reads'
+          + ' the whole frame first: it measures how large the text on that screen is, sorts the'
+          + ' screen into a dense / normal / large tier, and then judges each row on its score,'
+          + ' its length, its shape and the column it sits in, with a threshold fitted per tier.'
+          + ' `legacy` is the single global cutoff this replaced - it drops anything under 0.35'
+          + ' whatever the screen, which is also the way back if the new filter ever reads a'
+          + ' screen worse. Leave it out unless you are comparing the two',
       },
       note: NOTE,
     },
@@ -2605,13 +2886,38 @@ const TOOLS = [
       + "phone's own screen with displayId 0. By name is the reliable "
       + 'way: pass text exactly as lw_ui reported it and the device finds that control and presses '
       + 'it, reporting what it pressed. If the name reaches more than one control nothing is '
-      + 'pressed and the candidates come back, so the next attempt can be more specific. A point '
+      + 'pressed and the candidates come back, so the next attempt can be more specific. A name '
+      + 'that matches nothing is not a dead end either: the screen is read as pixels too, and the '
+      + 'three lines that came closest come back with their text, a score and their rectangle - '
+      + 'press one of those, or use the closer name they suggest. A point '
       + 'is for when there is no name to use - a canvas, or a place you measured on a screenshot - '
       + 'and it is in the screen\'s own pixels, with 0,0 at its top left. Either way the call '
-      + 'returns once the device has delivered the press, so a screenshot or an lw_ui taken after '
-      + 'it shows the result. Pass hold to make it a long press, which is how a context menu, a '
-      + 'selection or a drag handle is reached; by name that uses the control\'s own long click '
-      + 'action, and a control without one is pressed with a held finger instead.',
+      + 'reads the screen back once, about 300ms after the press, and says what that did: '
+      + '"effect=changed" with up to five lines of text that appeared or went, or '
+      + '"effect=unchanged" with the three controls that come closest to what you meant - press '
+      + 'one of those instead of the same place again. Two presses in a row that leave the screen '
+      + 'exactly as it was stop the third one before it is sent (the answer says '
+      + 'reason=effect-missing), so a screen that ignores presses cannot be tapped at all day; a '
+      + 'screen that did change lets the next press through. Pass verify: "off" to skip that '
+      + 'read-back, which is the old behaviour word for word. Pass hold to make it a long press, '
+      + 'which is how a context menu, a selection or a drag handle is reached; by name that uses '
+      + 'the control\'s own long click action, and a control without one is pressed with a held '
+      + 'finger instead. Before any press the target is checked three ways, and a target that fails '
+      + 'any of them is not pressed at all: a name that reaches more than one control whose scores '
+      + 'are too close to tell apart answers with candidates (skip=ambiguous), a target that is off '
+      + 'this screen or covered by another named control answers skip=occluded, and a control that '
+      + 'is named by name whose short side is under 48px answers skip=small (a point you measured '
+      + 'yourself is not measured that way). Every candidate and every re-anchored target comes '
+      + 'with its rectangle AND the centre of it, so the next press can land on that exact point. '
+      + 'A press that leaves the screen unchanged is then recovered in two graded steps - reread, '
+      + 'then reanchor - answered as recover=reread or recover=reanchor with the target\'s current '
+      + 'centre, and as recover=giveup when neither helps, while a screen whose tree cannot be read '
+      + 'at all is answered effect=unknown and is not recovered, because nothing was proved either '
+      + 'way. The tool never presses a second '
+      + 'time by itself. When pressing by point, pass expect with the text of the control you '
+      + 'believe is there: the point is checked against the control actually at it before the '
+      + 'touch, a mismatch answers reason=anchor-mismatch with what is really there and where the '
+      + 'closest control is, and a match answers anchor=confirmed.',
     parameters: {
       displayId: DISPLAY_ID,
       text: {
@@ -2629,6 +2935,26 @@ const TOOLS = [
           + 'which is what a self-drawn screen needs. a11y is the tree alone, ocr is the pixels '
           + 'alone. An ambiguous name is never followed by a guess, whichever way it was found',
       },
+      verify: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'Whether to read the screen back after the press. auto (the default) reads '
+          + 'it twice - just before and 300ms after - and answers effect=changed with the text '
+          + 'difference, or effect=unchanged with the three closest controls to press instead. '
+          + 'off sends the press and answers exactly as this tool always did, which is what to '
+          + 'use when the screen answers in a picture, a sound or a toast that no tree shows. off '
+          + 'also turns off the three prechecks and, on a press by point, the expect check - '
+          + 'nothing at all is looked at before the touch, as before #32',
+      },
+      expect: {
+        type: 'string',
+        description: 'For a press by point: the text of the control you expect at that point. The '
+          + 'point is checked against the control actually taking the press there before anything '
+          + 'is sent - a mismatch answers reason=anchor-mismatch with what is really there and '
+          + 'where the closest control is, and nothing is pressed. A match answers '
+          + 'anchor=confirmed. Only a press by point takes it: with verify off it is not checked at '
+          + 'all, and with text it is refused - pass x and y, or drop expect',
+      },
       hold: holdParameter(
         'A hold past a long press is a press kept down, which is what a voice message being '
         + 'recorded or a drag that has to be started by holding expects.',
@@ -2639,7 +2965,7 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, context) {
       const named = args?.text !== undefined
       const placed = args?.x !== undefined && args?.y !== undefined
       if (named && placed) {
@@ -2648,29 +2974,158 @@ const TOOLS = [
       if (!named && !placed) {
         throw new Error('lw_tap needs either a text to press by name or both x and y')
       }
+      // expect 只服务按点那一条: 同时给 text 与 expect 时不能静默丢掉那份期望 (backlog)
+      if (named && typeof args?.expect === 'string' && args.expect.trim() !== '') {
+        throw new Error('expect belongs to a press by point: pass x and y, or drop expect')
+      }
+      // 跨应用记忆 (2.8.1 #36): 回执原样交回去, 只顺手往账上记这一下
+      // 归属按 displayId 反那一块屏上的应用 (审查 M5): 一律写手里这一个的话, 在别的屏上按的那一下
+      // 会记到错的包名下; 认不出来才退回手里这一个。effect 一律 `unknown` —— 回执里既没有 effect
+      // 也没有熄屏, 那一下按到了没有只够把回执念对, 不够说界面变了 (审查 M1);
+      // 真按到了由 `delivered` 交代, 它进"上次按过"那一档 (第二轮 E)
+      const remember = (report, result, effect, delivered = false) => {
+        exploreMemoryNote(context, exploreMemoryOnDisplayPkg(args.displayId), effect ?? exploreMemoryEffect(result),
+          exploreMemoryTapText(args), delivered === true)
+        return report
+      }
       const held = holdMs(args?.hold)
+      // 核对那一档 (落实表 #32): 缺省 auto, verify=off 与今天逐字相同
+      const verify = args?.verify === 'off' ? 'off' : 'auto'
+      // 按点按时"我以为是哪一个" (落实表 #37): 只有 auto 那一档才核, off 原样退回
+      const expected = typeof args?.expect === 'string' ? args.expect.trim() : ''
+      const sessionId = sessionIdOf(context)
+      const before = verify === 'off' ? null : await tapEffectSnapshot(args.displayId)
+      const wanted = named
+        ? String(args.text)
+        : tapEffectLabelAt(before, args.x, args.y)
+      // 回执里那块屏的编号: 树读到了就用树自己报的那个 —— 调用方省掉 displayId 时回执也不能写
+      // 一个 `undefined` 出来 (#37 归档项)
+      const at = tapDisplayId(args, before)
+      // 连着两下没变: 这一下不发出去, 让调用方在原地换一条路 (账只有 auto 那一档才记)
+      const brake = verify === 'off' ? null : tapEffectBrake(tapEffectLog, sessionId, before, wanted)
+      if (brake !== null) {
+        console.log(`lw_tap: not sent, reason=${brake.reason} after ${brake.streak} unchanged`
+          + ` on ${displayWhere(at)}`)
+        return said(tapEffectBrakeAnswer(brake, at), args.note)
+      }
+      // `point` 是这一下按在哪一点: 恢复那一步拿它挑"刚才按的那一处", 不挑最上面那一处 (必修 2)
+      const withEffect = (pressed, report, pressedLabel, point = null) => tapEffectCheck({
+        verify,
+        before,
+        pressed,
+        wanted: pressedLabel === undefined ? wanted : pressedLabel,
+        displayId: args.displayId,
+        sessionId,
+        step: exploreRun.steps,
+        holdMs: held,
+        point,
+      }).then((effect) => (effect === '' ? report : `${report}\n\n${effect}`))
       if (named) {
         const source = args.source ?? 'auto'
         const asked = { displayId: args.displayId, text: args.text, holdMs: held }
+        // **a11y 按名成功那条不给恢复交按点** (第三轮 backlog): 它只在唯一命中时才按, 而恢复只在
+        // `effect=unchanged` 的那一屏上跑 —— 那一屏与按之前是同一份树, 同一个名字挑不出第二处。
+        // 读屏那两条路 (`source === 'ocr'`, 以及这里退到读屏那一段) 仍交 `reading.point`: 那一侧
+        // 是像素猜出来的位置, 恢复要认的正是"刚才按的那一点"
+        // 前置校验 (#37): 按之前那一次读树里先核一遍 —— 唯一 / 够大 / 没被盖住, 不过就不发触摸
+        if (source !== 'ocr' && before !== null) {
+          const hits = tapNameMatches(before, args.text)
+          if (hits.length > 1) {
+            const candidates = closestReadLines(hits.map((node) => ({
+              text: node.label, box: node.bounds, score: 1,
+            })), args.text)
+            const why = `${hits.length} controls on this screen say ${JSON.stringify(String(args.text))}`
+            return said(await withEffect(false, tapPrecheckCandidatesAnswer(
+              at, args.text, candidates, why,
+            )), args.note)
+          }
+          if (hits.length === 1) {
+            const skip = tapPrecheck(before, hits[0])
+            if (skip !== null) {
+              return said(await withEffect(false, tapSkipAnswer(at, args.text, skip)), args.note)
+            }
+          }
+        }
         if (source === 'ocr') {
-          return said(await tapByReading(args.displayId, args.text, held), args.note)
+          const reading = await tapByReading(args.displayId, args.text, held, before, verify)
+          // 按到了没有由 tapByReading 自己说了算 (`pressed`), 不再拿"候选是不是空"反推 (审查 M2)
+          const pressed = reading.pressed === true
+          const report = await withEffect(
+            pressed,
+            tapReadingAnswer(at, args.text, reading, undefined),
+            reading.pressedLabel,
+            reading.point ?? null,
+          )
+          return remember(said(report, args.note), null, 'unknown', pressed)
         }
         const tree = await call('tapText', asked)
         // ambiguous 也直接交回去: 树里说有两个同名控件的时候, 读像素只会是第三个猜测
         // 这里看的是 clicked 而不是 outcome: 无障碍动作被拒之后桥会用一根按住的手指兜底,
         // 那一下 outcome 仍是 unclicked 而 clicked 已经是真, 再退到读屏就会按第二次
         if (source === 'a11y' || tree.clicked === true || tree.outcome === 'ambiguous') {
-          return formatNamedTap(tree, args.note)
+          // 生产里最常见的一条路 (第三轮 E): 按名成功也要把"真的按到了"报给账, 否则
+          // `pressed` 在真机上永远是空的, 提示只剩 intent 一行
+          const deliveredNamed = exploreMemoryDelivered(tree)
+          return remember(
+            said(await withEffect(deliveredNamed, namedTapReport(tree)), args.note),
+            tree, undefined, deliveredNamed,
+          )
         }
-        const reading = await tapByReading(args.displayId, args.text, held)
-        return said(`${namedTapReport(tree)}\n${reading}`, args.note)
+        const reading = await tapByReading(args.displayId, args.text, held, before, verify)
+        // 树里没有、读屏也没有的时候不给死胡同: 最像的几行就是下一次要点的东西
+        // 熄屏 / 读不到 / 找到了没送达三种照念原因 (第二轮 F) —— 三种下一步各不相同
+        const report = reading.candidates.length > 0 || reading.skip
+          ? tapReadingAnswer(at, args.text, reading, tree)
+          : `${namedTapReport(tree)}\n${reading.report}`
+        const pressedByReading = reading.pressed === true
+        return remember(
+          said(await withEffect(
+            pressedByReading, report, reading.pressedLabel, reading.point ?? null,
+          ), args.note),
+          null, 'unknown', pressedByReading,
+        )
       }
-      return formatGesture('tapped', await call('tap', {
+      // 按点按: 说了期望是哪一个, 就先证明这个点上真的是它 (#37), 证明不了就不发这一下
+      const pressedAt = { x: Number(args.x), y: Number(args.y) }
+      let anchorLine = ''
+      if (expected !== '' && verify !== 'off') {
+        const mismatch = tapAnchorMismatch(before, expected, args.x, args.y)
+        if (mismatch !== null) {
+          return said(tapAnchorMismatchAnswer(at, mismatch, args.x, args.y), args.note)
+        }
+        const node = before === null ? null : tapEffectNodeAt(before, args.x, args.y)
+        // 按点这一条只判"这一点还在不在这一屏上", **不量短边**: 坐标是调用方自己量好交来的,
+        // 而一行 14sp 的字在 1080x2460 上短边只有 36~47px, 拿 48px 去卡它会把 expect 明明对得上
+        // 的那一下也拦成 skip=small (必修 1; 读屏那条路 7177 也是这么传的)
+        const skip = node === null
+          ? null
+          : tapPrecheckGeometry(before, node.target ?? node.bounds, { minSide: false })
+        if (skip !== null) return said(tapSkipAnswer(at, expected, skip), args.note)
+        console.log(`LwTap: anchor=confirmed on ${displayWhere(at)}`
+          + ` at ${args.x},${args.y} for ${JSON.stringify(expected)}`)
+        anchorLine = `anchor=confirmed: the control at ${args.x},${args.y} is ${JSON.stringify(expected)}`
+      }
+      const delivered = await call('tap', {
         displayId: args.displayId,
         x: args.x,
         y: args.y,
         holdMs: held,
-      }), args.note)
+      })
+      const effect = await tapEffectCheck({
+        verify,
+        before,
+        pressed: delivered.tapped === true,
+        wanted,
+        displayId: args.displayId,
+        sessionId,
+        step: exploreRun.steps,
+        holdMs: held,
+        point: pressedAt,
+      })
+      // 坐标那一路也是"真按到了" (第三轮 E): 回执说 tapped 就算按到
+      return remember(said(formatGesture('tapped', delivered, undefined,
+        [anchorLine, effect].filter((line) => line !== '')), args.note),
+      delivered, undefined, exploreMemoryDelivered(delivered))
     },
   }),
 
@@ -2751,8 +3206,12 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
-      return formatGesture('swiped', await call('swipe', drop(args, 'note')), args?.note)
+    async execute(args, exec) {
+      const swiped = await call('swipe', drop(args, 'note'))
+      // 跨应用记忆 (2.8.1 #36): 滑动只算"还在这个应用里", 三个"已确认"格留给 lw_tap 的控件名
+      // (审查 m6: 一次滑动一条 `滑动 x,y -> x,y` 会把三个格子全换成坐标)
+      exploreMemoryNote(exec, exploreMemoryOnDisplayPkg(args.displayId), 'read', '')
+      return formatGesture('swiped', swiped, args?.note)
     },
   }),
 
@@ -2824,6 +3283,138 @@ const TOOLS = [
     },
     async execute(args) {
       return formatApps(await call('apps', drop(args, 'note')))
+    },
+  }),
+
+  // 主人自己登记的那几个工具 (2.8.1 B2)
+  //
+  // 与 lw_apps 的分工: 那一条列的是这台手机上能启动的全部应用, 名字随系统语言变, 于是每换一台手机
+  // 模型就得重新猜一次包名. 这一条读的是主人手写的 `$DSH_HOME/lw/external-apps.json`: id 是固定的,
+  // label 只是给人看的. 四件事: list 念登记表, probe 只问装没装 (不发 Intent), open 打开,
+  // handoff 把一段话交给那个工具
+  defineTool({
+    name: 'lw_external',
+    description:
+      'The tools this person registered for me to reach, by the id they chose rather than by a'
+      + ' label that changes with the system language. op=list (the default) prints the registry'
+      + ' and says which entries are installed right now; op=probe asks about one id or all of'
+      + ' them and starts nothing; op=open starts one (its registered activity first, its launcher'
+      + ' entry otherwise); op=handoff passes a stretch of text to one through ACTION_SEND.'
+      + ' **handoff takes words, not files**: the text is what the person would have typed or said,'
+      + ' so a path, a content:// or file:// URI, a shell line or a credential is refused - read the'
+      + ' file with another tool and hand over the part that matters. Nothing here installs,'
+      + ' downloads or creates a virtual screen; an id that is not in the registry answers unsupported'
+      + ' rather than guessing a package.',
+    parameters: {
+      op: {
+        type: 'string',
+        description: 'list (default) to read the registry, probe to ask, open to start one,'
+          + ' handoff to pass text to one',
+        enum: ['list', 'probe', 'open', 'handoff'],
+      },
+      id: {
+        type: 'string',
+        description: 'The id from the registry, for probe, open and handoff. Leave it out for'
+          + ' probe to ask about every entry',
+      },
+      text: {
+        type: 'string',
+        description: 'For handoff: the words to hand over, as the person would say them.'
+          + ' Never a path, URI, shell line or credential - those are refused',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = ['probe', 'open', 'handoff'].includes(args?.op) ? args.op : 'list'
+      const answer = await call('external', {
+        op,
+        id: args?.id,
+        text: args?.text,
+      })
+      return formatExternal(op, answer)
+    },
+  }),
+
+  // 手机应用工坊 (2.8.1): 改应用名 / 图标 / 内容, 在手机上构建并装上一个 Android App
+  //
+  // 与文件工具的分工: 代码与 res 是**普通文件**, 用现成的读写编辑工具直接改
+  // (`<workspace>/app-projects/<slug>/`); 这一条只管那几件文件工具做不了的事 —— 建项目、改元信息、
+  // 落图标、装工具链、跑构建、装机、把开发台拉到虚拟屏上
+  defineTool({
+    name: 'lw_forge',
+    description:
+      'Build an Android app on the phone itself. A project lives at <workspace>/app-projects/<slug>/'
+      + ' and its source and res are ordinary files: edit them with the file tools, and use this tool'
+      + ' for everything that is not a text edit. op=init creates a project from the java-basic'
+      + ' template (name / package are required, the package cannot change later); op=meta renames'
+      + ' it or bumps the version; op=icon turns a picture from the workspace into the launcher'
+      + ' icon (raster mipmaps plus an adaptive icon); op=status prints the project, the last build'
+      + ' and whether the toolchain and the dev console are ready; op=toolchain installs the'
+      + ' toolchain the Android-dev-tools companion app carries; op=build compiles, dexes, signs and'
+      + ' verifies the APK and keeps the previous one when it fails; op=install installs the built'
+      + ' APK; op=logs prints the tail of the build log; op=screen opens the dev console on a virtual'
+      + ' screen so the progress can be watched on this phone (op=preview puts the built app on that'
+      + ' same screen, op=back closes it). Nothing here takes a command line: the build steps are'
+      + ' fixed and only the project name and options are yours.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'init | meta | icon | status | toolchain | create | build | install | logs | screen | preview | back',
+        enum: ['init', 'meta', 'icon', 'status', 'toolchain', 'create', 'build', 'install', 'logs', 'screen', 'preview', 'back'],
+      },
+      project: {
+        type: 'string',
+        description: 'The project slug: lower-case letters, digits, dash or underscore, e.g. hello',
+      },
+      name: {
+        type: 'string',
+        description: 'For init / meta: the name shown under the launcher icon',
+      },
+      package: {
+        type: 'string',
+        description: 'For init: the application id, e.g. com.example.hello. It cannot be changed later',
+      },
+      file: {
+        type: 'string',
+        description: 'For icon: a picture inside the workspace (or lw-in/), absolute or workspace-relative',
+      },
+      versionName: {
+        type: 'string',
+        description: 'For meta: the version name, e.g. 1.1',
+      },
+      lines: {
+        type: 'integer',
+        description: 'For logs: how many lines from the end, default 60, at most 200',
+      },
+      force: {
+        type: 'boolean',
+        description: 'For init: overwrite an existing project (its files are kept; the json is rewritten)',
+      },
+      note: NOTE,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args, exec) {
+      const workspace = sessionCwdOf(exec)
+      const answer = await call('forge', {
+        op: args?.op,
+        project: args?.project,
+        name: args?.name,
+        package: args?.package,
+        file: args?.file,
+        versionName: args?.versionName,
+        lines: args?.lines,
+        force: args?.force === true,
+        workspace: workspace || '',
+      })
+      return String(answer?.text ?? '').trim() || '(no answer)'
     },
   }),
 
@@ -2951,13 +3542,19 @@ const TOOLS = [
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const packageName = (args?.package ?? '').trim()
       const component = (args?.component ?? '').trim()
       if ((packageName === '') === (component === '')) {
         throw new Error('lw_launch takes either a package or a component, and exactly one of them')
       }
-      return formatLaunched(await call('launch', drop(args, 'note')), args?.note)
+      const launched = await call('launch', drop(args, 'note'))
+      // 跨应用记忆 (2.8.1 #36): 换应用是最直白的一次"切走", 账上切到刚起来的那个包
+      // 起应用是这一趟自己做的, 所以主屏也认它 (审查 M5: 归属只认 lw_launch 或屏上的包真的换了)
+      if (launched?.started === true) {
+        exploreMemoryNote(exec, exploreMemorySeen(args?.displayId, launched?.package, true), 'read', '')
+      }
+      return formatLaunched(launched, args?.note)
     },
   }),
 
@@ -4009,7 +4606,20 @@ const TOOLS = [
     + ' watches can run right now, what is holding a rule back (no notification access,'
     + ' accessibility off, no exact alarms, power save, quiet hours) and, for every combination,'
     + ' the last time each sub-condition held (that line is how you answer "why did it not fire"), op=history says what was'
-    + ' decided recently and why it did not fire. Deleting is not available here: that is a button on'
+    + ' decided recently and why it did not fire, and op=record turns one real run through the phone'
+    + ' into a rule: call it with action="start", ask the user to do the thing on the phone (for example'
+    + ' 打开设置 -> 点 WLAN), then call it again with action="stop" plus name and then, and the rule is'
+    + ' written for you - no JSON to compose. **The steps come from the accessibility window trace, so'
+    + ' every step becomes exactly one condition, in order**: the first window of an app becomes'
+    + ' foreground {package}, and each later screen of the same app becomes activity {withinMinutes:1}'
+    + ' (a tap inside an app can only be seen as "the phone was just touched"); the screen titles are'
+    + ' kept in then.text after the line "录的那一串", so a fired rule still knows which sequence it was.'
+    + ' A recording longer than five steps keeps the first five, action="cancel" drops one, and the raw'
+    + ' trace of the last one is left in DSH_HOME/automations/recorded as <name>.steps.json (not the'
+    + ' rules directory, so nothing in it is ever loaded as a rule). What is recorded is that bounded'
+    + ' 200-event ring, so keep one recording to the flow itself - a minute or two, not a whole session.'
+    + ' Prefer it over op=write when the user would rather show you than describe it.'
+    + ' Deleting is not available here: that is a button on'
     + ' the settings page. A rule that cannot be read is copied to DSH_HOME/automations/rejected as'
     + ' <name>.json plus <name>.error.txt, and the settings page can delete both at once.',
     'automation',
@@ -4017,17 +4627,29 @@ const TOOLS = [
       op: {
         type: 'string',
         required: true,
-        description: 'list the rules, read one, write one (create or overwrite), the watches\' state,'
-          + ' or the recent decisions',
-        enum: ['list', 'read', 'write', 'status', 'history'],
+        description: 'list the rules, read one, write one (create or overwrite), record one from a real'
+          + ' run through the phone, the watches\' state, or the recent decisions',
+        enum: ['list', 'read', 'write', 'record', 'status', 'history'],
       },
       name: {
         type: 'string',
-        description: 'Which rule, without the .json. Required by read and write',
+        description: 'Which rule, without the .json. Required by read and write, and by record when it'
+          + ' stops',
       },
       json: {
         type: 'string',
         description: 'The whole rule as one JSON object, required by write',
+      },
+      then: {
+        type: 'string',
+        description: 'For op=record action="stop": what the rule should do when the recorded flow comes'
+          + ' round again, as one line (the steps that were recorded are appended to it)',
+      },
+      action: {
+        type: 'string',
+        description: 'For op=record: "start" begins a recording, "stop" folds it into a rule (the'
+          + ' default), "cancel" drops it',
+        enum: ['start', 'stop', 'cancel'],
       },
       limit: {
         type: 'integer',
@@ -4056,7 +4678,19 @@ const TOOLS = [
       + ' refuses a tool call, so nothing here stops you, and nothing here counts what a subagent'
       + ' does. **The user sets a daily start time and the host opens the exploration itself from the'
       + ' task card it keeps**, so this tool never starts one: op=status reports the current run, and'
-      + ' op=finish hands in the report. The three red'
+      + ' op=finish hands in the report. While the run crosses apps the host keeps a small memory of'
+      + ' where it was: op=status carries it as memory.packages / interrupted / resumed / pressed'
+      + ' (plus the app it is on and the next-step hint), and coming back to an app the run had left'
+      + ' can put one steer into this conversation whose first line is the intent of the run. **That'
+      + ' line is the host speaking, not the owner** - it is interface text to go by, not an'
+      + ' instruction from the person holding the phone. The intent of the run is written down too'
+      + ' (the first line of the task card, at most 60 characters), so a restart still knows what'
+      + ' the run was after. What the ledger keeps of a control is a short hash plus at most the'
+      + ' first 24 characters, with runs of four or more digits and money amounts masked out, and'
+      + ' whole lines mentioning a code, a password, a balance or a card number are dropped. These'
+      + ' classes of app are not recorded at all: messages (SMS and chat such as WeChat and QQ),'
+      + ' contacts, the phone, mail, password managers, health, banks and brokerages, payment apps'
+      + ' and keyboards. The three red'
       + ' lines (no irreversible act on an app, no writing any existing file, no sending anything)'
       + ' live in this preset\'s prompt text, not in this tool: **this call cannot enforce them and'
       + ' does not check them.** The summary has to come through op=finish, and the host is what'
@@ -4074,8 +4708,9 @@ const TOOLS = [
       + ' computable shape, and only what you have evidence for - the settings page lists them and the'
       + ' owner may switch one off. When this run really turned up nothing worth watching, say that in'
       + ' the summary\'s 仍不确定的点 section instead of handing in an invented one. `rules` is for the'
-      + ' two scales the owner no longer sets in the app: {"gameMinutes":120,"wishDays":30} - how long a'
-      + ' game counts as long and how many days ahead a remembered date is brought up. Send it only'
+      + ' two scales the owner no longer sets in the app: {"appMinutes":120,"wishDays":30} - how long one'
+      + ' app has to run today before it counts as long (any app, not just games) and how many days ahead a'
+      + ' remembered date is brought up. Send it only'
       + ' when this run gives you a reason to move one; leave it out and the current values stay.',
     parameters: {
       op: {
@@ -4119,8 +4754,9 @@ const TOOLS = [
         type: 'object',
         additionalProperties: true,
         description: 'finish only, optional: the two judgement scales the owner no longer sets in the'
-          + ' app - {"gameMinutes":120,"wishDays":30}. gameMinutes is how long a game counts as long'
-          + ' (5..1440), wishDays is how many days ahead a remembered date is brought up (1..365).'
+          + ' app - {"appMinutes":120,"wishDays":30}. appMinutes is how long one app has to run today'
+          + ' before it counts as long (any app: games, video, anything; 5..1440), wishDays is how many'
+          + ' days ahead a remembered date is brought up (1..365).'
           + ' Send only the key you want to move; the other one keeps its value',
       },
     },
@@ -4219,18 +4855,24 @@ const TOOLS = [
   defineTool({
     name: 'lw_speech',
     description:
-      'Transcribe speech on this phone with no network and no API key: everything runs in the '
-      + 'app process, so the audio never leaves the device. Two engines, and engine= picks one: '
+      'Transcribe speech on this phone. Three engines, and engine= picks one: '
       + 'engine=glm is Zhipu GLM-ASR-Nano (1.5 B, Q4_K, samples at a time of CPU: a couple of '
       + 'seconds for a short phrase, ten seconds or more for a long sentence), which is the accurate '
-      + 'one and is reached only by naming it, and engine=sherpa is SenseVoice '
-      + '(Chinese, English, Cantonese, Japanese and Korean, with punctuation), which is the fast one '
-      + 'and the default everywhere - the GUI voice input button and the ball both use it. '
-      + 'op=status reports both engines and whether their models are on disk; op=prepare downloads '
-      + 'the one named, from the hf-mirror copy (huggingface.co itself is unreachable from this '
-      + 'phone) - GLM-ASR is about 1.6 GB, SenseVoice about 240 MB plus the 1.8 MB silero '
-      + 'voice-activity model that the one-sentence window cuts segments with; op=transcribe turns '
-      + 'one 16 kHz mono PCM16 WAV file into text.',
+      + 'one and is reached only by naming it; engine=sherpa is SenseVoice '
+      + '(Chinese, English, Cantonese, Japanese and Korean, with punctuation), which is the fast one; '
+      + 'and engine=deepseek is the official DeepSeek speech input, which runs no model on the phone '
+      + 'and instead sends the recording to `POST /v1/tools/asr` from this host, where the signed-in '
+      + 'account token lives (so it needs a signed-in account or the API key from the getting-started '
+      + 'card, and no model on disk). Both on-device engines keep the audio on the device; the '
+      + 'deepseek one does not, and nothing is sent until it is asked for. Which engine the GUI voice '
+      + 'input button and the ball use follows the choice made in getting started '
+      + '(`$DSH_HOME/lw/voice-source.json`): the local model, or the DeepSeek account. '
+      + 'op=status reports all three engines, which one is in use, and whether their models are on '
+      + 'disk; op=prepare downloads the model named, from the hf-mirror copy (huggingface.co itself is '
+      + 'unreachable from this phone) - GLM-ASR is about 1.6 GB, SenseVoice about 240 MB plus the '
+      + '1.8 MB silero voice-activity model that the one-sentence window cuts segments with, and '
+      + 'engine=deepseek has nothing to download; op=transcribe turns one 16 kHz mono PCM16 WAV file '
+      + 'into text.',
     parameters: {
       op: {
         type: 'string',
@@ -4240,9 +4882,10 @@ const TOOLS = [
       engine: {
         type: 'string',
         description:
-          'glm (accurate, 1.5 B, slow, and 1.6 GB of weights of its own) or sherpa (fast, small); '
-          + 'the default is sherpa, the same engine the GUI voice input button uses, and op=status '
-          + 'ignores this',
+          'glm (accurate, 1.5 B, slow, and 1.6 GB of weights of its own), sherpa (fast, small), or '
+          + 'deepseek (the official DeepSeek speech input: no model, needs a signed-in account, and '
+          + 'the recording leaves the phone); op=status ignores this, and leaving it out follows the '
+          + 'choice made in getting started',
       },
       wav: {
         type: 'string',
@@ -4260,7 +4903,11 @@ const TOOLS = [
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const engine = speechEngineOf(args.engine) ?? SPEECH_ENGINE_DEFAULT
+      const asked = speechEngineOf(args.engine)
+      // 没点名就照引导里做过的那个选择 (2026-11-15, 2.8.1 #6): 选了账号那条的机器, 一句话与页面那颗
+      // 麦克风走的是官方接口, 而不是"再下一份 240 MB"
+      const chosen = voiceSourceChoice()
+      const engine = asked ?? (chosen === SPEECH_ENGINE_DEEPSEEK ? SPEECH_ENGINE_DEEPSEEK : SPEECH_ENGINE_DEFAULT)
       if (args.op === 'status') {
         const info = await speechInspect()
         return [
@@ -4275,17 +4922,28 @@ const TOOLS = [
             ? `  Q4_K ${info.glm.modelBytes} bytes, audio encoder ${info.glm.mmprojBytes} bytes,`
               + ` loaded in memory: ${info.glm.loaded ? 'yes' : 'no'}`
             : '  op=prepare engine=glm fetches it (about 1.6 GB), then transcribe with engine=glm',
+          `DeepSeek speech input: POST ${LW_ASR_ENDPOINT}, relayed through the host route`
+            + ` ${LW_ASR_ROUTE} so the account token never leaves this process; no model on disk, and`
+            + ' the recording is the one thing that leaves the phone',
           info.vad
             ? `silero VAD downloaded: ${info.vadBytes} bytes at ${info.vadPath}`
             : `the silero VAD is missing (${info.vadBytes} bytes at ${info.vadPath}): the wake word`
               + ' still listens, but nothing gets cut into segments until op=prepare fetches it',
           `SenseVoice loaded in memory: ${info.loaded ? 'yes' : 'no'}`,
           `languages: ${info.languages}`,
-          `the voice input button in the GUI uses: ${SPEECH_ENGINE_DEFAULT}`,
+          `the voice input button in the GUI and the ball use: ${chosen === SPEECH_ENGINE_DEEPSEEK
+            ? `${SPEECH_ENGINE_DEEPSEEK} (chosen in getting started; no local model needed)`
+            : `${SPEECH_ENGINE_SHERPA} (chosen in getting started)`}`,
         ].join('\n')
       }
       if (args.op === 'prepare') {
-        if (engine === SPEECH_ENGINE_GLM) {
+        const wanted = asked ?? SPEECH_ENGINE_DEFAULT
+        if (wanted === SPEECH_ENGINE_DEEPSEEK) {
+          return 'engine=deepseek has nothing to download: the official DeepSeek speech input runs'
+            + ' in the cloud and only needs a signed-in account (or the API key from the'
+            + ' getting-started card); op=transcribe engine=deepseek can be used right now'
+        }
+        if (wanted === SPEECH_ENGINE_GLM) {
           const info = await speechPrepareGlm()
           return `the GLM-ASR-Nano model is ready in ${info.glm.directory}, about 1.6 GB of it;`
             + ' transcribe with engine=glm (the GUI voice input button stays on SenseVoice)'
@@ -4299,7 +4957,10 @@ const TOOLS = [
         const answer = await speechTranscribe(args.wav, args.language, engine)
         const detail = engine === SPEECH_ENGINE_GLM
           ? `${(answer.elapsedMs / 1000).toFixed(1)}s of CPU for the whole request`
-          : `${answer.seconds.toFixed(1)}s of audio, ${answer.language}`
+          : engine === SPEECH_ENGINE_DEEPSEEK
+            ? `${answer.durationMs} ms of audio (billed by the second),`
+              + ` ${(answer.elapsedMs / 1000).toFixed(1)}s of network time`
+            : `${answer.seconds.toFixed(1)}s of audio, ${answer.language}`
         return `${answer.text}\n\n(${detail}, ${answer.elapsedMs} ms)`
       }
       throw new Error(`op has to be status, prepare or transcribe, not "${args.op}"`)
@@ -4319,7 +4980,10 @@ const TOOLS = [
       + 'engine keeps its own volume and follows the phone\'s media volume; an imported on-device '
       + 'voice reads at its own quiet level and has a volume (percent) the settings page owns; the '
       + 'free Edge online engine and a self-hosted OpenAI-compatible endpoint (address and key live '
-      + 'on the settings page) both take their loudness from the service they talk to. On that API '
+      + 'on the settings page) both take their loudness from the service they talk to. The fifth '
+      + 'engine is the official DeepSeek voice: it needs no address and no key, only a signed-in '
+      + 'DeepSeek account (or the API key from the getting-started card) — the token stays in this '
+      + 'host and the audio is relayed to the app, and that engine has no rate knob. On that API '
       + 'engine, op=speak takes an optional voice=<id or name> for one line. op=voice manages the '
       + 'voices designed through the provider: action=list shows them, action=add registers one '
       + '(id is what the provider calls it; name and model are optional), action=remove drops one. '
@@ -4418,9 +5082,12 @@ const TOOLS = [
           ? `the on-device voice ${answer.onDeviceModel}`
           : answer.readingWith === 'edge'
             ? `the Edge online voice ${answer.edgeVoice}`
-            : answer.readingWith === 'api'
-              ? `the API engine voice ${answer.apiVoice} (model ${answer.apiVoiceModel})`
-              : 'the system engine'
+            : answer.readingWith === 'deepseek'
+              ? `the official DeepSeek voice ${answer.deepseekVoice}` +
+                ` (${answer.deepseekEndpoint}; it needs a signed-in account, no key)`
+              : answer.readingWith === 'api'
+                ? `the API engine voice ${answer.apiVoice} (model ${answer.apiVoiceModel})`
+                : 'the system engine'
         return [
           `reading with: ${reading}`,
           `rate: ${answer.rateFollowsSystem ? 'whatever the system says' : `${answer.rate} x`}`
@@ -4455,15 +5122,18 @@ const TOOLS = [
         // 自带那条要报出用的是哪个音色目录; API 那条要报出音色与生效模型; 系统那条没有这一项
         const withVoice = answer.readingWith === 'on-device'
           ? ` with the on-device voice ${answer.voice}`
-          : answer.readingWith === 'api'
-            ? ` with voice ${answer.voice} on model ${answer.model}`
-            : ''
-        // 点了音量却没落到这条引擎上时要把这句带上: 不然模型以为它调过了, 而人听到的还是原样
+          : answer.readingWith === 'deepseek'
+            ? ` with the official DeepSeek voice ${answer.voice}`
+            : answer.readingWith === 'api'
+              ? ` with voice ${answer.voice} on model ${answer.model}`
+              : ''
+        // 点了音量/语速却没落到这条引擎上时要把这句带上: 不然模型以为它调过了, 而人听到的还是原样
         const volumeNote = answer.volumeIgnored && answer.volumeNote ? `; ${answer.volumeNote}` : ''
         const voiceNote = answer.voiceIgnored && answer.voiceNote ? `; ${answer.voiceNote}` : ''
+        const rateNote = answer.rateIgnored && answer.rateNote ? `; ${answer.rateNote}` : ''
         return `the engine took ${answer.characters} characters` + withVoice
           + (answer.pieces > 1 ? ` in ${answer.pieces} pieces` : '')
-          + ` and reported it finished${volumeNote}${voiceNote}`
+          + ` and reported it finished${volumeNote}${voiceNote}${rateNote}`
       }
       if (args.op === 'stop') {
         return answer.stopped
@@ -4479,15 +5149,20 @@ const TOOLS = [
     name: 'lw_voice',
     description:
       'The voice inbox on this phone: the app cuts what you say into sentences with a silero VAD '
-      + '(3 s of silence ends one, 15 s at most each), transcribes each one on-device, and drops it '
+      + '(3 s of silence ends one, 15 s at most each), transcribes each one with the voice input '
+      + 'this install chose (the on-device SenseVoice model, or the DeepSeek official speech input '
+      + 'when getting started picked that one - `lw_speech op=status` says which), and drops it '
       + 'into a queue the host sends into the '
       + 'conversation as a `voice`-sourced message. Where a line lands is fixed: **the ball has a '
-      + 'conversation of its own, in the `dsh-ball` folder of the workspace**, and every line either '
+      + 'conversation of its own, in the `Luwi` folder of the workspace**, and every line either '
       + 'continues that one (steering into it while its turn runs) or opens a new one there - it is '
       + 'never spliced into whatever conversation the person happens to have open in the GUI. One '
       + 'exception: **the ball\'s reply box can name its own conversation** - a reply carries the '
       + 'session it came from, and anything typed or spoken back while that box is up is delivered '
-      + 'there (`to`), so answering the box keeps answering that same window even after an hour. A line '
+      + 'there (`to`), so answering the box keeps answering that same window even after an hour. '
+      + 'A line that points back at what came before (`这个`, `刚才`, `改成` and the like) keeps the '
+      + 'ball conversation even past the 30-minute window - up to a day - because what it refers to '
+      + 'lives in that conversation. A line '
       + 'that matches a command sentence is different: '
       + 'it is executed here and never delivered (for example 打开视频模式, 回到手机模式 - see '
       + 'VOICE_COMMANDS; the app itself writes 打断当前回答 when the ball is double-tapped while it '
@@ -4558,7 +5233,7 @@ const TOOLS = [
         if (!state.inbox) return 'the voice inbox has no place to live: DSH_HOME is not set'
         const lines = state.queued.slice(-MAX_VOICE_LINES)
         // 2.7.8 批次 2 的三项读数 (根因一 / 根因二的现场): 这一场属于哪个工作区 / 它的 cwd /
-        // `dsh-ball` 那条工作区注册没注册 —— 以及那本账现在能不能用
+        // `Luwi` 那条工作区注册没注册 —— 以及那本账现在能不能用
         const ledger = await voiceLedgerSnapshot()
         const readings = await voiceWorkspaceReadings(hostCtx, ledger.id || voiceDelivery.sessionId || '')
         return withJson(
@@ -4660,27 +5335,45 @@ const TOOLS = [
     name: 'lw_sticker',
     description:
       'The stickers she has (her own little pictures): op=list shows the files in $DSH_HOME/lw/stickers '
-      + '(png / gif / webp, each one under the size limit set in 设置 → 活动 → 更多设置 → 表情) - use it '
-      + 'to find a file name. op=fetch saves ONE picture from the web into that same folder, which is '
+      + '(png / gif / webp, each one under the size limit set in 设置 → 活动 → 更多设置 → 表情), with the '
+      + 'tags she gave them and how many times each one went out. **Listing first is not required**: lw_say '
+      + 'takes a mood or scene word (开心 / 无语 / 晚安) and the host picks a file whose tags or name match '
+      + 'it - at random when several match, so the same word does not always put up the same picture. '
+      + 'op=pick is that same lookup without saying anything (use it to check what a word would hit). '
+      + 'op=tag records 1-6 short words on one sticker, so later moods find it - do it when she first '
+      + 'notices what a picture means, not in bulk; **a sticker with no tags can only be found by its '
+      + 'exact file name**, so when one that just went out had no tags, give it 1-3 words right after '
+      + 'saying that line (op=list also lists the ones still untagged). op=fetch saves ONE picture from '
+      + 'the web into that same folder, which is '
       + 'how she builds up her own set: give url (https only, at most that same size limit) and '
       + 'optionally name (letters, digits, _ or Chinese characters, at most 24, no dots or slashes); '
       + 'the type follows the bytes, not the link, and the name is overwritten if it is already there. '
       + 'Fetching does NOT put anything in the conversation. **Putting a sticker '
       + 'into the conversation does not happen here**: pass that file name to lw_say\'s sticker '
       + 'parameter, which is the one channel she speaks through (it references the file, it does not '
-      + 'copy it). op=say is the host\'s own low-level path (the ball\'s reply box) and is not for you '
-      + 'to call.',
+      + 'copy it). op=say is the host\'s own low-level path (it writes one line into the current '
+      + 'conversation, same out file as lw_say) and is not for you to call.',
     parameters: {
       op: {
         type: 'string',
         required: true,
-        description: 'list, fetch (save one picture from the web) or say for the host\'s low-level'
-          + ' ball channel',
-        enum: ['list', 'fetch', 'say'],
+        description: 'list, pick (what a mood word would hit), tag (record moods on one file),'
+          + ' fetch (save one picture from the web) or say for the host\'s low-level ball channel',
+        enum: ['list', 'pick', 'tag', 'fetch', 'say'],
       },
       id: {
         type: 'string',
-        description: 'For op=say: the sticker file name, exactly as op=list printed it',
+        description: 'For op=say and op=tag: the sticker file name, exactly as op=list printed it',
+      },
+      query: {
+        type: 'string',
+        description: 'For op=pick: a mood or scene word (开心 / 无语 / 晚安), or an exact file name',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For op=tag: 1-6 short words that should find this picture later (开心 / 赞 / 无语);'
+          + ' they replace whatever was there before',
       },
       url: {
         type: 'string',
@@ -4703,12 +5396,55 @@ const TOOLS = [
       if (!home) throw new Error('this profile has no DSH_HOME, so there are no stickers to read')
       const folder = join(home, 'lw', 'stickers')
       if (op === 'list') {
-        const names = await readdir(folder).then(
-          (list) => list.filter((one) => STICKER_FILE_OK.test(one)).sort(),
-          () => [],
-        )
-        if (names.length === 0) return `no stickers yet: put png / gif / webp files into ${folder}`
-        return `${names.length} sticker(s) in ${folder}:\n${names.map((one) => `- ${one}`).join('\n')}`
+        const entries = await stickerEntriesOf(folder)
+        if (entries.length === 0) {
+          return `no stickers yet: put png / gif / webp files into ${folder},`
+            + ' or use op=fetch with an https link to save one'
+        }
+        const lines = entries.map((one) => {
+          const bits = []
+          if (one.tags.length > 0) bits.push(`tags: ${one.tags.join('/')}`)
+          if (one.used > 0) bits.push(`went out ${one.used}x`)
+          return `- ${one.name}${bits.length > 0 ? ` (${bits.join('; ')})` : ''}`
+        })
+        const untagged = stickerUntaggedText(entries, 12)
+        return `${entries.length} sticker(s) in ${folder}:\n${lines.join('\n')}\n`
+          + 'put one up with lw_say - either the file name, or just a mood word'
+          + (untagged === ''
+            ? ''
+            : `\nno tags yet (only their file names find them): ${untagged}`
+              + ' - give one 1-3 words with op=tag')
+      }
+      if (op === 'pick') {
+        const query = String(args?.query ?? args?.id ?? '').trim()
+        if (query === '') throw new Error('op=pick needs query: a mood or scene word, e.g. 开心')
+        const entries = await stickerEntriesOf(folder)
+        if (entries.length === 0) throw new Error(`no stickers yet: ${folder} is empty`)
+        const hit = pickSticker(entries, query)
+        if (hit === null) {
+          return `nothing matches "${query}"; the folder has: ${stickerCatalogText(entries)}`
+        }
+        return `"${query}" would put up ${hit.name}`
+          + `${hit.tags.length > 0 ? ` (tags: ${hit.tags.join('/')})` : ''}`
+      }
+      if (op === 'tag') {
+        const id = String(args?.id ?? '').trim()
+        if (id === '') throw new Error('op=tag needs id: the sticker file name')
+        const entries = await stickerEntriesOf(folder)
+        const target = entries.find((one) => one.name.toLowerCase() === id.toLowerCase()
+          || stickerStemOf(one.name) === stickerStemOf(id))
+        if (!target) throw new Error(`no sticker called ${id}; op=list shows the names`)
+        const tags = stickerTagsOf(args?.tags ?? args?.query ?? '')
+        if (tags.length === 0) {
+          throw new Error('op=tag needs tags: 1-6 short words, e.g. ["开心","赞"]')
+        }
+        const map = await readStickerTags(folder)
+        const before = map[target.name] ?? { used: 0, lastUsedAt: 0 }
+        map[target.name] = { tags, used: before.used, lastUsedAt: before.lastUsedAt }
+        if (!(await writeStickerTags(folder, map))) {
+          throw new Error(`the tag file did not land in ${folder} (the write was not read back)`)
+        }
+        return `tagged ${target.name}: ${tags.join('/')} - lw_say {sticker:"${tags[0]}"} finds it from now on`
       }
       if (op === 'fetch') {
         const url = String(args?.url ?? '').trim()
@@ -4783,10 +5519,10 @@ const TOOLS = [
         if (id.includes('/') || id.includes('\\') || id.includes('..')) {
           throw new Error(`that is not a sticker file name: ${id}`)
         }
-        reportSticker(id)
-        return `the sticker ${id} is on its way to the ball (it shows above the reply, one at a time)`
+        await reportSticker(id)
+        return `the sticker ${id} went into the conversation (portal, ball and the notification all read the same line)`
       }
-      throw new Error(`op has to be list, fetch or say, not "${op}"`)
+      throw new Error(`op has to be list, pick, tag, fetch or say, not "${op}"`)
     },
   }),
   defineTool({
@@ -4798,17 +5534,24 @@ const TOOLS = [
       + 'twice and never call this twice for one thought. '
       + 'Use text for one line (that is the whole call most of the time), lines for two to six when she '
       + 'really has that much to say: they are spoken one after another, at the pace set in this '
-      + "phone's own settings (设置 → 活动 → 更多设置). "
+      + "phone's own settings (设置 → 活动 → 更多设置), and the host sends at most the 一次最多几条 "
+      + 'cap from those same settings. '
+      + 'One bubble holds one thing (2026-11-16): a line, a picture, a document or a sticker. Passing '
+      + 'text together with a picture is fine - the host writes the sentence first and the picture '
+      + 'after it, each on its own bubble, never both inside one. '
       + 'image puts one picture into the same stream: give the absolute path of a png / jpg / jpeg / '
       + 'webp / gif on this phone (at most 20 MB). It is copied into her own folder, so tidying the '
-      + 'album later does not take it away. One picture per call, sentence plus picture, and never a '
-      + 'picture where a sentence would do. '
-      + 'sticker puts one of her own little pictures instead (a file name inside '
-      + '$DSH_HOME/lw/stickers, list them with lw_sticker op=list); do not then explain the picture. '
+      + 'album later does not take it away. One picture per call, and never a picture where a sentence '
+      + 'would do. '
+      + 'sticker puts one of her own little pictures instead: either a file name inside '
+      + '$DSH_HOME/lw/stickers, or just a mood or scene word (开心 / 无语 / 晚安) - the host picks a file '
+      + 'whose tags or name match, at random when several do, and says what it picked. Text and a sticker '
+      + 'in the same call is normal (a line, then the picture on its own bubble); do not then explain the '
+      + 'picture either. Nothing matched the word means the call fails and lists what she has. '
       + 'file hands over one document instead: give the absolute path of a pdf / txt / md / json / csv / '
       + 'log / doc(x) / xls(x) / ppt(x) / zip on this phone (at most 20 MB). It is copied into her own '
       + 'folder and drawn as a blue file name the user can tap to preview - so do not paste the contents '
-      + 'into the reply, the name is the whole message. '
+      + 'into the reply, the name is the whole message. It goes out on its own bubble too. '
       + 'speak: true also reads that line out loud, when read-aloud is switched on in the app. '
       + 'The reply body - the text written beside a tool call - is NOT a way to speak in this preset: '
       + 'the portal does not draw it, the ball does not show it and it is not read aloud. Keep it to '
@@ -4823,24 +5566,28 @@ const TOOLS = [
         type: 'array',
         items: { type: 'string' },
         description: 'Two to six lines when she really has that much to say (each entry is one line, '
-          + 'one bubble). Do not also pass text.',
+          + 'one bubble; the 一次最多几条 setting may cap it lower). Do not also pass text.',
       },
       image: {
         type: 'string',
         description: 'For a picture: the absolute path of a png / jpg / jpeg / webp / gif file on this '
           + 'phone. It is COPIED into her own folder - the album copy can change or go away and this '
-          + 'picture still stays in the conversation',
+          + 'picture still stays in the conversation. A sentence passed with it lands first as its own '
+          + 'bubble: the picture is never drawn inside the same bubble as text',
       },
       sticker: {
         type: 'string',
-        description: 'For a sticker: the file name inside $DSH_HOME/lw/stickers, exactly as '
-          + 'lw_sticker op=list printed it (no path, no ..). It is only REFERENCED, not copied - '
-          + 'swapping that file swaps the sticker',
+        description: 'For a sticker: a mood or scene word (开心 / 无语 / 晚安) or the exact file name '
+          + 'inside $DSH_HOME/lw/stickers - a word is matched against each sticker\'s tags and name, and '
+          + 'one of the matches is picked at random. It is only REFERENCED, not copied - swapping that '
+          + 'file swaps the sticker. It always goes out as its own bubble (text + sticker in one call = '
+          + 'a line bubble, then the sticker bubble)',
       },
       file: {
         type: 'string',
         description: 'For a document: the absolute path of a pdf / txt / md / json / csv / log / doc(x) / '
-          + 'xls(x) / ppt(x) / zip file on this phone (at most 20 MB)',
+          + 'xls(x) / ppt(x) / zip file on this phone (at most 20 MB). It goes out as its own bubble - a '
+          + 'sentence passed with it lands first as its own bubble',
       },
       speak: {
         type: 'boolean',
@@ -4868,66 +5615,89 @@ const TOOLS = [
       let texts = list.length > 0 ? list : [String(args?.text ?? '').trim()].filter(Boolean)
       // 分条关掉时**在宿主这一侧就并成一条**: 两个界面永远是同一个条数 (不留给球那一侧再合并一次,
       // 那会让球 1 条、门户 N 条, 同一条话两种形状)
-      if (send.burstEnabled !== true && texts.length > 1) texts = [texts.join('\n')]
-      if (texts.length > 6) texts = texts.slice(0, 6)
-      const sticker = String(args?.sticker ?? '').trim()
-      if (sticker !== '' && (sticker.includes('/') || sticker.includes('\\') || sticker.includes('..'))) {
-        throw new Error(`that is not a sticker file name: ${sticker}`)
+      //
+      // **一次最多几条** (2026-11-20 修): 原来这里写死 6, 于是设置里拨到 3 只有球那侧认 (球按
+      // `BallOutbox.limitOf` 播 3 条), 门户照旧一次画 6 个气泡。现在两处同一个数 —— 上限仍是 6
+      // (schema 与 `SEND_BURST_MAX` 的上界), 但"这次到底几条"由 `send.burstMaxMessages` 收
+      if (send.burstEnabled !== true) {
+        if (texts.length > 1) texts = [texts.join('\n')]
+      } else {
+        const cap = Math.min(6, Math.max(1, Number(send.burstMaxMessages) || 6))
+        if (texts.length > cap) texts = texts.slice(0, cap)
       }
+      // 表情收两种说法 (2026-11-15): 准确文件名, 或者一句情绪 / 场景词; 都对不上就当场退回候选
+      const stickerRaw = String(args?.sticker ?? '').trim()
+      if (stickerRaw !== ''
+        && (stickerRaw.includes('/') || stickerRaw.includes('\\') || stickerRaw.includes('..'))) {
+        throw new Error(`that is not a sticker name or mood word: ${stickerRaw}`)
+      }
+      const stickerHit = stickerRaw === '' ? null : await resolveStickerForSay(stickerRaw)
+      const sticker = stickerHit === null ? '' : stickerHit.name
       const image = String(args?.image ?? '').trim()
       const file = String(args?.file ?? '').trim()
       if (texts.length === 0 && sticker === '' && image === '' && file === '') {
         throw new Error('lw_say needs text, lines, sticker, image or file - something has to be said')
       }
+      // **他划过的线** (2026-11-20, 方案 §8.1): `hard` 条目命中就整趟不发 —— 这是人格层的硬边界,
+      // 与 `PROACTIVE_*_DENIED` 同一风格: 拒在宿主这一侧, 不靠提示词自觉. 回执里点名是哪一条,
+      // 她要么换个说法, 要么先问他这条线还留着吗
+      if (texts.length > 0) {
+        const drawn = await readBoundaries()
+        for (const one of [...texts, String(args?.voice ?? '')]) {
+          const hit = emotion.hardBoundaryHit(one, drawn)
+          if (hit !== null) {
+            throw new Error(`not said: 他划过这条线「${String(hit.what ?? '')}」`
+              + ' - 换个说法, 或者先问问他还要不要留着这条')
+          }
+        }
+      }
       // 一次只递一样媒体: 图与文件同时给说明这一遍想错了, 落哪一行都不对
       if (image !== '' && file !== '') {
         throw new Error('one call carries either an image or a file, not both')
       }
-      // 图片落成 `image` 行: 有字就是"一句话带一张图", 没字就是纯图 (两种都只占一行一个泡)
+      // **一条气泡只装一样东西** (2026-11-16, 落实表 #9): 话与媒体各落各的行 —— 门户每一行画一个
+      // 气泡, 球每一行落一样东西。原来图 / 文件是被揉进最后一句那一行的 (prepare 把 `kind:"image"`
+      // 与 `kind:"text"` 并进同一个对象), 门户只好把一句话和图挤进一条气泡 —— 主人 2026-11-15 那一句
+      // 是"表情或图片和文字同时进一条气泡时表情会被吞, 要求表情图片等文件必须单独发一条气泡"。
+      // 表情那一行以前还带一个 `[…]` 占位正文, 同样算"话与表情同进一条气泡", 一并去掉
       const images = image === '' ? [] : [image].slice(0, LW_IMAGE_MAX_PER_CALL)
       const files = file === '' ? [] : [file]
       const written = []
       const problems = []
+      // ① 话: 一句一行, 这一行只有 kind 与 text
       for (let index = 0; index < texts.length; index += 1) {
-        const text = texts[index]
-        const fields = { kind: 'text', text }
-        const last = index === texts.length - 1
-        const withImage = images.length > 0 && last
-        const withFile = files.length > 0 && last
         try {
-          const row = await lwOutAppend(session, fields, withImage
-            ? async (seq) => {
-              const art = await lwOutImage(session, seq, images[0])
-              return art === null ? {} : { kind: 'image', ...art }
-            }
-            : withFile
-              ? async (seq) => {
-                const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
-                return art === null ? {} : { kind: 'file', ...art }
-              }
-              : undefined)
-          written.push(row)
+          written.push(await lwOutAppend(session, { kind: 'text', text: texts[index] }))
         } catch (error) {
           problems.push(`line ${index + 1}: ${error?.message ?? error}`)
           break
         }
       }
-      // 只有图 / 只有文件 / 只有表情: 文字那一圈是空的, 就落一行媒体
-      if (written.length === 0 && problems.length === 0) {
+      // ② 图或文件: 自己那一行 (没有正文, 不与谁合并) —— 一次只递一样, 见上面那道闸
+      if (problems.length === 0 && (images.length > 0 || files.length > 0)) {
         try {
           if (images.length > 0) {
             written.push(await lwOutAppend(session, { kind: 'image' }, async (seq) => {
               const art = await lwOutImage(session, seq, images[0])
               return art === null ? {} : art
             }))
-          } else if (files.length > 0) {
+          } else {
             written.push(await lwOutAppend(session, { kind: 'file' }, async (seq) => {
               const art = await lwOutPayload(session, seq, files[0], LW_FILE_EXTS, 'file')
               return art === null ? {} : art
             }))
-          } else {
-            written.push(await lwOutAppend(session, { kind: 'sticker', sticker, text: '[…]' }))
           }
+        } catch (error) {
+          problems.push(error?.message ?? String(error))
+        }
+      }
+      // ③ 表情: 自己那一行 —— "说一句 + 补一张"是真人常见的写法 (2026-11-15), 但它不跟那句话挤在
+      // 一条气泡里, 所以这一行只有 kind 与 sticker
+      if (sticker !== '' && problems.length === 0) {
+        try {
+          written.push(await lwOutAppend(session, { kind: 'sticker', sticker }))
+          const home = process.env.DSH_HOME
+          if (home) void markStickerUsed(join(home, 'lw', 'stickers'), sticker).catch(() => {})
         } catch (error) {
           problems.push(error?.message ?? String(error))
         }
@@ -4955,7 +5725,17 @@ const TOOLS = [
         ? `#${written[0].seq}`
         : `#${written[0].seq}-#${written[written.length - 1].seq}`
       const gaps = written.map((row) => `${row.gapMs}ms`).join(' / ')
+      // 回执里点名"这一张还没标签" (2026-11-16 主人: 没标签的顺手标上): 她此刻正好知道这张是怎么用的,
+      // 也正好在说话 — 这一句是"标一下"最便宜的落点, 不必另开一次检查
+      const stickerNote = sticker === ''
+        ? ''
+        : `, including the sticker ${sticker}`
+          + ((stickerHit.tags ?? []).length === 0
+            ? ` (no tags on it yet: 1-3 words with lw_sticker op=tag id "${sticker}" would let`
+              + ' 「无语」「赞」这类词 find it next time)'
+            : '')
       const head = `said ${written.length} line(s) ${range} into the conversation (gapMs ${gaps})`
+        + stickerNote
         + `${spoken === '' ? '' : `, ${spoken}`}`
       return problems.length === 0 ? head : `${head}\nproblem: ${problems.join('; ')}`
     },
@@ -5050,12 +5830,18 @@ const TOOLS = [
     name: 'lw_router',
     description:
       'The decision layer: whether she should speak up right now, and about what. op=judge runs the '
-      + 'judgement over the phone\'s own numbers (how long a game has been running today, the things '
-      + 'she remembers about you, the recent signals) and returns { say, kind, why }; op=say puts one '
-      + 'sentence on the ball yourself; op=status shows the last decision and the rules in effect. '
-      + 'op=rules sets how long a game counts as long (gameMinutes) and how many days ahead a promise '
-      + 'is brought up (wishDays) - the owner no longer has those two rows in settings (2026-11-10), '
+      + 'judgement over the phone\'s own numbers (how long the heaviest app has been running today, the '
+      + 'things she remembers about you, the recent signals) and returns { say, kind, why }; op=say says '
+      + 'one sentence into the current conversation (portal, ball and the notification all read that one '
+      + 'out file); op=status shows the last decision and the rules in effect. '
+      + 'op=rules sets how long one app has to run today before it counts as long (appMinutes - any app, '
+      + 'not just games; the home screen, the keyboard and Luwi herself never count) and how many days '
+      + 'ahead a promise is brought up (wishDays) - '
+      + 'the owner no longer has those two rows in settings (2026-11-10), '
       + 'so use this op when your own judgement says the scale should change. '
+      + 'Each tick also pays an interruption cost (a game or video in the foreground, a call within '
+      + 'the last 30 minutes, or having just spoken) and op=status shows the last tick that cost held '
+      + 'back (heldBack: what, how costly, why) - that one is being kept for a later tick, not dropped. '
       + 'It never opens a conversation by itself - op=judge only answers.',
     parameters: {
       op: {
@@ -5065,11 +5851,17 @@ const TOOLS = [
       },
       text: {
         type: 'string',
-        description: 'For op=say: the sentence to put on the ball',
+        description: 'For op=say: the sentence to say into the current conversation',
+      },
+      appMinutes: {
+        type: 'number',
+        description: 'For op=rules: how long one app has to run today before it counts as long, in'
+          + ' minutes (5..1440)',
       },
       gameMinutes: {
         type: 'number',
-        description: 'For op=rules: how long a game counts as long, in minutes (5..1440)',
+        description: 'For op=rules: the old name of appMinutes (before 2.8.1 it only counted games).'
+          + ' Still accepted, but it lands on the default appMinutes - send appMinutes instead',
       },
       wishDays: {
         type: 'number',
@@ -5090,11 +5882,15 @@ const TOOLS = [
       if (op === 'say') {
         const text = String(args?.text ?? '').trim()
         if (!text) throw new Error('op=say needs text')
-        reportSay(text)
-        return `said it on the ball: ${text}`
+        await reportSay(text)
+        return `said it in the conversation: ${text} (portal, ball and the notification all read that one line)`
       }
       if (op === 'rules') {
-        const written = await writeRouterRules({ gameMinutes: args?.gameMinutes, wishDays: args?.wishDays })
+        const written = await writeRouterRules({
+          appMinutes: args?.appMinutes,
+          gameMinutes: args?.gameMinutes,
+          wishDays: args?.wishDays,
+        })
         if (written.error) throw new Error(written.error)
         return JSON.stringify(written.rules)
       }
@@ -5105,6 +5901,11 @@ const TOOLS = [
           lastSpokenAt: Number(state.lastSpokenAt ?? 0) || 0,
           last: state.last ?? null,
           rules: inputs?.rules ?? state.rules ?? {},
+          // 2.8.1 #11: "错过几次"与"下一拍随口一句的概率" —— 递增那一条只看这一段就够
+          chatMisses: Math.max(0, Number(inputs?.chatMisses ?? 0) || 0),
+          chatChance: routerChatChance(inputs?.rules ?? state.rules ?? {}, inputs?.chatMisses ?? 0),
+          // 2.8.1 #29: 上一拍被"打扰成本"压住的那一件攒着的账 (真说出来了由 routerMarkSaid 清掉)
+          heldBack: state.heldBack ?? null,
           // 探索交来的检测项 (2026-11-07 晚): 看一眼"现在盯着什么"就是这一段
           checks: inputs?.checks ?? [],
           checksSaid: inputs?.checksSaid ?? {},
@@ -5208,6 +6009,222 @@ const TOOLS = [
         return `snoozed ${id} until ${new Date(at).toISOString()}`
       }
       throw new Error(`op has to be add, list, done or snooze, not "${op}"`)
+    },
+  }),
+  defineTool({
+    name: 'lw_memory',
+    description:
+      'What she actually remembers about him. Three layers in $DSH_HOME/lw/memory: episodes.jsonl '
+      + '(things worth bringing up later, one line each: what he said, when, whether it is still open), '
+      + 'profile.json (his habits, what to call him, what not to touch, how he likes to be comforted) '
+      + 'and relation.json (days known, closeness - the host keeps that one, never write it). '
+      + 'op=add stores ONE thing in HIS OWN WORDS (at most 120 characters) - never a summary of how you '
+      + 'think he felt, and nothing that looks like a code, a password, an amount or an address. '
+      + 'op=list searches what is already stored (give q with the words he just used) - check it before '
+      + 'saying "you mentioned before". op=profile reads or sets one whitelisted key. op=forget removes '
+      + 'one episode by id (use it the moment he asks you to forget something). op=boundary is the line '
+      + 'he drew: hard=true means lw_say refuses to send a line containing it. op=mute stops her from '
+      + 'starting anything for N hours (he said he needs quiet). op=status counts each layer.',
+    parameters: {
+      op: {
+        type: 'string',
+        required: true,
+        description: 'add, list, profile, forget, boundary, mute or status',
+      },
+      what: {
+        type: 'string',
+        description: 'For op=add / op=boundary: the thing itself, in his words, one short line',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For op=add: up to 6 words that would make this come back later (开会 / 键盘 / 累)',
+      },
+      valence: {
+        type: 'number',
+        description: 'For op=add: -1 if it was a bad moment, 1 if it was a good one, 0 / omitted otherwise',
+      },
+      open: {
+        type: 'boolean',
+        description: 'For op=add: true when it is still unresolved (he has not come back to it yet)',
+      },
+      hard: {
+        type: 'boolean',
+        description: 'For op=boundary: true = lw_say must refuse a line containing it; false = a note only',
+      },
+      q: {
+        type: 'string',
+        description: 'For op=list / op=forget: words to look for',
+      },
+      id: {
+        type: 'string',
+        description: 'For op=forget / op=boundary: the id op=list printed',
+      },
+      key: {
+        type: 'string',
+        description: `For op=profile: one of ${PROFILE_KEYS.join(' / ')}`,
+      },
+      value: {
+        type: 'string',
+        description: 'For op=profile: what to store under that key (at most 200 characters)',
+      },
+      hours: {
+        type: 'number',
+        description: 'For op=mute: how many hours she should stay quiet (1 to 168, default 168)',
+      },
+      limit: {
+        type: 'number',
+        description: 'For op=list: at most how many lines (default 5, max 20)',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const op = String(args?.op ?? 'list').trim()
+      const now = Date.now()
+      const rows = await readEpisodes()
+      if (op === 'list') {
+        const limit = Math.min(20, Math.max(1, Math.round(Number(args?.limit) || 5)))
+        const found = emotion.relatedEpisodesFor(rows, String(args?.q ?? '').trim(), now, {
+          ...emotion.EPISODE_BUDGET,
+          rows: limit,
+        })
+        if (found.rows.length === 0) {
+          return rows.length === 0
+            ? 'memory is empty: nothing said to you has been kept yet'
+            : `${rows.length} episode(s) stored, none match "${String(args?.q ?? '').trim()}"`
+        }
+        return found.rows
+          .map((one) => {
+            const day = new Date(Number(one?.at ?? 0) || now)
+            const stamp = `${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
+            const tags = Array.isArray(one?.tags) && one.tags.length > 0 ? ` [${one.tags.join('/')}]` : ''
+            const open = one?.open === true ? ' (still open)' : ''
+            return `- ${one.id}: ${stamp} ${one.what}${tags}${open}`
+          })
+          .join('\n')
+      }
+      if (op === 'add') {
+        const what = String(args?.what ?? '').trim()
+        if (what === '') throw new Error('op=add needs what: the thing to remember, in his words')
+        // 隐私形状闸 (方案 §4.2): 记一次就会随每次主动场 prompt 出网, 所以拒在写入之前
+        const shape = privateShapeOf(what)
+        if (shape !== '') throw new Error(`not kept: 这条看着像 ${shape}, 别记进记忆`)
+        const tags = (Array.isArray(args?.tags) ? args.tags : [])
+          .map((one) => String(one ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 6)
+        const valence = Number(args?.valence)
+        const row = {
+          id: `e${now.toString(36)}`,
+          at: now,
+          who: 'he',
+          what: what.slice(0, 120),
+          tags,
+          valence: Number.isFinite(valence) ? Math.max(-2, Math.min(2, valence)) : 0,
+          refs: [],
+          open: args?.open === true,
+        }
+        const written = await writeEpisodes([...rows, row])
+        if (!written) throw new Error('episodes.jsonl was not written: check that $DSH_HOME is writable')
+        // 顺带记一条"他划过的线"是 op=boundary 的事 (2026-11-20 审查): 普通记忆带 `hard` 会把
+        // 一句原话变成硬闸, 而常见短语会把她的嘴整个堵上
+        const note = args?.hard === undefined
+          ? ''
+          : ' (a line he drew goes through op=boundary, not here)'
+        return `kept ${row.id}: ${row.what}${note}`
+      }
+      if (op === 'profile') {
+        const path = memoryPath('profile.json')
+        const file = (await readMemoryJson(path)) ?? {}
+        const values = file.values && typeof file.values === 'object' ? file.values : {}
+        const key = String(args?.key ?? '').trim()
+        if (key === '') {
+          const keys = Object.keys(values)
+          if (keys.length === 0) return `profile is empty; keys allowed: ${PROFILE_KEYS.join(', ')}`
+          return keys.map((one) => `- ${one}: ${String(values[one]).slice(0, 200)}`).join('\n')
+        }
+        if (!PROFILE_KEYS.includes(key)) {
+          throw new Error(`profile key has to be one of ${PROFILE_KEYS.join(', ')}, not "${key}"`)
+        }
+        const value = String(args?.value ?? '').trim()
+        if (value === '') return values[key] === undefined ? `${key}: (not set)` : `${key}: ${values[key]}`
+        const next = { ...values, [key]: value.slice(0, 200) }
+        const kept = Object.fromEntries(Object.entries(next).slice(-PROFILE_MAX))
+        await writeMemoryJsonStrict(path, { v: 1, at: now, values: kept }, 'profile.json')
+        return `profile ${key} = ${kept[key]}`
+      }
+      if (op === 'forget') {
+        const id = String(args?.id ?? '').trim()
+        const q = String(args?.q ?? '').trim()
+        if (id === '' && q === '') throw new Error('op=forget needs id or q: what should be forgotten')
+        const gone = rows.filter((one) => (id === '' ? String(one?.what ?? '').includes(q) : one?.id === id))
+        if (gone.length === 0) throw new Error(`nothing matched: ${id === '' ? q : id}`)
+        const kept = rows.filter((one) => !gone.includes(one))
+        const written = await writeEpisodes(kept)
+        if (!written) throw new Error('episodes.jsonl was not written: check that $DSH_HOME is writable')
+        // 墓碑 (2026-11-20 审查): 宿主会把 `wishes.json` 的每一件补成情节, 只删那一行的话下一轮
+        // 又补回来 —— 他要求忘掉的东西一轮内复活
+        await addForgottenRefs(gone.map((one) => one?.ref).filter(Boolean))
+        return `forgot ${gone.length} episode(s); ${kept.length} left`
+      }
+      if (op === 'boundary') {
+        const path = memoryPath('boundaries.json')
+        const items = await readBoundaries()
+        const what = String(args?.what ?? '').trim()
+        const id = String(args?.id ?? '').trim()
+        if (what !== '') {
+          const shape = privateShapeOf(what)
+          if (shape !== '') throw new Error(`not kept: 这条看着像 ${shape}, 别记进边界`)
+          // hard 是**硬闸**, 而匹配是子串: 太短的一条会把她的嘴整个堵上 (2026-11-20 审查)
+          if (args?.hard === true && what.length < 4) {
+            throw new Error('a hard line has to be at least 4 characters: 短句会连普通发言一起拦掉')
+          }
+          const kept = items.filter((one) => String(one?.what ?? '') !== what)
+          const item = { id: id || `b${now.toString(36)}`, what, hard: args?.hard === true, learnedAt: now }
+          await writeMemoryJsonStrict(path, { v: 1, at: now, items: [...kept, item].slice(-40) }, 'boundaries.json')
+          return `boundary ${item.id}: ${what} (${item.hard ? 'hard' : 'note'})`
+        }
+        if (id !== '') {
+          const kept = items.filter((one) => one?.id !== id)
+          if (kept.length === items.length) throw new Error(`no such boundary: ${id}`)
+          await writeMemoryJsonStrict(path, { v: 1, at: now, items: kept }, 'boundaries.json')
+          return `removed boundary ${id}; ${kept.length} left`
+        }
+        if (items.length === 0) return 'no lines drawn yet'
+        return items.map((one) => `- ${one.id}: ${one.what}${one.hard === true ? ' (hard)' : ''}`).join('\n')
+      }
+      if (op === 'mute') {
+        // hours 必填, 0 = 解除 (2026-11-20 审查): 缺省 168 又没有任何清零的 op, 误调一次就停一周
+        const raw = Number(args?.hours)
+        if (!Number.isFinite(raw)) throw new Error('op=mute needs hours (1 to 168), or 0 to lift it')
+        const hours = Math.min(168, Math.max(0, Math.round(raw)))
+        const path = memoryPath('relation.json')
+        const relation = await readRelation()
+        const until = hours === 0 ? 0 : now + hours * 60 * 60 * 1000
+        await writeMemoryJsonStrict(path, { ...relation, v: 1, at: now, mutedUntil: until }, 'relation.json')
+        return until === 0 ? 'quiet lifted' : `quiet until ${new Date(until).toISOString()} (${hours} h)`
+      }
+      if (op === 'status') {
+        const profile = (await readMemoryJson(memoryPath('profile.json'))) ?? {}
+        const relation = await readRelation()
+        const items = await readBoundaries()
+        return JSON.stringify({
+          episodes: rows.length,
+          openEpisodes: rows.filter((one) => one?.open === true).length,
+          profileKeys: Object.keys(profile?.values ?? {}).length,
+          relation: {
+            days: Number(relation?.days ?? 0) || 0,
+            closeness: Number(relation?.closeness ?? 0) || 0,
+            mutedUntil: Number(relation?.mutedUntil ?? 0) || 0,
+          },
+          boundaries: items.length,
+          hardBoundaries: items.filter((one) => one?.hard === true).length,
+        })
+      }
+      throw new Error(`op has to be add, list, profile, forget, boundary, mute or status, not "${op}"`)
     },
   }),
   defineTool({
@@ -6108,8 +7125,13 @@ function fieldName(field) {
   return `${field.className}${said ? ` "${said}"` : ''} at ${formatRect(field.bounds)}`
 }
 
-/** What a gesture was delivered as, which is all a caller can know without looking */
-function formatGesture(verb, result, note) {
+/**
+ * What a gesture was delivered as, which is all a caller can know without looking
+ *
+ * `extra` 是接在正文之后、那段机器可读 JSON 之前的花絮 (点按那一档拿它放核对结果): JSON 必须仍是
+ * 尾巴, 否则调用方按"最后一个 `{`"解析的那条路就断了
+ */
+function formatGesture(verb, result, note, extra = []) {
   if (result.tapped === true || result.swiped === true) {
     const lines = result.swiped === true
       ? [`${verb} displayId ${result.displayId} over ${result.durationMs}ms`]
@@ -6120,6 +7142,7 @@ function formatGesture(verb, result, note) {
         + ' injected presses - the gesture was delivered to a display that is not listening.'
         + ' Send WAKEUP with lw_key first if something was supposed to happen.')
     }
+    if (extra.length > 0) lines.push('', ...extra)
     return said(withJson(lines, result), note)
   }
   return said(withJson([`the device did not report the gesture as delivered`], result), note)
@@ -6347,6 +7370,68 @@ function formatApps(result) {
 }
 
 /**
+ * 登记表那一条的回话: 四个 op 各说各的, 但都不念 JSON
+ *
+ * list 顺带把"装没装"一起说 —— 那是主人此刻最想知道的, 模型也不必再 probe 一遍. open/handoff
+ * 失败时一定把那句话带出去 (registry 里没有 / 没装 / 不收这种文字), 因为下一步该改什么全写在那句里
+ */
+function formatExternal(op, result) {
+  if (!result || typeof result !== 'object') return String(result ?? '')
+  const because = result.error ? ` - ${result.error}` : ''
+  if (op === 'list') {
+    const apps = result.apps ?? []
+    if (apps.length === 0) {
+      return `nothing is registered yet${because}. The registry is `
+        + `${result.file || '$DSH_HOME/lw/external-apps.json'}; one line of it looks like`
+        + ' {"id":"termux","label":"Termux","package":"com.termux"}'
+    }
+    const lines = [
+      `${apps.length} registered tool${apps.length === 1 ? '' : 's'} in `
+        + `${result.file || 'the registry'}${because}:`,
+    ]
+    for (const app of apps) {
+      lines.push(
+        `  ${app.id} - ${app.label} (${app.package}) `
+          + `${app.installed ? 'installed' : 'not installed'}`,
+      )
+    }
+    lines.push(
+      'Open one with lw_external(op="open", id="..."), or pass it a stretch of words with'
+        + ' op="handoff" - the text is what the person would say, never a path or a URI.',
+    )
+    return lines.join('\n')
+  }
+  if (op === 'probe') {
+    if (result.known === false) return `no entry with that id${because}`
+    const apps = result.apps ?? []
+    if (apps.length === 0) return `the registry has nothing to ask about${because}`
+    const lines = [`${apps.length} entr${apps.length === 1 ? 'y' : 'ies'}${because}:`]
+    for (const app of apps) {
+      const can = [
+        app.canOpen ? 'can be opened' : '',
+        app.canSend ? 'accepts a send' : '',
+      ].filter(Boolean).join(', ')
+      lines.push(
+        `  ${app.id} (${app.package}): ${app.installed ? 'installed' : 'not installed'}`
+          + `${can ? ` - ${can}` : ''}`,
+      )
+    }
+    return lines.join('\n')
+  }
+  if (op === 'handoff') {
+    if (result.sent) {
+      return `handed ${result.chars} characters to ${result.id} as ${result.mime}`
+    }
+    return `handoff to ${result.id || 'that entry'} did not go through${because}`
+  }
+  if (result.started) {
+    return `started ${result.id} (${result.package}`
+      + `${result.activity ? ` ${result.activity}` : ''})`
+  }
+  return `opening ${result.id || 'that entry'} did not work${because}`
+}
+
+/**
  * What the device says it can do, action by action
  *
  * 一条动作一行, 第二行是失败原因: 那正是模型最需要提前知道的一句 —— 撞上"日历没给权限"或
@@ -6418,22 +7503,21 @@ function formatQuickOpened(result) {
   ].join('\n')
 }
 
-/** What pressing by name did, which is the one call that can be ambiguous */
-function formatNamedTap(result, note) {
-  return said(namedTapReport(result), note)
-}
-
 /** What reading a screen's pixels found */
 function formatOcr(result) {
   const where = `displayId ${result.displayId}`
   if (result.error) return `could not read ${where}: ${result.error}`
   const lines = result.lines ?? []
+  // 引擎永远是 local: 屏幕画面默认不上传, 2.x 里连云端那一支代码都没有
+  const engine = result.engine ?? 'local'
   // recMs 是识别总时间, 不是每行平均值: 以前按每行报, 33 行的 330ms 会被说成 10ms
   const calls = Number(result.recCalls ?? 0)
   const cost = `${result.captureMs ?? 0}ms to capture, ${result.detMs ?? 0}ms to find the text, `
     + `${result.recMs ?? 0}ms to read it`
     + (calls > 0 ? ` in ${calls} pass${calls === 1 ? '' : 'es'}` : '')
-    + `, on ${result.backend}`
+    + `, on ${result.backend}, engine "${engine}"`
+    // 分档路由：这一帧被判成哪一档，以及走的是分档还是旧单阈值（回退时一眼看得出）
+    + (result.scene ? `, ${result.scene} tier on the ${result.route} filter` : '')
   const asleep = asleepLine(result)
   if (lines.length === 0) {
     return `no text was found on ${where} (${cost}). The screen may be blank or hold only`
@@ -6488,14 +7572,42 @@ function asleepLine(result) {
  * Press a name that exists only as pixels
  *
  * Reading is a guess, so it never guesses twice: an exact match wins, otherwise a line that
- * contains the name, and more than one candidate presses nothing at all
+ * contains the name, and more than one candidate presses nothing at all unless one of them is
+ * clearly ahead (score gap over TAP_SCORE_GAP, 落实表 #37). Nothing at all is answered with the
+ * lines that came closest (`candidates`), which the caller turns into "press one of these" rather
+ * than "there is nothing here". A candidate that is too small or not on the screen is skipped
+ * before any touch is sent, and the caller answers `skip=small|occluded`
+ *
+ * `pressed` says whether a press was really delivered (2.8.1 #36 审查 M2): reading failed, the
+ * screen is asleep, nothing matched, or more than one line matched - none of those pressed
+ * anything at all, and `candidates` being empty is not the same thing as a press. `reason` says
+ * which of them it was (第二轮 F): the caller keeps those apart, because what to do next differs
+ *
+ * 分数差量的是 [alikeText] (只比文本像不像), **不是** 识别器对那一行的置信: 同名两行只要一行糊一
+ * 点, 光比置信就能差出 0.15, 而那正是这张卡要治的"猜错目标" (必修 6). 于是同名多行几乎必然
+ * 分不开、一次都不按, 想按就交一个点过来
+ *
+ * `verify:"off"` 这一档逐字退回 #37 之前那条路: 不量分数差、也不量几何, 同名多行照旧回
+ * "N lines say that, so nothing was pressed" (必修 5)
  */
-async function tapByReading(displayId, text, hold = 0) {
+async function tapByReading(displayId, text, hold = 0, snapshot = null, verify = 'auto') {
   const result = await call('ocr', { displayId })
-  if (result.error) return `the screen could not be read: ${result.error}`
+  if (result.error) {
+    return {
+      report: `the screen could not be read: ${result.error}`,
+      candidates: [],
+      pressed: false,
+      reason: 'unreadable',
+    }
+  }
   if (result.screen && result.screen !== 'on') {
-    return `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
-      + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.'
+    return {
+      report: `the screen is ${result.screen}, so nothing was pressed: a sleeping screen keeps showing`
+        + ' its last frame but does not take a press. Send WAKEUP with lw_key first, then try again.',
+      candidates: [],
+      pressed: false,
+      reason: 'asleep',
+    }
   }
   const lines = result.lines ?? []
   const needle = String(text).trim()
@@ -6504,24 +7616,325 @@ async function tapByReading(displayId, text, hold = 0) {
     ? exact
     : lines.filter((line) => String(line.text ?? '').includes(needle))
   if (candidates.length === 0) {
-    return lines.length === 0
-      ? 'reading the screen found no text at all'
-      : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
-        + ' lines it could read; call lw_ocr to see them'
+    return {
+      report: lines.length === 0
+        ? 'reading the screen found no text at all'
+        : `reading the screen found no line saying ${JSON.stringify(text)} among the ${lines.length}`
+          + ' lines it could read',
+      candidates: closestReadLines(lines, needle),
+      pressed: false,
+      reason: 'no-match',
+    }
   }
+  let only = candidates[0]
   if (candidates.length > 1) {
-    return `${candidates.length} lines on the screen say that, so nothing was pressed: `
-      + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
-        .join(', ')
-      + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.'
+    // verify=off 那一档没有前置校验: 同名多行的答案与 #37 之前逐字相同, 副作用也相同 (都不按)
+    if (verify === 'off') {
+      return {
+        report: `${candidates.length} lines on the screen say that, so nothing was pressed: `
+          + candidates.map((line) => `${JSON.stringify(line.text)} at [${(line.box ?? []).join(',')}]`)
+            .join(', ')
+          + '. Press the one you meant with lw_tap(x=..., y=...) at its centre.',
+        candidates: [],
+        pressed: false,
+      }
+    }
+    // 前置校验 ① (落实表 #37): 同名好几行时先看"像不像"的差 —— 分不开就不猜, 分得开才按最前面那一行
+    // **只比文本接近度**: 识别置信当不了"哪一行是目标" (同名两行只差在糊不糊时, 光比置信就会挑
+    // "最清楚那行"按下去), 它只在同样像时排个先后 (必修 B)
+    const squashed = squashText(needle)
+    const alike = (line) => alikeText(squashed, squashText(line.text))
+    const ranked = [...candidates].sort((left, right) =>
+      alike(right) - alike(left)
+      || (Number(right.score) || 0) - (Number(left.score) || 0))
+    const gap = alike(ranked[0]) - alike(ranked[1])
+    if (gap < TAP_SCORE_GAP) {
+      // 两条同名行本身就要交回去 (第三轮 F): 只写进 report 的话模型拿到的是空候选,
+      // 那句"按坐标选一条"就没有坐标可依 —— 坐标与置信度都在这里
+      return {
+        report: '',
+        candidates: closestReadLines(candidates, needle),
+        pressed: false,
+        reason: 'ambiguous',
+        skip: {
+          skip: 'ambiguous',
+          why: `${candidates.length} lines on the screen say ${JSON.stringify(needle)} and the top`
+            + ` two differ by only ${gap.toFixed(3)} in how alike they are, too close to tell which`
+            + ' one was meant',
+        },
+      }
+    }
+    only = ranked[0]
   }
-  const only = candidates[0]
+  // 前置校验 ②③: 不在这一屏上不发触摸 (读屏找到的字没有可点的树, 只判几何那一条)
+  // 读屏找到的是一行字, 字高不是命中区: 短边那条不卡它, 只判还在不在这一屏上
+  if (verify !== 'off') {
+    const geometry = tapPrecheckGeometry(snapshot, only.box ?? [], { minSide: false })
+    if (geometry !== null) return { report: '', candidates: [], pressed: false, skip: geometry }
+  }
   const point = scatterInside(only.box ?? [])
-  const pressed = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
-  return `pressed the line ${JSON.stringify(only.text)} (read off the screen with score`
-    + ` ${(only.score ?? 0).toFixed(2)}) at ${point.x},${point.y} on displayId`
-    + ` ${pressed.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
-    + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`
+  const tap = await call('tap', { displayId, x: point.x, y: point.y, holdMs: hold })
+  const delivered = tap.tapped === true
+  return {
+    report: `${delivered ? 'pressed' : 'found but the press was NOT reported as delivered:'}`
+      + ` the line ${JSON.stringify(only.text)} (read off the screen with score`
+      + ` ${(only.score ?? 0).toFixed(2)}) at ${point.x},${point.y} on displayId`
+      + ` ${tap.displayId}, a point drawn inside its rectangle [${(only.box ?? []).join(',')}]`
+      + ` rather than its exact centre${hold > 0 ? `, holding it for ${formatMs(hold)}` : ''}`,
+    candidates: [],
+    // 按下去才值得回读核对 (落实表 #32); 送达与否仍照 #36 的 `pressed` 说真话: 上面几条
+    // "什么都没按"的路不占那一次读屏, 而按了没送达也不能冒充按到
+    pressed: delivered,
+    pressedLabel: String(only.text ?? ''),
+    reason: delivered ? 'pressed' : 'undelivered',
+    // 这一下按在哪一点: 恢复里的重锚拿它挑"按过的这一处" (必修 2)
+    point,
+  }
+}
+
+/**
+ * 读屏那一路交给模型的话 (纯函数): 「没按」按原因分开说, 按下去才有报告
+ *
+ * 三条"没按"各有各的说法 (#37): 分数分不开 / 太小或不在这一屏 / 一个都不像. #36 那一侧还要
+ * 把"为什么没按"原样念回来 (熄屏 / 读不到 / 按了没送达), 那三种的下一步各不相同 (先唤醒 /
+ * 先开无障碍 / 换个点再按), 收成一句"没找到这一行"等于把模型推回去瞎猜. `pressedPrefix` 是
+ * 树里那段话 (按名字读屏兜底时挂在前面)
+ */
+function tapReadingAnswer(displayId, wanted, reading, tree, pressedPrefix = '') {
+  const reason = String(reading?.reason ?? '')
+  const candidates = Array.isArray(reading?.candidates) ? reading.candidates : []
+  const skip = reading?.skip ?? null
+  // 前置校验 (#37) 的结论先说: 分不开 / 太小 / 被盖住三种都不发触摸, 回执里带 skip=
+  if (skip !== null && skip.skip === 'ambiguous') {
+    return tapPrecheckCandidatesAnswer(displayId, wanted, candidates, skip.why)
+  }
+  if (skip !== null) return tapSkipAnswer(displayId, wanted, skip)
+  if (reason === 'ambiguous') {
+    // 同名两条: 屏幕上确实有这一行, 只是不止一条 (#36 第三轮 F) —— 开头别再说"没有这一行"
+    return tapCandidatesAnswer(displayId, wanted, candidates, tree,
+      `${candidates.length} lines on ${displayWhere(displayId)} say ${JSON.stringify(wanted)},`
+        + ' so pick the one you meant')
+  }
+  if (reason === 'no-match' || candidates.length > 0) {
+    return tapCandidatesAnswer(displayId, wanted, candidates, tree)
+  }
+  const report = String(reading?.report ?? '')
+  return reason === 'pressed' && pressedPrefix !== '' ? `${pressedPrefix}\n${report}` : report
+}
+
+/**
+ * How many close guesses a name that matched nothing hands back
+ *
+ * Three: one is a guess the model has to take or leave, two is a coin toss, and past three the
+ * list stops being "the closest few" and turns into a second screen dump
+ */
+const MAX_TAP_CANDIDATES = 3
+
+/**
+ * 名字一个也没匹配上时, 屏幕上最像的那几行
+ *
+ * 「没找到」对模型是死胡同: 它下一步只能整屏重读, 或者猜一个坐标. 给三行候选, 一次就够它
+ * 改成"点那个看起来最像的" —— 每行带 `text` / `score` / `bbox`, 按分数从高到低, 与 lw_ocr
+ * 报出来的矩形同一套像素
+ *
+ * 分数以**像不像**为主 (`alikeText`, 0.8), 以识别器对那一行自己的置信为辅 (0.2): 单纯按置信排
+ * 会把"清楚但是完全无关"的一行排在最前. 同分时先看置信, 再看读出来的先后, 所以顺序是稳定的
+ */
+function closestReadLines(lines, wanted, limit = MAX_TAP_CANDIDATES) {
+  const needle = squashText(wanted)
+  return lines
+    .map((line, order) => ({ line, order, score: closenessScore(line, needle) }))
+    .sort((left, right) => right.score - left.score
+      || (Number(right.line.score) || 0) - (Number(left.line.score) || 0)
+      || left.order - right.order)
+    .slice(0, limit)
+    .map(({ line, score }) => ({
+      text: String(line.text ?? ''),
+      score,
+      bbox: Array.isArray(line.box) ? line.box.slice(0, 4) : [],
+      // 那一格的中心: 下一次按落在这个点上 (落实表 #37 的"定点恢复")
+      center: centreInBox(line.box),
+    }))
+}
+
+/** 比较之前先抹掉大小写与空白: 屏上的字经常是 "设 置" 或 "Wi-Fi" 这种写法 */
+function squashText(value) {
+  return String(value ?? '').toLowerCase().replace(/\s+/gu, '')
+}
+
+/**
+ * 两串字有多像, 0 到 1
+ *
+ * 逐字相同是 1; 一边整个出现在另一边里按比例给 0.6~0.9 (短的那个占比越大越像); 其余看公共
+ * 子序列占长边的比例, 封顶 0.6. 中文按字比就够用: "设置" 与 "设备连接" 共享一个「设」, 与
+ * "蓝牙" 一个都不共享
+ */
+function alikeText(left, right) {
+  if (left === '' || right === '') return 0
+  if (left === right) return 1
+  const short = left.length <= right.length ? left : right
+  const long = left.length <= right.length ? right : left
+  if (long.includes(short)) return 0.6 + 0.3 * (short.length / long.length)
+  return 0.6 * (commonLetters(left, right) / long.length)
+}
+
+/** 最长公共子序列的长度 (逐行滚动, 只留一行) */
+function commonLetters(left, right) {
+  const row = new Array(right.length + 1).fill(0)
+  for (let i = 1; i <= left.length; i += 1) {
+    let diagonal = 0
+    for (let j = 1; j <= right.length; j += 1) {
+      const above = row[j]
+      row[j] = left[i - 1] === right[j - 1] ? diagonal + 1 : Math.max(row[j], row[j - 1])
+      diagonal = above
+    }
+  }
+  return row[right.length]
+}
+
+/** 一行读出来的字离想要的名字有多近, 0 到 1, 保留三位小数 */
+function closenessScore(line, needle) {
+  const alike = alikeText(needle, squashText(line.text))
+  const read = Math.min(Math.max(Number(line.score) || 0, 0), 1)
+  return Math.round((alike * 0.8 + read * 0.2) * 1000) / 1000
+}
+
+/**
+ * 回执里那块屏的编号 (#37 归档项): 树读到了就用树自己报的那个, 否则用调用方点的那一个
+ *
+ * 两样都没有时回 null —— 调用方省掉 `displayId` 是"跟着手里那块屏走", 回执不能把这个位置写成
+ * `undefined`, 也不能替它猜一个 0
+ */
+function tapDisplayId(args, snapshot) {
+  const fromTree = snapshot === null || snapshot === undefined ? Number.NaN : Number(snapshot.displayId)
+  if (Number.isFinite(fromTree) && fromTree >= 0) return fromTree
+  const asked = args?.displayId === undefined || args?.displayId === null
+    ? Number.NaN
+    : Number(args.displayId)
+  if (Number.isFinite(asked) && asked >= 0) return asked
+  return null
+}
+
+/**
+ * 什么都没按到时给模型的那段话: 换成"最像的这几个", 并带上机器可读的 candidates
+ *
+ * 尾部的 JSON 与 `lw_ocr` 一样是给人之外的那一层看的: `candidates` 每项是 `{text, score, bbox}`,
+ * 按 score 从高到低. 屏幕上真的一行字都没有时这个列表是空的, 那句"没读到任何字"才回来
+ */
+function tapCandidatesAnswer(displayId, wanted, candidates, tree, opening = '') {
+  const name = JSON.stringify(wanted)
+  const where = displayWhere(displayId)
+  // 树没被读到 (无障碍关着) 时不能写成"树里没有": 那是另一件事, 模型据此会去关掉无障碍的闸
+  const head = tree === undefined
+    ? `no line on ${where} says ${name}`
+    : tree.outcome === 'unavailable'
+      ? `the control tree on ${where} could not be read (accessibility is off), and no`
+        + ` line on the screen says ${name}`
+      : `no control on ${where} is named ${name}, and no line on the screen says it`
+        + ' either'
+  // 真机上这条是唯一能证明候选真的给出来了的读数 (2026-11-17, 落实表 #27)
+  console.log(`lw_tap: candidates=${candidates.length} on ${displayWhere(displayId)}`
+    + ` for ${JSON.stringify(wanted)}`)
+  // `opening` 给"同名两条"那种情形用 (第三轮 F): 那时候屏幕上是**有**这一行, 只是不止一条
+  return withJson([
+    opening === ''
+      ? `${head}: nothing was pressed. The closest lines on the screen are:`
+      : `${opening}: nothing was pressed. These are the ones to pick from:`,
+    ...candidateLines(candidates),
+    'Press one of them by a point inside its bbox with lw_tap(x=..., y=...), or call lw_ui to see'
+      + ' what the screen actually says.',
+  ], { displayId, text: String(wanted), candidates })
+}
+
+/**
+ * 候选那几行: 名字 / 矩形 / 中心 / 分数
+ *
+ * 中心是 #37 加的: 恢复要交回去的正是"下一次按这个点", 让人自己从矩形算一次中间那格在真机上
+ * 每次都会多错一格
+ */
+function candidateLines(candidates) {
+  return candidates.map((candidate) => {
+    const centre = candidate.center ?? centreInBox(candidate.bbox)
+    return `- ${JSON.stringify(candidate.text)} at [${(candidate.bbox ?? []).join(',')}]`
+      + `${centre === null ? '' : ` centre ${centre.x},${centre.y}`}`
+      + ` score ${candidate.score.toFixed(3)}`
+  })
+}
+
+/**
+ * 前置校验没过时的回执 (落实表 #37): 一句"没按" + 为什么 + 下一步按哪儿
+ *
+ * 回 `skip=small|occluded`, 并且**一次都不发触摸** —— 这是与"按完发现没变"最要紧的区别
+ */
+function tapSkipAnswer(displayId, wanted, skip) {
+  console.log(`LwTap: skip=${skip.skip} on ${displayWhere(displayId)} for ${JSON.stringify(wanted)}`)
+  return withJson([
+    `not pressed: ${JSON.stringify(wanted)} was skipped on ${displayWhere(displayId)}`
+      + ` (skip=${skip.skip}).`,
+    skip.why,
+    skip.skip === 'small'
+      ? 'A control that small is usually an icon or a decoration. Press the row it sits in by name,'
+        + ' or read the screen with lw_ui and press a control that is big enough to take a press.'
+      : 'Read the screen again with lw_ui and press the control where it really is, or bring it'
+        + ' into view (scroll it, or close what is covering it) first.',
+  ], { displayId, text: String(wanted), skip: skip.skip, why: skip.why })
+}
+
+/** 同名候选分不开时的回执: 按 #27 的三候选格式给"最像的这几个", 但把 skip=ambiguous 说在明面上 */
+function tapPrecheckCandidatesAnswer(displayId, wanted, candidates, why) {
+  const name = JSON.stringify(wanted)
+  // 真机上这一行证明"没点"是前置校验做的, 不是按完才发现 (与 #27 的 `lw_tap: candidates=` 同一档)
+  console.log(`LwTap: precheck=ambiguous candidates=${candidates.length} on ${displayWhere(displayId)}`
+    + ` for ${name}`)
+  return withJson([
+    `${why}, so nothing was pressed on ${displayWhere(displayId)} (skip=ambiguous).`,
+    'The closest controls are:',
+    ...candidateLines(candidates),
+    `Press one of them by a point at its centre, or call lw_ui and name a control that only`
+      + ' appears once.',
+  ], { displayId, text: String(wanted), skip: 'ambiguous', why, candidates })
+}
+
+/**
+ * 按点按的锚点对不上时的回执 (落实表 #37): 点上是别的什么、期望的那一格现在在哪
+ *
+ * `reason=anchor-mismatch` 是给人之外那一层看的字面量, 与 #32 的 `effect=` 同一套写法
+ */
+function tapAnchorMismatchAnswer(displayId, mismatch, x, y) {
+  console.log(`LwTap: anchor=mismatch on ${displayWhere(displayId)} at ${x},${y}`
+    + ` for ${JSON.stringify(mismatch.want)}`)
+  const lines = [
+    `not pressed: ${x},${y} on ${displayWhere(displayId)} is not the control you expected`
+      + ' (reason=anchor-mismatch).',
+  ]
+  if (!mismatch.readable) {
+    lines.push('The control tree could not be read, so there is no way to prove that point is the'
+      + ' control you meant - nothing was sent.')
+  } else if (mismatch.found === '') {
+    lines.push('No control with a name covers that point - it is empty space or something a picture'
+      + ' draws.')
+  } else {
+    lines.push(`What is actually there is ${JSON.stringify(mismatch.found)}.`)
+  }
+  if (mismatch.closest === null) {
+    lines.push(`Nothing on this screen looks like ${JSON.stringify(mismatch.want)}: read it with`
+      + ' lw_ui first and press a control that is really there.')
+  } else {
+    const centre = mismatch.closest.center ?? centreInBox(mismatch.closest.bbox)
+    lines.push(`The closest control to ${JSON.stringify(mismatch.want)} is`
+      + ` ${JSON.stringify(mismatch.closest.text)} at [${mismatch.closest.bbox.join(',')}]`
+      + `${centre === null ? '' : ` centre ${centre.x},${centre.y}`}: press that point instead.`)
+  }
+  return withJson(lines, {
+    displayId,
+    x,
+    y,
+    reason: 'anchor-mismatch',
+    expected: mismatch.want,
+    found: mismatch.found,
+    readable: mismatch.readable,
+    closest: mismatch.closest,
+  })
 }
 
 /**
@@ -6543,6 +7956,7 @@ function scatterInside(box) {
   const y = Math.round(top + insetY + Math.random() * Math.max(0, bottom - top - 2 * insetY))
   return { x, y }
 }
+
 
 /** The report itself, before the caller's own note is put on it */
 function namedTapReport(result) {
@@ -6592,6 +8006,644 @@ function formatRect(rect) {
 
 function sameRect(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.every((value, index) => value === b[index])
+}
+
+/* ── 按完这一下先验一次 (2.8.1 落实表 #32) + 按之前先证明按的是对的那个 (#37) ──────
+ *
+ * 点按原来"送出去就算成功": 按钮是灰的、面板没开、点在动画中间 —— 界面一点没变, 而回执与真的生效
+ * 一模一样, 于是调用方照着没变的界面继续点下去 (探索那种连点十几下的流程一踩就是十几下, 依据
+ * VeriGUI https://arxiv.org/abs/2604.05477 说的"重复无效动作占全部失败 72.3%"就是这条)
+ *
+ * 这里补一次**回读**: 按下之前取一次树, 按下之后 [TAP_EFFECT_WAIT_MS] 再取一次, 比文本集合与目标
+ * 那一格的位置. 变了说变了 (附新旧文本差), 没变说没变并给出最像的三个候选 —— 调用方能在原地换一条
+ * 路. 连着两下没变时第三下**不发出去**, 回 `reason=effect-missing`
+ *
+ * 只在 `lw_tap` 上开 (`lw_swipe` / `lw_key` 不动): 每一下多两次树读取, 连点十几下的流程约 +0.3 s 一步
+ *
+ * #37 在这一段前后各补一块: 按之前的三道前置校验 (唯一 / 够大 / 在屏上) 与失败后的分级恢复
+ * (重读屏 → 重锚 → 放弃), 各自有一个小节写着为什么
+ */
+
+/** 按下之后等多久再回读: 短了读到的还是按下那一帧, 长了每一步都慢 */
+const TAP_EFFECT_WAIT_MS = 300
+
+/** 一次树读取最多等这么久, 超了就不核对并回 `effect=unknown` (宁可不说, 不许阻塞主流程) */
+const TAP_EFFECT_READ_MS = 900
+
+/** 差额最多列几行: 五行走得完, 再多就是第二份整屏 */
+const TAP_EFFECT_DIFF_LINES = 5
+
+/** 账里留多少条: 只给探索的 status 与那一次刹车看, 不是审计 */
+const TAP_EFFECT_KEPT = 40
+
+/**
+ * 一块屏在回执里怎么写: 有编号就写编号, 没编号就说"手里那块"
+ *
+ * 调用方省掉 `displayId` 是"跟着手里那块屏走", 于是回执里那个位置既不能写成 `undefined`, 也不能
+ * 替它猜一个 0 (#37 归档项)
+ */
+function displayWhere(displayId) {
+  if (displayId === null || displayId === undefined) return 'the screen in hand'
+  const id = Number(displayId)
+  return Number.isFinite(id) && id >= 0 ? `displayId ${id}` : 'the screen in hand'
+}
+
+/** 连着几条 `unchanged` 才踩那一脚 (`exploreEffectReason` 用的是同一个数) */
+const TAP_EFFECT_STREAK = 2
+
+/**
+ * 这一次进程里点过、核对过的那些一下
+ *
+ * 一行 `{ step, effect, displayId, at, fingerprint, session }`. **只由 `lw_tap` 的核对写**; 探索的
+ * status 按场次把它挑出来念 (`effects`). 不落盘 —— 它算的是"刚才连点的那十几下", 不是要跨重启记住的账
+ */
+const tapEffectLog = []
+
+/** 一块屏的指纹: 念得出字的那些节点的文本与矩形, 排好再拼起来 (便宜的相等判断) */
+function tapEffectFingerprint(snapshot) {
+  return (snapshot?.nodes ?? []).map((node) => `${node.label}@${node.bounds.join(',')}`).join('|')
+}
+
+/**
+ * 读一次树, 收成"能比的那一份": 只留念得出字的节点 (text 或 desc), 按矩形自上而下排好
+ *
+ * 读不到 (无障碍关着 / 通道超时 / 这块屏没了) 回 null —— 那是"这一次核不了", 不是"没有变化",
+ * 两者在回执上必须分开 (`effect=unknown`)
+ */
+async function tapEffectSnapshot(displayId) {
+  let result
+  try {
+    result = await withTimeout(call('ui', { displayId }), TAP_EFFECT_READ_MS)
+  } catch {
+    return null
+  }
+  if (result === null || typeof result !== 'object') return null
+  if (result.enabled !== true || result.error) return null
+  const nodes = (Array.isArray(result.nodes) ? result.nodes : [])
+    .map((node, order) => ({
+      label: String(node?.text ?? '') || String(node?.description ?? ''),
+      bounds: Array.isArray(node?.bounds) ? node.bounds.slice(0, 4) : [],
+      // 这一格按下去实际落在哪一格 (无障碍报的 target): "被盖住"要拿两边这个矩形比
+      target: Array.isArray(node?.target) ? node.target.slice(0, 4) : null,
+      // 前置校验 (#37) 要的两件: 这一格自己能不能按, 以及它画在第几层 (后画的盖在前面的上面)
+      clickable: node?.clickable === true,
+      order,
+    }))
+    .filter((node) => node.label !== '' && node.bounds.length === 4)
+    .sort((left, right) => left.bounds[1] - right.bounds[1]
+      || left.bounds[0] - right.bounds[0]
+      || left.label.localeCompare(right.label))
+  return {
+    displayId: Number(result.displayId ?? displayId) || 0,
+    label: String(result.label ?? ''),
+    // 这一块屏多大: 前置校验靠它判"这一格还在不在当前屏上" (读不到就不猜, 那一条直接跳过)
+    screen: Number(result.width) > 0 && Number(result.height) > 0
+      ? [Number(result.width), Number(result.height)]
+      : null,
+    nodes,
+    texts: [...new Set(nodes.map((node) => node.label))].sort(),
+  }
+}
+
+/** 两份快照之间新出现的 / 消失的文本 */
+function tapEffectDiff(before, after) {
+  const was = before?.texts ?? []
+  const now = after?.texts ?? []
+  return {
+    added: now.filter((text) => !was.includes(text)),
+    lost: was.filter((text) => !now.includes(text)),
+  }
+}
+
+/** 这一段文字在快照里的第一格 (按文本找), 找不到回 null */
+function tapEffectNodeFor(snapshot, label) {
+  const wanted = String(label ?? '').trim()
+  if (wanted === '') return null
+  return (snapshot?.nodes ?? []).find((node) => node.label === wanted) ?? null
+}
+
+/**
+ * 这一下有没有让界面变 (纯函数, 真值表就压它)
+ *
+ * 三分: `changed` = 文本集合变了, 或者目标那一格挪了位; `unchanged` = 两样都没变; `unknown` = 有一
+ * 份读不到. 自绘界面 (canvas) 本来就没有树, 那种屏只会走到 `unknown`, 不会把"变了"误判成"没变"
+ */
+function tapEffectOf(before, after, wanted) {
+  if (before === null || after === null) return 'unknown'
+  const { added, lost } = tapEffectDiff(before, after)
+  if (added.length > 0 || lost.length > 0) return 'changed'
+  const was = tapEffectNodeFor(before, wanted)
+  const now = tapEffectNodeFor(after, wanted)
+  if (was !== null && now !== null && !sameRect(was.bounds, now.bounds)) return 'changed'
+  return 'unchanged'
+}
+
+/**
+ * 没变的时候"接下来该按哪几个": 屏幕上除了刚按的那一格之外, 最像的三个
+ *
+ * 分数还是 [closenessScore] 那一套 (像不像 0.8 + 识别置信 0.2), 树里读到的文本算满置信 —— 不新写一
+ * 套打分. **按过的那一格排掉**: 让调用方"再按一次同一个地方"正是这一整条要治的病
+ */
+function tapEffectCandidates(snapshot, wanted, limit = MAX_TAP_CANDIDATES) {
+  const pressed = String(wanted ?? '').trim()
+  const lines = (snapshot?.nodes ?? [])
+    .filter((node) => node.label !== pressed)
+    .map((node) => ({ text: node.label, box: node.bounds, score: 1 }))
+  return closestReadLines(lines, pressed, limit)
+}
+
+/**
+ * 一个点上压着的那一格 (最里面那一格, 也就是后画在上面那个)
+ *
+ * 两个用处: 点按那一档按过的那一格就是从这里读出来的; 前置校验拿它判"这一点被谁盖着"
+ */
+function tapEffectNodeAt(snapshot, x, y) {
+  const atX = Number(x)
+  const atY = Number(y)
+  if (!Number.isFinite(atX) || !Number.isFinite(atY)) return null
+  let best = null
+  for (const node of snapshot?.nodes ?? []) {
+    const [left, top, right, bottom] = node.bounds
+    if (atX < left || atX > right || atY < top || atY > bottom) continue
+    const area = (right - left) * (bottom - top)
+    if (best === null || area < best.area) best = { node, area }
+  }
+  return best === null ? null : best.node
+}
+
+/** 一个点上压着的那一格叫什么: 点按那一档按过的那一格就是从这里读出来的 */
+function tapEffectLabelAt(snapshot, x, y) {
+  const node = tapEffectNodeAt(snapshot, x, y)
+  return node === null ? '' : node.label
+}
+
+/* ── 按下去之前先证明按的是对的那个 (2.8.1 落实表 #37) ──────────────────────
+ *
+ * #32 只补了"按完看一眼". 可点错目标的病在按之前就种下了: 同名两行、短边只有二十几像素的图标、
+ * 被浮层盖住的控件 —— 那一下照样发出去, 界面只要变了就记 changed, 探索把错的一步当成功继续走
+ * (依据 UIAnchor https://arxiv.org/abs/2611.20753: 野外失败瓶颈是"误读可操作元素"与"执行时不
+ * 验证目标正确性")
+ *
+ * 三道校验都在**按下去之前**判, 任何一道不过就不发触摸:
+ *   ① 唯一: 同名候选不止一个且分数差 < [TAP_SCORE_GAP] → 回候选, 不猜
+ *   ② 够大: 目标那格短边 < [TAP_MIN_SIDE] px → `skip=small` (那么小的图标, 按下去落在旁边那格)
+ *   ③ 在屏上: 那格完全不在当前屏 (或大半不在) → `skip=occluded`; 要按的那个点上压着的是另一个
+ *      有名字的控件 (被浮层盖住) 同样算 occluded
+ */
+
+/** 目标那一格短边小于这个数就不按 (px): 安卓最小可点尺寸 48dp 的像素档 */
+const TAP_MIN_SIDE = 48
+
+/** 同名候选「像不像」的差小于这个数就算"说不清是哪一个" (0~1, 与 `alikeText` 同一把尺; 不比置信) */
+const TAP_SCORE_GAP = 0.15
+
+/** 一块 bbox 的中心 (回给调用方"下一次按这个点"的那一处), 形状不对回 null */
+function centreInBox(box) {
+  if (!Array.isArray(box) || box.length < 4) return null
+  const numbers = box.slice(0, 4).map(Number)
+  if (!numbers.every(Number.isFinite)) return null
+  return {
+    x: Math.round((numbers[0] + numbers[2]) / 2),
+    y: Math.round((numbers[1] + numbers[3]) / 2),
+  }
+}
+
+/** 外面那格是不是把里面那格整个包住 (同名控件与它自己的子节点是同一处, 不算两个候选) */
+function containsRect(outer, inner) {
+  return Array.isArray(outer) && Array.isArray(inner) && outer.length === 4 && inner.length === 4
+    && inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+/** 这一点是不是落在这块矩形里 (闭区间, 与 `tapEffectNodeAt` 同一个口径) */
+function rectHoldsPoint(rect, x, y) {
+  if (!Array.isArray(rect) || rect.length < 4) return false
+  const atX = Number(x)
+  const atY = Number(y)
+  if (!Number.isFinite(atX) || !Number.isFinite(atY)) return false
+  return atX >= rect[0] && atX <= rect[2] && atY >= rect[1] && atY <= rect[3]
+}
+
+/** 两串名字算不算同一个 (逐字相同, 抹掉大小写与空白之后) */
+function tapLabelMatches(label, wanted) {
+  const seen = squashText(label)
+  const want = squashText(wanted)
+  if (seen === '' || want === '') return false
+  return seen === want
+}
+
+/** 一格能按多大: 有命中区 (`target`) 就算命中区, 没有就看它自己那块矩形 */
+function tapPlaceArea(node) {
+  const rect = Array.isArray(node?.target) ? node.target : node?.bounds
+  if (!Array.isArray(rect) || rect.length < 4) return 0
+  return Math.abs((Number(rect[2]) - Number(rect[0])) * (Number(rect[3]) - Number(rect[1]))) || 0
+}
+
+/** 两格是不是"同一处": 一块包住另一块, 或者按下去落在同一格 (`target` 同矩形) */
+function sameTapPlace(left, right) {
+  if (Array.isArray(left.bounds) && Array.isArray(right.bounds)
+    && (containsRect(left.bounds, right.bounds) || containsRect(right.bounds, left.bounds))) return true
+  return Array.isArray(left.target) && Array.isArray(right.target) && sameRect(left.target, right.target)
+}
+
+/**
+ * 快照里名字对得上的那几格, **同一处只算一个候选**
+ *
+ * 同一处的两种形态: 一条同名标签与它自己的子节点 (一块包住另一块), 或者按下去落在同一格的两条标签
+ * (`target` 相同 —— 设备侧 `LwAccessibility.keyOf` 也是这个口径, 那里算一处, 这里再算两处就会把本来
+ * 按得下去的一行判成 `skip=ambiguous`, 必修 8)
+ *
+ * 合并**与快照顺序无关** (backlog): 不看"谁排在前面", 而是两两判同一处, 留下面积大的那一格
+ * (外层 / 真正接这一下的那块); 一样大就留先来的. 于是子节点排在父节点前面也只算一处
+ */
+function tapNameMatches(snapshot, wanted) {
+  const needle = squashText(wanted)
+  if (needle === '') return []
+  const nodes = (snapshot?.nodes ?? []).filter((node) => node.label !== '')
+  const exact = nodes.filter((node) => squashText(node.label) === needle)
+  const hits = exact.length > 0 ? exact : nodes.filter((node) => squashText(node.label).includes(needle))
+  const kept = []
+  for (const node of hits) {
+    const at = kept.findIndex((seen) => sameTapPlace(seen, node))
+    if (at < 0) kept.push(node)
+    else if (tapPlaceArea(node) > tapPlaceArea(kept[at])) kept[at] = node
+  }
+  return kept
+}
+
+/**
+ * 几何那两条校验 (够大 / 在屏上)
+ *
+ * 回 null = 可以按; 回 `{ skip, why }` = 这一下不发出去. 读不到屏尺寸时只跳过"在屏上"这一条:
+ * 不拿一个猜出来的数当判据
+ *
+ * `minSide` 只在"量的是命中区"那条路上开 (按名字按下树里那一格): 那里量的是"按下去会落在多大
+ * 一块". 读屏找到的是一行字, 字高不是命中区 (14sp 在 3x 屏上才 42px), 拿短边去卡它会把正常的一行
+ * 字全挡掉; 按点按也不卡它 —— 坐标是调用方自己量好交来的 (必修 1), 那两条路都只判"还在不在这一
+ * 屏上" (`{ minSide: false }`)
+ */
+function tapPrecheckGeometry(snapshot, box, { minSide = true } = {}) {
+  const rect = Array.isArray(box) ? box.slice(0, 4).map(Number) : []
+  if (rect.length < 4 || !rect.every(Number.isFinite)) {
+    return { skip: 'occluded', why: 'this target has no rectangle on the screen, so nothing proves it is there' }
+  }
+  const [left, top, right, bottom] = rect
+  const width = right - left
+  const height = bottom - top
+  if (width <= 0 || height <= 0) {
+    return { skip: 'occluded', why: `its rectangle [${rect.join(',')}] has no area` }
+  }
+  const short = Math.min(width, height)
+  if (minSide && short < TAP_MIN_SIDE) {
+    return {
+      skip: 'small',
+      why: `the area it takes a press on is ${width}x${height}px, and its short side of ${short}px is`
+        + ` under the ${TAP_MIN_SIDE}px this tool presses: a control that small is usually an icon`
+        + ' or a decoration, and a press on it lands on whatever sits next to it',
+    }
+  }
+  const screen = Array.isArray(snapshot?.screen) ? snapshot.screen : null
+  if (screen !== null && screen[0] > 0 && screen[1] > 0) {
+    const seenAcross = Math.max(0, Math.min(right, screen[0]) - Math.max(left, 0))
+    const seenDown = Math.max(0, Math.min(bottom, screen[1]) - Math.max(top, 0))
+    const seen = seenAcross * seenDown
+    if (seen <= 0) {
+      return {
+        skip: 'occluded',
+        why: `its rectangle [${rect.join(',')}] is off the ${screen[0]}x${screen[1]} screen entirely`,
+      }
+    }
+    if (seen * 2 < width * height) {
+      return {
+        skip: 'occluded',
+        why: `only ${Math.round((seen / (width * height)) * 100)}% of its rectangle is on the`
+          + ` ${screen[0]}x${screen[1]} screen, so the point this tool would press may not be on it`,
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 三道一起: 几何两条 + "要按的那个点上是不是盖着别的能按的控件" (按名字那条路走它)
+ *
+ * 量的是**命中区** (`target`: 按下去实际落在哪一格), 不是名字那一格的文字框 —— 一行字的文字框
+ * 往往比它能按的面积小得多, 拿文字框去卡"够不够大"会把正常的列表行全挡掉
+ */
+function tapPrecheck(snapshot, node) {
+  const label = node?.label ?? ''
+  const hit = Array.isArray(node?.target) ? node.target : (node?.bounds ?? [])
+  const geometry = tapPrecheckGeometry(snapshot, hit)
+  if (geometry !== null) return geometry
+  const centre = centreInBox(hit)
+  if (centre === null) return null
+  const onTop = tapEffectNodeAt(snapshot, centre.x, centre.y)
+  if (onTop === null || onTop.label === '' || onTop.clickable !== true) return null
+  const want = squashText(label)
+  const seen = squashText(onTop.label)
+  if (want === '' || seen === '' || seen === want || seen.includes(want) || want.includes(seen)) return null
+  // 同一格里换了名字不算盖住: 子节点与它所在的那一行按下去落在同一块 (target 相同)
+  const theirs = Array.isArray(onTop.target) ? onTop.target : onTop.bounds
+  if (sameRect(hit, theirs)) return null
+  return {
+    skip: 'occluded',
+    why: `the point this tool would press is covered by ${JSON.stringify(onTop.label)}, a different`
+      + ' clickable control, so the press would land on that one instead',
+  }
+}
+
+/**
+ * 按点按时核对「这个点上的控件是不是调用方期望的那个」 (落实表 #37)
+ *
+ * 回 null = 对得上 (或者调用方没说期望什么); 回 `{ want, found, readable, closest }` = 对不上,
+ * 这一下不发. 树读不回来也算对不上: 证明不了就不按, 这是这张卡的整个意思
+ *
+ * 认的顺序 (必修 7 / 必修 C): **先取真正接这一下的最深那格** (`tapEffectNodeAt`), 只有"按下去落在
+ * 同一格"的节点 (`target` 同矩形) 里逐字同名的才算对上 —— 一行「更多设置」的 target 盖住右侧小按钮
+ * 「更多」时, 按 950,150 而 expect 写「更多设置」必须回 anchor-mismatch, 不能盖章成按对了. 只有
+ * 最深那格自己接不了这一下 (没有 target, 或不可按) 时, 才退到"点在某条行内子文本上而 expect 给的
+ * 是整行名字"那条兜底
+ *
+ * 「同一格」的尺子只有 `target` 同矩形 (降验收 2026-11-22): 列表行那种形态是**行名的文字框很小、
+ * target 是整行**, 行内子文本的 target 也是整行 —— 再拿"namesake 自己的 target 与 bounds 同矩形"
+ * 当附加条件, 就把这条最常见的用法整条判成不符 (按下「已连接」而 expect 写「蓝牙」)
+ */
+function tapAnchorMismatch(snapshot, expected, x, y) {
+  const want = String(expected ?? '').trim()
+  if (want === '') return null
+  if (snapshot === null) return { want, found: '', readable: false, closest: null }
+  const inner = tapEffectNodeAt(snapshot, x, y)
+  const holding = (snapshot.nodes ?? []).filter((node) => rectHoldsPoint(node.target ?? node.bounds, x, y))
+  const innerTarget = Array.isArray(inner?.target) ? inner.target : null
+  // ① 与最深那格落在同一格 (target 同矩形) 的那几条: 逐字同名才算对上
+  const samePlace = holding.filter((node) => node === inner
+    || (innerTarget !== null && Array.isArray(node.target) && sameRect(node.target, innerTarget)))
+  if (samePlace.some((node) => tapLabelMatches(node.label, want))) return null
+  // ② 兜底只给"这一点上根本没有那一格"的情形: 点落在行内空白段、或只有 target 覆盖到这一点而那一格
+  // 自己没进快照 —— 设备侧任何处在可点祖先里的节点都带 target (`clickTarget`), 所以"最深那格有名字
+  // 却既没 target 也不可点"不是正常形态; 放它过去会把"按在具名但不可点的那格上、expect 却写外包层"
+  // 盖成 confirmed (第三轮 verifier 用探针实测出这条新偏差, main 上同名函数是回 anchor-mismatch)
+  if (inner === null && holding.some((node) => tapLabelMatches(node.label, want))) return null
+  const found = tapAnchorFoundAt(inner, holding)
+  const nodes = (snapshot.nodes ?? []).map((node) => ({ text: node.label, box: node.bounds, score: 1 }))
+  const closest = closestReadLines(nodes, want, 1)[0] ?? null
+  return { want, found, readable: true, closest }
+}
+
+/**
+ * 这个点上"实际是什么" (回执里那句): 最深那格有名字就用它; 点落在行内空白段时 (最深那格没名字)
+ * 用"含这一点的节点里面积最小的那格"兜底 —— 不能因为一格没写名字就说这一点上什么都没有
+ * (backlog: 具名控件明明接着这一下)
+ */
+function tapAnchorFoundAt(inner, holding) {
+  const own = String(inner?.label ?? '')
+  if (own !== '') return own
+  let best = null
+  for (const node of holding) {
+    if (String(node.label ?? '') === '') continue
+    const [left, top, right, bottom] = node.bounds
+    const area = (right - left) * (bottom - top)
+    if (best === null || area < best.area) best = { node, area }
+  }
+  return best === null ? '' : best.node.label
+}
+
+/**
+ * 重锚那一档用: 在这一屏上把目标重新找出来, 连它现在的中心一起交回去
+ *
+ * `point` 是刚才按在哪一点 (必修 2): 同名两处分别画在屏幕上下时, 交回的必须是"按过的这一处",
+ * 而 `tapNameMatches` 的第 0 个永远是最上面那一处. 先挑包含这个点的那几处, 再挑离它最近的
+ *
+ * 零面积的格子先剔掉 (单列旧问题): 设备侧对"有字但没量出大小"的节点会给 `[0,0,0,0]`, 拿它交出
+ * 中心就是 `0,0` —— 恢复会把 giveup 顶掉, 还叫模型去按屏左上角
+ */
+function tapAnchorNode(snapshot, wanted, point = null) {
+  const matches = tapNameMatches(snapshot, wanted).filter((node) => tapPlaceArea(node) > 0)
+  if (matches.length === 0) return null
+  const atX = Number(point?.x)
+  const atY = Number(point?.y)
+  const placed = Number.isFinite(atX) && Number.isFinite(atY)
+  const holding = placed ? matches.filter((node) => rectHoldsPoint(node.target ?? node.bounds, atX, atY)) : []
+  const pool = holding.length > 0 ? holding : matches
+  const first = placed
+    ? pool.reduce((best, node) => (tapAnchorGap(node, atX, atY) < tapAnchorGap(best, atX, atY) ? node : best))
+    : pool[0]
+  // 交回"按下去落在哪一格"的中心 (有 target 就用 target): 名字那一格的文字框往往只是行内一小段,
+  // 拿它算中心会让下一次按落在文字上而不是那一行 (backlog: 同名标签共用一个 target 时尤其明显)
+  const rect = Array.isArray(first.target) ? first.target : first.bounds
+  const centre = centreInBox(rect)
+  return centre === null ? null : { label: first.label, bounds: rect, centre }
+}
+
+/** 一格离一个点多远 (中心到那个点的平方距离): 重锚挑"按过的这一处"用, 不新造一把尺 */
+function tapAnchorGap(node, x, y) {
+  const centre = centreInBox(node.target ?? node.bounds) ?? centreInBox(node.bounds)
+  if (centre === null) return Number.POSITIVE_INFINITY
+  return (centre.x - x) ** 2 + (centre.y - y) ** 2
+}
+
+/**
+ * 核对那一段回执: 一行机器可读的 `effect=`, 后面跟人读的差额或候选
+ *
+ * `changed` 附新旧文本差最多 [TAP_EFFECT_DIFF_LINES] 行; `unchanged` 附三个候选 (text / score /
+ * bbox / centre, 按分数降序) 与一句"先看一眼再按"; `unknown` 说明这次核不了, 别据此另点
+ */
+function formatTapEffect(effect, before, after, candidates = []) {
+  if (effect === 'unknown') {
+    return 'effect=unknown: the screen could not be read back after the press, so whether anything'
+      + ' changed is not known - read it with lw_ui before the next press'
+  }
+  if (effect === 'changed') {
+    const { added, lost } = tapEffectDiff(before, after)
+    const lines = ['effect=changed: the screen answered the press']
+    for (const text of added.slice(0, TAP_EFFECT_DIFF_LINES)) {
+      lines.push(`  + ${JSON.stringify(text)}`)
+    }
+    const room = Math.max(0, TAP_EFFECT_DIFF_LINES - added.length)
+    for (const text of lost.slice(0, room)) lines.push(`  - ${JSON.stringify(text)}`)
+    const total = added.length + lost.length
+    if (total > TAP_EFFECT_DIFF_LINES) {
+      lines.push(`  … ${total - TAP_EFFECT_DIFF_LINES} more changed line(s)`)
+    }
+    return lines.join('\n')
+  }
+  const lines = [
+    'effect=unchanged: the press was delivered and the screen is exactly as it was - nothing was'
+    + ' added, removed or moved. Pressing the same place again would do the same nothing.',
+  ]
+  if (candidates.length > 0) {
+    lines.push('The closest things to press instead are:')
+    // 候选一律带矩形与中心 (与 skip=ambiguous / 锚点那几条同一个格式): 说明里承诺了"下一次按这个点",
+    // 少了中心模型得自己从矩形算, 真机上每次都会多错一格 (backlog)
+    lines.push(...candidateLines(candidates))
+    lines.push('Read the screen with lw_ui, or press one of those by a point inside its bbox.')
+  } else {
+    lines.push('Nothing else on this screen looks like it: read it again with lw_ui.')
+  }
+  return lines.join('\n')
+}
+
+/** 这一场 + 这一块屏最近的那几条 (纯函数): 从后往前收, 遇到一条 `changed` 就断开 */
+function tapEffectTail(log, sessionId, displayId) {
+  const entries = Array.isArray(log) ? log : []
+  const tail = []
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry?.session !== sessionId || entry?.displayId !== displayId) continue
+    tail.unshift(entry)
+    if (entry.effect !== 'unchanged') break
+  }
+  return tail
+}
+
+/** 尾巴上有几条连着的 `unchanged` (纯函数) */
+function tapEffectStreak(tail) {
+  let streak = 0
+  for (let index = tail.length - 1; index >= 0; index -= 1) {
+    if (tail[index]?.effect !== 'unchanged') break
+    streak += 1
+  }
+  return streak
+}
+
+/**
+ * 连着两下都没变之后的那一脚刹车 (纯函数)
+ *
+ * 只在"屏幕还是那一屏"时踩: 读回来的指纹与上一条 `unchanged` 记下的那份一样, 说明再按同一个地方还
+ * 是什么都不会发生 —— 这一下就不发出去, 回 `reason=effect-missing` 加三个候选. 屏幕真变了 (或者读不
+ * 到了) 就放行, 于是这个刹车不会把一场探索关死
+ *
+ * 回 null = 照常发出去; 回 `{ reason, streak, candidates }` = 这一下不发
+ */
+function tapEffectBrake(log, sessionId, snapshot, wanted, streakLimit = TAP_EFFECT_STREAK) {
+  if (snapshot === null) return null
+  const tail = tapEffectTail(log, sessionId, snapshot.displayId)
+  const streak = tapEffectStreak(tail)
+  if (streak < streakLimit) return null
+  if (tail[tail.length - 1].fingerprint !== tapEffectFingerprint(snapshot)) return null
+  return { reason: 'effect-missing', streak, candidates: tapEffectCandidates(snapshot, wanted) }
+}
+
+/** 刹车那一下的回执: 先说清"这一下没发出去", 再给三条别的路 */
+function tapEffectBrakeAnswer(brake, displayId) {
+  const lines = [
+    `not pressed: the last ${brake.streak} presses on ${displayWhere(displayId)} left the screen`
+    + ' exactly as it was, so this one was not sent (reason=effect-missing).',
+    'Pressing the same place again would do the same nothing. What is there to press instead:',
+  ]
+  lines.push(...candidateLines(brake.candidates))
+  lines.push('Read the screen with lw_ui first, then press one of those or a different name.')
+  return lines.join('\n')
+}
+
+/**
+ * 失败分支的分级恢复 (落实表 #37): 重读屏 → 重锚 → 放弃
+ *
+ * 只做两件事, 而且**一次都不重放原来那一下**: ① 再读一眼, 慢一拍的界面 (动画 / 转场 / 回包)
+ * 在这一步就认了; ② 在这一屏上把目标重新锚一次, 把它现在的矩形与中心交回去 —— 下一次按落在
+ * 那里, 而不是原地再按一次. 两步都没救回来才 `giveup`
+ *
+ * 每一步 stdout 一行 `LwTap: recover=`, 真机 logcat 认这一行; 整趟最多两次 (重读 / 重锚),
+ * 没有第三次重试
+ *
+ * 回 `{ recover, text }`: `recover` 进账 (停判看的是"这一下到底变没变": effect=unchanged, 或恢复
+ * 走到 giveup —— `recover=reread` 是慢一拍的成功, 不算没变), `text` 进回执.
+ * 屏幕真的变了 (effect=changed) 就不恢复, 回空串
+ *
+ * **树读不回来 (`effect=unknown`) 也不恢复** (必修 3): 那既不是"变了"也不是"没变", 手上没有一份
+ * 能比、能锚的快照 —— 硬走三步只会把"这一次核不了"记成"放弃" (自绘界面每一下都会算出 giveup,
+ * 两下就把整场探索判停). 回 `recover:''`, 回执只说这次核不了, 与 #32 立的 `unknown ≠ unchanged` 一致
+ */
+async function tapEffectRecover({
+  before, after, effect, wanted, displayId, holdMs = 0, point = null,
+}) {
+  if (effect === 'changed') return { recover: '', text: '' }
+  if (effect === 'unknown') return { recover: '', text: '' }
+  const at = before === null ? displayId : before.displayId
+  const base = before ?? after
+  // ① 重读屏: 界面可能只是慢了一拍, 再看一眼, 变了就算这一下成了
+  await new Promise((resume) => setTimeout(resume, TAP_EFFECT_WAIT_MS + Math.max(0, Number(holdMs) || 0)))
+  const seen = await tapEffectSnapshot(at)
+  const late = base === null || seen === null ? 'unknown' : tapEffectOf(base, seen, wanted)
+  console.log(`LwTap: recover=reread effect=${effect} then=${late}`
+    + `${seen === null ? ' (the screen could not be read back)' : ''}`)
+  if (late === 'changed') {
+    return {
+      recover: 'reread',
+      text: 'recover=reread: a second look shows the screen did change - this press worked, just'
+        + ' more slowly than the first read allowed for. Nothing was pressed a second time.',
+    }
+  }
+  // ② 重锚: 在这一屏上把目标重新找出来, 交回它现在的中心 (只重锚, 不重放那一下)
+  const anchor = tapAnchorNode(seen ?? after ?? base, wanted, point)
+  console.log(`LwTap: recover=reanchor`
+    + `${anchor === null ? ' anchor=none' : ` anchor=${anchor.centre.x},${anchor.centre.y}`}`)
+  if (anchor !== null) {
+    return {
+      recover: 'reanchor',
+      text: (seen === null
+        ? 'recover=reanchor: the screen could not be read back after the press, and the last known'
+          + ` position of ${JSON.stringify(anchor.label)} is`
+        : `recover=reanchor: the screen did not change, and ${JSON.stringify(anchor.label)} is at`)
+        + ` [${anchor.bounds.join(',')}], centre ${anchor.centre.x},${anchor.centre.y}. If it is`
+        + ' still the thing you want, press that point (or a different name) - this tool did not'
+        + ' press again by itself.',
+    }
+  }
+  // ③ 放弃: 两条路都没了, 再说"再按一次"就是骗人
+  console.log('LwTap: recover=giveup')
+  return {
+    recover: 'giveup',
+    text: 'recover=giveup: the press changed nothing, a second look found nothing new, and'
+      + ` ${wanted === '' ? 'the point that was pressed' : JSON.stringify(wanted)} is not on the`
+      + ' screen any more. Stop pressing here: read the screen with lw_ui and pick another target.',
+  }
+}
+
+/**
+ * 按下之后那一次回读: 回 `effect` 那一段, 顺手记一条账
+ *
+ * `verify=off` 或**这一下根本没按出去** (同名多个 / 没有这个名字 / 屏在睡) 时回空串 —— 那几条路不
+ * 占这一次读屏, 而"没按"本来就不需要核对
+ *
+ * 长按要等按住那一段走完再回读 (`holdMs`): 3 s 的长按在 300 ms 那一刻当然还没发生任何事, 拿那一帧
+ * 去判就是一句假的 `unchanged`
+ *
+ * 没变 (或读不回来) 时接上 #37 的分级恢复, 恢复走到哪一档记进账的 `recover` 那一格
+ *
+ * **记账那一格与停判同一个数** (第三轮 backlog): `recover=reread` 是"慢一拍的成功", 账上必须记成
+ * `changed` —— 点按层的 `tapEffectStreak` 与 `lw_explore` 的停判看的是同一个 `effect`, 两处漂开的
+ * 样子就是 status 说该停而 lw_tap 还在发。回执仍按按下那一拍读到的 `effect` 说话 (`formatTapEffect`),
+ * 只是账本不许把它记成"没变"
+ */
+async function tapEffectCheck({
+  verify, before, pressed, wanted, displayId, sessionId, step, holdMs = 0, point = null,
+}) {
+  if (verify === 'off' || pressed !== true) return ''
+  await new Promise((resume) => setTimeout(resume, TAP_EFFECT_WAIT_MS + Math.max(0, Number(holdMs) || 0)))
+  const at = before === null ? displayId : before.displayId
+  const after = await tapEffectSnapshot(at)
+  const effect = tapEffectOf(before, after, wanted)
+  const candidates = effect === 'unchanged' ? tapEffectCandidates(after ?? before, wanted) : []
+  const recovery = await tapEffectRecover({ before, after, effect, wanted, displayId: at, holdMs, point })
+  const counted = recovery.recover === 'reread' ? 'changed' : effect
+  const entry = {
+    step: Number(step) || 0,
+    effect: counted,
+    recover: recovery.recover,
+    displayId: Number(after?.displayId ?? at) || 0,
+    at: Date.now(),
+    fingerprint: counted === 'unchanged' ? tapEffectFingerprint(after) : '',
+    session: sessionId ?? null,
+  }
+  tapEffectLog.push(entry)
+  if (tapEffectLog.length > TAP_EFFECT_KEPT) tapEffectLog.splice(0, tapEffectLog.length - TAP_EFFECT_KEPT)
+  // 真机上这条是唯一能证明核对真的跑过、并且真的读出了三个候选的读数 (与 `lw_tap: candidates=` 同一档)
+  console.log(`lw_tap: effect=${effect}`
+    + `${effect === 'unchanged' ? ` candidates=${candidates.length}` : ''}`
+    + `${recovery.recover === '' ? '' : ` recover=${recovery.recover}`}`
+    + ` on displayId ${entry.displayId}`)
+  const report = formatTapEffect(effect, before, after, candidates)
+  return recovery.text === '' ? report : `${report}\n\n${recovery.text}`
 }
 
 /** A report a model can read, with the structured answer kept underneath it */
@@ -6673,6 +8725,17 @@ const SPEECH_VAD_SOURCES = [
  */
 const SPEECH_ENGINE_SHERPA = 'sherpa'
 const SPEECH_ENGINE_GLM = 'glm'
+
+/**
+ * 第三档: DeepSeek 官方语音输入 (2026-11-15, 2.8.1 #6)
+ *
+ * 这一档**不在手机上跑模型**: 一段 wav 交给应用 → 回环 `/lw-asr` → 宿主带令牌打官方 `POST
+ * /v1/tools/asr`。所以它不需要那 240 MB, 也不需要唤醒词之外的任何本地件 —— 只要账号登录着。
+ *
+ * 引导里选了「使用 DeepSeek 语音输入」的机器 (#4 落的 `lw/voice-source.json`), 页面那颗麦克风与
+ * 常驻链都走这一档
+ */
+const SPEECH_ENGINE_DEEPSEEK = 'deepseek'
 
 /**
  * Which engine everything that does not name one uses, the page's own voice input button included
@@ -6780,6 +8843,7 @@ function speechEngineOf(value) {
   const asked = String(value ?? '').trim().toLowerCase()
   if (asked === SPEECH_ENGINE_GLM) return SPEECH_ENGINE_GLM
   if (asked === SPEECH_ENGINE_SHERPA) return SPEECH_ENGINE_SHERPA
+  if (asked === SPEECH_ENGINE_DEEPSEEK) return SPEECH_ENGINE_DEEPSEEK
   return null
 }
 
@@ -6899,6 +8963,10 @@ async function speechTranscribe(wav, language, engine = SPEECH_ENGINE_DEFAULT) {
       'the GLM-ASR model is not downloaded yet: run lw_speech op=prepare engine=glm once'
       + ' (about 1.6 GB), or ask for engine=sherpa to use the small one',
     )
+  }
+  // **deepseek 那一档不看盘上有什么** (2026-11-15, 2.8.1 #6): 它跑在云端, 缺的只是登录
+  if (engine === SPEECH_ENGINE_DEEPSEEK) {
+    return await call('speech', { op: 'transcribe', wav, language: language ?? 'auto', engine })
   }
   if (engine === SPEECH_ENGINE_SHERPA && !info.present) {
     throw new Error(
@@ -7375,7 +9443,6 @@ const LW_SEND_DEFAULTS = Object.freeze({
   longGapProbability: 0.2,
   longGapMinMs: 5000,
   longGapMaxMs: 10000,
-  maxMessageChars: 600,
 })
 
 /**
@@ -7402,7 +9469,6 @@ async function readLwSend() {
     longGapProbability: num(raw.longGapProbability, LW_SEND_DEFAULTS.longGapProbability, 0, 1),
     longGapMinMs: Math.round(num(raw.longGapMinMs, LW_SEND_DEFAULTS.longGapMinMs, 200, 60_000)),
     longGapMaxMs: Math.round(num(raw.longGapMaxMs, LW_SEND_DEFAULTS.longGapMaxMs, 200, 60_000)),
-    maxMessageChars: Math.round(num(raw.maxMessageChars, LW_SEND_DEFAULTS.maxMessageChars, 60, 4_000)),
   }
 }
 
@@ -7426,6 +9492,22 @@ async function readLwStickerLimits() {
   return {
     maxBytes: mb * 1024 * 1024,
     maxCount: clamp(raw?.maxCount, STICKER_COUNT_RANGE, STICKER_MAX_COUNT),
+    // 多久贴一张 (2026-11-15): 0 = 不贴; 提示词那一侧按它换一句密度的话
+    everyN: clamp(raw?.everyN, STICKER_EVERY_RANGE, STICKER_EVERY_N),
+  }
+}
+
+/** 同上一格, 只给同步的提示词变量用 (读坏了按缺省: 贴表情的密度不值得为它掉一行提示词) */
+function readLwStickerEveryNSync(home) {
+  try {
+    const text = readFileSync(join(home, 'lw', 'sim.json'), 'utf8')
+    const root = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+    const raw = root?.sticker !== null && typeof root?.sticker === 'object' ? root.sticker : {}
+    const number = Number(raw?.everyN)
+    if (!Number.isFinite(number)) return STICKER_EVERY_N
+    return Math.min(STICKER_EVERY_RANGE[1], Math.max(STICKER_EVERY_RANGE[0], Math.round(number)))
+  } catch {
+    return STICKER_EVERY_N
   }
 }
 
@@ -7532,6 +9614,22 @@ async function lwOutAppend(sessionId, fields, prepare, atHint) {
 }
 
 /**
+ * 她发消息的唯一出口 (2026-11-22): 只写 `lw/out` 那一份 jsonl, 门户 / 球 / 通知三端各自读它
+ *
+ * 任何"她说话"的路径都从这里走, 不许再绕 `overlay op=say` / `op=sticker` 直推 —— 那几路只到球,
+ * 门户与通知永远收不到. 一次 `lwOutAppend` 写一行, 于是"球有、门户没有"在数据层就不成立
+ *
+ * 没有可说的那一场时抛错 (不静默丢): 调用方要么先开一场, 要么把这句话落进当前那一场
+ */
+async function sayToConversation(sessionId, fields) {
+  const id = String(sessionId ?? '').trim()
+  if (id === '') throw new Error('there is no conversation to speak into')
+  const row = await lwOutAppend(id, fields)
+  console.log(`luwi-channel: said one ${fields?.kind ?? 'text'} line #${row.seq} into ${id}`)
+  return row
+}
+
+/**
  * 念一段稿子 (方案 §3.2 表格里 `speak: true` 那一格)
  *
  * **念不念由设置页说**: 「自动朗读回答」关着时什么都不出声, 而"关掉朗读"不该让这一句消失 —— 它已经
@@ -7576,8 +9674,746 @@ async function lwSpeakLine(script, waitMs) {
  */
 const LW_OUT_ROUTE = '/lw-out'
 
-/** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */
-const LW_OUT_IMAGE_TYPES = Object.freeze({
+/* ── 账号 (2026-11-14): 原生引导那一行借这条路走 dsh 自己的登录 / 凭据接口 ───────────── */
+
+/**
+ * 账号那条路由的名字 (页面 `fetch('/lw-account')` 拼的是同一串)
+ *
+ * **为什么要一条路由**: 页面那侧 (`remote.account`) 是 dsh 开给**自家账号页**的缝 —— 第三方插件直接
+ * 调, 真机上 12 秒没有半点回音 (2026-11-14 实测)。而 `deepseekAccount` 与 `credentials` 这两个服务
+ * 就在**宿主进程里** (余额那条链一直用着前者), 于是原生引导窗 → 页面 → 这条路由 → 宿主服务,
+ * 一条直路, 不经过那一层访问授权
+ */
+const LW_ACCOUNT_ROUTE = '/lw-account'
+
+/** 「填一把 API Key」写的是 dsh 官方那一条凭据 (与 Models 页同一个 ref) */
+const LW_ACCOUNT_KEY_REF = 'DEEPSEEK_API_KEY'
+
+/** 一次请求最多读这么多字节: 只有 `op` / `key` / `origin` / `locale` 四个字段 */
+const LW_ACCOUNT_BODY_MAX = 8 * 1024
+
+/** 等授权地址等多久 (与 GUI 的 `BrowserLogin` 同一个尺度) */
+const LW_ACCOUNT_URL_TIMEOUT_MS = 12_000
+
+/**
+ * 那把 Key 写了没有
+ *
+ * 只读回"有没有", 内容一个字节都不往外带 (`credentials.resolve` 给的就是那个值, 这里只判真值)
+ * @param credentials 宿主凭据服务 (可能不在)
+ * @returns 写了为 true
+ */
+async function lwAccountKeyPresent(credentials) {
+  if (!credentials || typeof credentials.resolve !== 'function') return false
+  try {
+    const value = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+    return typeof value === 'string' && value !== ''
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 等账户流里第一帧带授权地址的
+ *
+ * `startSignIn` 回的那一帧不一定带地址 (dsh 自己那页也是"先开标签页, 后一帧才 replace 到地址"),
+ * 所以跟一段流; 到点回空串
+ * @param account 宿主账号服务
+ * @param timeoutMs 最多等多久
+ * @returns 授权地址, 没等到为 ''
+ */
+async function lwAccountAwaitUrl(account, timeoutMs) {
+  if (!account || typeof account.watch !== 'function') return ''
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    try {
+      controller.abort()
+    } catch {
+      // 已经结束了
+    }
+  }, timeoutMs)
+  try {
+    for await (const view of account.watch(controller.signal)) {
+      const url = view?.attempt?.authorizeUrl
+      if (typeof url === 'string' && url !== '') return url
+      if (view?.status === 'credential-stored') return ''
+    }
+    return ''
+  } catch {
+    return ''
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 账号那一条路要的 Key 路线: 会话钉在这条 route 上又没有 Key, 就是"登录了却报 no API key"那一幕 */
+const LW_ACCOUNT_STALE_ROUTE = 'deepseek-official'
+
+/** 账号收尾那份读数: `$DSH_HOME/lw/account-model.json` (status 与引导卡都读它) */
+const LW_ACCOUNT_MODEL_FILE = 'account-model.json'
+
+/** 同一个结论多久之内不重复算一遍: turn/start 每轮都会问, 60 s 够用且不挡人 */
+const LW_ACCOUNT_ADOPT_MS = 60 * 1000
+
+/** 收尾那一步的账 (内存): 节流 / 防并发 / 上一次的结论 */
+const lwAccountAdoptState = { at: 0, running: false, last: null, lastError: null }
+
+/**
+ * 上一次落盘的账号模型结论
+ * @returns {object|null} 文件不在或读不动就是 null
+ */
+function readAccountModel() {
+  const path = homePath('lw', LW_ACCOUNT_MODEL_FILE)
+  if (path === null) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把结论落盘 (原子写: `.tmp` + rename, 与 [writeModelCatalog] 同一个写法)
+ * @param payload 那一段 JSON
+ * @returns 写完为 true
+ */
+async function writeAccountModel(payload) {
+  const path = homePath('lw', LW_ACCOUNT_MODEL_FILE)
+  if (path === null) return false
+  const temporary = temporaryName(path)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`)
+    await rename(temporary, path)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: the account model readout was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/**
+ * 登录之后把「默认模型」与「活着的会话」收到账号那条 route 上 (2026-11-15)
+ *
+ * 上游这件事本来有人做: dsh 的 `sessionController.initializeDefaultModel()` —— 但它的触发点在
+ * **client** 那一侧的账号状态流里 (`ui-settings-account`), 整条流被 `remoteAccess.whenAccess(
+ * 'account/watch')` 包着, 而 Luwi 的门户是第三方页面, 那条授权拿不到 (真机上 `remote.account`
+ * 会静默挂住), 于是登录能成、模型却还钉在 `deepseek-official` 上, 一发言就报
+ * `no API key for provider route "deepseek-official"`。这里补的就是那一半, 判据与上游同一条:
+ * **别的 provider 配了 key 就保留原默认** (见 `session-controller/src/catalog.ts` 的
+ * `hasProviderApiKey`), 只有没 key 时才把默认换成账号的首个可用模型
+ *
+ * 三处调用 (都幂等): 起来一次 / 打开账号窗那一次 `status` / 每轮 `turn/start` 兜底
+ * @param ctx 宿主插件 context
+ * @returns {object|null} 这一次的结论, 什么都没做 (节流中 / 没服务) 就是上一次那份
+ */
+async function lwAccountAdoptModel(ctx) {
+  if (lwAccountAdoptState.running) return lwAccountAdoptState.last
+  if (Date.now() - lwAccountAdoptState.at < LW_ACCOUNT_ADOPT_MS) return lwAccountAdoptState.last
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (!account || typeof account.getState !== 'function') return null
+  // 视频模式自己那套 (`applyModeModelToSession`) 管模型, 这里不许抢
+  if (activeMode() === MODE_VIDEO) return lwAccountAdoptState.last
+  const controller = ctx.get('sessionController')
+  const defaults = ctx.get('agentDefaultModel')
+  if (!controller || typeof controller.modelCatalog !== 'function') return null
+  lwAccountAdoptState.running = true
+  lwAccountAdoptState.at = Date.now()
+  const payload = {
+    v: 1, at: lwAccountAdoptState.at, ok: false, provider: '', model: '', label: '', changed: false, sessions: 0,
+  }
+  try {
+    const state = await account.getState()
+    if (state?.status !== 'credential-stored') {
+      payload.reason = 'not signed in'
+    } else {
+      const catalog = await controller.modelCatalog()
+      const group = (catalog?.groups ?? [])
+        .find((one) => one?.id === 'deepseek-account' && (one?.models?.length ?? 0) > 0)
+      const pick = group?.models?.[0]
+      if (!pick) {
+        // 账号模型目录要 token 去问: 拿不到时如实说, 一个字节都不写
+        payload.reason = 'the account lists no models yet'
+      } else {
+        const provider = 'deepseek-account'
+        const model = String(pick.id)
+        payload.provider = provider
+        payload.model = model
+        payload.label = String(pick.name ?? model)
+        payload.ok = true
+        const target = {
+          provider,
+          model,
+          ...pick.reasoning?.defaultEffort === undefined
+            ? {}
+            : { reasoningEffort: pick.reasoning.defaultEffort },
+        }
+        const keyConfigured = await lwAccountKeyPresent(ctx.get('credentials'))
+        if (!keyConfigured && typeof defaults?.saveSelection === 'function') {
+          const current = typeof defaults.currentSelection === 'function' ? defaults.currentSelection() : null
+          if (!current || current.provider !== provider || current.model !== model) {
+            await defaults.saveSelection(target)
+            payload.changed = true
+          }
+        }
+        // 活着的会话里钉在 Key 那条 route 上的, 当场切过来 —— **只碰活着的**: `resolveAgent` 会把
+        // 冷会话恢复起来, 那等于替主人开一场 (与 `restoreModeModelSessions` 同一条判据)
+        if (typeof controller.list === 'function' && typeof controller.selectModel === 'function') {
+          const listed = await controller.list({}, new AbortController().signal)
+          const live = (listed?.items ?? []).filter((item) => item && item.agentAvailable === true
+            && item.origin !== 'subagent' && !item.parentSessionId)
+          for (const item of live) {
+            try {
+              const sessionId = String(item.sessionId)
+              const resolved = await ctx.agents.withoutInitiator(() => controller.resolveAgent(sessionId))
+              if ('error' in resolved) continue
+              const currentModel = readSessionModel(ctx, resolved.agent)
+              if (!currentModel || currentModel.provider !== LW_ACCOUNT_STALE_ROUTE) continue
+              await controller.selectModel({ sessionId, provider, model })
+              payload.sessions += 1
+            } catch (error) {
+              // 单场切不动不算整件事失败: 下一轮 `turn/start` 还会再试一次
+              console.warn(`luwi-channel: a session could not move onto the account model: ${error?.message ?? error}`)
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    payload.reason = `reading the account model failed: ${error?.message ?? error}`
+    lwAccountAdoptState.lastError = payload.reason
+  } finally {
+    lwAccountAdoptState.running = false
+  }
+  lwAccountAdoptState.last = payload
+  await writeAccountModel(payload)
+  return payload
+}
+
+/**
+ * 账号那三件事的宿主实现
+ * @param ctx 宿主插件 context
+ * @param body 解析过的那一段 JSON: `{op, key?, origin?, locale?}`
+ * @returns 回给页面的那一段 JSON
+ */
+async function handleLwAccount(ctx, body) {
+  const op = typeof body?.op === 'string' ? body.op.trim() : ''
+  const account = ctx.get(ACCOUNT_SEAM)
+  const credentials = ctx.get('credentials')
+  const client = {
+    version: 'luwi',
+    locale: typeof body?.locale === 'string' && body.locale !== '' ? body.locale : 'zh',
+    timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+  }
+  if (op === 'status') {
+    const keyConfigured = await lwAccountKeyPresent(credentials)
+    if (!account || typeof account.getState !== 'function') {
+      // 这条部署没挂账号缝: 不是错误, 只是"登录这条路这里没有" (Key 那条照旧)
+      return { ok: true, signedIn: false, label: '', keyConfigured, seam: false, modelsReady: false, model: null }
+    }
+    // 打开账号窗正是"登录刚从浏览器回来"的那一刻: 顺手把默认与会话收到账号模型上 (幂等, 60 s 节流)
+    const adopted = await lwAccountAdoptModel(ctx).catch(() => null)
+    const state = await account.getState()
+    const signedIn = state?.status === 'credential-stored'
+    let label = ''
+    if (signedIn && typeof account.getProfile === 'function') {
+      const profile = await account.getProfile(client).catch(() => null)
+      if (profile?.status === 'ready') label = String(profile.value?.name ?? profile.value?.contact ?? '')
+    }
+    // 这一趟被节流掉时回上一次落盘的结论, 不让卡片在"知道"与"不知道"之间闪
+    const cached = adopted?.ok === true ? null : readAccountModel()
+    const model = adopted?.ok === true
+      ? { provider: adopted.provider, model: adopted.model, label: adopted.label }
+      : cached?.ok === true
+        ? { provider: String(cached.provider ?? ''), model: String(cached.model ?? ''), label: String(cached.label ?? '') }
+        : null
+    return { ok: true, signedIn, label, keyConfigured, seam: true, modelsReady: model !== null, model }
+  }
+  if (op === 'login') {
+    if (!account || typeof account.startSignIn !== 'function') {
+      return { ok: false, error: '这条部署没有挂 DeepSeek 账号缝, 请改用 API Key' }
+    }
+    const origin = typeof body?.origin === 'string' ? body.origin : ''
+    // 回调必须落在回环上: 别人的 origin 拿去换 token 就等于把登录交给别人
+    if (!origin.startsWith('http://127.0.0.1:') && !origin.startsWith('http://localhost:')) {
+      return { ok: false, error: 'the caller did not say a loopback origin' }
+    }
+    const view = await account.startSignIn(client, origin, 'web')
+    const first = view?.attempt?.authorizeUrl
+    if (typeof first === 'string' && first !== '') return { ok: true, url: first }
+    const url = await lwAccountAwaitUrl(account, LW_ACCOUNT_URL_TIMEOUT_MS)
+    return url === '' ? { ok: false, error: '浏览器登录这一趟没有回音' } : { ok: true, url }
+  }
+  if (op === 'key') {
+    const key = typeof body?.key === 'string' ? body.key.trim() : ''
+    if (!credentials || typeof credentials.set !== 'function') {
+      return { ok: false, error: 'this host has no credentials service' }
+    }
+    // 空串 = 清掉这把 Key (引导窗里"留空保存"就是这个意思): 不把空值写进凭据, 而是摘掉那一条
+    if (key === '') {
+      if (typeof credentials.unset !== 'function') return { ok: false, error: 'this host cannot clear a credential' }
+      await credentials.unset(LW_ACCOUNT_KEY_REF)
+      return { ok: true, cleared: true }
+    }
+    await credentials.set(LW_ACCOUNT_KEY_REF, key)
+    return { ok: true }
+  }
+  return { ok: false, error: `unknown op ${JSON.stringify(op)}` }
+}
+
+/**
+ * `/lw-account` 那条路由: POST 一段 JSON, 回一段 JSON
+ *
+ * 只认回环两头 (与 `/lw-out` 同一条信任边界), 只收 POST, 正文有上限
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwAccount(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    let raw = ''
+    try {
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > LW_ACCOUNT_BODY_MAX) {
+          reply(413, { ok: false, error: 'body too large' })
+          return
+        }
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    let body = null
+    try {
+      body = raw === '' ? {} : JSON.parse(raw)
+    } catch {
+      reply(400, { ok: false, error: 'bad json' })
+      return
+    }
+    try {
+      reply(200, await handleLwAccount(ctx, body))
+    } catch (error) {
+      warn(ctx, `the account request failed: ${error?.message ?? error}`)
+      reply(200, { ok: false, error: error?.message ?? String(error) })
+    }
+  }
+}
+
+/* ── DeepSeek 官方语音识别 (2026-11-15, 2.8.1 #6) ───────────────────────────── */
+
+/**
+ * 语音识别那条路由
+ *
+ * **为什么转写在宿主这一侧**: 与合成同一个理由 (见下面那条 TTS) —— 官方接口要
+ * `Authorization: Bearer <令牌>`, 而令牌只活在宿主进程里。应用那边把一段 wav 原样交过来, 拿回去的是
+ * 一句话; **令牌一个字节都不外带**, 应用偏好里也没有它的容身处
+ *
+ * 这一条是"引导里选了「使用 DeepSeek 语音输入」之后真的能出字"那一步 (#4 落了选择, #6 落这条链)
+ */
+const LW_ASR_ROUTE = '/lw-asr'
+
+/** 官方那条接口: 与 `LwDeepseekAsr.ENDPOINT` 必须是同一串 (multipart 的 `file` 字段) */
+const LW_ASR_ENDPOINT = 'https://api.deepseek.com/v1/tools/asr'
+
+/**
+ * 一次最多收这么多字节
+ *
+ * 官方对**文件**的上限是 8 MiB, 而应用那边按 60 s 一段切 (16 kHz 单声道 16 bit 约 1.9 MB), 所以真正
+ * 走到这里的正文离上限很远; 这个数只是"别让一条失控的请求把内存吃掉"
+ */
+const LW_ASR_BODY_MAX = 8 * 1024 * 1024
+
+/** 官方一次最长 120 s 音频; 转写本身要十几秒, 加上传给它 120 s 的余量 */
+const LW_ASR_TIMEOUT_MS = 120_000
+
+/**
+ * 官方那两条工具接口 (`/v1/tools/asr` 与 `/v1/tools/tts`) 该带哪个认证头
+ *
+ * **账号那条令牌只认 dsh 自己的头**: 上游 `llm-deepseek-account` 发给 `/anthropic` 的正是
+ * `x-dsh-auth-token` (`packages/llm/llm-deepseek-account/src/index.ts` 的 `TOKEN_HEADER`), 而这里
+ * 原先两条都写成 `Authorization: Bearer` —— 于是**登录着也一直 401** (`Authentication Fails, Your
+ * api key: ****xxxx is invalid`, 那串只是令牌尾 4 位; 2026-11-20 真机用同一枚令牌换这个头, TTS 直接
+ * 回 200 audio/wav, ASR 只剩请求体边界的 400)。手填的 `sk-` Key 仍走公开 API 那条 `Bearer`
+ * @param token 这一趟的令牌
+ * @param from 它来自哪一条 (`account` = 登录账号 / `key` = 手填 Key, 见 [lwAsrToken] / [lwTtsToken])
+ * @returns 该带的那一个头 (调用方再并上自己的 `Content-Type`)
+ */
+function lwToolsAuthHeader(token, from) {
+  return from === 'account' ? { 'x-dsh-auth-token': token } : { Authorization: `Bearer ${token}` }
+}
+
+/**
+ * 这一趟用哪枚令牌
+ *
+ * 与 TTS 那条同一个顺序 (**账号优先, 没登录退 API Key**)。这里独立一份而不是把 TTS 那个挪上来共用:
+ * TTS 那一段被 `tools/check-speak-engine.mjs` 整段抽出来真跑, 挪走它会连带那一份判据一起红; 两份
+ * 逐字同源由 `tools/check-voice-asr.mjs` 钉住
+ * @param ctx 宿主插件 context
+ * @returns {Promise<{token: string, from: string}>} 令牌与它来自哪一条
+ */
+async function lwAsrToken(ctx) {
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (account && typeof account.resolveToken === 'function') {
+    try {
+      const token = await account.resolveToken(LW_ASR_ENDPOINT)
+      if (typeof token === 'string' && token !== '') return { token, from: 'account' }
+    } catch (error) {
+      warn(ctx, `the account token could not be read for speech input: ${error?.message ?? error}`)
+    }
+  }
+  const credentials = ctx.get('credentials')
+  if (credentials && typeof credentials.resolve === 'function') {
+    try {
+      const key = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+      if (typeof key === 'string' && key !== '') return { token: key, from: 'key' }
+    } catch {
+      // 读不到就是没有: 下面那句"还没登录"已经说清了
+    }
+  }
+  return { token: '', from: '' }
+}
+
+/** 这一段是不是一个 wav (官方只认 16 位 PCM WAV 或 Ogg Opus; 应用这一侧只发 wav) */
+function lwAsrIsWav(bytes) {
+  if (bytes.length < 12) return false
+  return bytes.subarray(0, 4).toString('latin1') === 'RIFF'
+    && bytes.subarray(8, 12).toString('latin1') === 'WAVE'
+}
+
+/**
+ * 把一段 wav 包成官方要的 `multipart/form-data`
+ *
+ * 手写而不是用 `FormData` + `Blob`: 那几个全局在随包的那个 node 上不一定齐, 而这一段的形状是固定的
+ * (一个 `file` 字段), 拼起来的字节还能被判据逐字量 (见 `tools/check-voice-asr.mjs`)
+ * @param {Buffer} bytes wav 原本的字节
+ * @param {string} boundary 这一次的分界串
+ * @returns {Buffer} 可以直接当请求体的那一份
+ */
+function lwAsrMultipart(bytes, boundary) {
+  const head = Buffer.from(
+    `--${boundary}\r\n`
+      + 'Content-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
+      + 'Content-Type: audio/wav\r\n\r\n',
+    'utf8',
+  )
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
+  return Buffer.concat([head, bytes, tail])
+}
+
+/**
+ * `/lw-asr`: 收一段 wav, 回一句话
+ *
+ * 只认回环两头、只收 POST、正文有上限, 还要求那一段真的是 wav (官方对不是 16 位 PCM WAV 的会回 400,
+ * 在这一侧先说清比让官方去说省一次请求)。成功回 `{"ok":true,"text":…,"requestId":…,"durationMs":…}`,
+ * 失败回一段 JSON (`{"ok":false,"error":"…"}`) —— 应用那边把 `error` 逐字说给主人听
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwAsr(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload, headers) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+        ...headers,
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    const parts = []
+    let size = 0
+    try {
+      for await (const chunk of req) {
+        const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += piece.length
+        if (size > LW_ASR_BODY_MAX) {
+          reply(413, { ok: false, error: `the recording is larger than ${LW_ASR_BODY_MAX} bytes` })
+          return
+        }
+        parts.push(piece)
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    const audio = Buffer.concat(parts)
+    if (audio.length === 0) {
+      reply(400, { ok: false, error: 'there is nothing to transcribe: the body is empty' })
+      return
+    }
+    if (!lwAsrIsWav(audio)) {
+      reply(400, { ok: false, error: 'the recording is not a 16-bit PCM WAV: the bytes start with something else' })
+      return
+    }
+    const { token, from } = await lwAsrToken(ctx)
+    if (token === '') {
+      reply(401, {
+        ok: false,
+        signedIn: false,
+        error: 'not signed in: sign in to the DeepSeek account in Luwi (or fill an API key) to use the'
+          + ' official DeepSeek voice input',
+      })
+      return
+    }
+    const boundary = `----luwi${randomUUID().replace(/-/g, '')}`
+    let upstream = null
+    try {
+      upstream = await fetch(LW_ASR_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          ...lwToolsAuthHeader(token, from),
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: lwAsrMultipart(audio, boundary),
+        signal: AbortSignal.timeout(LW_ASR_TIMEOUT_MS),
+      })
+    } catch (error) {
+      warn(ctx, `the DeepSeek speech input request failed: ${error?.message ?? error}`)
+      reply(502, {
+        ok: false,
+        error: `the DeepSeek speech input could not be reached: ${error?.message ?? error}`,
+      })
+      return
+    }
+    if (!upstream.ok) {
+      // 官方那句原文带得出去 (它不含令牌), 但先把令牌抹一遍: 上游若把请求头回显进错误里也只是空白
+      const detail = await upstream.text().catch(() => '')
+      const safe = detail.split(token).join('***').slice(0, 400)
+      reply(502, {
+        ok: false,
+        status: upstream.status,
+        error: `the DeepSeek speech input answered ${upstream.status}${safe === '' ? '' : `: ${safe}`}`,
+      })
+      return
+    }
+    let said = null
+    try {
+      said = await upstream.json()
+    } catch (error) {
+      reply(502, { ok: false, error: `the DeepSeek speech input answer could not be read: ${error?.message ?? error}` })
+      return
+    }
+    const text = typeof said?.text === 'string' ? said.text.trim() : ''
+    if (text === '') {
+      reply(502, { ok: false, error: 'the DeepSeek speech input heard nothing in that recording' })
+      return
+    }
+    reply(200, {
+      ok: true,
+      text,
+      requestId: typeof said?.request_id === 'string' ? said.request_id : '',
+      durationMs: Number(said?.duration_ms ?? 0),
+      source: from,
+    })
+  }
+}
+
+/* ── DeepSeek 官方 TTS (2026-11-15, 2.8.1 #5) ───────────────────────────────── */
+
+/**
+ * 语音合成那条路由
+ *
+ * **为什么合成在宿主这一侧**: 官方接口要 `Authorization: Bearer <令牌>`, 而账号那枚令牌只活在宿主进程里
+ * (dsh 的 `deepseekAccount`)。应用那边是明文偏好文件, 把令牌抄过去等于多一处要守的东西 —— 于是应用只
+ * 把稿子交过来, 拿回去的是音频字节, **令牌一个字节都不外带**。设置页因此不需要地址栏与密钥框:
+ * 选了这条引擎, 只要账号登录着就有声音
+ */
+const LW_TTS_ROUTE = '/lw-tts'
+
+/** 官方那条接口 (`POST`, 整段合成): 与 `LwDeepseekSpeech.ENDPOINT` 必须是同一串 */
+const LW_TTS_ENDPOINT = 'https://api.deepseek.com/v1/tools/tts'
+
+/** 一次请求最多读这么多: 官方自己的上限是 64 KiB 正文 */
+const LW_TTS_BODY_MAX = 64 * 1024
+
+/** 官方一次最多 10,000 个计费字符 (应用那一侧切得比这狠, 这里再挡一次) */
+const LW_TTS_TEXT_MAX = 10_000
+
+/** 官方给的两个音色: `stella` 海星 (女声, 缺省) 与 `tide` 暗潮 (男声) */
+const LW_TTS_VOICES = new Set(['stella', 'tide'])
+
+/** 合成一句长稿要几十秒, 给足 (超时算这一趟失败, 应用那边会说没念成) */
+const LW_TTS_TIMEOUT_MS = 90_000
+
+/**
+ * 这一趟用哪枚令牌
+ *
+ * 两条来源, 顺序是"账号优先":
+ *  1. `deepseekAccount.resolveToken(端点)` —— 登录过就有, 就是"只要有登录状态即可用"那一条
+ *  2. `credentials.resolve('DEEPSEEK_API_KEY')` —— 没登录但引导页填过一把 Key 的机器也能用
+ *
+ * 只返回令牌本身, **不返回来源里的任何别的东西**; 拿不到就回空串 (调用方据此说"还没登录")
+ * @param ctx 宿主插件 context
+ * @returns {Promise<{token: string, from: string}>} 令牌与它来自哪一条
+ */
+async function lwTtsToken(ctx) {
+  const account = ctx.get(ACCOUNT_SEAM)
+  if (account && typeof account.resolveToken === 'function') {
+    try {
+      const token = await account.resolveToken(LW_TTS_ENDPOINT)
+      if (typeof token === 'string' && token !== '') return { token, from: 'account' }
+    } catch (error) {
+      warn(ctx, `the account token could not be read for speech: ${error?.message ?? error}`)
+    }
+  }
+  const credentials = ctx.get('credentials')
+  if (credentials && typeof credentials.resolve === 'function') {
+    try {
+      const key = await credentials.resolve(LW_ACCOUNT_KEY_REF)
+      if (typeof key === 'string' && key !== '') return { token: key, from: 'key' }
+    } catch {
+      // 读不到就是没有: 下面那句"还没登录"已经说清了
+    }
+  }
+  return { token: '', from: '' }
+}
+
+/**
+ * `/lw-tts`: 收一段稿子, 回音频字节
+ *
+ * 只认回环两头、只收 POST、正文有上限; 成功时回的就是官方那一段音频 (Content-Type 照抄),
+ * 失败回一段 JSON (`{"ok":false,"error":"…"}`) —— 应用那边把 `error` 逐字说给主人听
+ * @param ctx 宿主插件 context
+ * @returns node 的 `(req, res)` 处理函数
+ */
+function serveLwTts(ctx) {
+  return async (req, res) => {
+    const reply = (status, payload, headers) => {
+      const text = JSON.stringify(payload)
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': String(Buffer.byteLength(text)),
+        'Cache-Control': 'no-store',
+        ...headers,
+      })
+      res.end(text)
+    }
+    if (req.method !== 'POST') {
+      reply(405, { ok: false, error: 'only POST' })
+      return
+    }
+    if (!lwLoopback(req.socket?.remoteAddress) || !lwLoopback(req.socket?.localAddress)) {
+      reply(404, { ok: false, error: 'not found' })
+      return
+    }
+    let raw = ''
+    try {
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > LW_TTS_BODY_MAX) {
+          reply(413, { ok: false, error: 'body too large' })
+          return
+        }
+      }
+    } catch (error) {
+      reply(400, { ok: false, error: `unreadable body: ${error?.message ?? error}` })
+      return
+    }
+    let body = null
+    try {
+      body = raw === '' ? {} : JSON.parse(raw)
+    } catch {
+      reply(400, { ok: false, error: 'bad json' })
+      return
+    }
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (text === '') {
+      reply(400, { ok: false, error: 'there is nothing to say: the text is empty' })
+      return
+    }
+    if (text.length > LW_TTS_TEXT_MAX) {
+      reply(400, {
+        ok: false,
+        error: `the DeepSeek TTS takes at most ${LW_TTS_TEXT_MAX} characters at once, this one has ${text.length}`,
+      })
+      return
+    }
+    const asked = typeof body?.voice_id === 'string' ? body.voice_id.trim() : ''
+    const voice = LW_TTS_VOICES.has(asked) ? asked : 'stella'
+    const { token, from } = await lwTtsToken(ctx)
+    if (token === '') {
+      reply(401, {
+        ok: false,
+        signedIn: false,
+        error: 'not signed in: sign in to the DeepSeek account in Luwi (or fill an API key) to use the'
+          + ' official DeepSeek voice',
+      })
+      return
+    }
+    let upstream = null
+    try {
+      upstream = await fetch(LW_TTS_ENDPOINT, {
+        method: 'POST',
+        headers: { ...lwToolsAuthHeader(token, from), 'Content-Type': 'application/json' },
+        // 与 `LwDeepseekSpeech.requestBody` 同一份字段: 官方那条认 text / voice_id / format /
+        // filter_markdown, **没有语速参数** (它自己定节奏)
+        body: JSON.stringify({ text, voice_id: voice, format: 'wav', filter_markdown: true }),
+        signal: AbortSignal.timeout(LW_TTS_TIMEOUT_MS),
+      })
+    } catch (error) {
+      warn(ctx, `the DeepSeek TTS request failed: ${error?.message ?? error}`)
+      reply(502, { ok: false, error: `the DeepSeek TTS could not be reached: ${error?.message ?? error}` })
+      return
+    }
+    if (!upstream.ok) {
+      // 官方那句原文带得出去 (它不含令牌), 但先把令牌抹一遍: 上游若把请求头回显进错误里也只是空白
+      const detail = await upstream.text().catch(() => '')
+      const safe = detail.split(token).join('***').slice(0, 400)
+      reply(502, {
+        ok: false,
+        status: upstream.status,
+        error: `the DeepSeek TTS answered ${upstream.status}${safe === '' ? '' : `: ${safe}`}`,
+      })
+      return
+    }
+    let audio = null
+    try {
+      audio = Buffer.from(await upstream.arrayBuffer())
+    } catch (error) {
+      reply(502, { ok: false, error: `the DeepSeek TTS audio could not be read: ${error?.message ?? error}` })
+      return
+    }
+    if (audio.length === 0) {
+      reply(502, { ok: false, error: 'the DeepSeek TTS returned no audio' })
+      return
+    }
+    res.writeHead(200, {
+      'Content-Type': upstream.headers.get('content-type') ?? 'audio/wav',
+      'Content-Length': String(audio.length),
+      'Cache-Control': 'no-store',
+      'X-Lw-Token-Source': from,
+    })
+    res.end(audio)
+  }
+}
+
+/** 图: `Content-Type` 按扩展名给 (贴纸目录只认这一张表) */const LW_OUT_IMAGE_TYPES = Object.freeze({
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -7986,6 +10822,31 @@ const STICKER_FILE_OK = /\.(png|gif|webp|jpg|jpeg)$/i
 const STICKER_NAME_OK = /^[\w\u4e00-\u9fa5-]{1,24}$/u
 
 /**
+ * 表情的标签与使用账落这一个文件 (2026-11-15)
+ *
+ * 它躺在同一个目录里, 但 `STICKER_FILE_OK` 只认图, 所以既不会被当成一张表情, 也不占张数
+ */
+const STICKER_TAG_FILE = 'tags.json'
+
+/** 一张表情最多记几条标签 (再多就没人读了) */
+const STICKER_TAG_MAX = 6
+
+/** 标签本身认的字符: 比名字宽一点 (允许更短), 但同样不许空白与斜杠 */
+const STICKER_TAG_OK = /^[\w\u4e00-\u9fa5-]{1,12}$/u
+
+/** 提示词摘要里最多列几张 (库再大也不能把每一步的提示词撑爆) */
+const STICKER_PROMPT_LIMIT = 30
+
+/** `lw_stickers` 那个提示词变量的缓存 (组提示词每一步都求值, 而目录不是每步都变) */
+const stickerPromptCache = { at: 0, key: '', text: '' }
+
+/** 贴表情的密度缺省: 大约每 4 条话一张 (与 `SimSetting.Default.STICKER_EVERY_N` 同一个数) */
+const STICKER_EVERY_N = 4
+
+/** 那一格的范围: 0 = 不贴 (与 `SimSetting.STICKER_EVERY_RANGE` 逐字相同) */
+const STICKER_EVERY_RANGE = [0, 20]
+
+/**
  * 一张图的真身是什么 (按**魔数**判, 不信 URL 后缀)
  *
  * 后缀是调用方随手写的, 而解码器只认字节 —— 一张 `.png` 名义的 jpeg 落进目录之后, `BallStickers`
@@ -8028,6 +10889,212 @@ function stickerNameOf(rawName, url) {
   const dot = raw.lastIndexOf('.')
   const stem = (dot > 0 ? raw.slice(0, dot) : raw).trim()
   return STICKER_NAME_OK.test(stem) ? stem : ''
+}
+
+/** 文件名去掉扩展名、压小写 —— 检索与打标签都按它比 */
+function stickerStemOf(name) {
+  const raw = String(name ?? '').trim()
+  const dot = raw.lastIndexOf('.')
+  return (dot > 0 ? raw.slice(0, dot) : raw).toLowerCase()
+}
+
+/**
+ * 双向包含: 短的这一头至少两个字 (2026-11-15)
+ *
+ * 不加这条, 名字叫 `a` 的那张就会命中任何带 a 的词 ("happy"), 而一张叫 `开心` 的图反而找不到
+ * `不开心` —— 两个方向都是错的, 只是错法不同
+ */
+function stickerWordHit(hay, needle) {
+  const a = String(hay ?? '').trim().toLowerCase()
+  const b = String(needle ?? '').trim().toLowerCase()
+  if (a === '' || b === '') return false
+  if (a.includes(b)) return true
+  return b.includes(a) && a.length >= 2
+}
+
+/**
+ * 调用方给的标签 (数组或一句串) → 干净的几条 (纯函数)
+ *
+ * 切分按空格 / 逗号 / 顿号 / 竖线: 她写 `tags: ["开心","赞"]` 与写 `"开心 赞"` 都收
+ */
+function stickerTagsOf(raw) {
+  const list = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,,;;、，；|/]+/u)
+  const out = []
+  for (const one of list) {
+    const tag = String(one ?? '').trim()
+    if (tag === '' || !STICKER_TAG_OK.test(tag)) continue
+    if (!out.includes(tag)) out.push(tag)
+    if (out.length >= STICKER_TAG_MAX) break
+  }
+  return out
+}
+
+/**
+ * 从一库里挑一张 (纯函数): 名字逐字相同 → 标签命中 → 名字里带着这个词
+ *
+ * 多张命中**随机一张**: 同一句情绪词对得上好几张是常态, 每次都取第一张等于库里只有一张 ——
+ * 而她老贴同一张比不贴更像假人 (这是 sticker-mcp 的 send_sticker 那条路教的)
+ *
+ * @param entries `[{ name, tags }]`
+ * @param query 情绪 / 场景词, 或者准确文件名
+ * @param rand 注入随机源, 判据里给固定值
+ * @returns 命中的那一条; 一张都对不上回 null
+ */
+function pickSticker(entries, query, rand = Math.random) {
+  const q = String(query ?? '').trim().toLowerCase()
+  if (q === '') return null
+  const list = (Array.isArray(entries) ? entries : []).filter((one) => one && one.name)
+  if (list.length === 0) return null
+  const choose = (hits) => hits[Math.min(hits.length - 1, Math.floor(Math.max(0, rand()) * hits.length))]
+  const exact = list.filter((one) => String(one.name).toLowerCase() === q || stickerStemOf(one.name) === q)
+  if (exact.length > 0) return choose(exact)
+  const byTag = list.filter((one) => (Array.isArray(one.tags) ? one.tags : [])
+    .some((tag) => stickerWordHit(tag, q)))
+  if (byTag.length > 0) return choose(byTag)
+  const byName = list.filter((one) => stickerWordHit(stickerStemOf(one.name), q))
+  return byName.length > 0 ? choose(byName) : null
+}
+
+/** 落盘那一份的归一化 (纯函数): 坏值当没有, 但名字那一层保留 —— 读坏了不该把整本账作废 */
+function stickerTagMapOf(parsed) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out = {}
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof name !== 'string' || name === '') continue
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+    out[name] = {
+      tags: stickerTagsOf(value.tags),
+      used: Math.max(0, Math.round(Number(value.used) || 0)),
+      lastUsedAt: Math.max(0, Number(value.lastUsedAt) || 0),
+    }
+  }
+  return out
+}
+
+/** 标签与使用账 (异步): 没有这一份 / 读坏了都当"还没有标签", 不阻断贴表情 */
+async function readStickerTags(folder) {
+  try {
+    const text = await readFile(join(folder, STICKER_TAG_FILE), 'utf8')
+    return stickerTagMapOf(JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text))
+  } catch {
+    return {}
+  }
+}
+
+/** 提示词变量那一侧只能同步读 (每一步组提示词都求值) */
+function readStickerTagsSync(folder) {
+  try {
+    const text = readFileSync(join(folder, STICKER_TAG_FILE), 'utf8')
+    return stickerTagMapOf(JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text))
+  } catch {
+    return {}
+  }
+}
+
+/** 写回标签账 (原子写): 失败只回 false —— 记不上账不该让这一张贴不出去 */
+async function writeStickerTags(folder, map) {
+  try {
+    await mkdir(folder, { recursive: true })
+    const temporary = temporaryName(join(folder, STICKER_TAG_FILE))
+    await writeFile(temporary, `${JSON.stringify(map, null, 2)}\n`, 'utf8')
+    await rename(temporary, join(folder, STICKER_TAG_FILE))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 目录里的表情 + 标签 + 次数 (list / 检索 / 提示词摘要共用这一处读) */
+async function stickerEntriesOf(folder) {
+  const names = await readdir(folder).then(
+    (list) => list.filter((one) => STICKER_FILE_OK.test(one)).sort((a, b) => a.localeCompare(b, 'zh')),
+    () => [],
+  )
+  const tags = await readStickerTags(folder)
+  return names.map((name) => ({
+    name,
+    tags: tags[name]?.tags ?? [],
+    used: tags[name]?.used ?? 0,
+    lastUsedAt: tags[name]?.lastUsedAt ?? 0,
+  }))
+}
+
+/** 记一次"贴出去了": 次数 +1 (账写不进去也不影响这一句已经发出去了) */
+async function markStickerUsed(folder, name) {
+  const map = await readStickerTags(folder)
+  const before = map[name] ?? { tags: [], used: 0, lastUsedAt: 0 }
+  map[name] = { tags: before.tags, used: before.used + 1, lastUsedAt: Date.now() }
+  await writeStickerTags(folder, map)
+}
+
+/**
+ * 贴表情的密度那一句 (设置 → 活动 → 更多设置 → 表情 → 多久贴一张)
+ *
+ * 光有"怎么贴"没有"多久贴一张", 模型就只会把它当装饰 (2026-11-15 主人: 概率太小)
+ */
+function stickerMoodLine(everyN) {
+  const n = Math.max(0, Math.min(200, Math.round(Number(everyN) || 0)))
+  if (n === 0) return '这一场主人把表情关掉了: 不要贴表情'
+  if (n <= 2) return `主人把密度调高了: 大约每 ${n} 条话就可以贴一张, 接梗 / 应和 / 吐槽都能来一张`
+  if (n <= 4) return `大约每 ${n} 条话贴一张就够; 对方先发表情、或者正玩得热闹时可以连贴两张`
+  return `大约每 ${n} 条话才贴一张: 宁可不贴, 也不要每条都配一张图`
+}
+
+/**
+ * 还没标签的那几张 (2026-11-16 主人: "使用表情包时列出没有标签的图, 有就顺便标上")
+ *
+ * 为什么它值得单独一处: 一张叫 `1000026655.jpg` 的图没有标签时, 对"情绪词检索"等于不存在 ——
+ * 只有准确文件名找得到它, 而她下一轮多半已经忘了那个流水号
+ */
+function stickerUntaggedOf(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((one) => (Array.isArray(one.tags) ? one.tags : []).length === 0)
+}
+
+/** 未标名单压成一行 (`a.jpg / b.png`, 超过 limit 张就 `+N`); 都标了回空串 */
+function stickerUntaggedText(entries, limit = 6) {
+  const list = stickerUntaggedOf(entries)
+  if (list.length === 0) return ''
+  const names = list.slice(0, Math.max(1, limit)).map((one) => one.name).join(' / ')
+  return list.length > limit ? `${names} 等 ${list.length} 张` : names
+}
+
+/** 目录里那几张压成一行 (提示词摘要与回执共用): `开心（开心/赞·用过3次） / 无语 / 晚安` */
+function stickerCatalogText(entries, limit = STICKER_PROMPT_LIMIT) {
+  const list = (Array.isArray(entries) ? entries : []).slice(0, Math.max(1, limit))
+  return list.map((one) => {
+    const bits = []
+    if (Array.isArray(one.tags) && one.tags.length > 0) bits.push(one.tags.join('/'))
+    if (Number(one.used) > 0) bits.push(`用过${one.used}次`)
+    const stem = stickerStemOf(one.name)
+    return bits.length > 0 ? `${stem}（${bits.join('·')}）` : stem
+  }).join(' / ')
+}
+
+/**
+ * 把 `lw_say` 收到的 sticker 参数变成一个真文件名 (2026-11-15)
+ *
+ * 原来只认 `lw_sticker op=list` 印出来的那一串名字: 她要先列一次目录, 再逐字抄一个; 抄错一个字宿主
+ * 也不报错 (那道闸只拦路径), 落下一行谁都画不出来的 sticker —— 门户退成灰字, 她那边毫无反馈, 于是
+ * 下一次干脆不贴了
+ *
+ * @param query 准确文件名 / 去掉扩展名的名字 / 一句情绪或场景词
+ * @returns 目录里命中那一条 (`{ name, tags, used }` —— 回执要按 `tags` 判断"要不要顺手标一下")
+ * @throws 库里是空的, 或者一张都对不上 (报错里带上库里有什么)
+ */
+async function resolveStickerForSay(query) {
+  const home = process.env.DSH_HOME
+  if (!home) throw new Error('this profile has no DSH_HOME, so there are no stickers to put up')
+  const folder = join(home, 'lw', 'stickers')
+  const entries = await stickerEntriesOf(folder)
+  if (entries.length === 0) {
+    throw new Error(`she has no stickers yet: ${folder} is empty - lw_sticker op=fetch saves one from`
+      + ' an https link')
+  }
+  const hit = pickSticker(entries, query)
+  if (hit !== null) return hit
+  throw new Error(`nothing matched "${query}": the folder has ${stickerCatalogText(entries)}`
+    + ' - give one of those, a shorter mood word, or lw_sticker op=fetch a new picture')
 }
 
 /**
@@ -8197,13 +11264,31 @@ function noteTurnOut(sessionId, lines) {
  * `lw/router.json` 里哪一项没写就用这里的 —— 于是"文件坏了"与"还没写过"都还能跑, 只是按缺省
  */
 const ROUTER_DEFAULTS = Object.freeze({
-  gameMinutes: 100,
+  /**
+   * 今天**任意一个应用**用满多久就该歇一会儿 (2.8.1 #10, 主人: "不光是游戏")
+   *
+   * 以前这一格叫 `gameMinutes` (缺省 100), 只数游戏 —— 可是刷两小时短视频、看一上午文档, 一样是
+   * "用得久了"。改口径时线也跟着抬到 120: 100 分钟那条线是给游戏定的, 铺到所有应用上就变成了打扰
+   * (旧键的迁移见 [ROUTER_LEGACY_RULES] 与 [migrateRouterRules])
+   */
+  appMinutes: 120,
   wishDays: 60,
   cooldownMs: 30 * 60 * 1000,
   chatChance: 0.35,
+  /**
+   * 每错过一拍涨多少 (2.8.1 #11, 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%, 任意一次开口
+   * 即清零")
+   *
+   * 以前那是**一条常数**概率: 到了"太久没说话"那条线之后, 每一拍都拿 0.35 再抽一次, 抽不中就再等
+   * 25~55 分钟. 主人要的是**越来越想说** —— 连着几拍都没说出口, 下一拍就多 20%, 顶到 1.0 为止;
+   * 任意一次开口 (提醒 / 未了的事 / 检测项 / 随口一句 / 点「唤醒一下」) 都把这笔账清零
+   *
+   * 写 0 = 不递增, 与 2.8.0 那条常数概率逐字一致 (老 `sim.json` 里没有这一格, 缺省就是 0.2)
+   */
+  chatChanceStep: 0.2,
   chatAfterMs: 4 * 60 * 60 * 1000,
   /**
-   * 沉睡前观察 (2026-11-07 晚): 主人刚说完话的这几分钟里, 她这一拍不敲
+   * 沉睡前观察 (2026-11-07 晚): 主人刚说完话的这几分钟里, 她这一拍不唤醒
    *
    * 与 QQ 桥接二代仿真的 `wake.preSleepWaitMs` 同一个口径 ("5 分钟内没人说话就可以沉") ——
    * 这里换个方向用: 有人在说话就先别插嘴。「更多设置」里能改, 0 表示关掉这一道
@@ -8216,7 +11301,36 @@ const ROUTER_DEFAULTS = Object.freeze({
    * "不理她她就别一直说". 一天一次, 而不是从此不开口
    */
   ignoredCooldownMs: 24 * 60 * 60 * 1000,
+  /**
+   * 打扰成本那三档 (2.8.1 #29, 主人: "压得住的事不必这一刻说")
+   *
+   * 判断层以前只看"这件事有多重" (`score`); 现在再扣一笔"这一刻开口有多贵"`cost`:
+   *
+   * - `gameCost` 2: 游戏 / 视频在前台 —— 一句话打断的是一局牌
+   * - `callCost` 3: 半小时内有过通话 (正在通话那一条前面那道闸已经拦住了, 这里管"刚挂")
+   * - `recentCost` 1: 距上次开口还不到 `chatAfterMs / 3`
+   *
+   * 三项相加夹到 [ROUTER_COST_MAX]; 顶到那档就一句都不说 (见 [routerWorthwhile])
+   */
+  gameCost: 2,
+  callCost: 3,
+  recentCost: 1,
 })
+
+/** 打扰成本的封顶: 三项相加超过它就是这一刻根本不说话 */
+const ROUTER_COST_MAX = 3
+
+/**
+ * 净收益 (`score - cost`) 到这条线才值得打扰
+ *
+ * 取 2 是刻意的: 随口一句本来就是 2 分, 于是**没成本时与改动前逐字一致** (2 - 0 = 2 刚好过线);
+ * 一旦有成本, 随口一句先攒着 (2 - 1 = 1), 检测项在成本 2 时也攒着 (3 - 2 = 1), 只有
+ * "用得久了" (5) 与"未了的事" (4) 这种分量才压得住
+ */
+const ROUTER_COST_MIN_NET = 2
+
+/** 通话那一档看多远: 半小时内有过 `call` 信号 */
+const ROUTER_CALL_RECENT_MS = 30 * 60 * 1000
 
 /**
  * 兜底的游戏包名
@@ -8233,6 +11347,116 @@ const ROUTER_GAME_PACKAGES = new Set([
   'com.netease.pes',
   'com.hypergryph.arknights',
 ])
+
+/**
+ * 视频 / 社交那一档 (2.8.1 #10)
+ *
+ * 它只决定"这句话怎么说", 与"算不算久"无关 —— 刷视频跟打游戏都用得久, 但劝人的话不一样。
+ * 与游戏那一张表同一个处境: 应用那一侧会写 `social` 标记, 这张表是旧版应用的兜底
+ */
+const ROUTER_SOCIAL_PACKAGES = new Set([
+  'com.tencent.mm',
+  'com.tencent.mobileqq',
+  'com.ss.android.ugc.aweme',
+  'com.ss.android.ugc.aweme.lite',
+  'com.smile.gifmaker',
+  'tv.danmaku.bili',
+  'com.xingin.xhs',
+  'com.sina.weibo',
+  'com.zhihu.android',
+  'com.ss.android.article.news',
+  'com.tencent.qqlive',
+  'com.qiyi.video',
+  'com.google.android.youtube',
+  'com.instagram.android',
+  'org.telegram.messenger',
+  'com.whatsapp',
+])
+
+/**
+ * 三类**不参与计数**的应用 (2.8.1 #10): Luwi 自己 / 桌面 / 输入法
+ *
+ * 为什么要专门排除: 桌面只要解锁就在, 输入法跟着每一句话涨, 它们当然排得进"今天用了多久"的头几名 ——
+ * 拿它们去判"该歇一会儿", 主人收到的是"桌面 今天 210 分钟", 那不是提醒, 是噪音。
+ *
+ * 应用那一侧 (`UsageLedger`) 会写 `home` / `ime` 两个标记, 那是最准的判据 (`PackageManager` 的
+ * `CATEGORY_HOME` 与已启用输入法名单); 这里几张表是**旧版应用**的兜底, 再退一步按包名认
+ */
+const ROUTER_SELF_PACKAGES = new Set([
+  'io.github.yuloong07star.luwi',
+])
+
+const ROUTER_HOME_PACKAGES = new Set([
+  'com.miui.home',
+  'com.android.launcher',
+  'com.android.launcher3',
+  'com.google.android.apps.nexuslauncher',
+  'com.huawei.android.launcher',
+  'com.oppo.launcher',
+  'com.bbk.launcher2',
+  'com.sec.android.app.launcher',
+  'com.teslacoilsw.launcher',
+])
+
+const ROUTER_IME_PACKAGES = new Set([
+  'com.sohu.inputmethod.sogou',
+  'com.iflytek.inputmethod',
+  'com.baidu.input',
+  'com.google.android.inputmethod.latin',
+  'com.huawei.ohos.inputmethod',
+  'com.miui.inputmethod',
+])
+
+/**
+ * 这一行读数要不要跳过 (纯函数): 她自己 / 桌面 / 输入法都不算"用了一个应用"
+ *
+ * 先认应用写的三个标记 (`self` / `home` / `ime`), 再认那几张表, 最后才是包名里的字眼 ——
+ * 旧版应用不写标记时, `com.vivo.launcher` 这种仍然得排掉
+ */
+function routerExcludedApp(one) {
+  const pkg = String(one?.pkg ?? '')
+  if (pkg === '') return true
+  if (one?.self === true || one?.home === true || one?.ime === true) return true
+  if (ROUTER_SELF_PACKAGES.has(pkg)) return true
+  if (ROUTER_HOME_PACKAGES.has(pkg) || ROUTER_IME_PACKAGES.has(pkg)) return true
+  return /launcher|inputmethod|input_method/iu.test(pkg)
+}
+
+/**
+ * 今天用得最久的那一个应用 (纯函数)
+ *
+ * 只看线以上的那些: 按时长降序取第一个 —— 两条都超线时说的是最久的那一个 (王者 130 与 Chrome 200
+ * 同时成立, 提的是 Chrome), 而不是碰巧排在 `usage.json` 前面那一个
+ *
+ * @returns `{ pkg, label, minutes, game, social }`, 一个都没到线就回 null
+ */
+function heaviestUsageApp(today, appMinutes) {
+  const line = Math.round(Number(appMinutes))
+  if (!Number.isFinite(line) || line <= 0) return null
+  const rows = (Array.isArray(today) ? today : [])
+    .filter((one) => one && !routerExcludedApp(one))
+    .map((one) => {
+      const pkg = String(one?.pkg ?? '')
+      return {
+        pkg,
+        label: String(one?.label ?? '').trim() || pkg,
+        minutes: Math.floor((Number(one?.ms ?? 0) || 0) / 60000),
+        game: one?.game === true || ROUTER_GAME_PACKAGES.has(pkg),
+        social: one?.social === true || ROUTER_SOCIAL_PACKAGES.has(pkg),
+      }
+    })
+    .filter((one) => one.minutes >= line)
+  if (rows.length === 0) return null
+  rows.sort((a, b) => b.minutes - a.minutes)
+  return rows[0]
+}
+
+/** 这个应用该用哪一档台词 (纯函数): 游戏原句 / 视频社交一句 / 其余中性一句 (2.8.1 #10) */
+function routerRestTier(one) {
+  if (one?.game === true) return 'game'
+  if (one?.social === true) return 'social'
+  return 'other'
+}
 
 /** 那一天是哪一天 (本地时区, `2026-11-07`) */
 function routerDayKey(now) {
@@ -8383,6 +11607,140 @@ function routerCheckHit(check, input, now) {
   return null
 }
 
+/** 随口一句那一档的概率上限 (2.8.1 #11): 涨到 1 就不再涨 */
+const ROUTER_CHAT_CHANCE_MAX = 1
+
+/** `chatMisses` 最多记到几 (0.35 + 4 × 0.2 就已经顶到 1.0, 再往上只是把文件写长) */
+const ROUTER_CHAT_MISSES_MAX = 20
+
+/**
+ * 这一拍"随口问一句"的概率 (2.8.1 #11, 纯函数)
+ *
+ * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口即清零"
+ * —— 于是这条概率不是常数, 而是"她等了多久"的函数: 连着几拍都没说出口, 下一拍就更想说
+ *
+ * `chatChanceStep` 写 0 时结果恒等于 `chatChance`, 与改动前逐字一致 (老 `sim.json` 没有这一格,
+ * 缺省 0.2; 只有写 0 才回到"不递增")
+ *
+ * 少了 `chatMisses` 这一格 (老 `router.json`) 按 0 算: 于是升级上来第一拍仍是 0.35
+ */
+function routerChatChance(rules, misses) {
+  const base = Number(rules?.chatChance ?? ROUTER_DEFAULTS.chatChance)
+  const step = Number(rules?.chatChanceStep ?? ROUTER_DEFAULTS.chatChanceStep)
+  const count = Math.max(0, Number(misses ?? 0) || 0)
+  const floor = Number.isFinite(base) ? Math.max(0, base) : ROUTER_DEFAULTS.chatChance
+  if (!Number.isFinite(step) || step <= 0) return Math.min(ROUTER_CHAT_CHANCE_MAX, floor)
+  // 浮点尾数收干净: 0.35 + 3 × 0.2 在 JS 里是 0.9500000000000001, 而人要看的是 0.95
+  return Math.min(ROUTER_CHAT_CHANCE_MAX, Math.round((floor + count * step) * 1e4) / 1e4)
+}
+
+/**
+ * 这一拍过完之后 `chatMisses` 该是多少 (2.8.1 #11, 纯函数)
+ *
+ * 只有"到点了该找句话, 这一拍却没说出口"才 +1 (`decision.chatMissed`) —— 静默时段 / 冷却 /
+ * 他还在说话 / 退让期 (`ignored >= 2`) 那些拍本来就不该开口, 拿它们去催她说话是另一回事
+ *
+ * **开口即清零**不在这一支: 说出来之后由 [routerMarkSaid] 直接写 0
+ */
+function nextChatMisses(state, decision) {
+  const before = Math.max(0, Number(state?.chatMisses ?? 0) || 0)
+  const bump = decision?.chatMissed === true ? 1 : 0
+  return Math.min(ROUTER_CHAT_MISSES_MAX, before + bump)
+}
+
+/**
+ * 这一格成本收成 0..[ROUTER_COST_MAX] 的整数 (纯函数)
+ *
+ * 坏值 / 缺键回落到缺省: `sim.json` 是应用写的, 写歪一个数不该让判断层换一套刻度
+ */
+function routerCostTier(value, fallback) {
+  const number = Number(value)
+  const base = Number.isFinite(number) ? number : Number(fallback)
+  if (!Number.isFinite(base)) return 0
+  return Math.min(ROUTER_COST_MAX, Math.max(0, Math.round(base)))
+}
+
+/**
+ * 前台这个应用是不是"正看在兴头上"的那一类 (纯函数)
+ *
+ * `usage.json` 的 `foreground` 只有 `{ pkg, since }` 两格 (见 `UsageLedger`), 所以这一档靠包名
+ * 认, 再借今天那一行读数拿到 `game` 标记与名字 —— 桌面 / 输入法 / 她自己不算 (解锁就在的应用
+ * 不是"正在玩")
+ *
+ * @returns `{ pkg, label, game }` 或者 null (前台是别的东西)
+ */
+function routerBusyUseApp(foreground, today) {
+  const pkg = String(foreground?.pkg ?? '')
+  if (pkg === '') return null
+  const rows = Array.isArray(today) ? today : []
+  const row = rows.find((one) => String(one?.pkg ?? '') === pkg)
+  // 桌面 / 输入法 / 她自己: 那几行本来就不算"用了一个应用", 前台也不算"正在忙"
+  if (routerExcludedApp(row ?? { pkg })) return null
+  const label = String(row?.label ?? '').trim() || pkg
+  if (row?.game === true || ROUTER_GAME_PACKAGES.has(pkg)) return { pkg, label, game: true }
+  if (row?.social === true || ROUTER_SOCIAL_PACKAGES.has(pkg)) return { pkg, label, game: false }
+  return null
+}
+
+/**
+ * 这一刻"打扰一下"值多少 (纯函数, 无 fs 无时钟)
+ *
+ * 2.8.1 #29: 判断层以前只回答"这件事有多重", 于是 "随口问一句" 与 "今天刷了三小时" 抢同一个
+ * 出口; 主人这一条要的是再算一笔 —— 主人正在打游戏 / 刚打完电话 / 刚被她自己打断过的时候,
+ * 低价值的那一句攒着不说, 账记进 `router.json`, 下一拍接着算
+ *
+ * 三档相加夹到 [ROUTER_COST_MAX]: 那一档是"根本不该开口" (见 [routerWorthwhile])
+ *
+ * @returns `{ cost, why }` —— `why` 是这几条原因 (给 `heldBack` 与日志用)
+ */
+function routerCostOf(input, rules) {
+  const now = Number(input?.now ?? Date.now())
+  const gameCost = routerCostTier(rules?.gameCost, ROUTER_DEFAULTS.gameCost)
+  const callCost = routerCostTier(rules?.callCost, ROUTER_DEFAULTS.callCost)
+  const recentCost = routerCostTier(rules?.recentCost, ROUTER_DEFAULTS.recentCost)
+  const why = []
+  let cost = 0
+  // ① 游戏 / 视频在前台: 一局牌被一句话打断, 比 "歇会儿吧" 贵得多
+  const busy = routerBusyUseApp(input?.usage?.foreground, input?.usage?.today)
+  if (busy && gameCost > 0) {
+    cost += gameCost
+    why.push(`${busy.game ? 'a game' : 'a video'} in the foreground (${busy.label})`)
+  }
+  // ② 半小时内有过通话: 正在通话那一条在更前面就 return 了, 这一档管"刚挂"
+  const signals = Array.isArray(input?.signals) ? input.signals : []
+  const called = signals.some(
+    (one) => one?.kind === 'call' && now - Number(one?.at ?? 0) <= ROUTER_CALL_RECENT_MS,
+  )
+  if (called && callCost > 0) {
+    cost += callCost
+    why.push('a call within the last 30 minutes')
+  }
+  // ③ 上一次开口还没过多久: 她刚说过一句, 再挤一句就是追着说
+  const lastSpokenAt = Number(input?.lastSpokenAt ?? 0) || 0
+  const quietFor = Number(rules?.chatAfterMs ?? ROUTER_DEFAULTS.chatAfterMs) / 3
+  if (recentCost > 0 && lastSpokenAt > 0 && Number.isFinite(quietFor) && quietFor > 0
+    && now - lastSpokenAt < quietFor) {
+    cost += recentCost
+    why.push(`she spoke ${Math.max(1, Math.round((now - lastSpokenAt) / 60000))} min ago`)
+  }
+  return { cost: Math.min(ROUTER_COST_MAX, cost), why }
+}
+
+/**
+ * 这一件值不值得为它打扰 (纯函数)
+ *
+ * 两条一起看:
+ * - **成本顶到头就一句都不说**: 3 分是"这一刻根本不该开口", 连"用得久了"也不说
+ * - 否则净收益 (`score - cost`) 得够 [ROUTER_COST_MIN_NET] —— 随口一句 (2) 一有成本就攒着
+ */
+function routerWorthwhile(score, cost) {
+  const one = Number(score)
+  const paid = Number(cost)
+  if (!Number.isFinite(one) || !Number.isFinite(paid)) return true
+  if (paid >= ROUTER_COST_MAX) return false
+  return one - paid >= ROUTER_COST_MIN_NET
+}
+
 /**
  * 这一次要不要开口 (纯函数, 无 fs 无时钟无随机源)
  *
@@ -8391,6 +11749,9 @@ function routerCheckHit(check, input, now) {
  * 不会因为模型慢而错过时机
  *
  * 闸的顺序是刻意的: 静默 -> 冷却 -> 通话中 -> 打分, 任何一条过了就不再往下看
+ *
+ * 2.8.1 #29: 打完分还要扣一笔"打扰成本" (见 [routerCostOf]) —— 排序按净收益排, 压不住的那一拍
+ * 一句都不说, 带上 `heldBack` 让 [routerTick] 记账
  */
 function judgeRouter(input) {
   const now = Number(input?.now ?? Date.now())
@@ -8427,20 +11788,23 @@ function judgeRouter(input) {
   const callEnded = recent.some((one) => one?.kind === 'call' && one?.state === 'end')
   if (callStarted && !callEnded) return { say: false, why: 'a call is running' }
 
+  // 这一刻开口有多贵 (2.8.1 #29): 三档相加夹到 [ROUTER_COST_MAX], `why` 只说触发的那几条
+  const interrupt = routerCostOf({ ...input, now, lastSpokenAt }, rules)
   const candidates = []
   const minuteMs = 60 * 1000
   const today = Array.isArray(input?.usage?.today) ? input.usage.today : []
-  for (const one of today) {
-    const pkg = String(one?.pkg ?? '')
-    const isGame = one?.game === true || ROUTER_GAME_PACKAGES.has(pkg)
-    if (!isGame) continue
-    const minutes = Math.floor(Number(one?.ms ?? 0) / minuteMs)
-    if (minutes < Number(rules.gameMinutes)) continue
+  // **rest 那一档按"今天任意一个应用"算** (2.8.1 #10): 以前只数游戏 (`gameMinutes`), 现在凡是用得
+  // 久的应用都要看见 —— 桌面 / 输入法 / 她自己不算 (见 [routerExcludedApp]), 台词按应用分档
+  // (见 [routerRestTier])
+  const heaviest = heaviestUsageApp(today, rules.appMinutes)
+  if (heaviest) {
     candidates.push({
       kind: 'rest',
       score: 5,
+      cost: interrupt.cost,
       to: 'ball',
-      brief: `${one?.label || pkg} 今天 ${minutes} 分钟, 现在 ${routerClockText(now)}`,
+      tier: routerRestTier(heaviest),
+      brief: `${heaviest.label} 今天 ${heaviest.minutes} 分钟, 现在 ${routerClockText(now)}`,
     })
   }
   const todayKey = routerDayKey(now)
@@ -8457,6 +11821,7 @@ function judgeRouter(input) {
     candidates.push({
       kind: 'wish',
       score: 4,
+      cost: interrupt.cost,
       to: 'ball',
       id: String(one?.id ?? ''),
       brief: `${one?.what ?? '那件事'}还有 ${days} 天, 今天还没提过`,
@@ -8465,29 +11830,42 @@ function judgeRouter(input) {
   // **探索交来的检测项** (2026-11-07 晚, 主人: "检测的内容应由探索时加上"): 分数排在"未了的事"
   // 之后、"随口问一句"之前 —— 它是她自己看出来的规律, 不如主人亲口交代的事硬, 但比没话找话要紧。
   // 去重键跟着命中一起回来 (2026-11-10): 事件型那一条是"一次发生一个键", 不是"一天一个键"
+  //
+  // 2026-11-14 主人: 一场主动对话要**结合多个检测项**, 不能只挑一条 —— 所以命中的每一条都收进
+  // `hits` (按 `checks` 顺序), 由 routerStartLine 按发送上限派给那一场; `candidates` 仍只决定
+  // "这一拍要不要开口、从哪条切进去"
+  const hits = []
   for (const one of Array.isArray(input?.checks) ? input.checks : []) {
     const hit = routerCheckHit(one, input, now)
     if (!hit) continue
     const id = String(one?.id ?? '')
     if (!id) continue
     if (String((input?.checksSaid ?? {})[id] ?? '') === hit.key) continue
+    const what = String(one?.what ?? '那件事')
+    hits.push({ id, key: hit.key, what, fact: hit.fact })
     candidates.push({
       kind: 'check',
       score: 3,
+      cost: interrupt.cost,
       to: 'ball',
       id,
       key: hit.key,
-      brief: `${String(one?.what ?? '那件事')} · ${hit.fact}`,
+      brief: `${what} · ${hit.fact}`,
     })
   }
+  // 这一拍算不算"到点了该找句话": 退让期里**不主动找话题** —— 这两次他都没接, 再"随口问一句"
+  // 就是骚扰; 太短没说话也不算. 两件事都要在抽签之外单独知道, 因为"该说却没说出来"那一拍
+  // 要记账 (2.8.1 #11): 下一拍的概率 +20% (见 [routerChatChance] / [nextChatMisses])
+  let chatDue = false
   if (candidates.length === 0) {
     const idleFor = lastSpokenAt > 0 ? now - lastSpokenAt : Number.POSITIVE_INFINITY
     const roll = typeof input?.random === 'function' ? Number(input.random()) : Math.random()
-    // 退让期里**不主动找话题**: 这两次他都没接, 再"随口问一句"就是骚扰
-    if (ignored < 2 && idleFor > Number(rules.chatAfterMs) && roll < Number(rules.chatChance)) {
+    chatDue = ignored < 2 && idleFor > Number(rules.chatAfterMs)
+    if (chatDue && roll < routerChatChance(rules, input?.chatMisses)) {
       candidates.push({
         kind: 'chat',
         score: 2,
+        cost: interrupt.cost,
         to: 'ball',
         brief: lastSpokenAt > 0
           ? `已经 ${Math.round(idleFor / minuteMs)} 分钟没说话了, 随口问一句`
@@ -8495,19 +11873,39 @@ function judgeRouter(input) {
       })
     }
   }
-  if (candidates.length === 0) return { say: false, why: 'nothing worth saying' }
-  candidates.sort((a, b) => b.score - a.score)
+  if (candidates.length === 0) {
+    // `chatMissed` 只给"该说却没说出来"那一拍: [routerTick] 据此把 `chatMisses` +1
+    return chatDue
+      ? { say: false, why: 'nothing worth saying', chatMissed: true }
+      : { say: false, why: 'nothing worth saying' }
+  }
+  // 排序按**净收益**排 (2.8.1 #29): 同样是 5 分的那一句, 在游戏里就不如"没成本的时候"值钱
+  candidates.sort((a, b) => (b.score - b.cost) - (a.score - a.cost))
   const best = candidates[0]
+  // 压不住就攒着 (2.8.1 #29): 账交给 [routerTick] 记进 `router.json.heldBack`, 下一拍接着算。
+  // `chatMissed` 跟着走 —— 该找句话的那一拍被成本压住, 与"抽签没抽中"是同一件事: 她还想说
+  if (!routerWorthwhile(best.score, best.cost)) {
+    return {
+      say: false,
+      why: `held back (cost ${best.cost})`,
+      ...(best.kind === 'chat' ? { chatMissed: true } : {}),
+      heldBack: { kind: best.kind, score: best.score, cost: best.cost, why: interrupt.why },
+    }
+  }
   // `id` 跟着走: 未了的事说完要标"今天提过了" (见 routerTick 的记账), 少了它就做不到。
   // `key` 是同一件事的"说过没有"那把尺子 (2026-11-10): 事件型那一条一次发生一个键
   return {
     say: true,
     kind: best.kind,
     to: best.to,
+    // rest 那一档带"按哪个应用分档" (2.8.1 #10): [routerLine] 据此挑那句话
+    ...(best.tier ? { tier: best.tier } : {}),
     ...(best.id ? { id: best.id } : {}),
     ...(best.key ? { key: best.key } : {}),
     brief: best.brief,
     why: best.brief,
+    // 只有"从检测项切进去"的那一档才带这一格: 说游戏 / 说未了的事时, 检测项不该挤进同一场
+    ...(best.kind === 'check' && hits.length > 0 ? { hits } : {}),
   }
 }
 
@@ -8574,17 +11972,23 @@ function voiceInboxPath() {
 }
 
 /**
- * 浮标那一路的**专用工作区**: 由通道问出来的对话都落在这个目录里
+ * 浮标那一路**落在哪**: 由通道问出来的对话都落在这个工作区里
  *
  * 主人 2026-10-06: "给浮标上的对话通道建一个专门的工作区, 对话都放在这个工作区中"。宿主进程的
  * cwd 与 `HOME` 都是工作区根 (见 app 的 DshHost.spawn), 所以这里只取根下一个固定的子目录 ——
  * 会按需创建, 但**不建在别处**: 主人要的是"对话们有个自己的家", 而它的文件也该由主人的文件管理器
  * 看得见 (工作区本来就在共享存储里)
  *
- * 名字是中英混合的一处取舍: 目录名要能在文件管理器里一眼认出是什么, 所以用 `dsh-ball`, 而不是
- * 一串没有意义的 hash —— 中文目录名在少数工具链里会踩编码, 这一条不值得赌
+ * **2026-11-20 主人改口径**: "ball 对话也投到 luwi 工作区, 不再投到 dsh-ball 了" —— 所以这个名字
+ * 现在就是 `Luwi` (与探索 / 主动场同一个工作区), 老机器上那个 `dsh-ball` 目录**留着不删**: 里面的
+ * 历史会话还归那条工作区, 只是不再往里投新话。这一改的副作用写在 [voiceLedgerUsable] 那段: 账本
+ * 的 `cwd` 判据跟着变成 `Luwi`, 于是老账 (写着 `dsh-ball`) 一律当没有, 浮标的下一条自然在 `Luwi`
+ * 开一场新的
+ *
+ * **为什么留成常量**: `tools/check-luwi-portal.mjs` 拿它与 Kotlin 的 `BALL_WORKSPACE` 逐字比对 ——
+ * 两边必须一起改
  */
-const BALL_WORKSPACE_NAME = 'dsh-ball'
+const BALL_WORKSPACE_NAME = 'Luwi'
 
 /**
  * 一条通道工作区的目录: 宿主进程的 cwd 与 `HOME` 都是工作区根 (见 app 的 DshHost.spawn), 所以
@@ -8600,7 +12004,7 @@ function ballWorkspace() {
 }
 
 /**
- * `dsh-ball` 那条工作区注册没注册 —— 上一次 [ensureBallWorkspace] 的读数
+ * 浮标那条工作区 (`Luwi`, 2026-11-20 之前是 `dsh-ball`) 注册没注册 —— 上一次 [ensureBallWorkspace] 的读数
  *
  * `registered` 三态: `true` / `false` (试过, 不通) / `null` (这个 profile 没有那项服务, 问不出来)
  */
@@ -8619,7 +12023,7 @@ const ballWorkspaceState = { path: null, id: null, registered: null, why: null }
  * 时才 `attachSession` (`packages/api/session-controller/src/commands.ts:105-141`), 只给 `cwd` 的话
  * 会话建出来但不入账 —— 界面上那条工作区在、里面一场都没有 (2026-10-17 模拟器上量到的)
  *
- * @param name 目录名 (`dsh-ball` / `Luwi`)
+ * @param name 目录名 (`Luwi` —— 浮标与探索 2026-11-20 起同一个)
  * @param state 这条通道自己的那份读数 (见 [ballWorkspaceState] / [exploreWorkspaceState])
  */
 async function ensureChannelWorkspace(ctx, name, state) {
@@ -8656,7 +12060,12 @@ async function ensureChannelWorkspace(ctx, name, state) {
   return { path: directory, id: state.id }
 }
 
-/** 浮标那条: 目录 `dsh-ball`, 读数记在 [ballWorkspaceState] 上 (判据钉着这个函数名) */
+/* [adoptExistingChannelWorkspace] 已删 (2026-11-13, 随 #37 口径作废): 通道工作区只剩"建目录 + 注册"
+ * 一条路 ([ensureChannelWorkspace]), 不再有"只认已有"的第二种形态 —— 门户里没有「选工作区」那一档,
+ * 首启该发生的是把 `<工作区根>/Luwi` 建好并注册上, 而不是把"没有工作区"这件事实留给界面去问人 */
+
+
+/** 浮标那条: 目录跟 [BALL_WORKSPACE_NAME] (`Luwi`), 读数记在 [ballWorkspaceState] 上 (判据钉着这个函数名) */
 async function ensureBallWorkspace(ctx) {
   return ensureChannelWorkspace(ctx, BALL_WORKSPACE_NAME, ballWorkspaceState)
 }
@@ -8809,7 +12218,7 @@ async function voiceReadNew(inbox) {
     if (!said && !image) continue
     // `wake` 是"这一句是唤醒之后的头一句"那个记号 (应用那侧只有头一句带它, 见 VoiceInbox.append) ——
     // **2026-10-06 起它只是记号, 不再是"另开一场"的判据**: 选哪一场由 [voiceCurrentSession] 那一笔
-    // 账 (2026-10-07 起 20 分钟, 2026-10-11 起 10 分钟) 定, 见 [voiceTargetCandidates]。老版本写的行没有这个键, 读起来与
+    // 账 (2026-10-07 起 20 分钟, 2026-10-11 起 10 分钟, 2026-11-20 起 30 分钟) 定, 见 [voiceTargetCandidates]。老版本写的行没有这个键, 读起来与
     // false 是一回事
     //
     // `to` 是**回复框点名的那一场** (2026-10-06 加): 框在屏上时, 框里发出去的那句话投给"发出那条
@@ -8945,7 +12354,7 @@ async function voiceInboxState() {
 /**
  * "当前对话"那一笔账: 一个会话 id 加它是什么时候拿到的
  *
- * **为什么落盘**: 宿主重启之后"10 分钟内那一场对话"还该是同一场 —— 记在内存里的话, 重启一次主人
+ * **为什么落盘**: 宿主重启之后"窗口之内那一场对话"还该是同一场 —— 记在内存里的话, 重启一次主人
  * 刚才说的话就接不上了 (而重启在这台设备上是常事: 装一次包、改一次设置都要重来)
  *
  * 可变部分全在 [voiceSession.state] 这一个对象上: 换掉它就等于"什么都没记住", 而那正是
@@ -8973,8 +12382,44 @@ function voiceSessionReset() {
  *
  * **2026-10-11 又缩到 10 分钟** (主人: "连续ball的对话从20min缩短到10min") —— 20 分钟那一档
  * 主人用下来觉得"隔了十几分钟还接着上一场"太粘, 所以缩到 10 分钟
+ *
+ * **2026-11-20 放到 30 分钟** (主人: "10min改为30min"): 10 分钟那档在真机上量到的效果是
+ * `opened: 2/3` —— 两句话隔了近两小时, 各开一场, 上一句的上下文 (还有那张屏) 全丢了。窗口是
+ * **滑动**的: 每一句成功投递都从那一刻重算, 见 [voiceSessionBump]
  */
-const VOICE_SESSION_MS = 10 * 60 * 1000
+const VOICE_SESSION_MS = 30 * 60 * 1000
+
+/**
+ * 「指着上一句说」的那一类话: 过了 [VOICE_SESSION_MS] 那一档也接着上一场, 上限一天
+ *
+ * 判据只有一条: `这个` / `刚才` / `改成` 这种话, 说的**一定是刚才那一场里的东西** ——
+ * 这时候换场等于把被指的东西扔掉 (2026-11-20 主人: "在浮标发送有带『这个』之类的词时…应该
+ * 回复上一次会话, 而不是重新开新会话")。一天之外不再接: 隔天的"这个"已经没有指代对象了
+ */
+const VOICE_REFER_BACK_MS = 24 * 60 * 60 * 1000
+
+/**
+ * 指着上一句说的那几个说法 (子串命中)
+ *
+ * **与 [SCREEN_REF_WORDS] 有重叠是有意的**: 那张表管"要不要附一张屏", 这张表管"要不要接着上一场"。
+ * 两边都必须有的是"指的是上一句里的那个东西"那四条 (`这个` / `这张` / `这个图` / `这张图`) ——
+ * `屏幕上` / `照片里` / `这份` 指那块屏, 带一张图就够, 不必把上一场接回来。判据
+ * (`check-auto-shot.mjs` 第五节) 钉着这一条, 不许漂成"图带上了而场换了"
+ *
+ * **不收 `这样`**: 它说的是做法, 不是上一句; 也不是 `再` 这种半个词 —— 认错人的代价是接着一场旧话,
+ * 所以只收明确的指代
+ */
+const REFER_BACK_WORDS = [
+  '这个', '这张', '这个图', '这张图', '那个', '那张',
+  '刚才', '刚刚', '你刚', '你说', '继续', '接着', '再改', '改成', '换成',
+]
+
+/** 这一句是不是"指着上一句在说" (纯函数: 没有设备也能量) */
+function refersBack(text) {
+  const said = String(text ?? '')
+  if (!said.trim()) return false
+  return REFER_BACK_WORDS.some((word) => said.includes(word))
+}
 
 /** 会话 id 是无符号 64 位, **别进整数**: 与虚拟屏那块屏的 id 同一个坑 */
 function voiceSessionPath() {
@@ -9010,18 +12455,18 @@ async function voiceSessionLoad() {
 }
 
 /**
- * 这本账指向的那一场**是不是真的落在 `dsh-ball` 里** (2.7.8 批次 2 根因二)
+ * 这本账指向的那一场**是不是真的落在浮标那个工作区里** (2.7.8 批次 2 根因二; 2026-11-20 起那个工作区是 `Luwi`)
  *
  * 判据只看账上记下的 `cwd`: 2026-10-17 之前写的账没有这个字段 (那时**每次投递都无条件写**, 于是
  * 主人"在 GUI 那场里问一句 -> 在框里答一句"就能把它改写成那场 GUI 会话) —— 那种账**一律当没有**,
  * 不做数据搬家, 下一次投递自然写一份新的。有 cwd 但不在浮标那个目录底下, 同样当没有
  *
  * 抽成纯字符串判据是为了让 `tools/check-voice-inbox.mjs` 直接量它 (两边都先去尾斜杠, 于是
- * `/x/dsh-ball/` 与 `/x/dsh-ball` 是同一个地方)
+ * `/x/Luwi/` 与 `/x/Luwi` 是同一个地方)
  *
  * @param record - `voice/session.json` 读出来的那一份 (`{ id, at, origin, cwd }`)
  * @param directory - 浮标那个工作区目录
- * @returns 能不能拿它当"10 分钟内可复用的那一场"
+ * @returns 能不能拿它当"窗口之内可复用的那一场"
  */
 function voiceLedgerUsable(record, directory) {
   return voicePathUnder(record?.cwd, directory) && voicePathUnder(directory, directory)
@@ -9040,12 +12485,36 @@ function voicePathNorm(value) {
   return String(value ?? '').replace(/\\/gu, '/').replace(/\/+$/u, '')
 }
 
+/**
+ * 账本现在指着谁, **不判新鲜** (没有就是 null)
+ *
+ * 两处要用它: ① 「这一句是不是投给账本指的那一场」(见 [voiceDeliver] 的续期判据 —— 门户 `portalBind`
+ * 过来的合流场真实 cwd 可能不在浮标那个工作区, 判"落在哪"那一支认不出来, 只能比 id); ② 读数
+ */
+async function voiceLedgerId() {
+  await voiceSessionLoad()
+  const id = voiceSession.state.current.id
+  return id ? String(id) : null
+}
+
 /** 现在那一场"当前对话"的 id, 没有 (或者过了 [VOICE_SESSION_MS]) 就是 null */
 async function voiceCurrentSession() {
+  return voiceLastBallSession(VOICE_SESSION_MS)
+}
+
+/**
+ * 账本指着的那一场, **在 `within` 之内**就是它 (否则 null)
+ *
+ * 判据三条, 缺一条都当没有: 有 id / 在这段时间之内 / cwd 落在浮标那个工作区 (见 [voiceLedgerUsable])。
+ * 两个窗口共用这一段: 普通一句 30 分钟 ([VOICE_SESSION_MS]), 指代上一句那种 24 小时 ([VOICE_REFER_BACK_MS])
+ *
+ * @param within - 多久之内算数 (毫秒)
+ */
+async function voiceLastBallSession(within = VOICE_REFER_BACK_MS) {
   await voiceSessionLoad()
   const current = voiceSession.state.current
   if (!current.id) return null
-  if (Date.now() - current.at > VOICE_SESSION_MS) return null
+  if (Date.now() - current.at > within) return null
   // 这一场得真的是浮标开出来的: 那本账被 GUI 会话改写过 / 是 2026-10-17 之前的老账, 都当没有
   const directory = await canonicalVoicePath(ballWorkspace())
   if (!voiceLedgerUsable(current, directory)) {
@@ -9063,10 +12532,11 @@ async function voiceCurrentSession() {
 }
 
 /**
- * 一句话投出去之后的记账: **每次发送都重算这一笔账**, 所以"10 分钟内可复用"是从最后一句起算
+ * 一句话投出去之后的记账: **每次发送都重算这一笔账**, 所以"30 分钟内可复用"是从最后一句起算
  *
- * **不是每一次投递都该记** (2.7.8 批次 2 根因二): 只有球自己那一句 (`origin === 'ball'`) 才改这本账,
- * 见 [voiceDeliver] 那一处调用 —— 回复框点名与自动指令各有各的落点
+ * **不是每一次投递都该记** (2.7.8 批次 2 根因二): 记与不记由 [voiceDeliver] 那一处判 —— 球自己那一句
+ * 一定记; 回复框点名的那一句, 只有在"投的就是账本指的那一场"或"落点在浮标工作区 (`Luwi`) 底下"时才记
+ * (2026-11-20 主人: 框里接着回的那一句要续期); 自动指令每次新开一场, 从不记
  *
  * @param sessionId - 投给哪一场
  * @param extra - `{ origin, cwd }`: 这一句是谁发的、那一场的 cwd (cwd 先过 realpath, 见
@@ -9099,8 +12569,9 @@ async function canonicalVoicePath(value) {
 /**
  * 那本账现在长什么样 (给 `lw_voice op=inbox` 与那份读数文件看)
  *
- * `usable` 是**能不能拿它当"10 分钟内可复用的那一场"**: 有 id、在 10 分钟以内、而且 cwd 落在
- * `dsh-ball` 底下 ([voiceLedgerUsable])。`why` 在不 usable 时说清是哪一条不成立
+ * `usable` 是**能不能拿它当"30 分钟内可复用的那一场"**: 有 id、在 30 分钟以内、而且 cwd 落在
+ * 浮标那个工作区 (`Luwi`) 底下 ([voiceLedgerUsable])。`why` 在不 usable 时说清是哪一条不成立; `ageMs` 是这笔账
+ * 记了多久 (0 = 还没有), 指代那一档要能看"它到底老到什么程度"
  */
 async function voiceLedgerSnapshot() {
   await voiceSessionLoad()
@@ -9121,13 +12592,14 @@ async function voiceLedgerSnapshot() {
     at: record.at ?? 0,
     origin: record.origin ?? '',
     cwd: record.cwd ?? '',
+    ageMs: exists && record.at > 0 ? Date.now() - record.at : 0,
     usable,
     why,
   }
 }
 
 /**
- * 三项读数 (2.7.8 批次 2 第一步): **这一场属于哪个工作区 / 它的 cwd / `dsh-ball` 注册没注册**
+ * 三项读数 (2.7.8 批次 2 第一步): **这一场属于哪个工作区 / 它的 cwd / 浮标那条工作区注册没注册**
  *
  * 只读, 而且一律 try —— 读数不许把 `op=inbox` 弄挂。cwd 从会话存储里拿 (`ctx.sessions.get` 是便宜
  * 的那一条, 不为了读数去 `resolveAgent` 把一场冷会话复活)
@@ -9233,13 +12705,14 @@ async function voiceReadingsWrite(ctx) {
  *
  * 三条判据 (前两条是主人 2026-10-06 的口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在同一场
  * 对话" + 当天那条例外 "有回复框时, 框里进的输入走发出回复那个窗口"; **2026-10-07 那个"1 小时"
- * 改成 20 分钟, 2026-10-11 又缩到 10 分钟**):
+ * 改成 20 分钟, 2026-10-11 又缩到 10 分钟, 2026-11-20 放到 30 分钟**):
  *
  * - **回复框点名的 `to`** ([voiceReadNew] 那一行读出来的): 它还在、还是根会话就投它 —— 框里
  *   发出的键盘与语音都从这条路进来, 于是"接着回答那个窗口"不会因为那笔账过了就换场
- * - 10 分钟内那一场 ([voiceCurrentSession], 需求点名的那个数): 复用它 —— 它本来就是浮标开出来的,
+ * - 窗口内那一场 ([voiceCurrentSession], 2026-11-20 起 30 分钟): 复用它 —— 它本来就是浮标开出来的,
  *   唤醒词命中之后的头一句也一样接上去 (**`fresh` 不再另开一场**, 2026-10-05 那版"喊一声就是换
  *   一件事说"作废)
+ * - 一句指着上一句说的话 (`这个` / `刚才` …): 窗口过了也接着上一场 (上限一天, 见 [refersBack])
  * - 那笔账过了 / 那一场不在了 / 从来没有过: 开一场新的 —— 而新对话落在浮标那个工作区里 (见
  *   [ensureBallWorkspace])
  *
@@ -9247,23 +12720,33 @@ async function voiceReadingsWrite(ctx) {
  *
  * **改过什么, 为什么改**: 原来是四条, 还多两条 —— "有正在跑的那一轮就 `steer` 插进去"与"都没有就
  * 投给会话列表里最近动过的那个根会话"。那两条会把一句浮标里说的话落进**主人此刻正在界面里用的那一场**
- * (它的 cwd 是 `/sdcard/DSH` 之类, 不是 `dsh-ball`), 于是"浮标的对话都在 dsh-ball 里"这件事就不成立
+ * (它的 cwd 是 `/sdcard/DSH` 之类, 不是浮标那个工作区), 于是"浮标的对话都在自己那条工作区里"这件事就不成立
  * 了 —— 主人报的正是这一条。现在 [voiceDeliver] 只问这一个函数, 而它只认浮标自己那一场: 那一场正在跑
  * 就 `steer`, 没在跑就 `followup`, 两种都落在浮标工作区
  */
 /**
- * 这一句话该试哪些会话, **按优先级排**: 点名的那一场 → 浮标那一笔账 (10 分钟); 空表就是"开一场新的"
+ * 这一句话该试哪些会话, **按优先级排**: 点名的那一场 → 浮标那一笔账 (30 分钟) → 指代那一档 (24 小时);
+ * 空表就是"开一场新的"
  *
  * (前两条是主人 2026-10-06 的口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在同一场对话" +
  * 当天那条例外 "有回复框时, 框里进的输入走发出回复那个窗口"; 那个 1 小时 2026-10-07 改成 20 分钟,
- * 2026-10-11 又缩到 10 分钟。`fresh` 只是记号, 不决定开不开新场)
+ * 2026-10-11 又缩到 10 分钟, **2026-11-20 放到 30 分钟**。`fresh` 只是记号, 不决定开不开新场)
+ *
+ * **第三条是 2026-11-20 主人点名加的** ("在浮标发送有带『这个』之类的词时…应该回复上一次会话, 而不是
+ * 重新开新会话"): 一句指着上一句说的话 ([refersBack]), 过了 30 分钟那一档也接着上一场 —— 它说的本来
+ * 就是那一场里的东西, 换场等于把被指的东西 (连同那张屏截图) 扔掉。上限 [VOICE_REFER_BACK_MS]
+ *
+ * 顺序上它排在最后: 框点名的场最准, 30 分钟内的账本最近, 指代只是"都过期了但话里明摆着在接着说"
  *
  * **这里一次会话表都不扫** (2026-10-15 真机上量到 `controller.list` 要 **11~12.8 秒** —— 投递总耗时
  * 的 99%, 因为它要读全部会话头与投影缓存, 而这台机器 38 个工作区里堆了上千场): 目标本来就有 id,
- * 那两场真的不在了 (被删 / 换过工作区), 由投递时 `resolveAgent` 的失败来发现 —— 调用方按这个顺序
+ * 那几场真的不在了 (被删 / 换过工作区), 由投递时 `resolveAgent` 的失败来发现 —— 调用方按这个顺序
  * 逐个试, 全试不出去才开新的一场 ([voiceDeliver] 里那个 for)
+ *
+ * @param to - 回复框点名的那一场 (`line.to`, 没点名是空串)
+ * @param text - 这一句的正文 (只有"要不要接着上一场"看它, 不看它就等于老行为)
  */
-async function voiceTargetCandidates(to) {
+async function voiceTargetCandidates(to, text) {
   const candidates = []
   const asked = String(to ?? '').trim()
   if (asked !== '') {
@@ -9271,7 +12754,17 @@ async function voiceTargetCandidates(to) {
   }
   const current = await voiceCurrentSession()
   if (current !== null && current !== asked) {
-    candidates.push({ sessionId: current, why: 'the ball conversation, reused' })
+    candidates.push({ sessionId: current, reused: true, why: 'the ball conversation, reused' })
+  }
+  if (refersBack(text)) {
+    const kept = current ?? await voiceLastBallSession()
+    if (kept !== null && !candidates.some((one) => one.sessionId === kept)) {
+      candidates.push({
+        sessionId: kept,
+        reused: true,
+        why: 'the line points back at what came before, so the ball conversation was kept',
+      })
+    }
   }
   return candidates
 }
@@ -9378,7 +12871,9 @@ async function deliverToBall(ctx, controller, sessionId, line, auto) {
     // 主人发来的图先搬进工作区, 再拼正文 (见 [stageInboxImage])
     const cwd = String(agent.session?.header?.cwd ?? '')
     const staged = await stageInboxImage(line, cwd)
-    const message = await createVoiceMessage(withInboxPicture(line.text, staged), auto.images)
+    // `via` 由调用方带 (主动场带 'proactive'); 不带就还是老记号 'voice'
+    const via = typeof line?.via === 'string' && line.via !== '' ? line.via : 'voice'
+    const message = await createVoiceMessage(withInboxPicture(line.text, staged), auto.images, via)
     if (running) agent.steer(message)
     else agent.followup(message)
     const flushed = await ctx.sessions.flush(agent.session)
@@ -9709,7 +13204,7 @@ async function runVoiceCommand(command, line) {
 const voiceDelivery = {
   lines: 0,
   sessionId: null,
-  /** 现在那一场"当前对话" (10 分钟内可复用的那个) */
+  /** 现在那一场"当前对话" (30 分钟内可复用的那个) */
   current: null,
   /** 这里面有几条是**复用**了当前对话 (而不是新开一场 / 投给最近动过的) */
   reused: 0,
@@ -9765,14 +13260,16 @@ let messageFactory = null
  * [images] 是指代词命中时 [autoScreenShot] 截下来的那张主屏截图 (0 或 1 张): 图块与正文一起进这一条
  * 用户消息 —— 界面上与主人自己发的图长得一样, 而正文一个字都没改
  */
-async function createVoiceMessage(text, images = []) {
+async function createVoiceMessage(text, images = [], via = 'voice') {
   if (messageFactory === null) messageFactory = await import('@deepseek-ai/dsh-llm')
   return messageFactory.createUserMessage({
     content: [
       { type: 'text', text },
       ...images.map((attachment) => ({ type: 'image', attachment })),
     ],
-    source: { kind: 'user', via: 'voice' },
+    // `via` 是"这句话是谁送进来的"那个记号 (kind 必须留 `user`, 见 [voiceDeliver] 那段): 门户按它
+    // 认出**主动场的开场提示词**, 那一条不进门户正文 (2026-11-12 #38, 见 [PROACTIVE_START_MARK])
+    source: { kind: 'user', via },
   })
 }
 
@@ -9787,7 +13284,8 @@ async function createVoiceMessage(text, images = []) {
  *
  * **`line.wake` 不再改写目标** (主人 2026-10-06 改口径: "只要是 1 小时内, 无论点球/喊唤醒词 都只在
  * 同一场对话"): 它只是"这一句是唤醒之后的头一句"那个记号, 选哪一场由 [voiceTargetCandidates] 按那一
- * 时间定 —— 10 分钟内一律复用浮标那一场 (正在跑就 steer), 那笔账过了才新开一场。界面**不会跟着切过去**:
+ * 时间定 —— 30 分钟内一律复用浮标那一场 (正在跑就 steer), 那笔账过了才新开一场 (指着上一句说的
+ * 那种话再宽到一天, 见 [refersBack])。界面**不会跟着切过去**:
  * 会话是这里建的, 而"在看哪一个"是浏览器自己的路由状态, 应用那侧没有一条让页面切会话的路 —— 所以
  * 新对话真的在跑、回答也会念出来, 但人可能正看着另一个会话。这是主人选的"改动最小"那一档
  *
@@ -9808,24 +13306,29 @@ async function voiceDeliver(ctx, line) {
   // "开一场探索" —— 于是它不进命令表、不截图、也不碰 `voice/session.json` 那本账 (那本账只认球自己
   // 那一句, 见 [voiceSessionBump])。检查 `source` 放在最前面: 这一步只多一次字符串比较
   if (line.source === 'explore') {
-    // 每场预算跟着那一行走 (2.7.9 第 8 条 T1): 应用那边写 `minutes` / `steps`, 老行没有这两个键时
-    // startExplore 里的 exploreClamp 落 30 / 60 的缺省
+    // 每场预算跟着那一行走 (2.7.9 第 8 条 T1; 2026-11-21 起只剩步数): 门户那颗「开始这一趟」写
+    // `steps`, 老行没有这个键时 startExplore 里的 exploreClamp 落 60 的缺省. `minutes` 不再有写方
+    // (设置页那一格撤了), 宿主内部那 30 分钟只当看门狗
     return startExplore(ctx, {
       text: line.text,
       via: 'inbox',
-      minutes: line.minutes,
       steps: line.steps,
     })
   }
-  // 判断层敲的那一下 (2026-11-07): 应用只说"该看一眼了", 说什么、要不要说是这里判的 ——
+  // 判断层唤醒的那一下 (2026-11-07): 应用只说"该看一眼了", 说什么、要不要说是这里判的 ——
   // 于是"她自己挑时机"与"她说人话"是两件分开的事
   if (line.source === 'router') {
     return routerTick(ctx)
   }
-  // 主动对话那一档也走收件箱进来 (2.8.0 B4-a): 到点了, 该看一眼要不要开口 —— **固定新开一场**,
-  // 不查浮标那本 10 分钟的账, 不进命令表, 也不截图; 开场用 `proactive` 预设, 那一场不建虚拟屏
+  // 判断层那颗「唤醒一下」(2.8.1 #8): 主人亲手点的, 不走上面那道判断 —— 他等了, 就得有回音
+  // (见 [routerWakeNow]: 先应一声落进 `lw/out`, 再开一场主动对话)
+  if (line.source === 'wake') {
+    return routerWakeNow(ctx)
+  }
+  // 按时间的主动对话排期已撤 (2026-11-21): 主动开口改由判断层挑时机, 排期场那一路不再存在.
+  // 老版本遗留的 `source:"proactive"` 行直接丢掉, 不按普通一句话走 (那会误开一场对话或切模式).
   if (line.source === 'proactive') {
-    return startProactive(ctx, { text: line.text, via: 'inbox' })
+    return { skipped: true, why: 'the scheduled proactive conversation was retired' }
   }
   // 先看它是不是一句命令 (批次 4.5): 是的话走 applyMode, 不进会话 —— 所以这一句既不插正在跑的那
   // 一轮, 也不开新对话, 更不理会 `line.wake`。命令是"对这台手机说的", 不是"对助手说的一句话"
@@ -9876,9 +13379,9 @@ async function voiceDeliver(ctx, line) {
     timing[key] = Date.now() - clock.mark
     clock.mark = Date.now()
   }
-  // **自动指令每次新开一场** (主人 2026-10-08 定): 不接回复框点名, 也不复用浮标那 10 分钟的一场 ——
+  // **自动指令每次新开一场** (主人 2026-10-08 定): 不接回复框点名, 也不复用浮标那一场 ——
   // "到点了提醒我"不是接着刚才那件事说, 而一次性提醒也不该把上下文带进主人的聊天里
-  const candidates = automated ? [] : await voiceTargetCandidates(line.to)
+  const candidates = automated ? [] : await voiceTargetCandidates(line.to, line.text)
   // 这一句是谁发的 (2.7.8 批次 2 的读数与判据): 自动指令 / 回复框点名 / 球自己
   const asked = String(line.to ?? '').trim()
   const origin = automated ? 'automation' : asked !== '' ? 'replyBox' : 'ball'
@@ -9932,24 +13435,33 @@ async function voiceDeliver(ctx, line) {
     outcome = await deliverToBall(ctx, controller, sessionId, line, auto)
   }
   beat('agent')
-  // 投出去了才记"当前对话": 这一笔是从**这一句**起算的 10 分钟 (需求: 每次发送完成后 10 分钟内)
+  // 投出去了才记"当前对话": 这一笔是从**这一句**起算的 30 分钟 (需求: 每次发送完成后, 窗口之内接着一场)
   //
-  // **只有球自己那一句才改这本账** (2.7.8 批次 2 根因二): 从前是"投成功就无条件写", 于是主人
-  // "在 GUI 那场里问一句 -> 在浮标框里答一句"就把账改写成了那场 GUI 会话 —— 之后 10 分钟的点球 /
-  // 语音全都投进那场 GUI 会话, 它当然不在 `dsh-ball` 分组里。回复框点名的那一句只对那一场生效,
-  // 自动指令每次新开一场, 两者都不该动这本账
-  if (origin === 'ball') {
+  // **记与不记按"落在哪 / 投给谁"判, 不再只看谁发的** (2.7.8 批次 2 根因二的修订, 2026-11-20):
+  // - 球自己那一句 (`origin === 'ball'`): 一定记
+  // - 回复框点名的那一句 (`origin === 'replyBox'`): 只要它 **① 投的就是账本现在指的那一场**, 或者
+  //   **② 落点在浮标那个工作区 (`Luwi`) 底下**, 就记 —— 主人 2026-11-20: "框开着、里面已经有她推来的一条回复,
+  //   你在下面回" 这个要续期; ①那一支是给门户 `portalBind` 过来的合流场 (真实 cwd 在 `Luwi`,
+  //   按落点认不出来, 只能比 id)
+  // - 其余 (框里挂着别的 GUI 场 / 自动指令): **一个字节都不动** —— 那正是 2.7.8 根因二:
+  //   "在 GUI 那场里问一句 -> 在浮标框里答一句"把账改写成了那场 GUI 会话
+  const pointed = await voiceLedgerId()
+  const landed = await canonicalVoicePath(outcome.cwd ?? '')
+  const inBall = voicePathUnder(landed, await canonicalVoicePath(ballWorkspace()))
+  const keepsLedger = origin === 'ball'
+    || (origin === 'replyBox' && (String(sessionId) === pointed || inBall))
+  if (keepsLedger) {
     await voiceSessionBump(sessionId, { origin, cwd: outcome.cwd ?? workspace?.path ?? '' })
   }
   voiceDelivery.origin = origin
   voiceDelivery.lines += 1
   voiceDelivery.sessionId = String(sessionId)
-  voiceDelivery.reused = (voiceDelivery.reused ?? 0) + (used?.why === 'the ball conversation, reused' ? 1 : 0)
+  voiceDelivery.reused = (voiceDelivery.reused ?? 0) + (used?.reused === true ? 1 : 0)
   voiceDelivery.current = String(sessionId)
   voiceDelivery.why = used?.why
     ?? (failure === null
       ? fresh
-        ? 'the hour was up, so the wake word opened a new conversation'
+        ? 'the window was up, so the wake word opened a new conversation'
         : 'the ball had no conversation, so this opened one'
       : `the conversation we knew was gone (${failure?.message ?? failure}), so this opened one`)
   if (opened) voiceDelivery.opened += 1
@@ -9961,7 +13473,7 @@ async function voiceDeliver(ctx, line) {
     sessionId: String(sessionId),
     steered: outcome.running,
     newConversation: opened,
-    reused: used?.why === 'the ball conversation, reused',
+    reused: used?.reused === true,
     source: line.source ?? 'voice',
     screenshot: outcome.screenshot === true,
     // 新开一场时用的是哪个预设 (复用那一场时不记: 那是它自己的事, 见 [chooseVoicePreset])
@@ -10220,6 +13732,10 @@ function replyChannelText(text) {
 /**
  * 把一句回答推回浮标那个输入通道 (主人 2026-10-05: "回复结果也传此通道")
  *
+ * **这一条从 2026-11-22 起只是降级路**: 她说话的正路是 [sayToConversation] → `lwOutAppend` → `lw/out`
+ * 那一份 jsonl (门户 / 球 / 通知三端各自读它). `overlay op=reply` 只在 turn end 补行**写不进 jsonl**
+ * (没有 DSH_HOME / 盘满) 时才被调用 —— 它不是第二条通道, 平时一句都不走这里
+ *
  * 与「正在想」那一句同一个去向 (`overlay` 那一个通道方法), 只是 op=reply: 应用那侧把它画进那块
  * 650 px 的文字框里 —— 问与答落在同一块框, 眼睛不必在浮标与页面之间来回找
  *
@@ -10267,33 +13783,33 @@ function reportNote(ctx, text) {
 }
 
 /**
- * 推一句"她自己想说的"到浮标 (2026-11-07: 球是门户)
+ * 她说一句"自己想说的" (2026-11-22: 统一出口)
  *
- * 与 [reportReply] 的差别只在应用那一侧怎么画: 这一句**不占回复框、不带 session、不动"下一刻把话
- * 投给谁"那笔账** —— 它是一句主动说的话, 主人看一眼就知道她为什么这时候开口
+ * 以前这一句只推球 (`overlay op=say`), 门户与通知收不到. 现在它写进当前那一场的 `lw/out`,
+ * 三端从同一份 jsonl 读 —— 一次写入, 谁都不用再各推一份
  *
- * 推不出去只记一行: 球被关掉的时候它本来就没有落脚处, 那不是要报给模型的错
+ * 当前没有可说的那一场时抛错: 调用方要么先开一场, 要么把这句话落进正在说的那一场
  */
-function reportSay(text) {
+async function reportSay(text) {
   const line = String(text ?? '').trim()
-  if (!line) return
-  void call('overlay', { op: 'say', text: line.slice(0, 200) }).catch((error) => {
-    console.warn(`luwi-channel: the ball did not get a bubble: ${error?.message ?? error}`)
-  })
+  if (!line) return null
+  const current = typeof voiceDelivery.current === 'string' ? voiceDelivery.current.trim() : ''
+  if (current === '') throw new Error('there is no current conversation to say that in')
+  return sayToConversation(current, { kind: 'text', text: line })
 }
 
 /**
- * 贴一张表情到浮标 (2026-11-07 主人: "能让 luwi 发表情包更具人味")
+ * 她贴一张表情 (2026-11-22: 统一出口)
  *
- * 参数是 `$DSH_HOME/lw/stickers/` 里的**文件名**: 应用那一侧按名字读图 (带路径的名字它不认),
- * 于是"她贴哪一张"这件事只由这个目录里有什么决定
+ * 参数是 `$DSH_HOME/lw/stickers/` 里的**文件名** (带路径的名字不认). 与 [reportSay] 同一条出口:
+ * 写进当前那一场的 `lw/out`, 三端都从那份 jsonl 读, 不再只推球
  */
-function reportSticker(id) {
+async function reportSticker(id) {
   const name = String(id ?? '').trim()
-  if (!name) return
-  void call('overlay', { op: 'sticker', id: name }).catch((error) => {
-    console.warn(`luwi-channel: the sticker did not reach the ball: ${error?.message ?? error}`)
-  })
+  if (!name) return null
+  const current = typeof voiceDelivery.current === 'string' ? voiceDelivery.current.trim() : ''
+  if (current === '') throw new Error('there is no current conversation to put that sticker in')
+  return sayToConversation(current, { kind: 'sticker', sticker: name })
 }
 
 /* ── 判断层的落点 (2026-11-07) ─────────────────────────────────────────────── */
@@ -10303,12 +13819,43 @@ function reportSticker(id) {
  *
  * 直推给球时用它 —— **不把数字念给主人听**: "王者荣耀今天 118 分钟"是判断的依据, 不是该说出口的
  * 那句话。想让她的语气不一样, 改 `lw/router.json` 的 `lines` 就行
+ *
+ * `rest` 不在这张表里: 它按应用分三档 (见 [ROUTER_REST_LINES]), 一句"起来走两步"对刷视频的人说不通
  */
 const ROUTER_LINES = Object.freeze({
-  rest: '都这么久了, 起来走两步吧',
   wish: '今天还没动那件事, 要不要现在看一眼',
   chat: '在干嘛呢',
 })
+
+/**
+ * `rest` 那一档的三句 (2.8.1 #10, 主人: "台词按应用分档")
+ *
+ * 游戏那句是原来的原句, 一个字都没改; 视频社交说的是"眼睛歇一下"; 其余应用一句中性的 ——
+ * 拿"起来走两步"去劝一个在看文档的人, 读起来就像她没看懂他在干什么
+ */
+const ROUTER_REST_LINES = Object.freeze({
+  game: '都这么久了, 起来走两步吧',
+  social: '刷了有一会儿了, 眼睛歇一下吧',
+  other: '这个看了挺久, 歇一会儿吧',
+})
+
+/** 某一档 rest 缺省说什么 (纯函数, 认不出来的档按"其余"那一句) */
+function routerRestLine(tier) {
+  return ROUTER_REST_LINES[String(tier ?? '')] ?? ROUTER_REST_LINES.other
+}
+
+/**
+ * 直推给球的那一句 (说人话, 不带数字)
+ *
+ * `decision.lines[kind]` 是主人自己改过的那一句 (`router.json` 的 `lines` 段): 她写了就一律按她的,
+ * 三档都算 —— 那是"她想怎么说", 不该被分档盖住
+ */
+function routerLine(decision) {
+  const custom = decision?.lines?.[decision.kind]
+  if (typeof custom === 'string' && custom.trim()) return custom.trim()
+  if (decision?.kind === 'rest') return routerRestLine(decision?.tier)
+  return ROUTER_LINES[decision.kind] ?? ''
+}
 
 /** 那份文件: `$DSH_HOME/lw/router.json` (规则 + 上一次判断 + 上次开口的时刻) */
 function routerStatePath() {
@@ -10374,9 +13921,15 @@ function simRouterRules(sim) {
   }
   put('cooldownMs', sim?.router?.cooldownMs)
   put('chatChance', sim?.router?.chatChance)
+  // 每错过一拍涨多少 (2.8.1 #11): 0 = 不递增, 与改动前逐字一致
+  put('chatChanceStep', sim?.router?.chatChanceStep)
   put('chatAfterMs', sim?.router?.chatAfterMs)
   put('ignoredCooldownMs', sim?.router?.ignoredCooldownMs)
   put('preSleepWaitMs', sim?.wake?.preSleepWaitMs)
+  // 打扰成本那三档 (2.8.1 #29): 由「更多设置」的 `interrupt` 段给, 缺键就由 ROUTER_DEFAULTS 兜底
+  put('gameCost', sim?.interrupt?.gameCost)
+  put('callCost', sim?.interrupt?.callCost)
+  put('recentCost', sim?.interrupt?.recentCost)
   return out
 }
 
@@ -10385,45 +13938,101 @@ function simRouterRules(sim) {
  *
  * 以前它们写在「更多设置」页、落 `sim.json`; 现在那一页没有了, 只剩 `router.json.rules` 这一处写点:
  * 探索收尾的 `rules` 或对话里的 `lw_router op=rules`。**范围写死在这里**: 模型给 0 或 99999 都夹回来,
- * 缺省仍由 [ROUTER_DEFAULTS] 给 (100 分钟 / 60 天)
+ * 缺省仍由 [ROUTER_DEFAULTS] 给 (120 分钟 / 60 天)
  */
 const ROUTER_RULE_RANGES = Object.freeze({
-  gameMinutes: { min: 5, max: 1_440 },
+  appMinutes: { min: 5, max: 1_440 },
   wishDays: { min: 1, max: 365 },
 })
 
 /**
- * 把一份 `{gameMinutes, wishDays}` 收干净 (纯函数)
+ * 上一版的名字 (2.8.1 #10): 旧键 `gameMinutes` → 新键 `appMinutes`
+ *
+ * **只读迁移**: 文件里认得到旧键就按它算一次新口径, 写的时候一定把旧键删掉 (见 [writeRouterRules]
+ * 与 [migrateRouterRules])
+ */
+const ROUTER_LEGACY_RULES = Object.freeze({
+  gameMinutes: 'appMinutes',
+})
+
+/**
+ * 把一份 `{appMinutes, wishDays}` 收干净 (纯函数)
  *
  * 不认识的键丢掉, 坏值丢掉, 越界夹进范围; 一个能用的都没有时回 `{}` —— 调用方据此决定"什么都不写"
  * (写一个空对象会把已有的两把尺子清掉, 那不是"没交")
+ *
+ * 旧键那一支是**迁移**, 不是读取: `gameMinutes` 说的是"游戏满多久", 现在这条说的是"任意一个应用满
+ * 多久", 同一根线换个口径会把 100 分钟铺到所有应用上 (比新缺省还松, 一天能响好几回) —— 所以认到旧键
+ * 就把新键落回缺省, 而不是把旧数字搬过来
  */
 function normalizeRouterRules(input) {
   const out = {}
   if (!input || typeof input !== 'object') return out
-  for (const [key, range] of Object.entries(ROUTER_RULE_RANGES)) {
-    const raw = input[key]
-    if (raw === undefined || raw === null || raw === '') continue
+  /** 一个键收成范围内的整数, 缺键 / 坏值一律回 null (交给下一支去判) */
+  const cleanNumber = (source, key, range) => {
+    const raw = source?.[key]
+    if (raw === undefined || raw === null || raw === '') return null
     const number = Math.round(Number(raw))
-    if (!Number.isFinite(number)) continue
-    out[key] = Math.min(range.max, Math.max(range.min, number))
+    if (!Number.isFinite(number)) return null
+    return Math.min(range.max, Math.max(range.min, number))
+  }
+  for (const [key, range] of Object.entries(ROUTER_RULE_RANGES)) {
+    const direct = cleanNumber(input, key, range)
+    if (direct !== null) {
+      out[key] = direct
+      continue
+    }
+    // 新键没给 (或给的是坏值) 时看旧键: 认到就把新缺省写上, 顺序也跟着范围表走
+    const legacy = Object.keys(ROUTER_LEGACY_RULES).find((one) => ROUTER_LEGACY_RULES[one] === key)
+    if (!legacy) continue
+    const raw = input[legacy]
+    if (raw === undefined || raw === null || raw === '') continue
+    // 坏值不算"认到了旧键": 那一份文件本来就该当没有
+    if (!Number.isFinite(Number(raw))) continue
+    out[key] = ROUTER_DEFAULTS[key]
   }
   return out
+}
+
+/**
+ * 读进来的那一份 `rules` 收成新口径 (纯函数, 只读迁移)
+ *
+ * 旧文件里可能还留着 `gameMinutes`: 这里把它换成 `appMinutes` 的缺省, **并把旧键丢掉** —— 于是
+ * `lw_router op=status` 报的是新口径, 而下一次谁写 `router.json` 时那份文件就干净了
+ */
+function migrateRouterRules(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {}
+  // 两把尺子排在前面 (按范围表的顺序), 别的键原样跟在后面, 旧键一个都不带出去 —— 于是同一份文件
+  // 迁移过后写出来的形状是定死的, 不会因为键的先后顺序每次都换一个样子
+  const out = { ...normalizeRouterRules(input) }
+  for (const [key, value] of Object.entries(input)) {
+    if (key in ROUTER_LEGACY_RULES) continue
+    if (key in out) continue
+    out[key] = value
+  }
+  return out
+}
+
+/** 这一份 rules 里还有没有旧键 (整个 `readRouterInputs` 只据此补写一次) */
+function hasLegacyRouterRules(input) {
+  if (!input || typeof input !== 'object') return false
+  return Object.keys(ROUTER_LEGACY_RULES).some((key) => key in input)
 }
 
 /**
  * 把两把尺子写进 `router.json.rules` (读-改-写, 保留那份文件里别的键)
  *
  * 与 `exploreChecksWrite` 同一个形状: 先读整份再写回, 于是探索的 `checks`、判断层的 `last` 不会被这一下
- * 抹掉。一次只写交上来的那几个键 —— 只给 `gameMinutes` 时 `wishDays` 保持原样
+ * 抹掉。一次只写交上来的那几个键 —— 只给 `appMinutes` 时 `wishDays` 保持原样; 旧键 `gameMinutes`
+ * 在写回时一定被删掉 (迁移只做一次, 之后那份文件里就没有它了)
  */
 async function writeRouterRules(rules) {
   const clean = normalizeRouterRules(rules)
-  if (Object.keys(clean).length === 0) return { rules: {}, written: 0, error: 'no gameMinutes / wishDays to write' }
+  if (Object.keys(clean).length === 0) return { rules: {}, written: 0, error: 'no appMinutes / wishDays to write' }
   const path = routerStatePath()
   if (!path) return { rules: {}, written: 0, error: 'this profile has no DSH_HOME' }
   const state = (await readRouterJson(path)) ?? {}
-  const existing = state?.rules && typeof state.rules === 'object' ? state.rules : {}
+  const existing = migrateRouterRules(state?.rules && typeof state.rules === 'object' ? state.rules : {})
   const merged = { ...existing, ...clean }
   await writeRouterJson(path, { ...state, v: 1, rules: merged })
   return { rules: merged, written: Object.keys(clean).length }
@@ -10521,8 +14130,15 @@ async function readRouterInputs() {
   if (!home) return null
   const lw = join(home, 'lw')
   const state = (await readRouterJson(routerStatePath())) ?? {}
-  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
+  // **旧键只读迁移一次** (2.8.1 #10): 那份文件里还留着 `gameMinutes` 就就地换成 `appMinutes` 的缺省
+  // 并把旧键删掉 —— 只动 `rules` 这一格, `last` / `checks` / `checksSaid` 那些账原样带回去;
+  // 迁移之后这一行不再触发 (旧键已经没了)
+  if (hasLegacyRouterRules(state?.rules)) {
+    state.rules = migrateRouterRules(state.rules)
+    await writeRouterJson(routerStatePath(), { ...state, v: 1 })
+  }
   const wishes = ((await readRouterJson(join(lw, 'wishes.json')))?.items) ?? []
+  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
   const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
   const gate = (await readRouterJson(join(lw, 'proactive-gate.json'))) ?? {}
   const settings = (await readRouterJson(join(home, 'automations', 'settings.json'))) ?? {}
@@ -10533,14 +14149,14 @@ async function readRouterInputs() {
     .filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
     .reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
   const ignored = await refreshIgnored(lastUserAt)
-  // 静默窗口: 「更多设置」里那一份在就按它 (`sim.json` 一写就是全键), 否则回落到自动指令那一份
+  // 这几拍她"该找句话却没说出口"累计了几次 (2.8.1 #11): 随口一句那条概率按它往上抬
+  const chatMisses = Math.max(0, Number(state?.chatMisses ?? 0) || 0)
+  // 静默窗口 (2026-11-20 起**只有一份**): `automations/settings.json` 的 `quiet` 段 ——
+  // 设置 → 活动 → 更多设置 里那三行写的也是它 (见应用侧 `QuietHours`), 到点主动场读的也是它。
+  // 老 `sim.json` 的 `wake.quiet*` 由应用在宿主起来时搬过去, 这里不再看那一份
   const window = String(settings?.quiet?.window ?? '')
   const [from, to] = window.split(/[-~]/).map((one) => one.trim())
-  const simFrom = String(sim?.wake?.quietFrom ?? '').trim()
-  const simTo = String(sim?.wake?.quietTo ?? '').trim()
-  const quiet = (simFrom || simTo)
-    ? { enabled: sim?.wake?.quietEnabled !== false, from: simFrom || from, to: simTo || to }
-    : { enabled: settings?.quiet?.enabled === true, from, to }
+  const quiet = { enabled: settings?.quiet?.enabled === true, from, to }
   const lastSpokenAt = Math.max(
     Number(state?.lastSpokenAt ?? 0) || 0,
     Number(gate?.lastAt ?? 0) || 0,
@@ -10550,13 +14166,18 @@ async function readRouterInputs() {
     quiet,
     lastSpokenAt,
     ignored,
+    // 2.8.1 #11: 随口一句那条概率的"欠账" —— 每错过一拍 +1, 开口就清零
+    chatMisses,
     lastUserAt,
     usage,
     wishes: Array.isArray(wishes) ? wishes : [],
     signals,
-    rules: { ...(state?.rules ?? {}), ...simRouterRules(sim) },
+    // 规则表按新口径收一遍 (2.8.1 #10): 旧文件里的 `gameMinutes` 在这里换成 `appMinutes` 的缺省
+    rules: migrateRouterRules({ ...(state?.rules ?? {}), ...simRouterRules(sim) }),
     checks: Array.isArray(state?.checks) ? state.checks : [],
     checksSaid: state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {},
+    // 一场主动对话最多发几条 (`send` 段): 2026-11-14 主人 —— 检测项在那一场里占几条, 由这个上限决定
+    send: sim?.send && typeof sim.send === 'object' ? sim.send : {},
     // 事件型检测项的唯一输入 (2026-11-10): 读不到就是 available: false, 那条判法不命中
     calendar: await readCalendarWindow(Date.now()),
   }
@@ -10590,10 +14211,26 @@ async function refreshIgnored(lastUserAt) {
   return ignored
 }
 
-/** 直推给球的那一句 (说人话, 不带数字) */
-function routerLine(decision) {
-  const custom = decision?.lines?.[decision.kind]
-  return typeof custom === 'string' && custom.trim() ? custom.trim() : ROUTER_LINES[decision.kind] ?? ''
+/**
+ * 一场主动对话的"发几条 / 检测项占几条" (纯函数, 2026-11-14)
+ *
+ * 主人的口径: **一次主动对话要结合多个检测项, 可以少, 但不能没有** —— 而"几个"不另设参数,
+ * 由发送上限(`sim.json` 的 `send` 段)算出来: 一场最多发 N 条, 检测项至多占一半(向上取整),
+ * 至少一条。
+ *
+ * N 跟着 `burstEnabled` 走: 关掉分条就是一句, 那时检测项也只有一条名额 —— 否则就是"要求她说
+ * 六条, 可链路只放一条"。上界 6 与 `SimSetting.Default.SEND_BURST_MAX` 同一个数(`check-sim` 盯两处相等)
+ *
+ * | N | 1 | 2 | 3 | 4 | 5 | 6 |
+ * | 检测项 | 1 | 1 | 2 | 2 | 3 | 3 |
+ */
+function routerCheckQuota(send) {
+  const burst = send?.burstEnabled !== false
+  const raw = Number(send?.burstMaxMessages ?? 6)
+  const wanted = Number.isFinite(raw) ? Math.round(raw) : 6
+  const maxMessages = burst ? Math.min(6, Math.max(1, wanted)) : 1
+  const checkMessages = Math.min(maxMessages, Math.ceil(maxMessages / 2))
+  return { maxMessages, checkMessages }
 }
 
 /**
@@ -10601,17 +14238,57 @@ function routerLine(decision) {
  *
  * **brief 不是台词**: 它是"为什么现在说"的事实, 说成什么人话由这一场决定 —— 所以这里明确要求
  * 它别复述这一行
+ *
+ * 2026-11-14 主人: 一次主动对话要**结合多个检测项** —— 于是这里多两段: 这一拍真触发了的那几条
+ * (按判断层给的 `hits`), 以及她此刻盯着的全部检测项 (当背景), 末尾按 [routerCheckQuota] 派配额。
+ * 配额写死在提示词里, 因为"发几条"这一侧只有 `send` 段知道; 而"至少一条落在检测项上"是一条
+ * 硬要求, 不是建议
  */
-function routerStartLine(decision) {
+function routerStartLine(decision, checks = [], checksSaid = {}, quota = { maxMessages: 1, checkMessages: 1 }) {
+  const all = (Array.isArray(checks) ? checks : [])
+    .filter((one) => one && one.enabled !== false && String(one?.what ?? '').trim() !== '')
+  const rows = all.map((one) => {
+    const kind = String(one?.when?.kind ?? '')
+    const at = String(one?.at ?? '')
+    const said = checksSaid && checksSaid[String(one?.id ?? '')] ? ' · 已经说过' : ''
+    return `- ${String(one.what).trim()}${kind ? ` (${kind}${at ? ` ${at}` : ''})` : ''}${said}`
+  })
+  const hitOf = new Map((Array.isArray(decision?.hits) ? decision.hits : []).map((one) => [String(one.id), one]))
+  const fired = all
+    .filter((one) => hitOf.has(String(one?.id ?? '')))
+    .map((one) => {
+      const hit = hitOf.get(String(one.id)) ?? {}
+      return `- ${String(one.what).trim()}: ${String(hit.fact ?? '')}`
+    })
+  const maxMessages = Math.max(1, Number(quota?.maxMessages ?? 1) || 1)
+  const checkMessages = Math.min(maxMessages, Math.max(0, Number(quota?.checkMessages ?? 0) || 0))
+  const quotaLines = all.length === 0
+    ? ['这一场没有检测项可提 —— 想说别的就说别的.']
+    : [
+        `这一场最多发 ${maxMessages} 条消息; 其中 ${checkMessages} 条要落在检测项上:`,
+        '- 至少 1 条, 一条都不提不算数; 也不许多过那几条',
+        '- 一条消息只说一件事: 两条检测项就两条消息, 不要并成一句, 也不要列出这张单子',
+        '- 先说这一拍真触发了的, 其余的当背景知道着就够了',
+      ]
   return [
     `[她的判断] ${decision.kind}: ${decision.brief}`,
     '开场不要复述这一行, 也不要说"我注意到" —— 直接说那句人话, 一两句',
     '说完就停, 不追问; 想记住的事用 lw_wish 记下来',
+    '',
+    ...(fired.length > 0 ? ['这一拍真触发了的:', ...fired, ''] : []),
+    ...(rows.length > 0 ? ['你此刻盯着的检测项 (全部):', ...rows, ''] : []),
+    ...quotaLines,
   ].join('\n')
 }
 
-/** 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那一条"这一次说过了" */
-async function routerMarkSaid(decision) {
+/**
+ * 说完之后记三笔账: 这次开口的时刻, 未了的事"今天提过了", 探索交来的那几条"这一次说过了"
+ *
+ * 2026-11-14: 一场可能被派了多条检测项 —— 她实际说了几条宿主无从知道, 所以按**派单**记账
+ * (取 `hits` 的前 `checkMessages` 条, 与开场那一份配额逐条对齐). 宁可少说一次, 也不要连着
+ * 两拍说同一件事
+ */
+async function routerMarkSaid(decision, quota = { checkMessages: 1 }) {
   const home = process.env.DSH_HOME
   if (!home) return
   const now = Date.now()
@@ -10620,9 +14297,13 @@ async function routerMarkSaid(decision) {
   const saidBefore = (state?.checksSaid && typeof state.checksSaid === 'object') ? state.checksSaid : {}
   // 键来自判断那一侧 (usage / time 是当天, event 是 `日期@startMs`): 这里只负责照抄
   const saidKey = typeof decision?.key === 'string' && decision.key !== '' ? decision.key : day
-  const checksSaid = decision?.kind === 'check' && decision?.id
-    ? { ...saidBefore, [String(decision.id)]: saidKey }
-    : saidBefore
+  const assigned = (Array.isArray(decision?.hits) ? decision.hits : [])
+    .slice(0, Math.max(1, Number(quota?.checkMessages ?? 1) || 1))
+  const checksSaid = assigned.length > 0
+    ? { ...saidBefore, ...Object.fromEntries(assigned.map((one) => [String(one.id), String(one.key)])) }
+    : (decision?.kind === 'check' && decision?.id
+      ? { ...saidBefore, [String(decision.id)]: saidKey }
+      : saidBefore)
   await writeRouterJson(routerStatePath(), {
     ...state,
     v: 1,
@@ -10631,6 +14312,11 @@ async function routerMarkSaid(decision) {
     // 这一笔是"退让"那条的起点: 下一次判断时看它之后他有没有说话 (见 [refreshIgnored])
     awaiting: { at: now, kind: String(decision?.kind ?? '') },
     last: decision,
+    // **开口即清零** (2.8.1 #11): 这一支本来就只在真的说出来之后调, 所以那一笔"错过几次"的
+    // 欠账直接写 0 —— +1 只在 [routerTick] 的未开口分支里 (见 [nextChatMisses])
+    chatMisses: 0,
+    // 压住的那笔账真说出来了就清掉 (2.8.1 #29): 留着它会让 `lw_router op=status` 一直报"攒着"
+    heldBack: null,
     ...(Object.keys(checksSaid).length > 0 ? { checksSaid } : {}),
   })
   if (decision?.kind !== 'wish' || !decision?.id) return
@@ -10725,7 +14411,7 @@ async function renderSlang() {
 }
 
 /**
- * 敲门那一下: 读齐输入 -> 判断 -> 要么直推一句, 要么开一场主动对话
+ * 唤醒那一下: 读齐输入 -> 判断 -> 要么直推一句, 要么开一场主动对话
  *
  * 直推优先 (`to === 'ball'`): 球那一场还在的时候, 一句话就够了 —— 为一句提醒开一整场会话是
  * 拿全量上下文换一句"歇会儿吧"
@@ -10736,23 +14422,395 @@ async function routerTick(ctx) {
   const decision = judgeRouter(inputs)
   if (decision.say !== true) {
     const state = (await readRouterJson(routerStatePath())) ?? {}
-    await writeRouterJson(routerStatePath(), { ...state, v: 1, at: inputs.now, last: decision })
+    const held = decision.heldBack && typeof decision.heldBack === 'object' ? decision.heldBack : null
+    await writeRouterJson(routerStatePath(), {
+      ...state,
+      v: 1,
+      at: inputs.now,
+      last: decision,
+      // 这一拍"该找句话却没说出口"就记一笔 (2.8.1 #11): 下一拍随口一句的概率高 20%,
+      // 静默 / 冷却 / 退让期那些拍不算 (见 [nextChatMisses])
+      chatMisses: nextChatMisses(state, decision),
+      // **被成本压住的那一拍会计账** (2.8.1 #29): 哪一件、多贵、为什么 —— 下一拍接着算,
+      // 真的开口了由 [routerMarkSaid] 清掉。别的拍 (静默 / 冷却) 不动上一笔账
+      ...(held
+        ? {
+          heldBack: {
+            at: inputs.now,
+            kind: String(held.kind ?? ''),
+            cost: Number(held.cost) || 0,
+            why: Array.isArray(held.why) ? held.why : [],
+          },
+        }
+        : {}),
+    })
+    if (held) {
+      console.log(
+        `luwi-channel: the router held back (cost ${Number(held.cost) || 0}, ${String(held.kind ?? '')}`
+          + ` ${Number(held.score) || 0})`,
+      )
+    }
     return { said: false, why: decision.why }
   }
-  const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
-  if (decision.to === 'ball') {
-    const line = routerLine(decision)
-    if (line) {
-      if (inBall) reportSay(line)
-      // 球那一场不在 (冷启动 / 宿主刚起来): 走一场主动对话, 否则这句话没有落脚处
-      else await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
-    }
-  } else {
-    await startProactive(ctx, { text: routerStartLine(decision), via: 'router' })
+  // 这一场能发几条 / 检测项占几条: 由 `send` 段算 (2026-11-14), 开场与记账用的是同一个数
+  const quota = routerCheckQuota(inputs.send)
+  // 他要求安静那一段 (方案 §8.2 第三条): 连球那一场还开着的直推也一起停 —— 只拦 `startProactive`
+  // 的话, 最常用的那一条路上"停 7 天"根本不成立 (2026-11-20 审查)
+  const mutedUntil = Number((await readRelation())?.mutedUntil ?? 0) || 0
+  if (mutedUntil > Date.now()) {
+    console.log(`luwi-channel: the router stayed quiet (he asked until ${new Date(mutedUntil).toISOString()})`)
+    return { said: false, why: 'muted' }
   }
-  await routerMarkSaid(decision)
+  const opening = routerStartLine(decision, inputs.checks, inputs.checksSaid, quota)
+  const inBall = typeof voiceDelivery.current === 'string' && voiceDelivery.current.length > 0
+  const line = routerLine(decision)
+  if (inBall) {
+    // 球那一场在场 (2026-11-21): 那句话写进当前场的 lw/out —— 门户与浮标从同一份读到,
+    // 取代只往球那块只读区冒一句的 reportSay. 一行一 seq, 两端不会各画一遍
+    if (line) await lwOutAppend(voiceDelivery.current, { kind: 'text', text: line })
+  } else {
+    // 球那一场不在 (冷启动 / 宿主刚起来): 开一场只按步数跑的探索, 收尾时把挑好的那句顺带说出来.
+    // 按时间的排期场已撤, 主动开口这一档并进探索 (2026-11-21)
+    //
+    // 2026-11-22: 排期没了之后设置页那两格只剩她能用 —— **步数** 与 **下一次探索的任务**.
+    // 判断层这条路上没有人手写正文, 所以卡与步数在这里现读 (每场一次, 文件只有几百字节):
+    // 卡进正文 (空卡才落"自由探索这台手机"), 步数进预算 (设置值 10 就真的只跑 10 步)
+    const card = await readExploreTask()
+    const { steps } = await readExploreSchedule()
+    console.log(
+      `luwi-channel: the router opened an exploration (budget ${steps} steps, card ${card.length} chars)`,
+    )
+    await startExplore(ctx, { via: 'router', speakOnFinish: line || opening, text: card, steps })
+  }
+  // 直推只写了一句, 开成探索才按 `quota` 派单记账
+  await routerMarkSaid(decision, inBall ? { checkMessages: 1 } : quota)
   console.log(`luwi-channel: the router spoke (${decision.kind}: ${decision.brief})`)
-  return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'conversation' }
+  return { said: true, kind: decision.kind, brief: decision.brief, via: inBall ? 'bubble' : 'explore' }
+}
+
+/* ── 点「唤醒一下」那一下 (2.8.1 #8 / #31) ───────────────────────────────────
+ *
+ * 主人 2026-11-15: "点击唤醒一下时, 必须主动说话". 那一颗按钮在判断层 (门户 `⋯ → 判断`), 投的是
+ * `source:"wake"`, 与闹钟那一拍 `router` 分开 —— 见 [routerWakeNow] 与应用的 `VoiceInbox.SOURCE_WAKE`
+ *
+ * 2026-11-18 (#31, 主人: "发送的内容不能是'怎么了''嗯?'这种疑问句 ... 要求必须主动找话题, 话题必须
+ * 依据判断层内容展开"): 先应一声的那一池被动话整池撤掉, 换成"从判断层里挑一件说出来" —— 检测项 /
+ * 未了的事有就按它的原话开场 (像"你之前提到的「开会前提醒」, 我还记着呢~"), 一件都没有才回到
+ * [ROUTER_WAKE_TOPICS] 那一池闲话; 那一场的开场正文同时把整张话题单子交给她, 让她接着聊
+ */
+
+/**
+ * 判断层里一件能聊的事都没有时, 她先抛的那一句 (轮转池)
+ *
+ * 只有**主动找话题**的句子: 被动应一声的那几句 ("我在, 怎么啦?" / "嗯? 叫我?") 在 #31 里整池撤掉,
+ * 主人点一下要的是"她来找你聊", 不是"她等你开口"
+ */
+const ROUTER_WAKE_TOPICS = Object.freeze([
+  '今天过得怎么样呀',
+  '今天有什么想跟我说的吗',
+  '在忙什么呢, 跟我说说呗.',
+  '今天有什么开心的事吗',
+  '吃饭了没, 今天吃了什么好吃的',
+  '今天累不累, 要不要聊会儿天.',
+])
+
+/** 拿判断层记着的事开场时套的句式: `{what}` 换成那件事的原话 (检测项 / 未了的事) */
+const ROUTER_WAKE_TOPIC_LINES = Object.freeze([
+  '你之前提到的「{what}」, 我还记着呢, 别忘了哦~',
+  '对了, 「{what}」这件事我一直帮你记着, 后来怎么样啦?',
+  '想起你之前说的「{what}」, 现在要不要聊两句?',
+])
+
+/** 池子空 / 三次重选都不合格时那一句 (点了没回音比一句平淡话更糟, 但它仍带一个话题) */
+const ROUTER_WAKE_FALLBACK = '我在呢, 今天过得怎么样呀'
+
+/**
+ * 下一次点「唤醒一下」先应哪一句 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * **轮转不随机**: 随机连着抽中同一句是常有的事, 而主人连点三下看见两个"嗯?"会以为又卡住了。
+ * 游标落在 `router.json` 的 `wake.cursor`, 于是宿主重启之后也记得上一句是谁
+ *
+ * @param {string[]} lines 池子
+ * @param {number} cursor 上一次用到哪一格 (负数 / 坏值都夹回来)
+ * @returns {{text: string, cursor: number}} 这一句与下一次的游标
+ */
+function wakeLineFor(lines, cursor) {
+  const pool = (Array.isArray(lines) ? lines : [])
+    .filter((one) => typeof one === 'string')
+    .map((one) => one.trim())
+    .filter((one) => one !== '')
+  if (pool.length === 0) return { text: ROUTER_WAKE_FALLBACK, cursor: 0 }
+  const raw = Number(cursor)
+  const wanted = Number.isFinite(raw) ? Math.floor(raw) : 0
+  const at = ((wanted % pool.length) + pool.length) % pool.length
+  return { text: pool[at], cursor: (at + 1) % pool.length }
+}
+
+/**
+ * 判断层里现在能拿来开场的话题 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * 两处来源就是判断层自己读的那两份: `router.json` 的 `checks` (探索交来的检测项) 与
+ * `wishes.json` 的 `items` (主人亲口交代的未了的事). **关掉的检测项不算** —— 他关过一次就是不想提.
+ * 今天说过的沉到后面 (检测项看 `checksSaid`, 未了的事看 `said`), 于是连点两下先聊没提过的那件;
+ * 同一句话在两份里都出现时只留前面那份
+ *
+ * `source` 是这条信号的门类 (2.8.1 #31): `usage` / `schedule` / `check` / `wish` —— 门户把它透传成
+ * 那句气泡的 `meta.topicSource`, 排障时一眼看出这句是从哪条信号里来的
+ *
+ * @param {object} state `router.json` 那一份 (坏 / 没有就当空)
+ * @param {object[]} wishes `wishes.json` 的 items
+ * @param {number} now 现在 (今天按这台机器的本地日期算, 与判断层同一把尺子)
+ * @returns {{id: string, kind: string, source: string, what: string, saidToday: boolean}[]}
+ */
+function wakeTopicsOf(state, wishes, now) {
+  const day = routerDayKey(now)
+  const said = state?.checksSaid && typeof state.checksSaid === 'object' ? state.checksSaid : {}
+  const checks = (Array.isArray(state?.checks) ? state.checks : [])
+    .filter((one) => one && one.enabled !== false && String(one?.what ?? '').trim() !== '')
+    .map((one) => {
+      const key = String(said[String(one?.id ?? '')] ?? '')
+      return {
+        id: String(one?.id ?? ''),
+        kind: 'check',
+        source: wakeSourceOf(one?.when),
+        what: String(one.what).trim(),
+        saidToday: key !== '' && key.startsWith(day),
+      }
+    })
+  const items = (Array.isArray(wishes) ? wishes : [])
+    .filter((one) => one && String(one?.what ?? '').trim() !== '')
+    .map((one) => ({
+      id: String(one?.id ?? ''),
+      kind: 'wish',
+      source: 'wish',
+      what: String(one.what).trim(),
+      saidToday: Array.isArray(one?.said) && one.said.map(String).includes(day),
+    }))
+  const seen = new Set()
+  const all = [...checks, ...items].filter((one) => {
+    if (seen.has(one.what)) return false
+    seen.add(one.what)
+    return true
+  })
+  return [...all.filter((one) => !one.saidToday), ...all.filter((one) => one.saidToday)]
+}
+
+/**
+ * 一条检测项的判法归到哪个信号门类 (纯函数)
+ *
+ * 只用来给门户那一格 `meta.topicSource` 一个稳定的词, 不参与选句 —— 三档判法在判断层里本来就是
+ * 同一张 `checks` 表, 分门只是让人看得出这句是"用久了" / "到点" / "日历前"哪一种
+ */
+function wakeSourceOf(when) {
+  const kind = String(when?.kind ?? '')
+  if (kind === 'usage') return 'usage'
+  if (kind === 'time' || kind === 'event') return 'schedule'
+  return 'check'
+}
+
+/**
+ * 这一句是不是"被动等她开口" (纯函数, 2.8.1 #31)
+ *
+ * 主人口径: "发送的内容不能是'怎么了''嗯?'这种疑问句, 这还是相当于被动唤醒" —— 于是两类判被动:
+ * ① 以那几句应答语开头 (`怎么了` / `嗯?` / `在吗` / `有啥事` / `叫我` …)
+ * ② 以问号结尾且短于 [ROUTER_WAKE_PASSIVE_CHARS] 个字 (光秃秃一个问句, 没有话题)
+ *
+ * **主动开场那几句不带问号**: "今天过得怎么样呀" 这类按 ② 会被判被动, 而它恰恰是主人点名的样子 ——
+ * 所以池子里的句子都写成不带问号的口语, "长问句" (带具体那件事的) 一律放行
+ */
+const ROUTER_WAKE_PASSIVE_PREFIXES = Object.freeze([
+  '怎么了',
+  '怎么啦',
+  '嗯?',
+  '嗯？',
+  '嗯嗯',
+  '在吗',
+  '在不在',
+  '有啥事',
+  '叫我',
+  '我听着呢',
+])
+
+/** 以问号结尾且不到这么多字的, 算"光秃秃一个问句" */
+const ROUTER_WAKE_PASSIVE_CHARS = 12
+
+/** 判被动时最多重选几条 (重选满了就用 [ROUTER_WAKE_FALLBACK] 并记 `opener:"fallback"`) */
+const ROUTER_WAKE_RESELECT_MAX = 3
+
+function isPassiveOpener(text) {
+  const line = String(text ?? '').trim()
+  if (line === '') return true
+  if (ROUTER_WAKE_PASSIVE_PREFIXES.some((one) => line.startsWith(one))) return true
+  const asked = line.endsWith('?') || line.endsWith('？')
+  return asked && Array.from(line).length < ROUTER_WAKE_PASSIVE_CHARS
+}
+
+/**
+ * 点「唤醒一下」先开口的那一句 (纯函数, 判据 `check-luwi-portal` 真跑)
+ *
+ * 2.8.1 #31: 这一句必须**主动找话题**. 判断层里有记着的事就把它说出来 —— 原话带在「」里, 于是
+ * "话题依据判断层展开"在**他看见的第一颗气泡**上就成立, 不靠模型那一轮赶上来; 一件都没有才退回
+ * [ROUTER_WAKE_TOPICS] 那一池. 轮转跨"话题 x 句式"两维: 连点三下既不是同一句, 也不会拿同一个
+ * 句式连着说同一件事 (与 #8 那条"连点不是同一句"同一条验收)
+ *
+ * 台词闸: 候选过一遍 [isPassiveOpener], 被判被动的往下一格重选 (最多 [ROUTER_WAKE_RESELECT_MAX]
+ * 次); 三次都不合格才用 [ROUTER_WAKE_FALLBACK] 并回 `opener:"fallback"` —— 点了没回音比一句平淡话
+ * 更糟, 但"等你开口"那一类句子一次都不许自己发出去
+ *
+ * @param {object} state `router.json` 那一份
+ * @param {object[]} wishes `wishes.json` 的 items
+ * @param {number} now 现在
+ * @param {number} cursor 上一次用到哪一格 (负数 / 坏值都夹回来)
+ * @returns {{text: string, cursor: number, kind: string, source: string, opener: string, id: string, what: string, topics: object[], saidToday: boolean}}
+ */
+function wakeTopicFor(state, wishes, now, cursor) {
+  const topics = wakeTopicsOf(state, wishes, now)
+  const raw = Number(cursor)
+  const wanted = Number.isFinite(raw) ? Math.floor(raw) : 0
+  const slots = topics.length === 0
+    ? ROUTER_WAKE_TOPICS.length
+    : topics.length * ROUTER_WAKE_TOPIC_LINES.length
+  const cycle = Math.max(1, slots)
+  const start = ((wanted % cycle) + cycle) % cycle
+  for (let step = 0; step < ROUTER_WAKE_RESELECT_MAX; step += 1) {
+    const at = (start + step) % cycle
+    let text = ''
+    let topic = null
+    if (topics.length === 0) {
+      text = wakeLineFor(ROUTER_WAKE_TOPICS, at).text
+    } else {
+      topic = topics[at % topics.length]
+      const line = ROUTER_WAKE_TOPIC_LINES[Math.floor(at / topics.length) % ROUTER_WAKE_TOPIC_LINES.length]
+      text = line.split('{what}').join(topic.what)
+    }
+    if (isPassiveOpener(text)) continue
+    return {
+      text,
+      cursor: (start + step + 1) % cycle,
+      kind: topic === null ? 'chat' : topic.kind,
+      source: topic === null ? 'fallback' : topic.source,
+      opener: 'active',
+      id: topic === null ? '' : topic.id,
+      what: topic === null ? '' : topic.what,
+      topics,
+      saidToday: topic === null ? false : topic.saidToday,
+    }
+  }
+  return {
+    text: ROUTER_WAKE_FALLBACK,
+    cursor: (start + ROUTER_WAKE_RESELECT_MAX) % cycle,
+    kind: 'fallback',
+    source: 'fallback',
+    opener: 'fallback',
+    id: '',
+    what: '',
+    topics,
+    saidToday: false,
+  }
+}
+
+/**
+ * 点「唤醒一下」那一场的开场正文 (纯函数)
+ *
+ * 与 `proactiveStartLine` 分开: 那一份允许"没有值得说的就保持沉默", 而这一颗是主人亲手点的 ——
+ * 第一句已经由宿主先落了, 这里只交代三件事: 那一句已经说出去 (别重复), **接着说下去** (2.8.1 #31:
+ * 不许再回 "怎么了" "嗯?" 这类等他开口的话), 判断层里还有哪些事可以聊.
+ * **不说来路**: 按钮 / 面板 / 判断层 / 指令这些字一个都不进她的嘴 (与 #43 同一条口径)
+ *
+ * @param {string} alreadySaid 宿主先开口出去的那一句
+ * @param {{topics?: {what: string, saidToday?: boolean}[]}} material 判断层里能聊的事 (由 [wakeTopicFor] 带出来)
+ */
+function wakeStartLine(alreadySaid, material = {}) {
+  const said = String(alreadySaid ?? '').trim()
+  const rows = (Array.isArray(material?.topics) ? material.topics : [])
+    .filter((one) => one && String(one?.what ?? '').trim() !== '')
+    .map((one) => {
+      const hint = one?.saidToday === true ? ' · 今天已经提过' : ''
+      return `- ${String(one.what).trim()}${hint}`
+    })
+  return [
+    '主人刚在手机上戳了你一下, 想听你说句话.',
+    said === '' ? '' : `你先开口说的那一句是: ${said}`,
+    said === '' ? '' : '那一句已经发出去了, 不要重复它.',
+    '这一下要你**主动找话题**: 不要只回「怎么了」「嗯?」这类等他开口的话, 顺着你刚说的那句往下聊, 把话递到他手里.',
+    rows.length > 0
+      ? ['话题从他记着的这些事里长出来 (挑一件真的与他有关的):', ...rows].join('\n')
+      : '一件记着的事都没有, 那就挑一件此刻能聊的: 今天过得怎么样 / 在忙什么 / 吃饭了没.',
+    '还想补就再补一句 (lw_say), 没有别的就保持沉默, 一条都不写.',
+    '别说按钮 / 面板 / 判断层 / 指令 / 系统这类来路, 就像平时随口接着说.',
+  ].filter((one) => one !== '').join('\n')
+}
+
+/**
+ * 判断层那颗「唤醒一下」: 人亲手点的, 不是闹钟 (2.8.1 #8 / #31)
+ *
+ * 与 [routerTick] 分两支是刻意的: 那一支是她自己在挑时机, 静默时段 / 冷却 / 沉睡前等待 /
+ * "没什么值得说的"每一道都能让它不出声; 而这一颗是人当面戳她 —— 他等了, 就得有回音。所以这里
+ * **一道闸都不看**: 直接开一场主动对话 (那一场照旧归 `proactive` 预设与三张表), 并把第一句先落进
+ * 它的 `lw/out`
+ *
+ * #31 起那一句**不是应声**: 从 `router.json` 的检测项 / `wishes.json` 的未了的事里挑一件说出来
+ * ([wakeTopicFor]), 一件都没有才用闲话池; 挑中的是哪一件也写进 `wake`, 面板与判据读同一份
+ */
+async function routerWakeNow(ctx) {
+  const before = (await readRouterJson(routerStatePath())) ?? {}
+  const cursor = Number(before?.wake?.cursor ?? 0)
+  const now = Date.now()
+  const chosen = wakeTopicFor(before, await readWishes(), now, Number.isFinite(cursor) ? cursor : 0)
+  const started = await startProactive(ctx, {
+    text: wakeStartLine(chosen.text, chosen),
+    via: 'wake',
+    openLine: chosen.text,
+    openTopic: chosen.source,
+  })
+  // 这一笔只记"开口了"与游标: `awaiting` 不写 (点了按钮不等于要主人再回一句), 冷却那一格照旧归
+  // 自动那一支; `lastSpokenAt` 要写 —— 面板上「上一次开口」读的就是它, 刚说完却显示「—」也是错的
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  await writeRouterJson(routerStatePath(), {
+    ...state,
+    v: 1,
+    at: now,
+    lastSpokenAt: now,
+    last: {
+      say: true,
+      kind: 'wake',
+      brief: chosen.what === ''
+        ? '主人在判断层点了「唤醒一下」'
+        : `主人在判断层点了「唤醒一下」: ${chosen.what}`,
+      why: '点了一下',
+    },
+    // 人亲手戳了一下也是"开口" (2.8.1 #11): 错过那笔账一样清零
+    chatMisses: 0,
+    // `from` / `source` / `opener` / `what` 是 #31 那一句"从哪一条信号开的口": 面板与判据读同一份
+    wake: {
+      at: now,
+      cursor: chosen.cursor,
+      text: chosen.text,
+      from: chosen.kind,
+      source: chosen.source,
+      opener: chosen.opener,
+      what: chosen.what,
+      session: started?.session ?? null,
+    },
+  })
+  console.log(
+    `luwi-channel: the router spoke (wake: ${chosen.source}):`
+      + ` conversation ${String(started?.session ?? '').slice(0, 8)} pulled up,`
+      + ` first line #${Number(started?.open ?? 0) || 0}`
+      + ` (${chosen.opener}${chosen.what === '' ? '' : `: ${chosen.what}`}) "${chosen.text}"`,
+  )
+  return {
+    said: true,
+    kind: 'wake',
+    brief: 'the wake button',
+    topic: chosen.kind,
+    source: chosen.source,
+    opener: chosen.opener,
+    what: chosen.what,
+    session: started?.session ?? null,
+    line: chosen.text,
+    via: 'wake',
+  }
 }
 
 /**
@@ -10912,13 +14970,543 @@ function startBallPhase(ctx) {
   void writeBallPhase()
 }
 
+/* ── 情感状态 / 关系记忆 / 共情策略 (2026-11-20) ────────────────────────────
+ *
+ * 方案: `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md` (P0 / P1)
+ *
+ * 分三层, 理由写在方案 §5.1 与 §14:
+ *   · **纯函数**在 `host-plugin/emotion/state.mjs` —— 状态向量 / 衰减 / 共情策略 / 召回打分 / 五格.
+ *     判据 `tools/check-emotion.mjs` 直接 import 它真跑, 一行都不依赖设备
+ *   · **宿主这一节**只做三件: 读现成文件 → 折成 inputs → 落 `lw/memory/affect.json` (给 `personaFor`
+ *     与开场正文各取一段). 这里一旦调模型, 那套"确定性内核"就白抄了
+ *   · **记忆三层**落 `lw/memory/`: `episodes.jsonl` (情节) / `profile.json` (画像) / `relation.json`
+ *     (关系), 边界落 `boundaries.json`. `lw_memory` 是模型唯一的写入口, `lw_say` 拿 `hard` 条目当硬闸
+ *
+ * 三条纪律与纯函数那一份一致: **读不到不抛 / 空值不出现 / 只记有出处的原话**
+ */
+
+/** 记忆目录 (`$DSH_HOME/lw/memory`), 没设 DSH_HOME 就是 null */
+function memoryDir() {
+  return homePath('lw', 'memory')
+}
+
+/** 情节那份 jsonl 在哪 */
+function episodesPath() {
+  const dir = memoryDir()
+  return dir === null ? null : join(dir, 'episodes.jsonl')
+}
+
+/** 画像 / 关系 / 边界 / 状态那四份 json 的路径 */
+function memoryPath(name) {
+  const dir = memoryDir()
+  return dir === null ? null : join(dir, name)
+}
+
+/** 情节最多几条: 400 条是方案 §6.1 的上限, 再多召回也翻不动 */
+const EPISODE_MAX = 400
+
+/** 策略那本账最多几行 (方案 §12.1 第五个数: 一周的分布, 500 行足够细也足够小) */
+const PLAN_MAX = 500
+
+/** 关系曲线最多几行 (方案 §12.2: 一天一行, 400 天够看趋势) */
+const RELATION_HISTORY_MAX = 400
+
+/** 画像最多几个键 (方案 §6.1): 白名单之外一律不收 —— 30 个键已经能把一个人写得很细 */
+const PROFILE_MAX = 30
+
+/** 他说的那些像隐私的形状: 只用来拒收, 原文一个字都不留 (方案 §4.2「看见了也当没看见」) */
+const AFFECT_PRIVATE_SHAPES = Object.freeze([
+  { label: '长数字串 (验证码 / 卡号 / 手机号)', test: /\d{6,}/u },
+  { label: '金额', test: /\d+\s*(元|块|千|万)/u },
+  { label: '链接', test: /(https?:|www\.)/iu },
+  { label: '隐私词 (验证码 / 密码 / 住址…)', test: /(验证码|密码|口令|身份证|银行卡|住址|地址|定位)/u },
+])
+
+/** 他说过的负面词 (只用来数一个数, 原文一个字都不留) */
+const AFFECT_NEGATIVE_WORDS = Object.freeze(['烦', '累死', '别烦', '不想聊', '难受', '难过', '气死', '滚'])
+
+/** 读一份 json, 坏了当没有 (与 [readRouterJson] 同一条路) */
+async function readMemoryJson(path) {
+  return readRouterJson(path)
+}
+
+/** 原子写一份 json */
+async function writeMemoryJson(path, payload) {
+  return writeRouterJson(path, payload)
+}
+
+/**
+ * 写不进就抛 (2026-11-20 审查): `writeRouterJson` 只 warn, 于是 `lw_memory` 会在盘满 / 只读时
+ * 照样回一句"记住了" —— 她说过的话与真的记住是两件事, 这里不许糊过去
+ */
+async function writeMemoryJsonStrict(path, payload, what) {
+  if (!path) throw new Error(`${what} has nowhere to go: DSH_HOME is not set`)
+  const temporary = temporaryName(path)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`, 'utf8')
+    await rename(temporary, path)
+  } catch (error) {
+    throw new Error(`${what} was not written: ${error?.message ?? error}`)
+  }
+}
+
+/**
+ * 这一句能不能落进记忆 (方案 §4.2: 验证码 / 金额 / 地址看见了也当没看见)
+ *
+ * 代码侧一道形状闸, 不只靠提示词: 记一次就会随每次主动场 prompt 出网, 那是**永久**的
+ *
+ * @returns {string} 命中的那一类 (空串 = 可以记)
+ */
+function privateShapeOf(text) {
+  const said = String(text ?? '')
+  if (said === '') return ''
+  for (const one of AFFECT_PRIVATE_SHAPES) {
+    if (one.test.test(said)) return one.label
+  }
+  return ''
+}
+
+/** 他要求忘掉的那几条的墓碑: `wish:<id>` 之类的 ref —— 免得宿主下一轮又补回来 */
+async function readForgottenRefs() {
+  const file = (await readMemoryJson(memoryPath('forgotten.json'))) ?? {}
+  return Array.isArray(file.refs) ? file.refs.map((one) => String(one)) : []
+}
+
+/** 记一条"这个 ref 已被他要求忘掉" */
+async function addForgottenRefs(refs) {
+  const wanted = (Array.isArray(refs) ? refs : []).map((one) => String(one ?? '')).filter(Boolean)
+  if (wanted.length === 0) return
+  const before = await readForgottenRefs()
+  await writeMemoryJsonStrict(
+    memoryPath('forgotten.json'),
+    { v: 1, at: Date.now(), refs: [...new Set([...before, ...wanted])].slice(-200) },
+    'forgotten.json',
+  )
+}
+
+/** 读情节 (坏行跳过: 一行坏了不该让整份记忆消失) */
+async function readEpisodes() {
+  const path = episodesPath()
+  if (path === null) return []
+  try {
+    const text = await readFile(path, 'utf8')
+    return text
+      .split('\n')
+      .filter(Boolean)
+      .map((one) => {
+        try {
+          const parsed = JSON.parse(one)
+          return parsed && typeof parsed === 'object' ? parsed : null
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** 整份重写 (上限 400 条, 留最新的) */
+async function writeEpisodes(rows) {
+  const path = episodesPath()
+  if (path === null) return false
+  const kept = (Array.isArray(rows) ? rows : []).slice(-EPISODE_MAX)
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    const temporary = temporaryName(path)
+    await writeFile(temporary, kept.map((one) => JSON.stringify(one)).join('\n') + (kept.length > 0 ? '\n' : ''), 'utf8')
+    await rename(temporary, path)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: episodes.jsonl was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/** 他划过的那几条线 (方案 §8.1) */
+async function readBoundaries() {
+  const file = (await readMemoryJson(memoryPath('boundaries.json'))) ?? {}
+  return (Array.isArray(file.items) ? file.items : []).filter((one) => one && typeof one === 'object')
+}
+
+/** 关系那一格: 相识天数 / 亲近度 / 他划过的线之外的账 */
+async function readRelation() {
+  return (await readMemoryJson(memoryPath('relation.json'))) ?? {}
+}
+
+/** 读一本账 (坏行跳过; 读不到就是空) —— 落在 `emotion/ledger.mjs`, 那里能被判据真跑 */
+const readMemoryLines = (path) => readJsonl(path)
+
+/**
+ * 往一本只追加的账上补一行 (只留最新 [max] 行)
+ *
+ * 写不动只 warn: 这两本账 (`plans.jsonl` / `relation.jsonl`) 是给审计脚本看的读数, 不是记忆本身 ——
+ * 不许因为账本写不进去就把这一场主动对话拖死
+ */
+async function appendMemoryJsonl(path, row, max, what) {
+  try {
+    await appendJsonl(path, row, max)
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: ${what} was not appended: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/**
+ * 关系曲线那本账: **一天一行** —— 换天就追加, 同一天里只改写最后那一行
+ *
+ * 写不动只 warn (与策略那本同一条纪律): 账本是读数, 不许把这一拍拖死
+ */
+async function recordRelationPoint(path, point, max) {
+  if (!path) return false
+  try {
+    const rows = await readMemoryLines(path)
+    const last = rows.length > 0 ? rows[rows.length - 1] : null
+    if (last !== null && Number(last?.day ?? 0) === Number(point?.day ?? -1)) {
+      rows[rows.length - 1] = point
+      await writeJsonl(path, rows, max)
+    } else {
+      await appendJsonl(path, point, max)
+    }
+    return true
+  } catch (error) {
+    console.warn(`luwi-channel: relation.jsonl was not written: ${error?.message ?? error}`)
+    return false
+  }
+}
+
+/**
+ * 关系账跟着事件走 (方案 §6.1 的第三层: **宿主自动, 不调模型**)
+ *
+ * 只累加两样: 相识天数 (从第一次见到他算) 与亲近度 (他接了她的话才涨). 亲近度涨得慢是刻意的 ——
+ * 方案 §12.2 要看的就是"上升过快 = 伪亲密, 一直平 = 没长进"
+ */
+async function touchRelation(now, inputs) {
+  const path = memoryPath('relation.json')
+  if (path === null) return {}
+  const before = await readRelation()
+  const firstSeenAt = Number(before?.firstSeenAt ?? 0) > 0 ? Number(before.firstSeenAt) : now
+  const days = Math.max(0, Math.floor((now - firstSeenAt) / (24 * 60 * 60 * 1000)) + 1)
+  let closeness = Number(before?.closeness ?? 0)
+  if (!Number.isFinite(closeness)) closeness = 0
+  // 他接了她的话 / 他主动开口: 记一点点亲近; 没人接就退回去一点点 (不是惩罚, 是别虚高)
+  const lastUserAt = Number(inputs?.lastUserAt ?? 0) || 0
+  const lastSpokenAt = Number(inputs?.lastSpokenAt ?? 0) || 0
+  const answeredAt = Number(before?.answeredAt ?? 0) || 0
+  if (lastSpokenAt > 0 && lastUserAt > lastSpokenAt && answeredAt !== lastSpokenAt) {
+    closeness += 0.02
+  }
+  const ignored = Math.max(0, Number(inputs?.ignored ?? 0) || 0)
+  // 减分也要去重 (2026-11-20 审查): 只看"又涨了一次"那一格, 否则他两次没接之后的每一拍都再扣
+  // 0.01, 一晚上能把 closeness 从 0.6 扣到 0
+  const penalizedFor = Number(before?.penalizedFor ?? 0) || 0
+  let nextPenalized = penalizedFor
+  if (ignored >= 2 && ignored > penalizedFor) {
+    closeness -= 0.01
+    nextPenalized = ignored
+  }
+  closeness = Math.min(0.95, Math.max(0, closeness))
+  const next = {
+    v: 1,
+    at: now,
+    firstSeenAt,
+    days,
+    closeness: Math.round(closeness * 100) / 100,
+    ignored,
+    answeredAt: lastSpokenAt > 0 && lastUserAt > lastSpokenAt ? lastSpokenAt : answeredAt,
+    penalizedFor: nextPenalized,
+    // 他明确说"别说了"之后那一段静默 (方案 §8.2 第三条, 由 lw_memory op=mute 写)
+    mutedUntil: Number(before?.mutedUntil ?? 0) || 0,
+  }
+  // 每 20 s 一拍都换 `at` 会让这份文件每轮必写一次 (2026-11-20 审查)。只比真正有意义的那几格
+  const SAME = ['firstSeenAt', 'days', 'closeness', 'ignored', 'answeredAt', 'penalizedFor', 'mutedUntil']
+  const unchanged = SAME.every((key) => (Number(next[key]) || 0) === (Number(before?.[key]) || 0))
+  if (!unchanged) await writeMemoryJson(path, next)
+  // 关系曲线 (方案 §12.2): `relation.json` 每拍覆盖, 曲线要一本账才画得出来 —— **一天一行**:
+  // 换天了补一行, 同一天里亲近度再变只改写那一行 (2026-11-21 审查: 原先"挪 0.02 也补一行",
+  // 而他每接一句就是 +0.02, 400 行封顶几天就满, delta 的起点会被悄悄裁掉)
+  if (!unchanged) {
+    const dayStart = new Date(now)
+    dayStart.setHours(0, 0, 0, 0)
+    await recordRelationPoint(memoryPath('relation.jsonl'), {
+      at: now,
+      day: dayStart.getTime(),
+      days: next.days,
+      closeness: next.closeness,
+    }, RELATION_HISTORY_MAX)
+  }
+  return next
+}
+
+/**
+ * 宿主把 `wishes.json` 的未了的事补进情节 (方案 §6.1: 宿主自动补)
+ *
+ * **只补他亲口交代过的那几件** (`wishes.json` 本来就是"他交代她记着的事"): 聊天原文不落这里 ——
+ * 那是隐私, 也是方案 §8.3 那句"不许假装"的另一半
+ */
+async function hostMaintainEpisodes(now) {
+  const wishes = await readWishes()
+  const rows = await readEpisodes()
+  const forgotten = new Set(await readForgottenRefs())
+  const live = new Set(wishes.map((one) => `wish:${String(one?.id ?? '')}`))
+  let changed = 0
+  // ① 那件他交代的事办完了 (wishes 里没了): 这条情节的"未了"收掉 —— 留着会一直按未了加权
+  for (const row of rows) {
+    if (row?.open !== true || typeof row?.ref !== 'string' || !row.ref.startsWith('wish:')) continue
+    if (live.has(row.ref)) continue
+    row.open = false
+    changed += 1
+  }
+  // ② 新的那几件补进来 (被要求忘掉的 ref 不再复活)
+  const known = new Set(rows.map((one) => String(one?.ref ?? '')))
+  for (const wish of wishes) {
+    const ref = `wish:${String(wish?.id ?? '')}`
+    if (ref === 'wish:' || known.has(ref) || forgotten.has(ref)) continue
+    const what = String(wish?.what ?? '').slice(0, 120)
+    if (what === '' || privateShapeOf(what) !== '') continue
+    rows.push({
+      id: `e${now.toString(36)}${changed.toString(36)}`,
+      at: Number(wish?.madeAt ?? 0) || now,
+      who: 'he',
+      what,
+      valence: 0,
+      refs: [],
+      ref,
+      open: true,
+    })
+    known.add(ref)
+    changed += 1
+  }
+  if (changed > 0) await writeEpisodes(rows)
+  return changed
+}
+
+/**
+ * 把现成文件折成 `affectEstimateOf` 要的那几个事实 (方案 §5.4)
+ *
+ * 全是**读**, 一个桥调用都不发: 状态是推导值, 每轮开始算一次不该带 1.5 s 的日历开销
+ */
+async function emotionInputsOf(now) {
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  const lw = join(home, 'lw')
+  const state = (await readRouterJson(routerStatePath())) ?? {}
+  const usage = (await readRouterJson(join(lw, 'usage.json'))) ?? {}
+  const signals = await readRouterSignals(join(lw, 'signals.jsonl'), 60)
+  const inbox = await readRouterSignals(join(home, 'voice', 'inbox.jsonl'), 200)
+  const his = inbox.filter((one) => ['voice', 'keyboard', 'ball'].includes(String(one?.source ?? '')))
+  const dayStart = new Date(now)
+  dayStart.setHours(0, 0, 0, 0)
+  const today = his.filter((one) => Number(one?.at ?? 0) >= dayStart.getTime())
+  const last24 = his.filter((one) => now - Number(one?.at ?? 0) <= 24 * 60 * 60 * 1000)
+  const firstUserAt = today.reduce((min, one) => {
+    const at = Number(one?.at ?? 0) || 0
+    if (at <= 0) return min
+    return min === 0 ? at : Math.min(min, at)
+  }, 0)
+  const negativeHits = last24.reduce((sum, one) => {
+    const text = String(one?.text ?? '')
+    return sum + (AFFECT_NEGATIVE_WORDS.some((word) => text.includes(word)) ? 1 : 0)
+  }, 0)
+  const phoneMinutes = (Array.isArray(usage?.today) ? usage.today : [])
+    .filter((one) => !routerExcludedApp(one))
+    .reduce((sum, one) => sum + Math.max(0, Number(one?.ms ?? 0) || 0) / 60000, 0)
+  const busy = routerBusyUseApp(usage?.foreground, usage?.today)
+  // "打游戏打久了"那一条 (方案 §5.3 的 long_game): 今天有哪个游戏过了 appMinutes 那条线
+  const appMinutes = Math.max(5, Number(state?.rules?.appMinutes ?? ROUTER_DEFAULTS.appMinutes) || ROUTER_DEFAULTS.appMinutes)
+  const longGame = (Array.isArray(usage?.today) ? usage.today : [])
+    .map((one) => ({
+      minutes: Math.floor((Number(one?.ms ?? 0) || 0) / 60000),
+      game: one?.game === true || ROUTER_GAME_PACKAGES.has(String(one?.pkg ?? '')),
+    }))
+    .filter((one) => one.game && one.minutes >= appMinutes)
+    .sort((a, b) => b.minutes - a.minutes)[0] ?? null
+  const callRecent = signals.some(
+    (one) => one?.kind === 'call' && now - Number(one?.at ?? 0) <= ROUTER_CALL_RECENT_MS,
+  )
+  const lastUserAt = his.reduce((max, one) => Math.max(max, Number(one?.at ?? 0) || 0), 0)
+  return {
+    now,
+    phase: emotion.phaseOf(now),
+    lastUserAt,
+    lastSpokenAt: Math.max(
+      Number(state?.lastSpokenAt ?? 0) || 0,
+      Number(state?.awaiting?.at ?? 0) || 0,
+    ),
+    ignored: Math.max(0, Number(state?.ignored ?? 0) || 0),
+    userTurns: last24.length,
+    userTurnsToday: today.length,
+    firstUserAt,
+    negativeHits,
+    phoneMinutes,
+    foregroundGame: busy?.game === true,
+    busy: busy !== null,
+    longGame: longGame !== null,
+    longGameMinutes: Number(longGame?.minutes ?? 0) || 0,
+    callRecent,
+    chatMisses: Math.max(0, Number(state?.chatMisses ?? 0) || 0),
+  }
+}
+
+/** `sim.json` 的 `affect` 段 (五格; 缺键回缺省) */
+async function readSimAffect() {
+  const home = process.env.DSH_HOME
+  if (!home) return emotion.AFFECT_SETTING_DEFAULTS
+  const sim = (await readRouterJson(join(home, 'lw', 'sim.json'))) ?? {}
+  return emotion.affectSettingsOf(sim?.affect)
+}
+
+/** 上一次那一笔 (用于算"过了多久、回了多少") */
+async function readAffectState() {
+  const file = await readMemoryJson(memoryPath('affect.json'))
+  if (!file || typeof file !== 'object') return null
+  const affect = file.affect
+  if (!affect || typeof affect !== 'object') return null
+  return {
+    at: Number(file.at ?? 0) || 0,
+    affect,
+    lastUserAt: Number(file.lastUserAt ?? 0) || 0,
+    lastSpokenAt: Number(file.lastSpokenAt ?? 0) || 0,
+    ignored: Number(file.ignored ?? 0) || 0,
+    // "带刺"按水位比, 不按 24 h 滚动计数比 (2026-11-20 审查): 计数滑出窗口会回落, 回落再涨就重复记
+    negativeSeen: Number(file.negativeSeen ?? 0) || 0,
+    // 打游戏过线只记一次: 上一拍是不是已经记过
+    longGame: file.longGame === true,
+    phase: String(file.phase ?? ''),
+  }
+}
+
+/**
+ * 算一次〔此刻〕并落盘 (方案 §5.4 / §5.5)
+ *
+ * 落盘的那一份同时给两处用: `personaFor` (对话场, 同步读) 与开场正文 (主动场). 于是"她此刻什么
+ * 状态"只有一个源头 —— 两条路不会各算一份、各说一句
+ *
+ * @param {{now?: number, cue?: string, event?: string}} options `cue` 是召回的打分线索 (话题原话)
+ * @returns {Promise<{block: string, memoryRef: string, affect: object, plan: object}|null>}
+ */
+async function affectSnapshotNow(options = {}) {
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  const now = Number(options?.now ?? 0) || Date.now()
+  const inputs = await emotionInputsOf(now)
+  if (inputs === null) return null
+  const settings = await readSimAffect()
+  const previous = await readAffectState()
+  const event = options?.event || emotion.affectEventOf(previous, inputs)
+  const affect = previous === null
+    ? emotion.affectEstimateOf(inputs)
+    : emotion.affectStep(previous.affect, { at: previous.at, now, kind: event })
+  const relation = await touchRelation(now, inputs)
+  // 时段一律取 `inputs.phase` (2026-11-20 审查): `affectStep` 只回三个维度, 拿它当 moment.phase
+  // 会让 `late and low` 那条分支永不命中, 也让 late_night 每拍重记一次
+  const phase = inputs.phase
+  // 先陪还是先给办法那一格 (方案 §9.2): 只改写**缺省**那一档, 具体的场景判断照 §7.2 走
+  const plan = emotion.applyEmpathySetting(
+    emotion.empathyPlanOf(affect, relation, { phase, busy: inputs.busy || inputs.callRecent }),
+    settings.empathy,
+  )
+  await hostMaintainEpisodes(now)
+  const registered = await readEpisodes()
+  const wanted = emotion.recallRowsOf(settings.recall)
+  const recalled = emotion.relatedEpisodesFor(
+    registered,
+    options?.cue ?? '',
+    now,
+    { ...emotion.EPISODE_BUDGET, rows: wanted },
+  )
+  const facts = {
+    now,
+    firstUserAt: inputs.firstUserAt,
+    userTurnsToday: inputs.userTurnsToday,
+    lastUserAt: inputs.lastUserAt,
+    lastSpokenAt: inputs.lastSpokenAt,
+    phoneMinutes: inputs.phoneMinutes,
+    foregroundGame: inputs.foregroundGame,
+  }
+  // 两份: 对话场只接状态那一小段 (§5.5 ≤140 字), 主动场的开场正文再接上五格与记着的事 (§7.3 / §6.4)
+  const stateText = emotion.affectBlockOf({ affect, facts, relation, plan })
+  const boundaries = await readBoundaries()
+  const soft = emotion.softBoundaryBlock(boundaries)
+  const openerText = [
+    emotion.affectBlockOf({
+      affect,
+      facts,
+      relation,
+      plan,
+      episodes: recalled.rows,
+      settings,
+    }),
+    // 他划的那些软的线 (方案 §8.1): 只当"注意", 不作硬拦 —— 以前这一段没有任何调用点
+    soft,
+  ].filter((one) => one !== '').join('\n')
+  // 透明引用 (方案 §8.3): 只在这一句真的引到了某条情节的**原话**时才带 —— 取召回第一名而不看
+  // 词重叠的话, 会指向一条无关的记忆, 那比不指更糟
+  const cue = String(options?.cue ?? '').trim()
+  const cued = recalled.rows.find((one) => emotion.overlapRatio(emotion.tokenize(one?.what), emotion.tokenize(cue)) > 0)
+  const memoryRef = cued === undefined ? '' : String(cued?.id ?? '')
+  const payload = {
+    v: 1,
+    at: now,
+    phase,
+    affect,
+    plan,
+    settings,
+    relation: { days: relation.days ?? 0, closeness: relation.closeness ?? 0 },
+    memoryRef,
+    event: event ?? null,
+    lastUserAt: inputs.lastUserAt,
+    lastSpokenAt: inputs.lastSpokenAt,
+    ignored: inputs.ignored,
+    negativeHits: inputs.negativeHits,
+    // 两个水位: 下一拍比"带刺"与"游戏过线"都用它, 于是同一件事只记一次
+    negativeSeen: Math.max(Number(previous?.negativeSeen ?? 0) || 0, inputs.negativeHits),
+    longGame: inputs.longGame === true,
+    // `block` 是对话场读的那一份, `opener` 是主动场读的那一份 (两个注入点各取所需)
+    block: stateText,
+    opener: openerText,
+  }
+  await writeMemoryJson(memoryPath('affect.json'), payload)
+  // 读数 (方案 §14.2: 出问题先看这一行) —— 一、换算是不是离谱; 二、为什么这一场是这个策略
+  console.log(
+    `luwi-channel: affect: v=${Number(affect.valence).toFixed(1)} a=${Number(affect.arousal).toFixed(1)}`
+      + ` e=${Number(affect.engagement).toFixed(1)} phase=${phase} event=${event ?? 'none'}`
+      + ` plan=${plan.lead}/${plan.avoid} why=${plan.why} recalls=${recalled.rows.length}`
+      + `${memoryRef === '' ? '' : ` ref=${memoryRef}`}`,
+  )
+  return { block: openerText, state: stateText, memoryRef, affect, plan, settings, relation, episodes: recalled.rows }
+}
+
+/**
+ * 每轮开始把状态算一遍 (方案 §5.5: 对话场也读得到)
+ *
+ * 20 s 节流: 一轮里可能有几步, 而状态是"小时级"的变量 —— 每一步都重算一遍纯属浪费
+ */
+function startAffectSnapshot(ctx) {
+  let lastAt = 0
+  onSessionEvent(ctx, (session, event) => {
+    if (event.type !== 'turn/start') return
+    if (session.meta?.origin === 'subagent') return
+    if (isPeerProjection(session) || session.agentPreset === 'tavern') return
+    const now = Date.now()
+    if (now - lastAt < 20_000) return
+    lastAt = now
+    void affectSnapshotNow({ now }).catch((error) => {
+      console.warn(`luwi-channel: the affect snapshot was not written: ${error?.message ?? error}`)
+    })
+  })
+}
+
 /* ── 主动对话 (2.8.0 B4-a, 排期骨架) ────────────────────────────────────────
  *
  * 到点那一场与浮标 / 探索都不一样: **固定新开一场**, 开场就用 `proactive` 预设, 默认只提醒
  *
  * 三件事的边界:
  *  - **固定新开** (B4-a ⑤): 每一行 `source:"proactive"` 都走 `controller.create`, 不查浮标那本
- *    10 分钟的账, 也不接主人此刻正看着的那一场
+ *    30 分钟的账, 也不接主人此刻正看着的那一场
  *  - **主动场能做什么是三档硬闸** (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`):
  *    [proactiveGate] 拿三张表 (A 屏 / B 写动 / C 命令) 与 `sim.json` 的 `proactive.acting` 对, 缺省
  *    `remind` 全拒. 这一层不再靠提示词 —— 与 QQ 桥接把群会话的唤醒条件钳死是同一个做法.
@@ -10950,6 +15538,18 @@ const proactiveRun = {
 
 /** 这次进程里开过几场 (读数) */
 let proactiveStarts = 0
+
+/**
+ * 最近开过的那几场 (`{session, startedAt, via}`), 给门户补漏用 (2.8.1 #8)
+ *
+ * `run` 只有**最新一场**: 连点三次「唤醒一下」时, 两场之间那一场会被下一次覆盖掉, 门户光看 `run`
+ * 就只收得到最后那一句。这一串跟着 `proactive.json` 一起落盘 (最多 [PROACTIVE_RECENT_MAX] 条),
+ * 门户按 `startedAt` 把还没收过的逐场补进来 —— 于是"连点三次"三条都在
+ */
+const proactiveRecent = []
+
+/** 那一串留几条: 一次连点最多几下的量级, 再多也没有读的人 */
+const PROACTIVE_RECENT_MAX = 8
 
 /* ── 主动场的三张表 + 三档 (2026-11-10) ─────────────────────────────────────
  *
@@ -11026,8 +15626,14 @@ const PROACTIVE_ACT_TABLE = new Map([
   ['lw_plugin', new Set(['list', 'read', 'audit'])],
   ['lw_skill', new Set(['scan'])],
   ['lw_sync', new Set(['status'])],
-  // 她的表情 (2026-11-10): 列素材与贴一张都不动设备, `fetch` 会外发请求并落盘 —— 那一面算写动
-  ['lw_sticker', new Set(['list', 'say'])],
+  // 她的表情 (2026-11-10): 列素材 / 贴一张 / 按情绪词挑一张都不动设备; `fetch` 会外发请求并落盘,
+  // 而 `tag` 写的是 `lw/stickers/tags.json` —— 那两面算写动 (2026-11-15 加的 pick / tag)
+  ['lw_sticker', new Set(['list', 'say', 'pick'])],
+  // 工坊 (2.8.1): 读项目状态与构建日志不动设备; 建 / 改 / 图标 / 构建 / 装机 / 建屏全归写动
+  ['lw_forge', new Set(['status', 'logs'])],
+  // 她自己的记忆 (2026-11-20, 方案 §6.2): 读那一面三档都放; `add` / `profile` / `forget` / `boundary`
+  // 写的是 `lw/memory/`, 归写动 (act 以上) —— 缺省那一档只能想, 不能记
+  ['lw_memory', new Set(['list', 'status'])],
   // 没有只读那一面: 一调就是动手
   ['lw_app_control', new Set()],
   ['lw_launch', new Set()],
@@ -11221,6 +15827,328 @@ function proactiveScreenRefusal(name) {
 }
 
 /**
+ * 开场那一句的头一段 (2026-11-12 #38; 2026-11-13 #43 改措辞)
+ *
+ * 门户按它把**整条**开场提示词认出来不画 (那是给模型的启动说明, 主人没说过)。客户端
+ * `presets/luwi-portal/lib/client.js` 的 `PROACTIVE_START_MARK` 逐字相同, `check-luwi-portal` 比对
+ * 这两个字面量; 消息本身还带 `via: 'proactive'`, 两个记号任一个命中就够
+ *
+ * 2026-11-13 改的是**措辞**: 原来写作"这是到点自己开的一场主动对话", 模型把这几个字照抄进自己
+ * 开口的第一句 ("到点醒一下…"), 主人一看就知道背后有人在发指令。现在只说她是自己想起来的,
+ * 一个字都不提时刻 —— 排期是后台的事, 不该出现在她嘴里
+ */
+const PROACTIVE_START_MARK = '这行字不是主人发的, 是你自己想起他, 于是开了这个话头'
+
+/**
+ * 卡是空 (或那一行没带正文) 时的缺省问题
+ *
+ * 与应用那一侧 `ProactiveSchedule.FALLBACK_TEXT` **逐字相同** (`check-proactive` 比对两处字面量):
+ * 主人没写 `proactive-card.md` 时应用投的就是这一段, 两边说法不一致等于同一场两个开场
+ */
+const PROACTIVE_ASK_DEFAULT = '最新探索摘要, 记着的事 (lw_wish), 今天的日历, 通知摘要 —— 看完再决定要不要开口'
+
+/**
+ * 开口时不许写在句首的几种"交代来路"的话 (2026-11-13 #43, 主人点名的例子是「到点醒一下」)
+ *
+ * 这几个词都是**后台的事** (排期 / 闸 / 把宿主叫起来): 她一说出来, 主人立刻看出背后有安排, 那句
+ * 话就不再像她自己想说的。开场正文逐字列出来, 判据 (`check-proactive`) 钉的就是那一句
+ */
+const PROACTIVE_BANNED_OPENERS = ['到点', '提醒', '该叫你', '我醒过来了']
+
+/**
+ * 这一场"怎么说" (开场正文的最后一段, 说完这段她就要动嘴)
+ *
+ * 放最后是刻意的: 上面几段讲读什么、这一档能做什么, 这一段只讲**怎么说**。人格那一份管她是谁,
+ * 这一段管这一场的第一句话像不像她自己想到他 —— 语气词 (柔和 / 客气 / 不催 / 不哄) 也是 #43 要的
+ */
+const PROACTIVE_START_VOICE = '开口的样子: 就当是你自己想到他, 顺口说一句, 不是照着稿子念. '
+  + `句首不要写「${PROACTIVE_BANNED_OPENERS.join('」「')}」这类交代来路的话, 也不提设定 / 任务 / 指令 / 系统; `
+  + '不列工具名, 不复述这几行说明, 不贴界面上看到的原文. '
+  + '语气柔和、客气一点: 先说你记挂着的那一件, 再轻轻问一句要不要看; 不催, 也不哄.'
+
+/* ── 本次消息快照 (2.8.1 #36, 2026-11-20) ──────────────────────────────────
+ *
+ * 主人口径: "截取当前门户显示的对话内容由新到旧取 20 条, 如果有文件或图片应当允许读取"。
+ *
+ * 三条来源只有两个:
+ *   · 他的话 —— dsh 的会话本身 (`session.snapshotEvents()` + `deriveEventMessage`, 每件事都带
+ *     `time`), 只认 `role === 'user'`: 门户画的主人气泡就是它
+ *   · 她的话 —— `$DSH_HOME/lw/out/<id>.jsonl` (宿主单写者, 见文件顶那条纪律), 只认 text / image /
+ *     file / sticker 四种 kind。**assistant 正文不取**: 门户也不画正文, 取了两边就对不上
+ *
+ * 附件: 她的图与文件落在 `$DSH_HOME/lw/out/assets/<id>/`, 而主动场的 read 关在工作区沙箱里 ——
+ * 所以先复制到 `<工作区>/.lw-snapshot/<id>/`, 快照行里给的是**工作区相对路径**, 她能直接
+ * `read` / `read_image`。他的话那一侧不用搬: 门户与浮标发送时已经把附件落进工作区的
+ * `lw-in/` 与 `.lw-inbox/`, 路径本来就在正文里
+ */
+
+/** 快照最多几条 (主人点名 20) */
+const PROACTIVE_SNAPSHOT_ROWS = 20
+
+/** 往回最多翻这么多条才凑满 [PROACTIVE_SNAPSHOT_ROWS] (工具调用之类不占名额) */
+const PROACTIVE_SNAPSHOT_CANDIDATES = 60
+
+/** 单条正文最多多少字, 超了截断 —— 粘一段代码不该把整段快照撑爆 */
+const PROACTIVE_SNAPSHOT_ROW_CHARS = 200
+
+/** 整段硬上限: 从最旧的开始丢, 最新那几条一定留 */
+const PROACTIVE_SNAPSHOT_MAX_CHARS = 4000
+
+/** 快照段的第一行: 固定措辞, 判据逐字比对 */
+const PROACTIVE_SNAPSHOT_HEAD = '本次消息快照: 门户里最近 20 条 (新->旧), 先看这个再决定开口;'
+  + ' 带路径的图 / 文件可以直接读, 不用先问.'
+
+/** 段尾那道隐私闸: 快照把她没资格复述的东西也带进来了, 这里拦住 */
+const PROACTIVE_SNAPSHOT_TAIL = '快照里出现的验证码 / 密码 / 金额 / 地址, 你看见了也当没看见:'
+  + ' 不念出来, 也不抄进文件.'
+
+/** 附件落到工作区的那个子目录 (相对工作区根) */
+const PROACTIVE_SNAPSHOT_DIR = '.lw-snapshot'
+
+/** 这一行是几点 (`21:04`); 时间是 0 / 坏值就回空串 (不编一个假时刻) */
+function snapshotClock(at) {
+  const ms = Number(at)
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** 一段正文压成一行 (换行折成空格), 超过 [PROACTIVE_SNAPSHOT_ROW_CHARS] 截断 */
+function snapshotText(text) {
+  const one = String(text ?? '').replace(/\s+/gu, ' ').trim()
+  if (one === '') return ''
+  const chars = Array.from(one)
+  return chars.length <= PROACTIVE_SNAPSHOT_ROW_CHARS
+    ? one
+    : `${chars.slice(0, PROACTIVE_SNAPSHOT_ROW_CHARS).join('')}…`
+}
+
+/**
+ * 一条消息里的正文 (纯函数)
+ *
+ * content 可以是字符串或 parts 数组; 图那几种 part 不取字节, 只留一句「[图 N 张]」—— 快照是给
+ * 她**看对话**用的, 不是给她搬一份附件
+ */
+function snapshotMessageText(message) {
+  const content = message?.content
+  if (typeof content === 'string') return snapshotText(content)
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  let images = 0
+  for (const part of content) {
+    if (part === null || typeof part !== 'object') continue
+    if (part.type === 'text' && typeof part.text === 'string') parts.push(part.text)
+    else if (part.type === 'image' || part.type === 'image_url') images += 1
+  }
+  const body = parts.join('\n').trim()
+  if (images === 0) return snapshotText(body)
+  return snapshotText(`${body}${body === '' ? '' : ' '}[图 ${images} 张]`)
+}
+
+/**
+ * 把两条来源的行拼成「本次消息快照」那一段 (纯函数, 判据真跑)
+ *
+ * 排序按 `at` 升序, 取**最后** [PROACTIVE_SNAPSHOT_ROWS] 条, 输出时反转成新->旧 (主人要的顺序)。
+ * 预算从最新那条往回累加, 超 [PROACTIVE_SNAPSHOT_MAX_CHARS] 就停 —— 于是"最新的一定在"是硬的
+ *
+ * @param {{at:number, who:'he'|'her', text?:string, marks?:string[]}[]} rows 两条来源合起来的行
+ * @param {{rows?:number, maxChars?:number}} options 覆盖条数与预算 (判据用)
+ * @returns {string} 整段 (含头尾两句); 没有可说的就回空串 —— 调用方据此整段不出现
+ */
+function proactiveSnapshotBlock(rows, options = {}) {
+  const limit = Number(options.rows) > 0 ? Math.floor(Number(options.rows)) : PROACTIVE_SNAPSHOT_ROWS
+  const budget = Number(options.maxChars) > 0 ? Math.floor(Number(options.maxChars)) : PROACTIVE_SNAPSHOT_MAX_CHARS
+  const all = (Array.isArray(rows) ? rows : [])
+    .filter((one) => one !== null && typeof one === 'object')
+    .map((one, index) => ({
+      at: Number(one.at) || 0,
+      who: one.who === 'he' ? 'he' : 'her',
+      text: snapshotText(one.text),
+      marks: (Array.isArray(one.marks) ? one.marks : []).filter((mark) => typeof mark === 'string' && mark.trim() !== ''),
+      index,
+    }))
+    .filter((one) => one.text !== '' || one.marks.length > 0)
+  if (all.length === 0) return ''
+  // 稳定排序: 同刻按来路顺序 (他的话与 lw/out 各自已经是有序的)
+  all.sort((a, b) => (a.at !== b.at ? a.at - b.at : a.index - b.index))
+  const picked = all.slice(-limit)
+  const lines = []
+  let used = 0
+  for (let i = picked.length - 1; i >= 0; i -= 1) {
+    const row = picked[i]
+    const clock = snapshotClock(row.at)
+    const who = row.who === 'he' ? '他' : '你'
+    const marks = row.marks.map((mark) => ` [${mark}]`).join('')
+    const line = `${picked.length - i}. ${clock === '' ? '' : `[${clock}] `}${who}: ${row.text}${marks}`.trimEnd()
+    const size = Array.from(line).length + 1
+    if (lines.length > 0 && used + size > budget) break
+    lines.push(line)
+    used += size
+  }
+  if (lines.length === 0) return ''
+  // 从最旧的往前丢时序号会重排: 输出的第 1 条必须是那一段里最新的一条
+  const numbered = lines.map((line, index) => line.replace(/^\d+\. /u, `${index + 1}. `))
+  return [PROACTIVE_SNAPSHOT_HEAD, ...numbered, PROACTIVE_SNAPSHOT_TAIL].join('\n')
+}
+
+/** 现在门户显示的那一场: 账本窗口内 -> 账本原文 (过期也认一次) -> null */
+async function portalSnapshotTarget() {
+  const fresh = await voiceCurrentSession().catch(() => null)
+  if (typeof fresh === 'string' && fresh !== '') return fresh
+  const home = process.env.DSH_HOME
+  if (!home) return null
+  try {
+    const record = JSON.parse(await readFile(join(home, 'voice', 'session.json'), 'utf8'))
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    return id === '' ? null : id
+  } catch {
+    return null
+  }
+}
+
+/** 她那一场说过的话 (lw/out 那几行): 正文原样, 附件换成工作区里的可读路径 */
+async function portalSnapshotHerRows(sessionId, workspacePath) {
+  const path = lwOutPath(sessionId)
+  if (path === null) return []
+  let text = ''
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return []
+  }
+  const rows = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let row = null
+    try {
+      row = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const at = Number(row?.at ?? 0) || 0
+    const kind = String(row?.kind ?? 'text')
+    if (kind === 'text') {
+      const body = snapshotText(row?.text)
+      if (body !== '') rows.push({ at, who: 'her', text: body })
+      continue
+    }
+    if (kind === 'sticker') {
+      rows.push({ at, who: 'her', text: '发了一张表情', marks: [] })
+      continue
+    }
+    if (kind !== 'image' && kind !== 'file') continue
+    const rel = typeof row?.rel === 'string' ? row.rel : ''
+    const staged = await snapshotStageAsset(rel, workspacePath, sessionId)
+    const label = kind === 'image' ? '图' : '文件'
+    rows.push({
+      at,
+      who: 'her',
+      text: staged === '' ? `（${label}没取到）` : '',
+      marks: staged === '' ? [] : [`${label} ${staged}`],
+    })
+  }
+  return rows
+}
+
+/**
+ * 把她那份附件复制进工作区 (读得到才算数)
+ *
+ * @param {string} rel `lw/out` 里那个相对路径 (`assets/<id>/<名字>`)
+ * @param {string} workspacePath 主动场的工作区 (快照落它下面的 `.lw-snapshot/<id>/`)
+ * @param {string} sessionId 哪一场 (只用于目标目录)
+ * @returns {string} 工作区相对路径 (`.lw-snapshot/<id>/<名字>`); 复制不成回空串
+ */
+async function snapshotStageAsset(rel, workspacePath, sessionId) {
+  if (rel === '' || workspacePath === '') return ''
+  const dir = lwOutDir()
+  if (dir === null) return ''
+  const source = join(dir, rel)
+  const info = await stat(source).catch(() => null)
+  if (info === null || !info.isFile() || info.size <= 0) return ''
+  if (info.size > LW_IMAGE_MAX_BYTES) return ''
+  const name = basename(source)
+  if (name === '' || name.includes('..') || name.includes('/') || name.includes('\\')) return ''
+  const id = lwOutId(sessionId)
+  if (id === '') return ''
+  const targetDir = join(workspacePath, PROACTIVE_SNAPSHOT_DIR, id)
+  try {
+    await mkdir(targetDir, { recursive: true })
+    let target = join(targetDir, name)
+    for (let n = 2; existsSync(target); n += 1) target = join(targetDir, `${n}-${name}`)
+    await copyFile(source, target)
+    const written = await stat(target).catch(() => null)
+    if (written === null || written.size <= 0) return ''
+    return `${PROACTIVE_SNAPSHOT_DIR}/${id}/${basename(target)}`
+  } catch {
+    return ''
+  }
+}
+
+/** 他那一场说过的话 (dsh 会话本身): 只认 user 节点, 时间取事件那一刻 */
+async function portalSnapshotHisRows(ctx, sessionId) {
+  const controller = ctx?.get?.('sessionController')
+  if (!controller || typeof controller.resolveAgent !== 'function') return []
+  let session = null
+  try {
+    const resolved = await ctx.agents.withoutInitiator(() => controller.resolveAgent(sessionId))
+    session = resolved?.agent?.session ?? null
+  } catch (error) {
+    // 这一场开不出来 (已归档 / 不在当前工作区): 那一半就当没有, 但留一行读数
+    console.warn(`luwi-channel: the portal session ${sessionId} was not readable: ${error?.message ?? error}`)
+    return []
+  }
+  if (session === null || typeof session.snapshotEvents !== 'function') {
+    console.warn(`luwi-channel: the portal session ${sessionId} gave nothing to read`)
+    return []
+  }
+  const rows = []
+  for (const event of session.snapshotEvents()) {
+    let message = null
+    try {
+      message = session.deriveEventMessage(event)
+    } catch {
+      continue
+    }
+    if (!message || message.role !== 'user') continue
+    const body = snapshotMessageText(message)
+    if (body === '') continue
+    rows.push({ at: Number(event?.time ?? 0) || 0, who: 'he', text: body })
+  }
+  return rows
+}
+
+/**
+ * 这一次主动场要带上的「本次消息快照」
+ *
+ * 任何一步读不动都只回空串 (开场照旧发出去): 快照是加分项, 不是开场的前提
+ *
+ * @param {object} ctx 插件上下文 (要 `sessionController` 与 `agents`)
+ * @param {string} workspacePath 主动场的工作区 (附件要落到它下面)
+ * @returns {Promise<string>} 空串 = 没有可说的 / 读不到
+ */
+async function buildPortalSnapshot(ctx, workspacePath) {
+  const target = await portalSnapshotTarget()
+  if (target === null || target === '') return ''
+  const rows = []
+  const hers = await portalSnapshotHerRows(target, workspacePath).catch(() => [])
+  rows.push(...hers)
+  const his = await portalSnapshotHisRows(ctx, target).catch(() => [])
+  rows.push(...his)
+  // 读数 (验收就看这一行): 哪一场、两条来源各几条。快照为空时也要留痕 —— 否则"没出现"与
+  // "读不到"在日志里长得一样
+  console.log(`luwi-channel: portal snapshot source her=${hers.length} his=${his.length} of ${target}`)
+  if (rows.length === 0) return ''
+  // 只往回翻这么多条 (两端各自截): 一场几百轮的老对话不该整份读进来
+  const cap = Math.max(PROACTIVE_SNAPSHOT_CANDIDATES, PROACTIVE_SNAPSHOT_ROWS)
+  const trimmed = rows.length > cap
+    ? [...rows].sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0)).slice(-cap)
+    : rows
+  return proactiveSnapshotBlock(trimmed)
+}
+
+/**
  * 主动对话的开场正文 (纯函数)
  *
  * 应用投进来的那一行是 `proactive-card.md` 的正文 (没有就投缺省那句); 这里再补上这四件:
@@ -11229,10 +16157,28 @@ function proactiveScreenRefusal(name) {
  *
  * 2026-11-10: 权限那一段**按档位生成** (方案 §3.5). 三档各一句, 与宿主那道硬闸 [proactiveGate]
  * 逐格对应 —— 注入说"能做什么", 闸决定"真能不能", 两边说法必须一致
+ *
+ * 2026-11-13 (#43): 头一段换成"你自己想起他", 末尾加一段 [PROACTIVE_START_VOICE]. 排期、提醒、
+ * 叫醒这些后台的事一个字都不写进来, 只留"看一眼 -> 想说就说一句"这件事本身
+ *
+ * 2026-11-20 (2.8.1 #36): 多第 4 个可选参数 `snapshot` —— 门户当前那一场最近 20 条, 由
+ * [buildPortalSnapshot] 出。空串时**这一段整块不出现**, 于是 2 参 / 3 参调用的输出一个字节不变
+ *
+ * 2026-11-20 (方案 §7.3, 情感那一批): 多第 5 个可选参数 `memory` —— 〔此刻〕/ 关系 / 这一场主调 /
+ * 记着的事, 由 [affectSnapshotNow] 出。**排在"可以沉默"之后、"语气"之前**: 先读"该不该说", 再读
+ * "怎么陪", 最后读"什么口气"。空串时整块不出现, 于是 2 / 3 / 4 参调用的输出仍逐字不变
+ *
+ * @param {string} text 卡里的正文 (空 = 缺省那句)
+ * @param {string} summaryPath 最新那份探索摘要的绝对路径
+ * @param {string} acting 档位 (`remind` / `act` / `full`)
+ * @param {string} snapshot 「本次消息快照」整段 (空串 = 不带)
+ * @param {string} memory 状态 + 关系 + 策略 + 记着的事 (空串 = 不带)
+ * @returns {string} 这一场的开场正文
  */
-function proactiveStartLine(text, summaryPath, acting) {
-  const asked = String(text ?? '').trim()
-    || '最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口'
+function proactiveStartLine(text, summaryPath, acting, snapshot, memory) {
+  const asked = String(text ?? '').trim() || PROACTIVE_ASK_DEFAULT
+  const snap = String(snapshot ?? '').trim()
+  const mood = String(memory ?? '').trim()
   const tier = PROACTIVE_ACTING_TIERS.has(acting) ? acting : PROACTIVE_ACTING_DEFAULT
   const permission = tier === PROACTIVE_ACTING_FULL
     ? '这一场全放开: 能写文件 / 开应用 / 跑命令, 也能建虚拟屏、截图、点、滑; 但动手前先说一句你要做什么.'
@@ -11240,7 +16186,7 @@ function proactiveStartLine(text, summaryPath, acting) {
       ? '这一场允许动手: 能写文件 / 开应用 / 跑命令; 屏不碰 —— 要看要点的事让主人自己来.'
       : '这一场只提醒: 不可 shell / 不可写文件 / 不可屏幕控制 / 不可 App 控制; 主动场不建虚拟屏.'
   return [
-    '这是到点自己开的一场主动对话, 不是主人刚说的话.',
+    `${PROACTIVE_START_MARK}.`,
     '',
     asked,
     '',
@@ -11248,8 +16194,14 @@ function proactiveStartLine(text, summaryPath, acting) {
     // 不存在的工具 —— "记着的事"才是这一档真正读得到的东西
     '启动顺序: 最新探索摘要 -> 记着的事 (lw_wish op=list) -> 今天的日历 -> 通知摘要 -> 决定要不要开口.',
     `最新那一份探索摘要: ${String(summaryPath ?? '').trim() || '还没有 (这是第一次)'}`,
+    // 本次消息快照 (2.8.1 #36): 没有就整块不出现 —— 空串不能留一行空标题
+    ...(snap === '' ? [] : ['', snap]),
     permission,
+    // "可以沉默"先说, "怎么说"留到最后一行: 说完这段她就要动嘴, 最后读到的该是语气
     '没有值得说的就保持沉默, 一条话都不要写.',
+    // 这一场该怎么陪 (方案 §7.3): 状态 / 关系 / 策略 / 记着的事 —— 没有就整块不出现
+    ...(mood === '' ? [] : [mood]),
+    PROACTIVE_START_VOICE,
   ].join('\n')
 }
 
@@ -11277,6 +16229,8 @@ async function proactiveStateWriteNow() {
     updatedAt: Date.now(),
     starts: proactiveStarts,
     run: proactiveRun.session === null ? null : { ...proactiveRun },
+    // 最近那几场 (2.8.1 #8): 门户按它把连点漏掉的那一场也收进来 (见 [adoptProactiveRuns])
+    recent: proactiveRecent.slice(-PROACTIVE_RECENT_MAX),
   }
   try {
     await mkdir(dirname(path), { recursive: true })
@@ -11306,6 +16260,17 @@ async function proactiveStateRestore() {
   const run = record?.run
   if (run === null || typeof run !== 'object') return false
   if (typeof run.session !== 'string' || run.session === '') return false
+  // 那一串也接回来: 宿主刚起时门户照它补漏 (2.8.1 #8), 缺 / 坏就当没有, 不拦住下面那一场
+  const recent = Array.isArray(record?.recent) ? record.recent : []
+  for (const one of recent) {
+    if (one === null || typeof one !== 'object') continue
+    if (typeof one.session !== 'string' || one.session === '') continue
+    proactiveRecent.push({
+      session: one.session,
+      startedAt: Number(one.startedAt) || 0,
+      via: typeof one.via === 'string' ? one.via : '',
+    })
+  }
   proactiveRun.session = run.session
   proactiveRun.workspace = typeof run.workspace === 'string' ? run.workspace : ''
   proactiveRun.startedAt = Number(run.startedAt) || 0
@@ -11351,9 +16316,22 @@ async function chooseProactivePreset(ctx) {
  * **能做什么按档位** (13-4, 2026-11-10 扩成三档): 这里没有一条建屏 / 选屏的路; 会话起来之后那一场
  * 三张表的工具由 [proactiveGate] 按 `sim.json` 的 `proactive.acting` 判 —— `remind` / `act` 两档
  * 从头到尾碰不到虚拟屏, `full` 档才放开 (主人 2026-11-10 的决定)
+ *
+ * **`openLine`** (2.8.1 #8): 给了就先把它当第一句落进这一场的 `lw/out`, 再开轮 —— 只有人亲手点的
+ * 「唤醒一下」用它 (见 [routerWakeNow]), 到点那一档不传
  */
 async function startProactive(ctx, options = {}) {
   const via = typeof options?.via === 'string' && options.via !== '' ? options.via : 'inbox'
+  // **干净的分手** (2026-11-20, 方案 §8.2 第三条): 他明确说过"别说了"之后那一段，宿主自己不开这一场
+  // —— 不是路由层不发话，是"她真的停"。人亲手点的那一下 (`via: 'wake'`) 不受这条管：那不是她在开新话头
+  if (via !== 'wake') {
+    const relation = await readRelation()
+    const mutedUntil = Number(relation?.mutedUntil ?? 0) || 0
+    if (mutedUntil > Date.now()) {
+      console.log(`luwi-channel: proactive skipped (he asked for quiet until ${new Date(mutedUntil).toISOString()})`)
+      return { started: false, why: 'muted', mutedUntil, session: null, via }
+    }
+  }
   const controller = ctx?.get?.('sessionController')
   if (!controller) {
     throw new Error('this profile has no session controller, so a proactive conversation has nowhere to go')
@@ -11364,6 +16342,29 @@ async function startProactive(ctx, options = {}) {
   const summaryPath = await exploreLatestSummary()
   // 这一场开在哪一档: 与开场注入、那道闸读的是同一个函数 (3 s 缓存, 不重启也生效)
   const acting = proactiveActing()
+  // 本次消息快照 (2.8.1 #36): 门户当前那一场最近 20 条。读不到就整段不带 —— 快照是加分项,
+  // 不许因为它把这一场拖死 (与下面 `openLine` 写不进去同一个处理)
+  let snapshot = ''
+  try {
+    snapshot = await buildPortalSnapshot(ctx, workspace?.path ?? '')
+  } catch (error) {
+    console.warn(`luwi-channel: the portal snapshot was not built: ${error?.message ?? error}`)
+  }
+  // 这一场该怎么陪 (方案 §7.3): 〔此刻〕/ 关系 / 这一场主调 / 记着的事。读不到就整段不带 ——
+  // 与快照同一条纪律: 状态是加分项, 不许因为它把这一场拖死
+  let mood = null
+  try {
+    mood = await affectSnapshotNow({ cue: String(options?.text ?? '').trim() })
+  } catch (error) {
+    console.warn(`luwi-channel: the affect block was not built: ${error?.message ?? error}`)
+  }
+  // 读数 (真机验收就看这一行): 那一段多少字、这一场是什么主调 —— 开场正文本身不落盘
+  if (typeof mood?.block === 'string' && mood.block !== '') {
+    console.log(`luwi-channel: proactive mood ${Array.from(mood.block).length} chars`
+      + ` (plan ${String(mood.plan?.lead ?? '?')}/${String(mood.plan?.avoid ?? '?')}`
+      + `, episodes ${Array.isArray(mood.episodes) ? mood.episodes.length : 0})`)
+  }
+  // 策略分布那本账 (方案 §12.1 第五个数) 挪到这一场真的开成之后再补 —— 见下面 `deliverToBall` 之后
   const request = {
     ...ballCreatePlace(workspace),
     ...(preset.id === undefined ? {} : { agentPreset: preset.id }),
@@ -11389,13 +16390,43 @@ async function startProactive(ctx, options = {}) {
   proactiveRun.presetWhy = presetWhy
   proactiveRun.acting = acting
   proactiveStarts += 1
+  // 快照的读数 (判据与真机验收都看这一行): 几条、多少字进了哪一场
+  if (snapshot !== '') {
+    console.log(`luwi-channel: proactive snapshot ${Math.max(0, snapshot.split('\n').length - 2)} row(s),`
+      + ` ${Array.from(snapshot).length} chars into ${sessionId}`)
+  }
+  // 这一场也记进"最近几场" (2.8.1 #8): `run` 会被下一场覆盖, 连点那几下里中间那一场就靠这一串
+  proactiveRecent.push({ session: sessionId, startedAt, via })
+  while (proactiveRecent.length > PROACTIVE_RECENT_MAX) proactiveRecent.shift()
   await proactiveStateWrite()
+  // 「唤醒一下」那一路: **先把那一句落进这一场的 jsonl, 再开轮** (2.8.1 #8)
+  // 门户画的是 `lw/out` 那份文件, 于是这一行落完就有一颗气泡, 不必等模型那一轮跑完; 写不进去只
+  // 记一行 —— 那一场照旧开, 不许因为这一句把整场拖死
+  // `topicSource` (2.8.1 #31) 跟着行一起落盘: 门户把它透传成气泡的 `meta.topicSource`, 排障时看
+  // 得出这句是从哪条信号里挑的, 也不必回头读 `router.json`
+  let openRow = null
+  const openLine = String(options?.openLine ?? '').trim()
+  const openTopic = String(options?.openTopic ?? '').trim()
+  if (openLine !== '') {
+    try {
+      openRow = await lwOutAppend(sessionId, {
+        kind: 'text',
+        text: openLine,
+        ...(openTopic === '' ? {} : { topicSource: openTopic }),
+        // 透明引用 (方案 §8.3): 这一句引的是哪一条记忆 —— 门户能顺着它查"她凭什么这么说"
+        ...(typeof mood?.memoryRef === 'string' && mood.memoryRef !== '' ? { memoryRef: mood.memoryRef } : {}),
+      })
+    } catch (error) {
+      console.warn(`luwi-channel: the wake line was not written: ${error?.message ?? error}`)
+    }
+  }
   try {
     await deliverToBall(
       ctx,
       controller,
       sessionId,
-      { text: proactiveStartLine(options?.text, summaryPath, acting) },
+      // `via: 'proactive'` 是给门户的记号: 开场提示词不进门户正文, 但她说的那几句照常投 (2026-11-12 #38)
+      { text: proactiveStartLine(options?.text, summaryPath, acting, snapshot, mood?.block ?? ''), via: 'proactive' },
       { images: [] },
     )
   } catch (error) {
@@ -11407,6 +16438,25 @@ async function startProactive(ctx, options = {}) {
     `luwi-channel: proactive conversation ${sessionId} started in ${proactiveRun.workspace}`
       + ` (via ${via}, preset ${presetId ?? 'the registry default'}, tier ${acting})`,
   )
+  // 策略分布那本账 (方案 §12.1 第五个数): `affect.json` 每拍覆盖一次, 一周的分布算不出来 ——
+  // **这一场真开成之后**才补一行 (2026-11-21 审查: 原先落在 `controller.create` 之前, 开不成的场
+  // 也会记一行, 把 planMix 的分母抬高). 写不动只 warn, 不许因为账本把这一场拖死
+  if (mood !== null && typeof mood?.plan === 'object' && mood.plan !== null) {
+    await appendMemoryJsonl(
+      memoryPath('plans.jsonl'),
+      {
+        at: startedAt,
+        via,
+        lead: String(mood.plan.lead ?? ''),
+        avoid: String(mood.plan.avoid ?? ''),
+        budget: Number(mood.plan.budget ?? 0) || 0,
+        why: String(mood.plan.why ?? ''),
+        ref: String(mood.memoryRef ?? ''),
+      },
+      PLAN_MAX,
+      'plans.jsonl',
+    )
+  }
   return {
     started: true,
     session: sessionId,
@@ -11418,6 +16468,8 @@ async function startProactive(ctx, options = {}) {
     acting,
     // 这一档有没有屏: 只有 `full` 才有 (`remind` / `act` 都碰不到)
     screen: acting === PROACTIVE_ACTING_FULL,
+    // 先落进去的那一句 (`openLine` 那一路才有): 宿主日志与「唤醒一下」的回执读它
+    open: openRow === null ? null : openRow.seq,
   }
 }
 
@@ -11449,6 +16501,48 @@ const EXPLORE_MINUTES_DEFAULT = 30
 const EXPLORE_MINUTES_RANGE = [1, 180]
 const EXPLORE_STEPS_DEFAULT = 60
 const EXPLORE_STEPS_RANGE = [1, 1000]
+
+/** 排期文件那个名字: 应用单写, 宿主只读 (2026-11-22 起它只剩步数与解锁两个键) */
+const EXPLORE_SCHEDULE_FILE = 'explore-schedule.json'
+
+/**
+ * 排期文件里那一格步数 (纯函数)
+ *
+ * 2026-11-21 起探索由判断层挑时机开, 应用那侧的开关 / 时刻 / 上一趟都撤了 —— 这一格里**只认 steps**,
+ * 老文件里的 `enabled` / `at` / `minutes` / `last` 一律不看 (关着探索这件事不再存在).
+ * 读法与应用 `ExploreSchedule.planOf` 同一套: 认不出来给缺省, 认出来的一律夹进范围
+ */
+function exploreStepsFrom(root) {
+  const raw = root !== null && typeof root === 'object' ? root.steps : undefined
+  return exploreClamp(raw, EXPLORE_STEPS_RANGE, EXPLORE_STEPS_DEFAULT)
+}
+
+/** 任务卡正文 (纯函数): 去首尾空白, 8000 字封顶; 读不出来就是空, 由开场正文落兜底那句 */
+function exploreTaskText(raw) {
+  return String(raw ?? '').trim().slice(0, EXPLORE_TASK_CHARS)
+}
+
+/**
+ * 判断层开探索之前现读一次步数 (`$DSH_HOME/lw/explore-schedule.json`)
+ *
+ * 不缓存: 主人可能刚好在设置页拨完那一条, 而这一场就在下一秒开
+ */
+async function readExploreSchedule() {
+  const home = process.env.DSH_HOME
+  const root = home ? await readRouterJson(join(home, 'lw', EXPLORE_SCHEDULE_FILE)) : null
+  return { steps: exploreStepsFrom(root) }
+}
+
+/** 判断层开探索之前现读一次任务卡 (`$DSH_HOME/lw/explore-card.md`, 与应用同一个文件) */
+async function readExploreTask() {
+  const path = exploreTaskPath()
+  if (path === null) return ''
+  try {
+    return exploreTaskText(await readFile(path, 'utf8'))
+  } catch {
+    return ''
+  }
+}
 
 /** 那几份文件的文件名 (与应用那一侧同一个约定, 谁都不许单边改) */
 const EXPLORE_TASK_FILE = 'explore-card.md'
@@ -11511,6 +16605,469 @@ function exploreClamp(value, range, fallback) {
   return Math.min(range[1], Math.max(range[0], Math.round(number)))
 }
 
+/**
+ * 跨应用记忆 (2026-11-20, 2.8.1 #36): 一趟探索跨过几个应用, 回来还知道自己要找什么
+ *
+ * 账是 `{ pkg: { intent, confirmed, failed, interrupted, resumed, active, at } }` —— 一场探索只有
+ * 一个 intent (开场那句), 每个应用记自己那一份: 切走时标 `interrupted`, 切回来时 `resumed` +1 并把
+ * intent 取回来当下一步提示的第一行。**不重读整屏**: 每一步只归档工具回执里已经有的那一条
+ * (effect 与按的是什么), 判据在 `tools/check-explore.mjs` 第十九节
+ *
+ * 盘上留下的只有"这一步按过什么"的指纹 (短 hash + 前 24 字), 敏感应用 (短信 / 通讯录 / 银行 /
+ * 支付) 整条跳过, 归属只认起应用与屏上真换了的包 —— 这三条是 2.8.1 #36 审查 M4 / M5 的口径
+ */
+const EXPLORE_MEMORY_MAX_DEFAULT = 8
+const EXPLORE_MEMORY_MAX_RANGE = [0, 20]
+const EXPLORE_MEMORY_CONFIRMED = 3
+// 控件文本只留前 24 字 + 一个短 hash (2.8.1 #36 审查 M4): 短信那一页的验证码、银行那一页的金额
+// 都在控件文本里, 整句 40 字落进 explore.json 就会跨重启一直留着
+const EXPLORE_MEMORY_TEXT_CHARS = 24
+const EXPLORE_MEMORY_HASH_CHARS = 6
+const EXPLORE_MEMORY_ROW_CHARS = EXPLORE_MEMORY_TEXT_CHARS + EXPLORE_MEMORY_HASH_CHARS + 1
+const EXPLORE_MEMORY_INTENT_CHARS = 60
+// 第三档: "上次按过什么" —— 基线没有 effect 回读, `changed` 在生产里没有生产者, 这一档才是真机上
+// 提示里能念出来的那几句 (2026-11-21 第二轮 E)
+const EXPLORE_MEMORY_PRESSED = 3
+// 掩码与整条丢弃 (第二轮 D): 数字串 / 金额先抹掉, 这几类字眼整条不进账
+const EXPLORE_MEMORY_DIGITS = /\d{4,}/gu
+const EXPLORE_MEMORY_MONEY = /\d+\.\d{2}/gu
+const EXPLORE_MEMORY_SECRET = /验证码|密码|余额|金额|身份证|卡号/u
+
+/**
+ * 这一趟记几个应用 (纯函数): `EXPLORE_MEMORY_MAX` 缺省 8, 0 = 整本账关掉
+ *
+ * 认不出来的 (空串 / 不是数) 给缺省 —— 与 `exploreClamp` 同一条纪律, 但它把空串也当没写
+ */
+function exploreMemoryLimit(env = process.env) {
+  const raw = env?.EXPLORE_MEMORY_MAX
+  if (raw === undefined || raw === null) return EXPLORE_MEMORY_MAX_DEFAULT
+  const text = String(raw).trim()
+  if (text === '') return EXPLORE_MEMORY_MAX_DEFAULT
+  const number = Number(text)
+  if (!Number.isFinite(number)) return EXPLORE_MEMORY_MAX_DEFAULT
+  return Math.min(EXPLORE_MEMORY_MAX_RANGE[1], Math.max(EXPLORE_MEMORY_MAX_RANGE[0], Math.round(number)))
+}
+
+/** 一条短文本 (纯函数): 折成一行, 去掉首尾空白, 按上限截 */
+function exploreMemoryText(value, chars = EXPLORE_MEMORY_TEXT_CHARS) {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
+  return text.length > chars ? text.slice(0, chars) : text
+}
+
+/**
+ * 一条控件文本的短 hash (纯函数): 6 位十六进制, FNV-1a
+ *
+ * 落盘那一条要能"对得上同一个控件"而不留下整句话 (2.8.1 #36 审查 M4): 连点同一个按钮两次要认成
+ * 同一行, 但短信与银行页上的数字不该原样躺着
+ */
+function exploreMemoryHash(text) {
+  let hash = 0x811c9dc5
+  for (const one of String(text ?? '')) {
+    hash ^= one.codePointAt(0)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0').slice(0, EXPLORE_MEMORY_HASH_CHARS)
+}
+
+/**
+ * 数字与金额先抹掉 (纯函数, 第二轮 D): `\d{4,}` → `****`, 金额 → `***`
+ *
+ * 金额那一条先走: `120000.00` 抹成 `***` 比抹成 `****.00` 更彻底 —— 后面那半截还看得出量级
+ */
+function exploreMemoryMask(text) {
+  return String(text ?? '')
+    .replace(EXPLORE_MEMORY_MONEY, '***')
+    .replace(EXPLORE_MEMORY_DIGITS, '****')
+}
+
+/**
+ * 一条已封的行把那 7 个字切掉 (纯函数, 第二轮 D)
+ *
+ * 幂等判据不再只看形状 (`^[0-9a-f]{6} ` 会把 `100000 元` 这种真控件文本的头切掉): **切掉 7 字之后
+ * 重算 hash, 跟已有的那 6 位一致才算已封** —— 认不出来的就整条当原文, 一个字都不切
+ */
+function exploreMemoryBare(value) {
+  const raw = exploreMemoryText(value, EXPLORE_MEMORY_ROW_CHARS)
+  if (raw.length <= EXPLORE_MEMORY_HASH_CHARS + 1) return raw
+  if (raw.charAt(EXPLORE_MEMORY_HASH_CHARS) !== ' ') return raw
+  const head = raw.slice(0, EXPLORE_MEMORY_HASH_CHARS)
+  if (!/^[0-9a-f]{6}$/u.test(head)) return raw
+  const body = raw.slice(EXPLORE_MEMORY_HASH_CHARS + 1)
+  return exploreMemoryHash(body) === head ? body : raw
+}
+
+/**
+ * 落盘的那一条 (纯函数, 幂等): `短 hash + 掩码后的前 24 字`
+ *
+ * 顺序是"先掩码再截断再算 hash": 盘上留下的就是 hash 认的那一段, 于是读回来再封一次逐字节一样
+ * (这一条是第二轮 D 要的幂等); 两条只差数字的行走成一行, 那正是我们要的 —— 数字本来就不该留下。
+ * 命中 `验证码 / 密码 / 余额 / 金额 / 身份证 / 卡号` 的整条丢掉 (回空串, 调用方那三档都不记)
+ */
+function exploreMemorySeal(value) {
+  const bare = exploreMemoryBare(value)
+  if (bare === '') return ''
+  if (EXPLORE_MEMORY_SECRET.test(bare)) return ''
+  const masked = exploreMemoryText(exploreMemoryMask(bare))
+  return masked === '' ? '' : `${exploreMemoryHash(masked)} ${masked}`
+}
+
+/**
+ * 敏感应用 (2.8.1 #36 审查 M4 与第二轮 B): 短信 / 通讯录 / 电话 / 银行 / 支付 / 微信 / QQ /
+ * 邮箱 / 密码管理器 / 健康
+ *
+ * 这一趟走过这些应用时一个字都不记, 连包名都不进账 —— 前 24 字也可能带出验证码与金额, hash 保不住
+ * 它, 所以整条跳过。三条判据: **段名** (`com.android.messaging`、`com.eg.android.AlipayGphone`)、
+ * **段前缀** (`bankofamerica` / `paytm` 这一类) 与**完整包名** (`com.tencent.mm` 这种段名认不出的)
+ */
+const EXPLORE_MEMORY_SENSITIVE_PARTS = new Set([
+  'sms', 'mms', 'messaging', 'messages', 'telephony', 'contacts', 'contactsprovider', 'contact',
+  'dialer', 'phone', 'calllog', 'incallui',
+  'bank', 'banking', 'wallet', 'pay', 'payment', 'payments', 'paypal', 'alipay', 'unionpay',
+  'icbc', 'cmb', 'cmbchina', 'ccb', 'boc', 'bocom', 'spdb', 'psbc', 'cebbank', 'cmbc',
+  'spay', 'smsextra', 'fitness', 'health', 'bitwarden', 'onepassword', 'mobileqq',
+])
+
+const EXPLORE_MEMORY_SENSITIVE_PREFIX = /^(?:bank|wallet|pay|alipay|unionpay|contact|messag|dial|call|qq|mm)/u
+
+/** 段名认不出来的那些 (第二轮 B 的实测名单): 段规则只能按词, 这些得写全名 */
+const EXPLORE_MEMORY_SENSITIVE_PACKAGES = new Set([
+  // 消息
+  'com.tencent.mm', 'com.tencent.mobileqq', 'com.tencent.tim', 'com.tencent.qqlite',
+  // 邮箱
+  'com.google.android.gm', 'com.netease.mail', 'com.tencent.androidqqmail', 'com.android.email',
+  'com.samsung.android.email.provider', 'com.kingsoft.mail',
+  // 密码管理器
+  'com.x8bit.bitwarden', 'com.onepassword.android', 'com.agilebits.onepassword', 'com.lastpass.lpandroid',
+  'com.keepassdroid', 'com.keeper.passwordmanager',
+  // 健康
+  'com.google.android.apps.fitness', 'com.xiaomi.hm.health', 'com.huawei.health',
+  // 银行 / 券商
+  'com.chinamworld.bocmbci', 'com.chinamworld.main', 'com.pingan.paces.ccms',
+  'com.eastmoney.android.berlin', 'com.htsc.mdc',
+  // 支付 / 短信增强
+  'com.samsung.android.spay', 'com.miui.smsextra',
+  // 输入法 (键盘自己那一屏不是"探索走到哪")
+  'com.iflytek.inputmethod', 'com.sohu.inputmethod.sogou', 'com.baidu.input',
+  'com.google.android.inputmethod.latin', 'com.huawei.ohos.inputmethod', 'com.miui.inputmethod',
+])
+
+/** 这个包名算不算敏感 (纯函数): 段名 / 段前缀 / 全名三路, 空包名不算 */
+function exploreMemorySensitive(pkg) {
+  const text = String(pkg ?? '').trim()
+  if (text === '') return false
+  if (EXPLORE_MEMORY_SENSITIVE_PACKAGES.has(text)) return true
+  return text.toLowerCase().split('.')
+    .filter((part) => part !== '')
+    .some((part) => EXPLORE_MEMORY_SENSITIVE_PARTS.has(part)
+      || EXPLORE_MEMORY_SENSITIVE_PREFIX.test(part))
+}
+
+/**
+ * 平台自己的那几张脸 (审查 M5 与第二轮 B): 通知栏 / 权限弹窗 / 桌面 / 安装器 / 键盘
+ *
+ * 它们出现在 `lw_ui` 的 `package` 里, 但都不是"探索走到哪个应用": 记成归属会把这个应用标成被打断,
+ * 下一次回来就多算一次 resumed、多发一句 steer。桌面那几张与判断层的 [ROUTER_HOME_PACKAGES] 共用
+ * 一张表 —— 两处认的是同一件事
+ */
+const EXPLORE_MEMORY_SHELL_PARTS = /(?:^|\.)(?:systemui|permissioncontroller|packageinstaller|launcher[0-9]*|inputmethod|input_method|home[0-9]*)(?:$|\.)/u
+
+/** 这是一块"不是应用"的屏吗 (纯函数) */
+function exploreMemoryShell(pkg) {
+  const text = String(pkg ?? '').trim()
+  if (text === '') return true
+  if (ROUTER_HOME_PACKAGES.has(text)) return true
+  return EXPLORE_MEMORY_SHELL_PARTS.test(text.toLowerCase())
+}
+
+/**
+ * 每一块屏上最近一次认得是哪个应用 (displayId → pkg): `lw_tap` / `lw_swipe` 按它归属
+ *
+ * 与探索场次同寿: 开场清空 ([startExplore]), 还掉自己那块屏时删掉那一格
+ * ([exploreReleaseOwnedScreens]) —— 屏号会被别的场次重用到, 留着就是记错包
+ */
+const exploreMemoryOnDisplay = {}
+
+/** 还掉一块屏: 那一格的归属跟着走 (第二轮 A) */
+function exploreMemoryDropDisplay(displayId) {
+  const id = Math.max(0, Math.round(Number(displayId) || 0))
+  delete exploreMemoryOnDisplay[id]
+}
+
+/** 换一场探索: 手里这张表整个清掉 (第二轮 A) */
+function exploreMemoryForgetDisplays() {
+  for (const key of Object.keys(exploreMemoryOnDisplay)) delete exploreMemoryOnDisplay[key]
+}
+
+/**
+ * 这一步是哪个应用 (不抛, 审查 M5 与第二轮 A): 认下来就记在那一块屏上, 空串 = 不认
+ *
+ * `trusted` 为真时是 `lw_launch` 那一下 —— 应用是这一趟自己起的, 一定认; 读屏 (`lw_ui`) 走
+ * 「包名真的变了才认」: 同一块屏上还是同一个包时只更新那条的时间, 不重新标一次切换 (否则每看一次
+ * 屏就把别的应用标成被打断, 回来时又多算一次 resumed / 多一句 steer)。
+ * **主屏 (displayId 0) 也走这条路**: 没建虚拟屏的那一场换应用全靠 HOME + 点图标, 那时读到的包名
+ * 就是唯一的归属来源, 恒回空串会让短信页上的每一下都记在上一个应用名下
+ */
+function exploreMemorySeen(displayId, pkg, trusted = false) {
+  const id = Math.max(0, Math.round(Number(displayId) || 0))
+  const text = String(pkg ?? '').trim()
+  if (text === '' || exploreMemorySensitive(text) || exploreMemoryShell(text)) return ''
+  if (trusted !== true && exploreMemoryOnDisplay[id] === text) return ''
+  exploreMemoryOnDisplay[id] = text
+  return text
+}
+
+/** 这一块屏上是哪个应用 (不抛): 没认过就是空串, 调用方退回手里这一个 */
+function exploreMemoryOnDisplayPkg(displayId) {
+  const id = Math.max(0, Math.round(Number(displayId) || 0))
+  return exploreMemoryOnDisplay[id] ?? ''
+}
+
+/** 这一趟要找什么 (纯函数): 开场正文的第一个非空行, 标题 / 列表记号剥掉, 截到一句提示放得下的长度 */
+function exploreMemoryIntent(value) {
+  const lines = String(value ?? '')
+    .split('\n')
+    .map((line) => line.trim().replace(/^(?:#{1,6}|[-*+>])\s*/u, '').trim())
+    .filter((line) => line !== '')
+  return lines.length === 0 ? '' : exploreMemoryText(lines[0], EXPLORE_MEMORY_INTENT_CHARS)
+}
+
+/** 账里那一条 (纯函数): 形状不对就当没有, 行一律封过 (hash + 掩码后的前 24 字, 幂等) */
+function exploreMemoryEntry(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const list = (rows, keep = EXPLORE_MEMORY_CONFIRMED) => (Array.isArray(rows) ? rows : [])
+    .map((row) => exploreMemorySeal(row))
+    .filter((row) => row !== '')
+    .slice(-keep)
+  return {
+    intent: exploreMemoryText(value.intent, EXPLORE_MEMORY_INTENT_CHARS),
+    confirmed: list(value.confirmed),
+    // 第三档 (第二轮 E): "上次按过什么" —— 按到了但界面变没变没人读过, 于是不冒充 changed
+    pressed: list(value.pressed, EXPLORE_MEMORY_PRESSED),
+    failed: list(value.failed),
+    interrupted: value.interrupted === true,
+    resumed: Math.max(0, Math.round(Number(value.resumed) || 0)),
+    active: value.active === true,
+    at: Math.max(0, Number(value.at) || 0),
+  }
+}
+
+/** 空的那一条 (纯函数): 账上还没这个应用时的形状, 一处写好, 读写两边都照它 */
+function exploreMemoryBlankEntry() {
+  return {
+    intent: '', confirmed: [], pressed: [], failed: [],
+    interrupted: false, resumed: 0, active: false, at: 0,
+  }
+}
+
+/**
+ * 整本账读成规整的形状 (纯函数): 写歪的包名与行一律丢, **敏感包在读这一侧也丢**
+ *
+ * 第二轮 C: 上一版 40 字明文写的行可能还在盘上 (短信 / 银行), 只挡写这一侧等于升级机器上留着
+ * 老明文 —— `run.pkg` 与三条读路 (status / for / hint) 都从这一处过, 所以在这里挡一次就够
+ */
+function exploreMemoryOpen(memory) {
+  const source = memory !== null && typeof memory === 'object' && !Array.isArray(memory) ? memory : {}
+  const out = {}
+  for (const [key, value] of Object.entries(source)) {
+    const pkg = String(key ?? '').trim()
+    if (pkg === '' || exploreMemorySensitive(pkg) || exploreMemoryShell(pkg)) continue
+    const entry = exploreMemoryEntry(value)
+    if (entry === null) continue
+    out[pkg] = entry
+  }
+  return out
+}
+
+/**
+ * 这一趟里走了一步 (纯函数): 归档一条, 并把"切走 / 切回来"记在账上
+ *
+ * `step` 是 `{ pkg, intent, effect, text, delivered, at }`: `effect` 用 #32 回读那一次算好的那三档
+ * (`changed` / `unchanged` / `failed`), 只是看了一眼的调用方给 `read`、回读不了的给 `unknown`
+ * (这两个两边都不进); `delivered` 为真表示"这一下真的按到了" (第二轮 E) —— `unknown` + 送达才进
+ * 第三档 `pressed`, 于是真机上提示里也有东西可念; `limit` 是硬界, 0 就是整本账关掉, 回空账
+ */
+function exploreMemoryStep(memory, step, limit = EXPLORE_MEMORY_MAX_DEFAULT) {
+  const cap = Math.max(0, Math.round(Number(limit) || 0))
+  if (cap === 0) return {}
+  const next = exploreMemoryOpen(memory)
+  const pkg = exploreMemoryText(step?.pkg, 120)
+  if (pkg === '') return next
+  // 敏感应用整条跳过 (2.8.1 #36 审查 M4): 连包名都不进账, 于是"跑过短信"这件事一个字都留不下来
+  if (exploreMemorySensitive(pkg)) return next
+  const at = Math.max(0, Number(step?.at) || Date.now())
+  const asked = exploreMemoryIntent(step?.intent)
+  // 切走: 别处那条 active 的意图标 interrupted (回到它时才 +1 resumed) —— **只动标记不动 at**
+  // (审查 M3): `at` 是"谁最久没碰过"那把尺子, 切走那一刻改写它等于把别人刚碰过的时间抹掉,
+  // 后面的淘汰就只能按包名字典序挑
+  for (const [key, entry] of Object.entries(next)) {
+    if (key === pkg || entry.active !== true) continue
+    next[key] = { ...entry, active: false, interrupted: true }
+  }
+  const before = next[pkg] ?? null
+  const back = before !== null && before.interrupted === true
+  const entry = before ?? exploreMemoryBlankEntry()
+  const effect = String(step?.effect ?? '').trim().toLowerCase()
+  // 落盘那一条封过 (掩码 + hash + 前 24 字): 纯函数见 [exploreMemorySeal]
+  const said = exploreMemorySeal(step?.text)
+  // 同一条连着来两次 (连点同一个控件) 只占一行: 那三格是"确认过什么", 不是点击流水
+  const add = (rows, one) => (rows[rows.length - 1] === one
+    ? rows
+    : [...rows, one]).slice(-EXPLORE_MEMORY_CONFIRMED)
+  const confirmed = effect === 'changed' && said !== '' ? add(entry.confirmed, said) : entry.confirmed
+  // 第三档 (第二轮 E): 按下去了、但界面变没变没人读 —— 记"上次按过", 不冒充已确认
+  const pressed = effect === 'unknown' && step?.delivered === true && said !== ''
+    ? add(entry.pressed, said)
+    : entry.pressed
+  const failed = (effect === 'unchanged' || effect === 'failed') && said !== ''
+    ? add(entry.failed, said)
+    : entry.failed
+  next[pkg] = {
+    ...entry,
+    intent: asked !== '' ? asked : entry.intent,
+    confirmed,
+    pressed,
+    failed,
+    interrupted: false,
+    resumed: entry.resumed + (back ? 1 : 0),
+    active: true,
+    at,
+  }
+  // 记几个应用: 三级淘汰, 硬界是 cap (审查 M3 与第二轮 G)
+  //   ① 先走"不是手里这个、也没被打断"的 (最久没碰过的先走)
+  //   ② 仍超 → 走"回过一次却什么都没捞到"的 (resumed > 0 且三格全空)
+  //   ③ 仍超 → 按 at 升序走, 手里这个最后
+  // 一级就够的时候被打断的全留着 —— 那正是"切回来还记不记得"要用的那一条
+  const over = () => Object.keys(next).length - cap
+  const byAt = (left, right) => (next[left].at - next[right].at) || (left < right ? -1 : 1)
+  const drop = (order) => {
+    for (const key of order.slice(0, Math.max(0, over()))) delete next[key]
+  }
+  if (over() > 0) {
+    drop(Object.keys(next)
+      .filter((key) => key !== pkg && next[key].interrupted !== true)
+      .sort(byAt))
+  }
+  if (over() > 0) {
+    drop(Object.keys(next)
+      .filter((key) => key !== pkg && next[key].interrupted === true && next[key].resumed > 0
+        && next[key].confirmed.length === 0 && next[key].pressed.length === 0
+        && next[key].failed.length === 0)
+      .sort(byAt))
+  }
+  if (over() > 0) {
+    drop(Object.keys(next).filter((key) => key !== pkg).sort(byAt))
+  }
+  return next
+}
+
+/**
+ * 回到一个应用时该记起什么 (纯函数): intent + 至多 3 条 confirmed + 至多 3 条 pressed
+ *
+ * 账上还没有这个应用时拿这一趟的 intent 垫底 (`found: false`), 调用方不用先判空;
+ * 失败过的那几条只报个数, 不进下一步提示
+ */
+function exploreMemoryFor(memory, pkg, intent = '') {
+  const wanted = String(pkg ?? '').trim()
+  const entry = exploreMemoryOpen(memory)[wanted] ?? null
+  const asked = exploreMemoryIntent(intent)
+  return {
+    pkg: wanted,
+    found: entry !== null,
+    intent: entry !== null && entry.intent !== '' ? entry.intent : asked,
+    confirmed: entry === null ? [] : entry.confirmed.slice(-EXPLORE_MEMORY_CONFIRMED),
+    pressed: entry === null ? [] : entry.pressed.slice(-EXPLORE_MEMORY_PRESSED),
+    failed: entry === null ? 0 : entry.failed.length,
+    interrupted: entry !== null && entry.interrupted === true,
+    resumed: entry === null ? 0 : entry.resumed,
+  }
+}
+
+/**
+ * 下一步提示那几行 (纯函数): 第一行是这一趟要找什么, 后面最多 3 条已确认 + 3 条"上次按过"
+ *
+ * 不写失败过的那几条 —— 提示是"接着走", 不是把走过的路全铺一遍 (失败在 status 里看得到)。
+ * "上次按过"那一档是第二轮 E 加的: 基线没有 effect 回读, 真机上 confirmed 是空的, 这一档才是
+ * 提示里真有内容的那几句 (按下去了是事实, 界面变没变没人读过)
+ */
+function exploreMemoryHint(view) {
+  const intent = exploreMemoryText(view?.intent, EXPLORE_MEMORY_INTENT_CHARS)
+  if (intent === '') return []
+  const pkg = String(view?.pkg ?? '').trim()
+  const lines = [pkg === '' ? `接着找: ${intent}` : `回到 ${pkg}, 接着找: ${intent}`]
+  const say = (rows, keep, label) => {
+    for (const one of (Array.isArray(rows) ? rows : []).slice(0, keep)) {
+      // 盘上那一行是 `hash + 掩码后的前 24 字`, 提示里只念后面那一段 (hash 是给磁盘对账用的)
+      const text = exploreMemoryBare(one)
+      if (text !== '') lines.push(`${label}: ${text}`)
+    }
+  }
+  say(view?.confirmed, EXPLORE_MEMORY_CONFIRMED, '已确认')
+  say(view?.pressed, EXPLORE_MEMORY_PRESSED, '上次按过')
+  return lines
+}
+
+/** 四个读数 (纯函数): 记了几个应用 / 几个被打断 / 回来过几次 / 按过几条 */
+function exploreMemoryCounts(memory) {
+  const entries = Object.values(exploreMemoryOpen(memory))
+  return {
+    packages: entries.length,
+    interrupted: entries.filter((entry) => entry.interrupted === true).length,
+    resumed: entries.reduce((sum, entry) => sum + entry.resumed, 0),
+    pressedCount: entries.reduce((sum, entry) => sum + entry.pressed.length, 0),
+  }
+}
+
+/** `lw_explore op=status` 里那一段读数 (纯函数): 四个数 + 手里这一个 + 开关 + 取回的下一步提示 */
+function exploreMemoryStatus(run, limit = exploreMemoryLimit()) {
+  const view = exploreMemoryFor(run?.memory, run?.pkg, run?.intent)
+  return {
+    ...exploreMemoryCounts(run?.memory),
+    current: String(run?.pkg ?? '').trim(),
+    enabled: limit > 0,
+    // 回到手里这个应用时下一步先看到的那几行 (还没记过这个应用时是空的)
+    hint: view.found ? exploreMemoryHint(view) : [],
+  }
+}
+
+/**
+ * 这一步算成什么 (纯函数): 回执里有 #32 回读算的 `effect` 就用它, 没有就是 `unknown`
+ *
+ * 基线这一档的桥回执只有 `tapped` / `swiped` / `clicked` (没有 effect 回读), 那三个只说明**动作
+ * 送到了**, 不说明界面变了 —— 于是记 `unknown`, confirmed 与 failed 两边都不进 (2.8.1 #36 审查 M1:
+ * 拿"发出去了"冒充"界面真变了", 提示里就会点名其实没变化的控件)。等 #32 的 effect 回读进基线,
+ * 同一行代码自己就接上了。熄屏时注入是静默失效的, 那种"发出去也没有用"的仍按 `failed` 算
+ */
+function exploreMemoryEffect(result) {
+  if (typeof result?.screen === 'string' && result.screen !== 'on') return 'failed'
+  const effect = String(result?.effect ?? '').trim().toLowerCase()
+  if (effect === 'changed' || effect === 'unchanged' || effect === 'failed' || effect === 'unknown') {
+    return effect
+  }
+  if (result?.tapped === true || result?.swiped === true || result?.clicked === true) return 'unknown'
+  return 'failed'
+}
+
+/**
+ * 这一下真的按到了吗 (纯函数, 第三轮 E): 无障碍那一路看 `clicked`, 同名两条不算按到
+ *
+ * `clicked` 而不是 `outcome`: 动作被拒之后桥会用一根按住的手指兜底, 那一下 `outcome` 仍是
+ * unclicked 而 `clicked` 已经是真 (与 [namedTapReport] 同一条判据); 坐标那一路看 `tapped`。
+ * 少传这一个布尔, 生产里最常见的那条 a11y 按名成功就只剩 intent 一行 ("上次按过"永远是空的)
+ */
+function exploreMemoryDelivered(result) {
+  if (result?.outcome === 'ambiguous') return false
+  return result?.clicked === true || result?.tapped === true
+}
+
+/** 这一步按的是什么 (纯函数): 按名字就是那个名字, 按点就是那个点 */
+function exploreMemoryTapText(args) {
+  const named = exploreMemoryText(args?.text, 120)
+  if (named !== '') return named
+  const x = Number(args?.x)
+  const y = Number(args?.y)
+  return Number.isFinite(x) && Number.isFinite(y) ? `(${x},${y})` : ''
+}
+
 /** 那一份摘要叫什么: `yyyyMMdd-HHmm` (本地时间, 按这一场开始那一刻算 —— 纯函数) */
 function exploreSummaryName(startedAt) {
   const at = new Date(Number(startedAt) || Date.now())
@@ -11556,6 +17113,59 @@ const exploreRun = {
   stepLimit: 0,
   reminded: false,
   over: false,
+  // 跨应用记忆 (2.8.1 #36): 这一场要找什么 / 手里是哪个应用 / 按应用记的那本账
+  intent: '',
+  pkg: '',
+  memory: {},
+  // 判断层在球不在场时开的这一场, 收尾要顺带说出去的那句 (2026-11-21); 空 = 普通探索不说
+  speakOnFinish: '',
+}
+
+/** status 里 `effects` 那一格留几条: 看的是"刚才连点的那十几下", 不是整场的审计 */
+const EXPLORE_EFFECTS_KEPT = 20
+
+/**
+ * 这一场点过、核对过的那些一下 (落实表 #32)
+ *
+ * 账在点按那一层 (`tapEffectLog`, 只由 `lw_tap` 的核对写), 这里按场次挑出来: 别的会话点的那几下不
+ * 属于这一场. `lw_explore op=status` 的 `effects` 与 `reason` 都读它
+ */
+function exploreEffectsFor(log, sessionId) {
+  const wanted = String(sessionId ?? '')
+  if (wanted === '') return []
+  return (Array.isArray(log) ? log : [])
+    .filter((one) => one?.session === wanted)
+    .slice(-EXPLORE_EFFECTS_KEPT)
+}
+
+/**
+ * 这一场该不该停一下 (纯函数): 尾巴上连着两条「什么都没变」就报 `giveup`
+ *
+ * 「什么都没变」= `effect=unchanged`, 或者恢复走到 `recover=giveup` (两样是同一件事的两条记法:
+ * 前置的那些不按根本没有账). 判据收的是**连着两条** —— 尺子与点按那一层是同一个数
+ * (`TAP_EFFECT_STREAK`), 漂开的样子是"status 说该停, 而 lw_tap 还在发"
+ *
+ * `effect=unknown` (树读不回来) 两件事都不算 (必修 3/4): 它不是"没变", 一条 unknown 就把这一串
+ * 断开 —— 自绘屏上每一下都是 unknown, 把它当 unchanged 会让一场探索两下就被判停
+ */
+function exploreEffectReason(effects) {
+  const list = Array.isArray(effects) ? effects : []
+  let streak = 0
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (!exploreEffectNothingChanged(list[index])) break
+    streak += 1
+  }
+  return streak >= TAP_EFFECT_STREAK ? 'giveup' : ''
+}
+
+/** 这一条账算不算「什么都没变」: unchanged 与 giveup 都算, unknown 与 changed 都不算 */
+function exploreEffectNothingChanged(entry) {
+  if (entry?.effect === 'unknown' || entry?.effect === 'changed') return false
+  // `recover=reread` 恰恰是「再看一眼就看见变了」: 这一下按成了, 只是慢了一拍 (动画 / 转场 /
+  // 回包晚于 300ms). 新账里 `tapEffectCheck` 已经把它记成 `effect=changed`, 这一句只兜旧账与手工
+  // 造出来的形状 (`{effect:'unchanged', recover:'reread'}`) —— 两个来源都不许被算成「什么都没变」
+  if (entry?.recover === 'reread') return false
+  return entry?.effect === 'unchanged' || entry?.recover === 'giveup'
 }
 
 /**
@@ -11733,12 +17343,15 @@ async function exploreReleaseOwnedScreens(reason, sessionId = exploreRun.session
       const at = Date.now()
       if (answer?.released === true) {
         outcome.released.push(entry.displayId)
+        // 屏没了, 那一格的归属跟着走 (第二轮 A): 显示号会被别的场次重用到, 留着就是记错包
+        exploreMemoryDropDisplay(entry.displayId)
         exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, {
           released: true, releasedAt: at, reason: outcome.reason, missing: false, lastError: '',
         })
       } else {
         // 用户先关屏 / 建新屏时已被替换: 只记 missing, 不当失败
         outcome.missing.push({ displayId: entry.displayId, why: String(answer?.error ?? 'the screen was already gone') })
+        exploreMemoryDropDisplay(entry.displayId)
         exploreScreens = exploreScreenMarked(exploreScreens, entry.displayId, {
           released: true, releasedAt: at, reason: outcome.reason, missing: true, lastError: '',
         })
@@ -11785,12 +17398,16 @@ const exploreWorkspaceState = { path: null, id: null, registered: null, why: nul
 /**
  * 探索那条: 目录 `Luwi`, 读数记在 [exploreWorkspaceState] 上
  *
- * 主人 2026-10-18 拍板 (D10 改口径): 探索会话落在 `Luwi`, 与 `dsh-ball` 那条各记各的账 —— 注册路
+ * 主人 2026-10-18 拍板 (D10 改口径): 探索会话落在 `Luwi`, 与浮标那条各记各的账 (2026-11-20 起两条是同一个目录, 账还各记各的) —— 注册路
  * 共用 [ensureChannelWorkspace], 一条会话该带 `workspaceId` 的那件事与浮标那条完全相同
  */
 async function ensureExploreWorkspace(ctx) {
   return ensureChannelWorkspace(ctx, EXPLORE_WORKSPACE_NAME, exploreWorkspaceState)
 }
+
+/* [adoptExploreWorkspace] 已删 (2026-11-13): 启动那一下改成与投递同一条 [ensureExploreWorkspace] ——
+ * 主人要的是"直接默认使用这个工作区", 门户里不再有「选工作区」这一档, 所以"目录不在就什么都不做"
+ * 这条路也就没有存在理由了 */
 
 /** 这一档的读数 (给 `lw_explore op=status`, 也是"省电探针抛错"的唯一落点) */
 const exploreState = {
@@ -11992,6 +17609,22 @@ async function exploreStateRestore() {
   exploreRun.stepLimit = Number(run.stepLimit) || EXPLORE_STEPS_DEFAULT
   exploreRun.reminded = run.reminded === true
   exploreRun.over = false
+  // 跨应用记忆也回来: 重启之后手里那个应用与那本账都还在 (EXPLORE_MEMORY_MAX=0 时一笔都不记)
+  exploreRun.intent = exploreMemoryIntent(run.intent)
+  // 敏感包 (第二轮 C): 盘上那一格是上一版写的敏感应用时置空 —— 读侧同一条纪律
+  const restoredPkg = typeof run.pkg === 'string' ? run.pkg.trim() : ''
+  exploreRun.pkg = exploreMemorySensitive(restoredPkg) || exploreMemoryShell(restoredPkg) ? '' : restoredPkg
+  const keptMemory = exploreMemoryLimit() === 0 ? {} : exploreMemoryOpen(run.memory)
+  const diskMemory = run.memory !== null && typeof run.memory === 'object' && !Array.isArray(run.memory)
+    ? run.memory
+    : {}
+  // 丢过东西就把盘上那份也重写一次 (第三轮 C 的残留): 只滤内存的话, 上一版那行明文 (数字与包名)
+  // 要等到下一次写盘才被盖掉 —— 中途任何一次崩溃 / 强杀都把那 40 字留在盘上
+  const dropped = exploreRun.pkg !== restoredPkg
+    || (exploreMemoryLimit() !== 0 && Object.keys(diskMemory).length !== Object.keys(keptMemory).length)
+  exploreRun.memory = keptMemory
+  if (dropped) void exploreStateWrite()
+  exploreRun.speakOnFinish = typeof run.speakOnFinish === 'string' ? run.speakOnFinish : ''
   return true
 }
 
@@ -12006,6 +17639,12 @@ function exploreReset() {
   exploreRun.stepLimit = 0
   exploreRun.reminded = false
   exploreRun.over = false
+  exploreRun.intent = ''
+  exploreRun.pkg = ''
+  exploreRun.memory = {}
+  // 手里那张"哪块屏是哪个应用"的表跟着这一场走 (第二轮 A)
+  exploreMemoryForgetDisplays()
+  exploreRun.speakOnFinish = ''
 }
 
 /** 最新那一份摘要的路径 (没有就是空串) —— pc=start 那一段要把它交给模型 (persona 第 17 条) */
@@ -12071,6 +17710,60 @@ async function exploreSay(ctx, text, options = {}) {
     const flushed = await ctx.sessions.flush(agent.session)
     return { sessionId, running, flushed }
   })
+}
+
+/**
+ * 这一趟走了一步: 归档进 [exploreRun] 的 memory (只认这一场)
+ *
+ * 从工具的执行里调 (同步, 不抛): 不是这一场 / 已经 over / `EXPLORE_MEMORY_MAX=0` 都只是一个 return。
+ * `delivered` 是"这一下真的按到了" (第二轮 E) —— 只有它才让 `unknown` 进第三档 `pressed`。
+ * 切走与切回来那两下才落盘 —— 步数由 [exploreStepGuard] 每五步写一次, 这本账不必每步都写
+ */
+function exploreMemoryNote(exec, pkg, effect, text, delivered = false) {
+  if (exploreRun.session === null || exploreRun.over === true) return false
+  if (sessionIdOf(exec) !== exploreRun.session) return false
+  const limit = exploreMemoryLimit()
+  if (limit === 0) return false
+  const wanted = String(pkg ?? '').trim() || exploreRun.pkg
+  if (wanted === '') return false
+  // 敏感应用连"路过"都不记 (2.8.1 #36 审查 M4): 记下包里那个名字也是一条隐私
+  if (exploreMemorySensitive(wanted)) return false
+  const before = exploreMemoryCounts(exploreRun.memory)
+  exploreRun.memory = exploreMemoryStep(exploreRun.memory, {
+    pkg: wanted,
+    intent: exploreRun.intent,
+    effect,
+    text,
+    delivered: delivered === true,
+    at: Date.now(),
+  }, limit)
+  exploreRun.pkg = wanted
+  const after = exploreMemoryCounts(exploreRun.memory)
+  if (after.packages !== before.packages || after.resumed !== before.resumed
+    || after.interrupted !== before.interrupted) void exploreStateWrite()
+  // 切回来那一下: 把这一趟要找什么交回去, 它下一步先看到的就是这一行
+  if (after.resumed > before.resumed) {
+    void exploreMemorySay(hostCtx, exploreMemoryFor(exploreRun.memory, wanted, exploreRun.intent))
+  }
+  return true
+}
+
+/**
+ * 回到原应用那一句: 下一步提示的第一行就是这一趟要找什么
+ *
+ * 从同步的工具执行里 `void` 出去, 所以失败只记读数 (与到步那一句同一个纪律)
+ */
+async function exploreMemorySay(ctx, view) {
+  if (ctx === null || ctx === undefined) return
+  const lines = exploreMemoryHint(view)
+  if (lines.length === 0) return
+  try {
+    await exploreSay(ctx, lines.join('\n'), { steer: true })
+    console.log(`luwi-channel: exploration ${shortSession(exploreRun.session)} came back to ${view.pkg}`)
+  } catch (error) {
+    exploreState.lastError = `the memory hint was not sent: ${error?.message ?? error}`
+    console.warn(`luwi-channel: ${exploreState.lastError}`)
+  }
 }
 
 /**
@@ -12331,6 +18024,16 @@ async function startExplore(ctx, options = {}) {
   exploreRun.stepLimit = stepLimit
   exploreRun.reminded = false
   exploreRun.over = false
+  // 跨应用记忆 (2.8.1 #36): 这一场要找什么先定下来, 每个应用那一份都由它垫底
+  exploreRun.intent = exploreMemoryIntent(options?.text) || '自由探索这台手机'
+  exploreRun.pkg = ''
+  exploreRun.memory = {}
+  // 换一场就是换一张"哪块屏是哪个应用"的表 (第二轮 A): 上一场认下的屏号不带到这一场
+  exploreMemoryForgetDisplays()
+  // 判断层在球不在场时开的这一场: 收尾顺带说出去的那句, 跟着 run 一起落盘 (重启也接得回来)
+  exploreRun.speakOnFinish = typeof options?.speakOnFinish === 'string'
+    ? options.speakOnFinish.trim()
+    : ''
   await exploreStateWrite()
   try {
     await exploreSay(ctx, exploreStartLine(options?.text, exploreRun, summaryPath))
@@ -12566,6 +18269,8 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
   }
   const ended = exploreRun.over === true ? 'deadline' : exploreRun.reminded === true ? 'steps' : 'finish'
   const finishing = exploreRun.session
+  // 判断层在球不在场时开的这一场, 收尾要顺带说的那句: exploreWriteSummary 会 reset, 先留一份
+  const speak = exploreRun.speakOnFinish
   try {
     const saved = await exploreWriteSummary({
       summary,
@@ -12586,7 +18291,22 @@ async function finishExplore(_ctx, args = {}, sessionId = '') {
     const rules = await exploreRulesWrite(args?.rules)
     exploreState.finished += 1
     console.log(`luwi-channel: exploration finished -> ${saved.path} (${saved.chars} chars)`)
-    return { saved: true, ...saved, nextTask: task, checks, ...(rules === null ? {} : { rules }) }
+    // 判断层开的这一场: 收尾顺带把挑好的那句说进本场的 lw/out —— 门户与浮标同一份读到 (2026-11-21)
+    let spoke = ''
+    if (speak !== '') {
+      try {
+        const row = await lwOutAppend(finishing, { kind: 'text', text: speak })
+        spoke = String(row?.seq ?? '')
+        console.log(`luwi-channel: the router's closing line went out on ${finishing} (seq ${spoke})`)
+      } catch (error) {
+        console.warn(`luwi-channel: the router's closing line was not written: ${error?.message ?? error}`)
+      }
+    }
+    return {
+      saved: true, ...saved, nextTask: task, checks,
+      ...(rules === null ? {} : { rules }),
+      ...(spoke === '' ? {} : { spoke }),
+    }
   } finally {
     // ⑥ finish 走 finally: 摘要 / 写卡哪一步失败都不许把屏留下, 归还自己的错也不许盖掉摘要的答案
     await exploreReleaseScreens(ended, finishing)
@@ -12600,6 +18320,9 @@ async function exploreStatus(ctx) {
   const readings = await voiceWorkspaceReadings(ctx, exploreRun.session ?? '', exploreWorkspaceState)
   const power = await explorePowerSave()
   const task = await exploreTaskInfo()
+  // 这一场点过、核对过的那几下 (落实表 #32 / #37): 连着两条「什么都没变」(effect=unchanged
+  // 或 recover=giveup, unknown 与 reread 都不算) 就报 reason=giveup
+  const effects = exploreEffectsFor(tapEffectLog, exploreRun.session)
   return {
     running: exploreRun.session !== null && exploreRun.over !== true,
     over: exploreRun.over,
@@ -12620,6 +18343,8 @@ async function exploreStatus(ctx) {
     steps: exploreRun.steps,
     stepLimit: exploreRun.stepLimit || EXPLORE_STEPS_DEFAULT,
     reminded: exploreRun.reminded,
+    effects,
+    effectReason: exploreEffectReason(effects),
     powerSave: power.powerSave,
     powerSaveKnown: power.known,
     powerSaveWhy: power.why,
@@ -12627,6 +18352,8 @@ async function exploreStatus(ctx) {
     nextTask: task,
     screens: exploreScreens,
     unreleasedScreens: exploreScreens.filter((one) => one.released !== true).length,
+    // 跨应用记忆 (2.8.1 #36): 记了几个应用 / 几个被打断 / 回来过几次
+    memory: exploreMemoryStatus(exploreRun),
     preset: exploreState.preset,
     presetWhy: exploreState.presetWhy,
     started: exploreState.started,
@@ -12666,8 +18393,18 @@ async function exploreStatusText(ctx) {
     `next task card: ${readings.nextTask.path || '(none yet)'} (${readings.nextTask.chars} chars)`,
     `screens: ${pendingScreens.length} unreleased of ${readings.screens.length} on the ledger`
       + `${pendingScreens.length === 0 ? '' : ` (displayId ${pendingScreens.join(', ')})`}`,
+    `memory: ${readings.memory.packages} app(s), ${readings.memory.interrupted} interrupted,`
+      + ` ${readings.memory.resumed} resumed, ${readings.memory.pressedCount} pressed`
+      + `${readings.memory.current ? ` (on ${readings.memory.current})` : ''}`
+      + `${readings.memory.enabled ? '' : ' - new steps are off (EXPLORE_MEMORY_MAX=0); the ledger'
+        + ' from before is still reported'}`,
     `this run: ${readings.started} started, ${readings.finished} finished, ${readings.stubs} stub(s),`
       + ` ${readings.refusals} refused`,
+    // 点按效果那一段 (落实表 #32 / #37): 连着两条「什么都没变」才是"这一场该换个走法了"
+    `press effects: ${readings.effects.length} recorded this run`
+      + `${readings.effectReason === ''
+        ? ''
+        : `, reason=${readings.effectReason} - change the screen or press another control instead`}`,
     `preset: ${readings.preset ?? '(the registry default)'}${readings.presetWhy ? ` - ${readings.presetWhy}` : ''}`,
   ]
   if (readings.lastRefusal) {
@@ -12755,9 +18492,12 @@ function startExploreClock(ctx) {
     })
     .catch((error) => warn(ctx, `the explore state could not be read: ${error?.message ?? error}`))
     .finally(() => {
-      // 宿主起来就把探索那条工作区注册上 (2.7.9 T5, 与 dsh-ball 同一条幂等注册路): 于是「Luwi」
+      // 宿主起来就把探索那条工作区注册上 (2.7.9 T5, 与浮标同一条幂等注册路): 于是「Luwi」
       // 不必等第一次探索成功才出现在会话列表里; 顺带把 status 那四项写进读数文件, 设置页才有得看。
       // **放在 restore 之后**: 这一步的写会覆盖 `run`, 抢在 restore 前面就把"上一场"抹掉了
+      //
+      // 2026-11-13 改口径: 这里也走"建目录 + 注册"([ensureExploreWorkspace]), 不再"只认已有" ——
+      // 主人要的是首启直接默认使用这个工作区, 门户里不再有「选工作区」那一档
       void ensureExploreWorkspace(ctx)
         .then((workspace) => {
           // 一行证据: 工作区不必等第一次探索成功才出现 (2.7.9 T5), 而这一行就是"它真的在"
@@ -13348,6 +19088,28 @@ function noteQuietRefresh() {
 }
 
 /**
+ * Which voice input this installation chose (2026-11-15, 2.8.1 #4)
+ *
+ * The onboarding offers two routes for the voice step: download the 240 MB SenseVoice model, or let
+ * the signed-in DeepSeek account carry voice input. The app writes that choice to
+ * `$DSH_HOME/lw/voice-source.json` (it is the only writer); this side only reads it so a mic press
+ * can say what is actually missing instead of always pointing at `lw_speech op=prepare`.
+ *
+ * Every read failure means `local` - a missing or broken file must not change how voice input works.
+ * @returns 'deepseek' when the account route was chosen, otherwise 'local'
+ */
+function voiceSourceChoice() {
+  const home = process.env.DSH_HOME
+  if (!home) return 'local'
+  try {
+    const body = JSON.parse(readFileSync(join(home, 'lw', 'voice-source.json'), 'utf8'))
+    return body?.source === 'deepseek' ? 'deepseek' : 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+/**
  * Register the provider the page's voice input button resolves to
  *
  * 与球同一个引擎 (2026-10-09): 下载那一栏走的是 SenseVoice 那 240 MB, 界面里的磁盘 / 内存 / 时间
@@ -13356,10 +19118,13 @@ function noteQuietRefresh() {
 function registerVoiceInput(ctx) {
   const speech = ctx.speechToText
   if (!speech || typeof speech.register !== 'function') return
+  // 名字跟着"这台机器选了哪一条"走 (2026-11-15, 2.8.1 #6): 选了账号那条的机器, 这颗麦克风底下跑的是
+  // 官方接口, 标签还写 "On-device" 就是在骗人 —— 换选择要重启宿主才会改这一行, 而那一行只是显示
+  const accountVoice = voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
   speech.register({
     info: {
       id: SPEECH_PROVIDER_ID,
-      name: 'On-device SenseVoice',
+      name: accountVoice ? 'DeepSeek official voice input' : 'On-device SenseVoice',
       location: 'host-local',
       languages: SPEECH_LANGUAGES,
       downloadSources: SPEECH_SOURCES,
@@ -13372,7 +19137,15 @@ function registerVoiceInput(ctx) {
       },
     },
     preparation: {
-      snapshot: () => ({ ...speechState }),
+      // 选了账号那条的机器没有可下的东西 (2026-11-15, 2.8.1 #6): 这一栏说 "ready", 而不是让"没下
+      // 240 MB"看起来像还没准备好 —— 那颗按钮真的按得动, 它走的是官方接口
+      snapshot: () => (voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
+        ? {
+            ...speechState,
+            phase: 'ready',
+            message: 'the DeepSeek voice input is in use: nothing to download on this phone',
+          }
+        : { ...speechState }),
       /**
        * 起一次准备
        *
@@ -13400,10 +19173,17 @@ function registerVoiceInput(ctx) {
     async transcribe({ audio, language }) {
       const info = await speechInspect()
       // 这条按钮与球走同一套 (2026-10-09): 盘上那一个模型就是它, 不再按"GLM 在不在"分岔 ——
-      // 分岔的代价是别人为了按一次按钮要多下 1.6 GB, 而 GLM 的准是**点名要它**时才值得的
-      const engine = SPEECH_ENGINE_SHERPA
-      if (!info.present) {
-        throw new Error('the SenseVoice model is not downloaded yet: run lw_speech op=prepare once')
+      // 分岔的代价是别人为了按一次按钮要多下 1.6 GB, 而 GLM 的准是**点名要它**时才值得的。
+      // **引导里选了账号那条的机器改走 deepseek** (2026-11-15, 2.8.1 #6): 那一档没有本地模型,
+      // 于是"没下 240 MB"不再是错误, 这一段录音由宿主带令牌送去官方接口
+      const engine = voiceSourceChoice() === SPEECH_ENGINE_DEEPSEEK
+        ? SPEECH_ENGINE_DEEPSEEK
+        : SPEECH_ENGINE_SHERPA
+      if (engine === SPEECH_ENGINE_SHERPA && !info.present) {
+        throw new Error(
+          'the SenseVoice model is not downloaded yet: run lw_speech op=prepare once'
+            + ' (or pick the DeepSeek voice input in getting started, which needs no model)',
+        )
       }
       const directory = info.directory
       await mkdir(directory, { recursive: true })

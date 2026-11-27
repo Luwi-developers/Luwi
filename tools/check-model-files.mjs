@@ -130,11 +130,13 @@ check('唤醒词模型的自有 Release 与镜像两侧一致', [
 
 /* ── 首启引导那一条链 ─────────────────────────────────────────────────── */
 
-check('检测: 两个模型各看各的, 缺一个都算', [
+check('检测: 两个模型各看各的, 缺一个都算 (语音那件认两档来源, 2.8.1 #4)', [
   /fun missing\(context: Context\): List<Need>/.test(setup),
   /if \(!WakeWordDownload\.present\(context\)\) add\(Need\.WAKE\)/.test(setup),
-  /if \(!SpeechModelDownload\.present\(context\)\) add\(Need\.SPEECH\)/.test(setup),
-], [true, true, true])
+  /if \(!speech\) add\(Need\.SPEECH\)/.test(setup),
+  // 选了已登录 DeepSeek 账号那条语音输入的机器, 那 240 MB 不再是"缺"
+  /VoiceSource\.satisfied\(VoiceSource\.read\(context\), SpeechModelDownload\.present\(context\)\)/.test(setup),
+], [true, true, true, true])
 check('每次冷启动提醒一次, 最多 3 次; 到数之后不再检测', [
   /private const val COUNT = "model-prompt-count"/.test(setup),
   /const val MAX_PROMPTS = 3/.test(setup),

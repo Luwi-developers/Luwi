@@ -15,6 +15,7 @@ import io.github.yuloong07star.luwi.plugin.PluginPaths
 import io.github.yuloong07star.luwi.plugin.PluginSettings
 import io.github.yuloong07star.luwi.plugin.PluginStore
 import io.github.yuloong07star.luwi.plugin.theme.BallTheme
+import io.github.yuloong07star.luwi.tool.IconTheme
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -346,10 +347,13 @@ fun areaDp(faceDp: Int, bubbleSp: Long, rows: Int): Int = rows * oneLineDp(bubbl
     /**
      * 与浮标相同外观: 取当前那一套的 `idle` 那张脸 (带帧就让它自己翻)
      *
-     * **没挑外观 (内置画法) 时退回那个品牌标记** (2026-10-17 主人: "人物没有跟 ball 变化"): 球在内置
-     * 画法下画的是"一圈水花里一只鲸尾", 而组件这一块原来在那种情形下**什么都不画** —— 于是选了
-     * 「跟随浮标显示」反而看着像"人物没了 / 没跟球变"。现在内置那一档画同一份标记
-     * (`ic_launcher_foreground`, 与球上那个标记同源), 跟随就是跟随
+     * **没挑外观 (内置画法) 时退回当前那套图标的标记** (2026-10-17 主人: "人物没有跟 ball 变化"): 球在
+     * 内置画法下画的是当前那套的标记, 而组件这一块原来在那种情形下**什么都不画** —— 于是选了
+     * 「跟随浮标显示」反而看着像"人物没了 / 没跟球变"。现在内置那一档画同一份
+     * (`IconTheme.markRes`, 与球上那个标记同源), 跟随就是跟随
+     *
+     * 2026-11-22 起那一份跟着 设置 -> 外观 -> Luwi 图标 换; 这一格是 `match_parent` + `fitCenter`,
+     * 所以满幅的套 (女仆那张) 自然铺满, 不必拿 `setViewLayoutWidth` 去猜桌面格子的尺寸
      */
     private fun bindBallFace(context: Context, view: RemoteViews) {
         val face = runCatching { BallTheme.face(context, FACE_STATE) }.getOrNull()
@@ -358,7 +362,7 @@ fun areaDp(faceDp: Int, bubbleSp: Long, rows: Int): Int = rows * oneLineDp(bubbl
             view.addView(
                 R.id.lw_chat_flipper,
                 RemoteViews(context.packageName, R.layout.lw_widget_slot_frame).apply {
-                    setImageViewResource(R.id.lw_slot_frame_image, R.drawable.ic_launcher_foreground)
+                    setImageViewResource(R.id.lw_slot_frame_image, IconTheme.markRes(context))
                 },
             )
             return

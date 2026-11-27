@@ -23,24 +23,30 @@
 | `check-overlay-yaml.mjs` | 把 app 会写出来的那两份 YAML (命令行覆盖层 + profile patch 里 `PluginRows` 补的那一行) 解析一遍 (拼错了的代价是整台 host 起不来, 而 profile patch 里那一行的 `name:` 写成裸路径的代价是**设置面板永远存不进去**) |
 | `check-read-aloud.mjs` | 念之前那次清洗: 直接拿 `host-plugin/index.mjs` 里的源码跑, 不复制一份出来 |
 | `check-voice-commands.mjs` | 命令句词表的**两份实现不许漂开** (宿主插件那张表 vs `voice/VoiceCommands.kt`) |
-| `check-auto-shot.mjs` | 自动识屏那一张图的判据表: 词表 (正例 / 反例) + 视频模式与设置那两道闸 + 图要进用户消息 |
+| `check-auto-shot.mjs` | 自动识屏那一张图的判据表: 词表 (正例 / 反例) + 视频模式与设置那两道闸 + 图要进用户消息 + **两张词表不许漂 ("上一句里的东西"那四条两边都要有)** |
 | `check-lock-steps.mjs` | 锁屏那一条的判据表: 坐标一律比例 / 密码与图案不落明文也不进日志 / 失败三次停 / 点亮三条路都在 / 插件与应用的 op 名单一致 / **脚本动词表与 `docs/lock-script.md` 不许漂** |
 | `check-quick-commands.mjs` | 快捷指令与技能那一条的判据表: `lw_calendar` / `lw_quick` 的 op 名单两侧一致 (删除只在桥上有) / 四份技能与两条样例都在 / 技能 frontmatter 合规 / `build.gradle.kts` 那张随包表与仓库里的文件对得上 |
 | `check-image-edit.mjs` | p 图那一条的判据表: `lw_image` 的两个 op 与 `.mjs` / 桥两侧对得上 (ref 那条链与 `edit_image` 的 `source_image` 同一份形状) / 生图插件与 `photo-edit` 技能都在随包表里 / 那两处清单与 `PluginOverlay` 那一行三边一致 / 面板要能改的那一行不在覆盖层两张表里, 而且盘上写的是 `file://` 形态 |
 | `check-automations.mjs` | 自动指令那一条的判据表: `lw_automation` 的 op 名单两侧一致 (删除只在桥上有) / 六个 `when.kind` 与两种 `then.kind` 在插件说明里逐个念到 / 冷却与上限那两个默认值两侧一致 / 两个来源记号 (`automation` 与 `automation-setup`) 都在且插件对前一个有那两处特别处理 / 设置页引用的字符串键两份 `strings.xml` 都有而且顺序一致 |
 | `check-wake-words.mjs` | 唤醒词表算法的两份实现不许漂开 (`WakeWordWords.kt` vs 插件里的 `wakeWordLine`) |
 | `check-model-files.mjs` | 两个模型的下载表不许漂开 (2026-10-28): 唤醒词 4 个文件 / 语音 2 个文件 + VAD 的 name·bytes·sha256 与镜像地址逐项对 `host-plugin/index.mjs`; 每次冷启动提醒一次、最多 3 次 (到数后不再检测)、下载编排、`AppNav` 与设置页入口、两份文案都在 |
-| `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话 |
+| `check-voice-inbox.mjs` | 投递队列那三条真值: 第一次跑不倒历史 / 投递成功才前移 / 断线要留话; 外加选场那三档 (点名 → 30 分钟账本 → **指代那一档 24 小时**) 与写账的"按落点还是按谁发的" |
+| `check-voice-asr.mjs` | 语音输入第三档 (2.8.1 #6) 的判据表: 端点与 `/lw-asr` 两处逐字相同 / 宿主那条路由真跑 (只收 POST、只认回环、≤8 MiB、RIFF 门、401 `signedIn=false`、multipart 的 `file` 字段与边界、上游错误把令牌抹掉) / 常驻链与页面麦克风都按 `lw/voice-source.json` 分岔 (`engine=deepseek` 不再要那 240 MB) / 设置页两行与两份 strings / `privacy.md` 出站表 / 接口文档 |
+| `check-speak-engine.mjs` | 语音输出那两件 (2.8.1 #5): 自动念缺省关 / 第五引擎 DeepSeek 官方 TTS 的端点与 `/lw-tts` 两处逐字相同, 且那条路由抽出来真跑 (未登录 401 / 令牌打官方 / 音色白名单 / 上游 500 抹令牌) |
 | `check-shot-params.mjs` | 取景与截图那几个数字的**唯一口径** (`docs/shot-params.md`) 与插件 / Kotlin / 提示词 / 技能 / 预置五处逐项对照 |
 | `check-video-gate.mjs` | 视频模式那两道闸 (屏幕类工具一律拒 / 相机同时只许一场会话用) 的判据表, 临时 `DSH_HOME` 自己搭 |
 | `check-single-screen.mjs` | 虚拟屏单槽那条硬限制的判据表 (2026-10-28): 特权侧建屏前先放已有的 / 应用侧先关旧再建 / 桥回被替换的 displayId / 插件把它写进描述与答案 / `displayId` 可省略但事件订阅不补 / 请求有超时 / `lw_wait_text` 在视频模式被拒 |
-| `check-explore.mjs` | 探索那一档的判据表 (2.7.8 批次 7): 预设那一段的 19 行 / persona 那三条红线与五节摘要 / 预算常数与 `exploreBudget` 真值表 / 工作区与预设回退 / 省电只当读数 (2026-10-26 起不再拦) / 数步只数不拒 / `lw_explore` 的工具面 / 摘要的文件形状 (抽那几段纯函数真跑) / 候选卡已下线 |
-| `check-proactive.mjs` | 主动对话那一档的判据表 (2.8.0 B4-a): requestCode 43 与 41 / 42 不撞 / `proactive-schedule.json` 的四个键与"先拉宿主再投" / `SOURCE_PROACTIVE` 两侧同一个字面量 / 主动场固定新开 / 主动场不建虚拟屏 (`proactiveScreenGate` 真跑) / `presets/proactive` 的四步启动顺序与插件表 / 预设落位 / `lw_persona` 的档位 |
-| `check-persona-live.mjs` | 人格卡"运行时读"那一条 (2026-11-10): 抽 `host-plugin` 那一节真跑 —— 设备卡原样与按 mtime 重读 / 缺失退包内默认 / 都缺失四行兜底 / 超 20000 字截断 / 非 luwi 档返回空 / provider 不抛 / 首次启动从包内默认播种且不覆盖已有内容 |
+| `check-explore.mjs` | 探索那一档的判据表 (2.7.8 批次 7): 预设那一段的 19 行 / persona 那三条红线与五节摘要 / 预算常数与 `exploreBudget` 真值表 / 工作区与预设回退 / 省电只当读数 (2026-10-26 起不再拦) / 数步只数不拒 / `lw_explore` 的工具面 / 摘要的文件形状 (抽那几段纯函数真跑) / 候选卡已下线 / 点按效果真值表与刹车 (#32) / 前置校验与 recover 三档 (#37) / 停判 = 连着两条「什么都没变」(unchanged 或 giveup), unknown 与 reread 不算 / 重锚认按点、认 target 中心、不认零面积格 / expect 认"接这一下的那格", 容器盖住子按钮时不算对上 |
+| `check-proactive.mjs` | 主动对话那一档的判据表 (2.8.0 B4-a): requestCode 43 与 41 / 42 不撞 / `proactive-schedule.json` 的四个键与"先拉宿主再投" / `SOURCE_PROACTIVE` 两侧同一个字面量 / 主动场固定新开 / 主动场不建虚拟屏 (`proactiveScreenGate` 真跑) / `presets/proactive` 的四步启动顺序与插件表 / 预设落位 / `lw_persona` 的档位 / 措辞 (2026-11-13 #43: 开场第一行只说"她自己想起他", 「到点」只在禁令那一句里露面, 缺省开场与 `FALLBACK_TEXT` 逐字相同) |
+| `check-persona-live.mjs` | 人格卡"运行时读"那一条 (2026-11-10): 抽 `host-plugin` 那一节真跑 —— 设备卡原样与按 mtime 重读 / 缺失退包内默认 / 都缺失四行兜底 / 超 20000 字截断 / 非 luwi 档返回空 / provider 不抛 / 首次启动从包内默认播种且不覆盖已有内容; 2026-11-20 起多两条: **主动场也认同一张卡 (只取「二之二」内核, 切不到退全文)** 与对话场末尾拼的那段〔此刻〕(有 `affect.json` 才拼, 坏了只剩卡) |
+| `check-emotion.mjs` | 情感状态那一批 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md` §11.1): `affectStep` 六种事件真跑且不越界 / 半天回一半·一天回四分之三的连续衰减 / `empathyPlanOf` 五条真值 / 五格越界夹取 / `affectMoodLines` 27 组逐字 / 召回条数·600 字预算与"空段不出现" / `hard` 边界命中即拒; 外加接线八条 (人格认档 / 开场第 5 参回归 / 每轮快照 / 记忆工具与 B 表 / `lw_say` 硬闸 / `memoryRef` 透传 / 卡里「二之二」/ 主动场预设引用同一张卡) |
 | `check-host-persistence.mjs` | dsh 后台持久化那一条的判据表 (2026-10-26; 2026-10-28 扩): renderer 优先级钉在不可见也不降 / renderer 死了自己换一块并有次数上限 / `MainActivity.onResume` 自愈 / 电池白名单只有一份实现且两处入口 / 酒馆缓存带 token 且 token 变了只重载一次 / 酒馆 renderer 也钉住并自己重建 / 浮标输入条收起再展开只重新挂上 / 那份文案两份 strings 都有 |
 | `check-bare-percent.py` | 扫 `strings.xml` 里的裸 `%` (`Resources.getString` 会把它当转换符, 主线程崩) |
+| `check-wording.mjs` | 叫法那一条 (2026-11-13 主人: 敲钟改成唤醒): 门户页面 / 两套 `strings.xml` / 宿主插件说明三处都不许再留旧叫法, `settings_sim_*` 那六条说明都带「唤醒」, 而语音那段仍是「唤醒词」(没被误伤) |
+| `check-activity-settings.mjs` | 门户那两颗「设置」与它们弹的窗 (2026-11-13): 三个入口共用一份 `SimSettingsDialog` (ui/ 里不许有第二份参数页) / `focus` 与那两张组表对得上 / 页面只调 `portalActivitySettings` 一个桥方法且状态只在 `PortalAsk` / 关窗推 `onSettingsClosed` / 设置页那个入口一个参数都没加 |
+| `check-input-dialogs.mjs` | 填写窗那一条 (2026-11-14 主人: "填写窗放屏幕中间, 防止弹出键盘时挡住填写内容"): 24 个要打字的弹窗都过 `scaffolds/InputDialog.kt` (Compose `Dialog` + `Alignment.Center` + `imePadding` + 按可用高度收卡片) / 反向闸: `OverlayDialog` 里再塞 `SuperTextField` 就红 / 只读弹窗 (关于 / 更新) 没被顺手换壳 |
 | `check-docx-preview.mjs` | Office 预览那一包 (2.7.9 第 6 条 T8/T9) 的判据表: 包形状 / 装载 id 与包名一字不差 / `extension` 档与那两条**末尾不能带 `$`** 的模式 / 读字节走 `remote.workspaceFiles` / 渲染进 `sandbox` iframe / 10 MB 闸与三种失败 / `lib/client.js` 是打包产物 / 两张覆盖层表各一行且不在 `PluginRows` |
-| `check-phone-actions.mjs` | 手机直连那一条的判据表 (2.8.0 B3-c): 快应用能力只在 `QuickAppCapability.kt` 里 / 标准链接三种写法 / 包名不像包名就拒 / 快应用这一条不许调建屏 / 不可用明确 unsupported / `quick_app` 只走 deep link 且路由里没有虚拟屏 / 桥上有 capabilities 与 quickapp 两档 / 插件的两条工具参数与说明 / phone.md 的固定优先级 (native -> intent -> 无障碍 -> 虚拟屏 -> unsupported) |
+| `check-phone-actions.mjs` | 手机直连那一条的判据表 (2.8.0 B3-c): 快应用能力只在 `QuickAppCapability.kt` 里 / 标准链接三种写法 / 包名不像包名就拒 / 快应用这一条不许调建屏 / 不可用明确 unsupported / `quick_app` 只走 deep link 且路由里没有虚拟屏 / 桥上有 capabilities 与 quickapp 两档 / 插件的两条工具参数与说明 / phone.md 的固定优先级 (native -> intent -> 无障碍 -> 虚拟屏 -> unsupported) / 点按找不到名字回三候选 (#27) / 按完回读 effect 与那一脚刹车 (#32) / 按之前的三道前置校验 (唯一 / 够大 / 在屏上) 与 recover=reread\|reanchor\|giveup 三档 (#37) / 第八之二节: expect 不被短边闸拦 / 重锚认按点与 target 中心 / unknown 不跑恢复 / verify=off 逐字退回 / gap 只比文本像不像 / expect 认接这一下的那格 / 回执不写 undefined / mismatch→centre→confirmed 闭环 / 候选带中心 / text+expect 报错 / 行名文字框窄于命中区也认「接这一下的那格」 / `recover=reread` 记成 changed（与探索的停判同一个数） / 两格同名而 target 不同时一次都不按 |
 | `check-tools.mjs` | 扫本目录自己: 命名 / 用法段 / 根目录落位 (就是本文那三条约定) |
 | `check-stickers.mjs` | "她自己攒表情"那一条的判据表 (2026-11-10, 方案 F): `lw_sticker op=fetch` 的类型按魔数判 / 名字只留 `[\w 汉字 -]` / 单张 2 MB 与目录 200 张·40 MB 两道上限 / https + 8 s 超时 / `.tmp` + rename 与写完读回 / 进 B 表 (`list`·`say` 三档都放, `fetch` 要 act 以上) / persona 教的是"攒下来仍用 `lw_say` 贴" |
 | `check-device-evidence.mjs` | 提交前置闸 (2.8.0 #30): 一份证据 Markdown (每个 `## <项名>` 一簇) 逐项核对测试环境四档与实测结果, 缺真机 / 模拟器读数就退出 3 并点名缺项, 齐了退出 0 报读数条数; 不带文件时跑两份夹具自测 (应分别给出 3 / 0), `lw-release-check.ps1` 的汇总里也调它 |
@@ -123,6 +129,8 @@ pwsh -File D:\apk\Luwi\tools\lw-doctor.ps1 -Serial emulator-5554
 cd D:\apk\Luwi
 node tools/check-host-plugin.mjs
 node tools/check-voice-commands.mjs
+node tools/check-voice-asr.mjs
+node tools/check-speak-engine.mjs
 node tools/check-auto-shot.mjs
 node tools/check-wake-words.mjs
 node tools/check-model-files.mjs
@@ -134,6 +142,9 @@ node tools/check-host-persistence.mjs
 node tools/check-phone-actions.mjs
 node tools/check-web-compat.mjs
 node tools/check-device-evidence.mjs
+node tools/check-wording.mjs
+node tools/check-activity-settings.mjs
+node tools/check-input-dialogs.mjs
 python tools/check-bare-percent.py
 node tools/check-tools.mjs
 ```

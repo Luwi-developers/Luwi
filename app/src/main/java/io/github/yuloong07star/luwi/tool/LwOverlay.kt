@@ -47,8 +47,12 @@ internal object LwOverlay {
         // 同一条推送, 但这一条不是回答: 比如"这句话没能送进会话" (画出来带一个 ⚠)
         "note" -> note(context, request)
         // 她主动说的一句 (2026-11-07 球是门户): 同一条通道, 应用那一侧画成一句主动说的话
+        // **2026-11-22 起宿主不再走这一支发言**: 她说话只写 $DSH_HOME/lw/out 的 jsonl, 三端
+        // (门户 / 球 / 通知) 各自读它 (见 host-plugin 的 `sayToConversation`)
+        // 这一支留着只给旧版 host 兜底, 别在上面加新东西
         "say" -> say(context, request)
         // 她贴一张表情 (2026-11-07): 参数是文件名, 素材在 $DSH_HOME/lw/stickers/
+        // 同上: 只向后兼容, 正路是 jsonl 里 kind=sticker 的一行
         "sticker" -> sticker(context, request)
         // 她连发几条 (2026-11-07): 一段里按行拆开, 应用那一侧一条一条放
         "burst" -> burst(context, request)

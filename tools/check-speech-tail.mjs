@@ -28,6 +28,9 @@ const system = await read(src('tool/SystemSpeech.kt'))
 const wake = await read(src('wake/WakeWordService.kt'))
 const overlay = await read(src('overlay/OverlayService.kt'))
 const host = await read(src('ui/HostScreen.kt'))
+const settings = await read(src('ui/SettingsScreen.kt'))
+const apiTts = await read(src('tool/LwApiTts.kt'))
+const deepseekTts = await read(src('tool/LwDeepseekTts.kt'))
 
 let failures = 0
 let checks = 0
@@ -81,6 +84,32 @@ check(
   [true, true, true],
 )
 
+/* ── 垫话 (2.8.1 #14): 等首包时先出一声, 而它**不进** tail 预算 ───────────── */
+
+check(
+  '垫话不计入 tail 预算: 预算只按正文的字数算, 首包那一声一个字符都不加',
+  [
+    // 预算的算式只认 `text.length` 与那 4 s 余量 —— 垫话那一声塞进来, 等于正文说完之后还要白关一段麦克风
+    /fun budgetMs\(text: String\): Long =\s*\(text\.length \* TAIL_MS_PER_CHAR \+ TAIL_MARGIN_MS\)\.coerceAtMost\(TAIL_MAX_MS\)/
+      .test(tail),
+    // 垫话那一套刻度只在 SpeechTail 里 (阈值 / 响哪一段 / 该不该响), 两条引擎不各写一份
+    [tail.includes('const val FILLER_AFTER_MS'), tail.includes('const val FILLER_CLIP'), tail.includes('fun fillerDue(')],
+    // 要等一趟网络的那两条: 起播先排一声垫话, 首片一到**先掐它再放真正的** (两段声音不叠), 失败也撤
+    apiTts.includes('LwSpeak.fillerFor(context)') &&
+      /fillerFor\(context\)[\s\S]{0,600}\.ready\(\)[\s\S]{0,400}LwVoiceClip\.play/.test(apiTts) &&
+      apiTts.includes('filler?.cancel()'),
+    deepseekTts.includes('LwSpeak.fillerFor(context)') &&
+      /fillerFor\(context\)[\s\S]{0,600}\.ready\(\)[\s\S]{0,400}LwVoiceClip\.play/.test(deepseekTts) &&
+      deepseekTts.includes('filler?.cancel()'),
+    // 换音色 / 再念一句: 上一趟还在响的那一份先掐掉, 否则两条播放器各放各的就是叠音
+    speak.includes('cutPrevious()') &&
+      speak.includes('LwDeepseekTts.stop() ?: LwEdgeTts.stop() ?: LwApiTts.stop()'),
+    // 一声垫话只属于一趟: 号码变了 (换了一句 / 被掐断) 就不许响
+    speak.includes('fillerPending?.cancel(false)'),
+  ],
+  [true, [true, true, true], true, true, true, true],
+)
+
 /* ── 五处消费: 一个都不能各读各的符号 ─────────────────────────────────── */
 
 check(
@@ -121,9 +150,14 @@ check(
   true,
 )
 check(
-  '⋮ 菜单「停止朗读」那条与球上同一个判据',
-  host.includes('voiceSpeaking = LwSpeak.talking(context)'),
-  true,
+  '⋮ 菜单「停止朗读」那条 2026-10-24 已撤, 停止朗读在设置页那行 (同一个 LwSpeak.stop)',
+  [
+    // 撤掉是有意的 (主人: "设置浮标的停止说话去掉"), 注释留在原处 —— 有人凭空加回来时这一条会红
+    host.includes('「停止朗读」那一条 2026-10-24 撤掉了'),
+    settings.includes('R.string.settings_speak_stop'),
+    settings.includes('LwSpeak.stop()'),
+  ],
+  [true, true, true],
 )
 
 /* ── 读数里那三样必须报出来 (不然真机上判不出"退化了没有") ────────────── */

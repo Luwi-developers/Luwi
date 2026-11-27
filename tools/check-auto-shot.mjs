@@ -158,12 +158,41 @@ check(
   '那张图进的是用户消息 (createVoiceMessage 收第二个参数)',
   // 2026-10-15 起造消息那一步挪进了 `deliverToBall` (选场那一段先按候逐个试), 所以这里量两件:
   // 投递带着 `auto` 走, 而造消息那一处把它当第二个参数喂进去
+  // 2026-11-12 (#38): 正文先过一遍 `withInboxPicture` (收件箱那张图加一行路径), `via` 是第三个参数
   deliver.includes('deliverToBall(ctx, controller, candidate.sessionId, line, auto)')
-    && plugin.includes('createVoiceMessage(line.text, auto.images)')
-    && plugin.includes('async function createVoiceMessage(text, images = [])')
+    && plugin.includes('createVoiceMessage(withInboxPicture(line.text, staged), auto.images, via)')
+    && plugin.includes('async function createVoiceMessage(text, images = [], via =')
     && plugin.includes("...images.map((attachment) => ({ type: 'image', attachment }))"),
   true,
 )
+
+/* ── 五、两张词表不许漂: "上一句里的东西"那几条两边都要有 (2026-11-20) ─────────────
+ *
+ * 一张管附不附屏 (`SCREEN_REF_WORDS`), 一张管接不接上一场 (`REFER_BACK_WORDS`)。漂开的症状很具体:
+ * 图带上去了, 场却换了一场 —— 那张屏就成了没有指代对象的图 (主人报的正是这一条)
+ *
+ * **两张表不必逐字相同**: `屏幕上` / `照片里` / `这份` 指的是那块屏, 不是上一句话, 它们带一张图就够,
+ * 不需要把上一场接回来。真正两边都要的是"指的是上一句里的那个东西"那四条
+ */
+const backNode = new Function(
+  `${slice('const REFER_BACK_WORDS', '/** 这一句是不是"指着上一句在说"')}\nreturn { REFER_BACK_WORDS }`,
+)()
+const deictic = ['这个', '这张', '这个图', '这张图']
+check(
+  '"指的是上一句里的东西"那几条两边都有',
+  deictic.filter((one) => !node.SCREEN_REF_WORDS.includes(one) || !backNode.REFER_BACK_WORDS.includes(one)),
+  [],
+)
+check('屏幕专属的说法只在附图那张表里 (指屏, 不指上一句)', [
+  node.SCREEN_REF_WORDS.includes('屏幕上'),
+  backNode.REFER_BACK_WORDS.includes('屏幕上'),
+], [true, false])
+check('接场那张表多收了"刚才 / 改成"这类不含屏幕字样的说法', [
+  backNode.REFER_BACK_WORDS.includes('刚才'),
+  backNode.REFER_BACK_WORDS.includes('改成'),
+  // 与上面那条同一个口径: "这样"是泛指, 两张表都不收
+  backNode.REFER_BACK_WORDS.includes('这样'),
+], [true, true, false])
 
 console.log(
   failures === 0 ? `\n自动识屏那一张图的判据全过, ${checks} 条` : `\n${failures} / ${checks} 条判据不过`,

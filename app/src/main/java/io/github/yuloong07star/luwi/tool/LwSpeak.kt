@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
 import android.speech.tts.UtteranceProgressListener
@@ -12,7 +13,10 @@ import io.github.yuloong07star.luwi.R
 import io.github.yuloong07star.luwi.voice.VoiceState
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -78,6 +82,21 @@ internal object LwSpeak {
      */
     @Volatile
     private var lastWasSystem: Boolean = false
+
+    /** 垫话那一拍: 到点还没等到首片就出声, 首片到了就把这一拍撤掉 (见 [fillerFor]) */
+    private val fillerTimer = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "lw-filler").apply { isDaemon = true }
+    }
+
+    /** 排着的那一拍 (撤它 = 这一声不响了) */
+    @Volatile
+    private var fillerPending: Future<*>? = null
+
+    /** 响过几声垫话 (读数用: 数字涨了就是"这段时间首包常常迟到") */
+    private val fillers = AtomicInteger(0)
+
+    /** `assets/clips/` 那几段只热一次 (冷启动时 SoundPool 才要装它们, 别让第一声垫话等这一趟) */
+    private val fillerWarm = AtomicBoolean(false)
 
     fun dispatch(context: Context, request: JsonObject): JsonObject = when (val op = request.string("op")) {
         "status" -> status(context)
@@ -197,7 +216,8 @@ internal object LwSpeak {
             dropped = readQueue.size
             readQueue.clear()
             waiting = readQueue.size
-            speaking = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+            speaking = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking ||
+                LwDeepseekTts.speaking
         }
         if (dropped > 0) readDropped.addAndGet(dropped)
         return buildJsonObject {
@@ -506,6 +526,11 @@ internal object LwSpeak {
             put("readAloud", SpeakSettings.readAloud)
             put("onDeviceModel", SpeakSettings.model ?: "")
             put("edgeVoice", SpeakSettings.edgeVoice)
+            // DeepSeek 官方那条 (2026-11-15): 只有音色是这一侧能定的; 端点与"登录了没有"归宿主,
+            // 所以这里照报端点本身 (它是公开的一串, 不是密钥), 令牌仍然一个字节都不报
+            put("deepseekVoice", SpeakSettings.deepseekVoice)
+            put("deepseekVoices", LwDeepseekSpeech.VOICES.joinToString(", ") { "${it.first}=${it.second}" })
+            put("deepseekEndpoint", LwDeepseekSpeech.ENDPOINT)
             // API 那条: 地址与模型/音色照报, **密钥只报"有没有"** (它不该出现在任何回执或日志里)
             put("apiUrl", apiConfig.url)
             put("apiKeySet", apiConfig.key.isNotBlank())
@@ -555,6 +580,11 @@ internal object LwSpeak {
             put("lastWasSystem", lastWasSystem)
             put("systemMatches", SystemSpeech.matches(context))
             put("systemOurs", SystemSpeech.describe())
+            // 垫话 (2.8.1 #14): 响过几声、响的是哪一段、起播之后多久它才允许响 —— 真机上"首包慢不慢"
+            // 就读这几个数, 而它**不进 tail 预算** (见 SpeechTail.budgetMs)
+            put("fillers", fillers.get())
+            put("fillerClip", SpeechTail.FILLER_CLIP)
+            put("fillerAfterMs", SpeechTail.FILLER_AFTER_MS)
             // 预录填音 (T13): 带的是哪几段、现在响没响。**顺手把 SoundPool 预载好** —— 插件那侧开工前
             // 会先叫一次 status 把引擎拉起来, 填音也走同一条预热, 于是第一声也是几十毫秒
             runCatching { LwClips.warm(context) }
@@ -614,6 +644,84 @@ internal object LwSpeak {
     internal fun spokenProblem(answer: JsonObject): String? =
         if (answer.bool("spoken", false)) null else answer.stringOrNull("detail") ?: "it did not say anything"
 
+    /**
+     * 垫话的把手 (2.8.1 #14): 等首包时先出一声
+     *
+     * 要等一趟网络的那两条引擎 (`LwApiTts` / `LwDeepseekTts`) 起播时叫一次 [LwSpeak.fillerFor]: 过了
+     * [SpeechTail.FILLER_AFTER_MS] 还没拿到第一片, 就先放一声预录的填音; 第一片到了叫 [ready] (撤掉还没
+     * 响的 + 掐掉已经在响的 —— 两段声音不许叠), 这一趟失败或被叫停叫 [cancel]
+     */
+    internal class Filler internal constructor(
+        private val onReady: () -> Unit,
+        private val onCancel: () -> Unit,
+    ) {
+        /** 第一片到了: 这一声垫话到此为止 */
+        fun ready() = onReady()
+
+        /** 这一趟结束了 (失败 / 被叫停): 那一声不用响了 */
+        fun cancel() = onCancel()
+    }
+
+    /**
+     * 排一声垫话 (2.8.1 #14)
+     *
+     * 为什么不在这里等: 首片那一趟网络还得跑, 这里只排一拍, 到点由后台那条 `lw-filler` 出声
+     * (`LwClips` 是 SoundPool, 出声是几十毫秒的事, 也不等它放完)
+     */
+    internal fun fillerFor(context: Context, clip: String = SpeechTail.FILLER_CLIP): Filler {
+        val run = speakingRun.get()
+        val startedAt = SystemClock.uptimeMillis()
+        val app = context.applicationContext
+        warmFiller(app)
+        // 一句只出一声: 上一句排着的那一拍先撤掉
+        fillerPending?.cancel(false)
+        val pending = fillerTimer.schedule(
+            {
+                val waited = SystemClock.uptimeMillis() - startedAt
+                // 这一趟已经结束 (或换了新的一趟) 就不响; 首片已经起播了也不响
+                if (run == speakingRun.get() && SpeechTail.fillerDue(waited, firstClipReady = LwVoiceClip.speaking)) {
+                    val played = runCatching { LwClips.play(app, clip, 1f).bool("played", false) }
+                        .getOrDefault(false)
+                    if (played) fillers.incrementAndGet()
+                    Log.i(TAG, "filler \"$clip\" at +${waited}ms, the first clip had not arrived, played=$played")
+                }
+            },
+            SpeechTail.FILLER_AFTER_MS,
+            TimeUnit.MILLISECONDS,
+        )
+        fillerPending = pending
+        return Filler(
+            onReady = {
+                pending.cancel(false)
+                LwClips.stop()
+                // 掐垫话不能顺手把半双工那道闸放开: 真正的那一片马上起播
+                if (run == speakingRun.get()) VoiceState.speaking = true
+            },
+            onCancel = {
+                pending.cancel(false)
+                LwClips.stop()
+            },
+        )
+    }
+
+    /** 素材只热一次: 冷启动时那四段 ogg 要进 SoundPool, 别让第一声垫话等这一趟 */
+    private fun warmFiller(context: Context) {
+        if (!fillerWarm.compareAndSet(false, true)) return
+        Thread({ runCatching { LwClips.warm(context) } }, "lw-filler-warm").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 新的一趟开始: 把上一趟**还在响的**那一份掐掉 (2.8.1 #14)
+     *
+     * 换音色时最容易踩: 前一声是旧音色、后一声是新音色, 两条 `MediaPlayer` 各放各的就是叠音; 上一趟排着的
+     * 那声垫话也要撤掉, 否则它会落在新的一句上面
+     */
+    private fun cutPrevious() {
+        fillerPending?.cancel(false)
+        LwClips.stop()
+        LwDeepseekTts.stop() ?: LwEdgeTts.stop() ?: LwApiTts.stop()
+    }
+
     /** 念一段: 太长就按句切, 只等最后一片念完 */
     private fun speak(context: Context, request: JsonObject): JsonObject {
         val text = request.string("text").trim()
@@ -632,6 +740,9 @@ internal object LwSpeak {
         // QUEUE_FLUSH), 前一趟得等满自己的预算才返回 —— 它返回时**不许**把后一声那笔闸清掉, 否则
         // 后一声还在响, 麦克风却已经开了
         val run = speakingRun.incrementAndGet()
+        // 换音色 / 再念一句: 上一趟还在响的那一段 (以及上一趟排着的那声垫话) 先掐掉 —— 新的一句起来之前
+        // 先让它安静, 否则两条播放器各放各的就是叠音 (2.8.1 #14)
+        cutPrevious()
         VoiceState.speaking = true
         // 新的一句开始: 上一句那份"可能还在响"的预算作废 (这一句结束时会重新写, 见 [talking])
         VoiceState.spokeUntil = 0L
@@ -681,6 +792,7 @@ internal object LwSpeak {
     private fun readingWith(): String = when {
         SpeakSettings.usesOnDevice() -> "on-device"
         SpeakSettings.usesEdge() -> "edge"
+        SpeakSettings.usesDeepseek() -> "deepseek"
         SpeakSettings.engine == SpeakSettings.Engine.API -> "api"
         else -> "system"
     }
@@ -688,7 +800,7 @@ internal object LwSpeak {
     /**
      * 一次点名里的引擎与音色 (2026-10-29)
      *
-     * 卡上那一位可以写成 `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id`;
+     * 卡上那一位可以写成 `sys:名字@地区` / `dev:模型名` / `edge:音色` / `api:登记 id` / `ds:音色`;
      * 没有前缀就是老写法 (引擎跟设置页, 音色原样交给系统 / API 那条)
      */
     internal data class VoiceRef(val engine: SpeakSettings.Engine?, val voice: String)
@@ -702,6 +814,7 @@ internal object LwSpeak {
             "dev", "device", "on-device" -> SpeakSettings.Engine.ON_DEVICE
             "edge" -> SpeakSettings.Engine.EDGE
             "api" -> SpeakSettings.Engine.API
+            "ds", "deepseek" -> SpeakSettings.Engine.DEEPSEEK
             else -> null
         }
         return if (engine == null) VoiceRef(null, text) else VoiceRef(engine, text.substring(at + 1).trim())
@@ -745,6 +858,48 @@ internal object LwSpeak {
                 put("voice", voice.name)
                 put("rate", speed.toDouble())
                 put("volume", volume.toDouble())
+                put("text", text)
+                put("characters", text.length)
+                put("detail", answer)
+            }
+        }
+        // DeepSeek 官方那条 (2026-11-15, 2.8.1 #5): **令牌不在这一侧** —— 稿子与音色交给宿主那条回环
+        // 路由, 宿主用账号那枚令牌去官方接口合成, 音频原样回来 (见 LwDeepseekTts 顶上那张分工图)。
+        // 所以这条引擎没有地址栏、没有密钥框: 登录过就直接有声音
+        if (engine == SpeakSettings.Engine.DEEPSEEK) {
+            val wanted = LwDeepseekSpeech.voiceOf(askedVoice, SpeakSettings.deepseekVoice)
+            val answer = LwDeepseekTts.speak(context, text, wanted)
+            val failed = !answer.startsWith("said ")
+            // 播放器在本进程 (LwVoiceClip): 与其它在线引擎同一套判据
+            if (!failed) stampTail(run, text, system = false)
+            // 官方那条没有语速参数 (也没有音量参数): 点了滑块就要如实说没生效
+            val askedRate = request.numberOrNull("rate") != null || !SpeakSettings.followsSystem
+            val askedVolume = request.numberOrNull("volume") != null
+            val voiceIgnored = askedVoice.isNotBlank() && !LwDeepseekSpeech.known(askedVoice)
+            return buildJsonObject {
+                put("spoken", !failed)
+                put("readingWith", "deepseek")
+                put("voice", wanted)
+                val entry = LwDeepseekSpeech.VOICES.firstOrNull { it.first == wanted }
+                put("voiceName", entry?.second.orEmpty())
+                put("rateIgnored", askedRate)
+                if (askedRate) {
+                    put(
+                        "rateNote",
+                        "the DeepSeek engine sets its own pace, so the speech rate did not apply",
+                    )
+                }
+                put("volumeIgnored", askedVolume)
+                if (askedVolume) {
+                    put(
+                        "volumeNote",
+                        "the DeepSeek engine keeps its own loudness, so that number did not apply",
+                    )
+                }
+                put("voiceIgnored", voiceIgnored)
+                if (voiceIgnored) {
+                    put("voiceNote", "the DeepSeek engine only knows stella and tide; that id was not sent")
+                }
                 put("text", text)
                 put("characters", text.length)
                 put("detail", answer)
@@ -921,6 +1076,8 @@ internal object LwSpeak {
         // **先加代际号**: 正在等预算的那一趟 (同步被掐 / 异步还在念) 回来时会发现号变了, 于是它不
         // 会再把半双工闸合上、不会写尾巴预算、也不会把 current 清掉 (T14)
         speakingRun.incrementAndGet()
+        // 还没响的那声垫话也一并作废 (它在另一条声轨上, 系统引擎的 stop 碰不到它)
+        fillerPending?.cancel(false)
         val waiting = current
         current = null
         // 让还在 `latch.await` 的那一趟立刻回来, 不必等满自己的预算 (长回答是 60 s 以上)
@@ -928,8 +1085,9 @@ internal object LwSpeak {
         // 预录填音也一起停 (它在另一条声轨上, 系统引擎的 stop 碰不到它)
         LwClips.stop()
         val onDevice = LwTts.stop()
-        // 在线那两条: 谁在放谁就停 (它们的播放器在 LwVoiceClip 里, 两条引擎各自记着自己的那一次)
-        val online = LwEdgeTts.stop() ?: LwApiTts.stop()
+        // 在线那几条: 谁在放谁就停 (它们的播放器在 LwVoiceClip 里, 每条引擎各自记着自己的那一次)。
+        // DeepSeek 那条排在最前: 它与 API 那条共用同一个播放器, 先问它才轮得到 API 那一句
+        val online = LwDeepseekTts.stop() ?: LwEdgeTts.stop() ?: LwApiTts.stop()
         val tts = synchronized(lock) { engine }
         val result = tts?.stop()
         // 掐断了就不能让那道半双工的闸一直关着
@@ -956,7 +1114,8 @@ internal object LwSpeak {
 
     /** 现在有没有在念: ⋮ 菜单那条「停止朗读」据此决定要不要说自己没东西可停 */
     internal val speakingNow: Boolean
-        get() = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+        get() = current != null || LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking ||
+            LwDeepseekTts.speaking
 
     /**
      * **她此刻还在出声吗** —— 半双工那道闸与"说的时候关麦"都认这一条, 不认 [speakingNow]
@@ -975,8 +1134,8 @@ internal object LwSpeak {
      * 成"只按预算"**, 绝不回退到媒体流那一条
      */
     internal fun talking(context: Context): Boolean {
-        // 自带那条与两条在线引擎: 播放器在进程内, 精确
-        val onThisProcess = LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking
+        // 自带那条与三条在线引擎: 播放器在进程内, 精确
+        val onThisProcess = LwTts.speaking || LwEdgeTts.speaking || LwApiTts.speaking || LwDeepseekTts.speaking
         // 系统那条: 只有它才去问"带我们那份属性的活跃播放"
         val ownPlayback = lastWasSystem && SystemSpeech.playing(context)
         return SpeechTail.holding(

@@ -18,6 +18,7 @@
 // 以及"本地已经先追加过的那句话" (pendingTexts) 在应用对端回声时被认掉一次
 
 import { LIVE_LIMITS } from './constants.mjs'
+import { pendingKeyOf } from './luwi-attach.mjs'
 
 /**
  * 把对端的文本条目折成本地要追加的事件。
@@ -55,8 +56,11 @@ export function proxyEventsFrom(entries, state = {}, maxEvents = LIVE_LIMITS.MAX
     }
     lastSeq = seq
     if (role === 'user') {
-      // 本地先追加过的那一句: 对端把它回推回来了, 认掉一次, 不重复落
-      const at = pendingTexts.indexOf(text)
+      // 本地先追加过的那一句: 对端把它回推回来了, 认掉一次, 不重复落。
+      // **只比人话** (2026-11-22): 本地那一句带的是本机 `lw-in/` 路径, 对端折回来的是它自己的路径
+      // (手机→电脑时还多走一次暂存路径), 两串永远不相等 —— 以前整串比, 一句在屏上画两遍
+      const key = pendingKeyOf(text)
+      const at = pendingTexts.findIndex(pending => pendingKeyOf(pending) === key)
       if (at !== -1) {
         pendingTexts = [...pendingTexts.slice(0, at), ...pendingTexts.slice(at + 1)]
         skipped += 1

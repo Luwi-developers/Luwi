@@ -383,3 +383,15 @@ test('formatDoctor renders the p2p status shell (unavailable is a line, not a fa
   assert.match(relayed, /p2p trust\s+: 已信任 · PC · SAS 042 317/u)
   assert.match(relayed, /p2p error\s+: P2P_TIMEOUT/u)
 })
+
+test('env 里没有 DSH_HOME 时 resolveConfig 不再抛 (桌面宿主装载那一刻就是这样)', () => {
+  const previous = process.env.DSH_HOME
+  delete process.env.DSH_HOME
+  try {
+    const resolved = plugin.resolveConfig({ enabled: true })
+    assert.equal(resolved.sessionRoot, '')
+    assert.equal(resolved.repoDir, '')
+  } finally {
+    if (previous !== undefined) process.env.DSH_HOME = previous
+  }
+})

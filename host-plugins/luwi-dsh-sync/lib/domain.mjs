@@ -28,8 +28,13 @@ export const syncStateSchema = z.object({
   deviceId: z.string().min(1).max(LIMITS.MAX_DEVICE_ID_LENGTH),
   lastPullAt: z.number().int().nonnegative().optional(),
   lastPushAt: z.number().int().nonnegative().optional(),
-  lastPushHead: z.string().regex(/^[0-9a-f]{40,64}$/iu).optional(),
-  lastError: z.string().max(500).optional(),
+  // 2026-11-21: 这一格**只做诊断**, 不参与任何判断 —— 原来是 `^[0-9a-f]{40,64}$` 的 sha 正则,
+  // 而 2026-10-21 真机上它被写进了一整段 git 输出 (换行 + 中文文件名), 于是整条 state 记录
+  // 从此 parse 不过: 每次 open / get / put 都抛 `invalid-record`, 插件的账 (投影游标、基线)
+  // 自那一刻起一个字节都没再落盘, 而且一声不响 —— 账本只剩内存里那一份。
+  // 连长度都不限: 长度设多少都只是把同一个死结往后挪 (那段真实数据比 4000 还长)
+  lastPushHead: z.string().optional(),
+  lastError: z.string().max(4000).optional(),
 }).catchall(z.unknown())
 
 /**

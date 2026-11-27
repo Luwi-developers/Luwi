@@ -27,14 +27,14 @@ function makeRoot(prefix) {
 }
 
 /** 一个能当 req 用的最小对象 (readJsonBody 要的可异步迭代体) */
-function makeReq({ method = 'GET', url = '/', token, body } = {}) {
+function makeReq({ method = 'GET', url = '/', token, body, remoteAddress = '127.0.0.1' } = {}) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
   return {
     method,
     url,
-    // luwi fix (2026-11-23, audit P0 #1): panel-local routes need a loopback peer
-    socket: { remoteAddress: '127.0.0.1' },
-    headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
+    // 2026-11-21: 本机控制面 (send / peer-live) 只认回环, 判据读的就是这个字段
+    socket: { remoteAddress },
+    headers: { host: '127.0.0.1:3080', ...(token === undefined ? {} : { authorization: `Bearer ${token}` }) },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -74,7 +74,7 @@ async function callRoute(runtime, path, options = {}) {
 function makeDeps(root, overrides = {}) {
   const calls = { delivered: [], pushes: 0, state: { delivered: [] } }
   const deps = {
-    spec: { enabled: true, listen: true, proxy: true, token: TOKEN, url: '', sendTimeoutMs: 1000, pollSeconds: 3 },
+    spec: { enabled: true, controller: false, listen: true, acceptSend: true, proxy: true, token: TOKEN, url: '', sendTimeoutMs: 1000, pollSeconds: 3 },
     live: { enabled: true, maxEntries: 40, maxChars: 16000, keepMinutes: 30 },
     repoDir: root,
     ownDeviceId: () => 'dev-me',
@@ -158,7 +158,7 @@ test('peer/info and peer/send answer the method they own', async () => {
     const runtime = createPeerRuntime(deps)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/info', { method: 'POST', token: TOKEN })).status, 405)
     assert.equal((await callRoute(runtime, '/luwi-sync/peer/send', { method: 'GET', token: TOKEN })).status, 405)
-    assert.equal((await callRoute(runtime, '/luwi-sync/send', { method: 'GET' })).status, 405)
+    assert.equal(runtime.routes().some(route => route.path === '/luwi-sync/send'), false, '面板发送路 2026-11-21 起整条下线')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -539,6 +539,68 @@ test('repoTranscript reads the peer transcript and never our own copy', async ()
     assert.deepEqual(cursor.entries.map(entry => entry.seq), [2])
     const missing = await runtime.repoTranscript('nope', 0)
     assert.equal(missing.ok, false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 7 · 终端问答: 手机回的那一句先问 answerAsk (2026-11-22)
+//
+// 那一轮正卡在 `ask_user_question` 里, steer 进去要等工具返回才被读 —— 而工具等的就是
+// 这句答案。所以命中就**不投递**, 回执里带 `answered` (手机端"有没有反应"的分水岭)。
+// ---------------------------------------------------------------------------
+
+test('an answer to the pending question is settled instead of delivered', async () => {
+  const root = makeRoot('lw-peer-ask')
+  try {
+    const answered = []
+    const { deps, calls } = makeDeps(root, {
+      answerAsk: async (sessionId, text) => {
+        answered.push({ sessionId, text })
+        return text === '1' ? { answered: 'call_1' } : null
+      },
+    })
+    const runtime = createPeerRuntime(deps)
+    const hit = await callRoute(runtime, '/luwi-sync/peer/send', {
+      method: 'POST',
+      token: TOKEN,
+      body: { text: '1', target: { kind: 'session', id: 's1' } },
+    })
+    assert.equal(hit.status, 200)
+    assert.deepEqual(hit.body, { ok: true, sessionId: 's1', running: true, answered: 'call_1' })
+    assert.deepEqual(calls.delivered, [], '命中的那一句不进 agent inbox')
+    assert.deepEqual(answered, [{ sessionId: 's1', text: '1' }])
+
+    // 没命中: 照旧投递 (主人的话一句都不吞)
+    const miss = await callRoute(runtime, '/luwi-sync/peer/send', {
+      method: 'POST',
+      token: TOKEN,
+      body: { text: '另外一件事', target: { kind: 'session', id: 's1' } },
+    })
+    assert.equal(miss.status, 200)
+    assert.deepEqual(miss.body, { ok: true, sessionId: 's1', running: true })
+    assert.deepEqual(calls.delivered, [{ sessionId: 's1', text: '另外一件事' }])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('answerAsk that throws or notes a non-answer still delivers the line', async () => {
+  const root = makeRoot('lw-peer-ask-bad')
+  try {
+    const { deps, calls } = makeDeps(root, {
+      answerAsk: async () => { throw new Error('boom') },
+    })
+    const runtime = createPeerRuntime(deps)
+    const res = await callRoute(runtime, '/luwi-sync/peer/send', {
+      method: 'POST',
+      token: TOKEN,
+      body: { text: '随便说一句', target: { kind: 'session', id: 's1' } },
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { ok: true, sessionId: 's1', running: true })
+    assert.equal(calls.delivered.length, 1)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

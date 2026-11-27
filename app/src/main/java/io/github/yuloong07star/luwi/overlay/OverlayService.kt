@@ -46,6 +46,8 @@ import io.github.yuloong07star.luwi.plugin.widget.WidgetHost
 import io.github.yuloong07star.luwi.host.BallReturn
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.tool.IconTheme
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 import io.github.yuloong07star.luwi.tool.BallAttach
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.LwSpeak
@@ -761,6 +763,13 @@ class OverlayService : Service() {
      * 所以这里把"外观 id"也算成一档变化: 主人在设置页换了外观、这一拍就看得见, 不必等下一次状态变化
      */
     private var lastThemeId: String? = null
+
+    /**
+     * 上一拍 `lw/icon.json` 的读数 (2026-11-22)
+     *
+     * 与 [lastThemeId] 同一条: 它是"要不要叫 BallView 重画一趟"的一档。一次 stat 而已, 400 ms 一拍
+     */
+    private var lastIconStamp: Long = -1L
 
     /** 上一拍宿主在不在跑 */
     private var lastHostUp = false
@@ -3671,7 +3680,14 @@ class OverlayService : Service() {
         val themeNow = runCatching { BallTheme.currentId(this) }.getOrDefault("")
         val rethemed = themeNow != lastThemeId
         lastThemeId = themeNow
-        if (force || changed || ring != lastRing || rethemed) {
+        // **图标套也算一档变化** (2026-11-22): 与外观插件同一条 —— 设置里换了 Luwi 图标之后, 这一拍
+        // 就该重画, 不必等状态词变化。**判据必须放在这里**: `BallView.show()` 的一条链只在"字 / 环色 /
+        // 外观 / 半藏 / 图标"变了时才走, 而这一处是唯一决定要不要叫它的地方 (真机踩到: 只把 stamp 判据
+        // 写进 show 里, 球永远等不到那一趟)
+        val iconNow = runCatching { IconTheme.stamp(this) }.getOrDefault(0L)
+        val restyled = iconNow != lastIconStamp
+        lastIconStamp = iconNow
+        if (force || changed || ring != lastRing || rethemed || restyled) {
             // **半隐也要跟着进**: BallPet 那一类外观给"贴边半藏"单独画了一张 (`peeked`), 半隐/回弹
             // 那一拍就得多喂这一个入参 (内置画法没有这一档, 照旧按 idle 画)
             ballView?.show(word, ring = ring, peeked = peeked)
@@ -3679,6 +3695,10 @@ class OverlayService : Service() {
             stripTitle?.text = title(word)
             lastRing = ring
         }
+        // **换图标也要重投这一条通知** (2026-11-22 主人: "通知图标没有随图标变化"): 通知是
+        // `fend()` / 文字变化时 build 的, 单靠重画球, 状态栏里那枚 small icon 一直是旧那套。
+        // 与上面共用一个 `restyled` 判据, 不另起计时器
+        if (restyled) announce(notice(word))
         // 球外那几圈涟漪 (说往外扩 / 听往回收): 那两档才挂窗, 别的档位把窗摘掉 (见 [applyPulse])
         applyPulse(word, ring)
         // 有状态就滑出来说话, 闲着就收边 (参考那套的 `floating_ball_idle_to_edge`)
@@ -4266,7 +4286,7 @@ class OverlayService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_notification)
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .addAction(0, getString(R.string.overlay_close), close)
             .setOngoing(true)

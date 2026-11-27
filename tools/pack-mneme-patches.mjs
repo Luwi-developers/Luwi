@@ -30,12 +30,15 @@ import { pathToFileURL } from 'node:url'
  * 一处补丁
  *
  * `file` 相对 mneme 包根; `insert` 追加在锚点之后, `replace` 整句替换锚点 (二选一);
- * `appliedWhen` 是"这处已经打过了"的标记文本
+ * `appliedWhen` 是"这处已经打过了"的标记文本; `retiredWhen` 是"上游自己做了这件事"的标记
+ * —— 命中就跳过这一处, 不再往新版里塞旧补丁 (2026-11-13: 0.15.0 用 Issue #637 的
+ * `omitPendingRound` 自己实现了热记忆那条)
  *
  * @typedef {object} MnemePatch
  * @property {string} id - 稳定名字, 报错与读数都用它
  * @property {string} file - 相对包根的路径
  * @property {string} appliedWhen - 已应用时文件里必然出现的标记
+ * @property {string} [retiredWhen] - 上游已经自己实现了时, 文件里必然出现的标记
  * @property {string} anchor - 必须恰好命中一次的原文
  * @property {string} [insert] - 追加在锚点之后
  * @property {string} [replace] - 替换整个锚点
@@ -74,6 +77,10 @@ export const MNEME_PATCHES = Object.freeze([
     id: 'hot-memory-unanswered',
     file: join('lib', 'hot-memory.js'),
     appliedWhen: 'Luwi: 当前这一轮还没说出话',
+    // 2026-11-13 (0.15.0): 上游用 Issue #637 的 `omitPendingRound` 自己把这条修了 ——
+    // 注入侧 inject.js 传 `{ omitPendingRound: true }`, 尾部 pending 轮不再进块。
+    // 新版不要再打旧补丁 (锚点也变了), 只认"上游已经做了"。
+    retiredWhen: 'omitPendingRound',
     // 行首那个 `\n` 不能省: 同一个调用在循环里还有一份 (6 空格缩进), 不带换行时
     // 这一串会命中两次, 补丁会因为"锚点不唯一"整段失败
     anchor: '\n  if (pendingQuery) rounds.push({ query: pendingQuery, response: "" });',
@@ -101,6 +108,11 @@ export function applyMnemePatches(packageRoot) {
       continue
     }
     const source = readFileSync(path, 'utf8')
+    if (patch.retiredWhen && source.includes(patch.retiredWhen)) {
+      // 上游自己实现了: 不打旧补丁, 记为 already (构建与预演都不算失败)
+      result.already.push(patch.id)
+      continue
+    }
     if (source.includes(patch.appliedWhen)) {
       result.already.push(patch.id)
       continue
@@ -143,10 +155,26 @@ export async function verifyHotMemory(packageRoot) {
     seq: 1,
     data: { source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] },
   }]
-  const unanswered = module.roundsFromEvents(userOnly, 5, new Set([1]))
-  if (unanswered.length !== 0) {
-    throw new Error(`an unanswered round still reaches hot memory: ${JSON.stringify(unanswered)}`)
+  // 两种世界都认:
+  //   - 旧版 (0.13.x): 我们那条补丁把 pending 轮整段删掉 → 不带参数调用就是 0 条
+  //   - 0.15.0 起: 上游用 `omitPendingRound` 开关自己实现了 → 带参调用才是 0 条,
+  //     此时还必须确认 *真的有人传 true* (lib/inject.js), 否则开关等于没接线
+  const legacy = module.roundsFromEvents(userOnly, 5, new Set([1]))
+  const withOmit = module.roundsFromEvents(userOnly, 5, new Set([1]), { omitPendingRound: true })
+  if (legacy.length !== 0 && withOmit.length !== 0) {
+    throw new Error(`an unanswered round still reaches hot memory: default=${JSON.stringify(legacy)} omitPendingRound=${JSON.stringify(withOmit)}`)
   }
+  /** @type {{ omitPendingRound?: boolean }} */
+  let opts = {}
+  if (legacy.length !== 0) {
+    const injectPath = join(packageRoot, 'lib', 'inject.js')
+    const inject = existsSync(injectPath) ? readFileSync(injectPath, 'utf8') : ''
+    if (!/omitPendingRound\s*:\s*true/.test(inject)) {
+      throw new Error('上游有 omitPendingRound 开关, 但 lib/inject.js 没有传 true —— 热记忆修复没接线')
+    }
+    opts = { omitPendingRound: true }
+  }
+  const unanswered = legacy.length === 0 ? legacy : withOmit
   const answered = [
     ...userOnly,
     {
@@ -155,7 +183,7 @@ export async function verifyHotMemory(packageRoot) {
       data: { source: { kind: 'assistant' }, message: { content: [{ type: 'text', text: '在' }] } },
     },
   ]
-  const rounds = module.roundsFromEvents(answered, 5, new Set([1, 2]))
+  const rounds = module.roundsFromEvents(answered, 5, new Set([1, 2]), opts)
   if (rounds.length !== 1 || rounds[0]?.response !== '在') {
     throw new Error(`an answered round did not reach hot memory: ${JSON.stringify(rounds)}`)
   }

@@ -5,6 +5,7 @@
 ## 用途
 
 - **启动顺序固定**：最新探索摘要（`lw_files` 列 `$DSH_HOME/lw/explore/`）→ 记忆搜索 → 今天的日历（`lw_calendar op=events`）→ 通知摘要（`lw_notifications op=list`）→ 决定要不要开口。
+- **开场就要像她自己想说的**（2026-11-13 #43）：开场正文第一行只说"这行字不是主人发的，是你自己想起他"，排期、提醒、叫醒这些后台的事一个字都不进正文；正文最后一段专门讲**怎么说**——句首不许写「到点」「提醒」「该叫你」「我醒过来了」这类交代来路的话，不提设定 / 任务 / 指令 / 系统，语气柔和客气、不催不哄。人格那一份同步去掉"到点你自己醒过来"这种说法（主人点名的例子就是「到点醒一下」）。判据在 `tools/check-proactive.mjs` 的「四·六」与 persona 那两条，钉"「到点」只在禁令那一句里露面"。
 - **默认可沉默**：四样读完没有值得说的就保持沉默，一条话都不写 —— 排期到点不等于必须说话。
 - **能做什么是三档，缺省只提醒**（2026-11-10，方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`）：设置 → 活动 → 主动对话 里三选一，落 `$DSH_HOME/lw/sim.json` 的 `proactive.acting`：
 
@@ -29,6 +30,20 @@
 - 预设声明落在 `<DSH_HOME>/profiles/web/cordis.patch.yml`，行 id `preset-proactive`，`config.id = proactive`，显示名「主动对话」，`order: 8`。
 - 那一步由应用自己做（`app/src/main/java/.../host/CustomPresets.kt` 的 `PRESET_ROWS`）：host spawn 之前把本目录 `cordis.patch.yml` 那段 `- insert:` 按行 id 追加进 profile patch；随 host 树走的那一份在 `lw-presets/proactive.patch.yml`，由 `tools/pack-host.mjs` 拷进去。
 - 也支持作为 bundle 安装（`dsh.bundle.patch` 已声明）。
+
+## 本次消息快照（2.8.1 #36，2026-11-20）
+
+- 每一场开场正文里多一段**「本次消息快照」**：门户当前那一场（`voice/session.json` 账本指的那一场）的最近 **20 条**，**由新到旧**，带 `HH:mm` 与说话人。
+- 两个来源：他的话取 dsh 会话的 `user` 节点（`snapshotEvents` + `deriveEventMessage`，时间取事件那一刻）；她的话取 `$DSH_HOME/lw/out/<id>.jsonl`。**assistant 正文不取** —— 门户也不画正文。
+- 附件：她的图与文件先复制到 `<工作区>/.lw-snapshot/<id>/`，快照行里给工作区相对路径，主动场的 `read` / `read_image` 直接能用；他的附件本来就在工作区（`lw-in/`、`.lw-inbox/`），路径已在正文里。
+- 预算：单条 200 字、整段 4000 字（从最旧开始丢）；没有可说的就**整段不出现**。开场照旧发得出去 —— 快照读不到只记一行 warn。
+
+## 情感与记忆那一块（2026-11-20，方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md`）
+
+- 开场正文末尾多一段（`proactiveStartLine` 第 5 参，空串时整块不出现）：〔此刻〕一声 / 心情与关系 / 这一场主调 / 今天的分寸 / 〔记着的几件事〕。由宿主 `affectSnapshotNow` 现算，落在 `$DSH_HOME/lw/memory/affect.json` 的 `opener` 字段上。
+- **人格不再另起一份**：`{{lw_persona}}` 在这一档也求值，但只取人格卡里「二之二」那一段（四条特质 / 三条禁区 / 一句关系），全文留给对话场。预设第五节写明"与对话场同一张卡"。
+- 记忆三层在 `$DSH_HOME/lw/memory/`：`episodes.jsonl`（情节，宿主从 `wishes.json` 补 + 她自己的 `lw_memory op=add`）、`profile.json`（画像）、`relation.json`（关系，宿主自动）；他划的线在 `boundaries.json`，`hard: true` 的由 `lw_say` 硬拒。
+- 他说过"别说了"那一段由 `relation.json` 的 `mutedUntil` 管住：`via: 'wake'`（人亲手点的那一下）不受限，到点与判断层两路都不开口。
 
 ## 卸载回滚
 

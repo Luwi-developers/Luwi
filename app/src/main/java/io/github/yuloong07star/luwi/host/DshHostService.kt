@@ -8,7 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -21,13 +23,15 @@ import io.github.yuloong07star.luwi.channel.PrivilegedBridge
 import io.github.yuloong07star.luwi.channel.PrivilegedChannel
 import io.github.yuloong07star.luwi.channel.VirtualScreen
 import io.github.yuloong07star.luwi.plugin.PluginManager
-import io.github.yuloong07star.luwi.tool.ExploreSchedule
 import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwSessionLock
 import io.github.yuloong07star.luwi.tool.LwWakeWord
-import io.github.yuloong07star.luwi.tool.ProactiveSchedule
+import io.github.yuloong07star.luwi.tool.OutNotify
+import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.UsageLedger
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 
 /**
  * Keeps the host process alive while the app is not in front
@@ -39,6 +43,12 @@ import io.github.yuloong07star.luwi.tool.UsageLedger
 class DshHostService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** 换套时摘掉那个听众 ([IconTheme.watch]) —— 服务没了不该还挂着一个会去碰通知的回调 */
+    private var unwatchIcon: (() -> Unit)? = null
+
+    /** 重投通知要回主线程 (回调从设置页的 IO 上来的) */
+    private val main = Handler(Looper.getMainLooper())
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -48,6 +58,11 @@ class DshHostService : Service() {
             notification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
+        // **换图标要重投这一条** (2026-11-22 主人: "通知图标没有随图标变化"): 常驻通知是起服务
+        // 那一刻 build 一次的, 切图标只重画球的话, 状态栏里会一直是旧那套的鲸尾
+        unwatchIcon = IconTheme.watch {
+            main.post { repostNotification() }
+        }
         // The privileged channel belongs to the app process, which outlives any activity, and the
         // socket the host's tools call it through is opened here so that whoever starts the host
         // finds it already there
@@ -60,17 +75,26 @@ class DshHostService : Service() {
         // 开放接口那份文档 (2026-10-25): 跟"应用又活了"走同一个钩子 —— agent 不用等谁打开设置页,
         // 也不用等开屏画出来, 进程一起来 `$DSH_HOME/lw/interfaces.md` 就在那儿了 (内容一致不重写)
         LwInterfaces.seed(this)
-        // 探索那张任务卡 (2.7.8 批次 8): 首启/升级后第一次把初始卡抄进来 (已经有就一个字节不动);
-        // 排期按主人设的那个时刻排上 (关着就撤) —— 它与宿主的存活无关, 但到点那一下要宿主在跑
+        // 探索那张任务卡 (2.7.8 批次 8): 首启/升级后第一次把初始卡抄进来 (已经有就一个字节不动).
+        // 2026-11-21 起探索与主动开口都不再按时间排闹钟: 探索改由判断层挑时机开, 排期 ensure 不再调
         ExploreTask.ensure(this)
-        ExploreSchedule.ensure(this)
-        // 主动对话的排期 (2.8.0 B4-a): 与探索那一句并排 —— 宿主起来就按主人定的几个时刻排上
-        // (关着就撤), 到点先拉宿主再投 `source:"proactive"` 那一行
-        ProactiveSchedule.ensure(this)
-        // 判断层的敲钟 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
-        // 才按 25~55 分钟不定时敲一次 "该看一眼了"
+        // 老配置的一次性搬家 (2026-11-20): `sim.json` 的 `mode = active` → `router.json` 的
+        // `tick.enabled`; `sim.json` 的 `wake.quiet*` → `automations/settings.json` 的 `quiet` 段。
+        // 两件都幂等, 宿主起来这一下跑一次就够 —— 界面那一侧删掉的格子不能"删了连行为一起没了"
+        runCatching {
+            if (RouterTick.migrateMode(this)) Log.i(TAG, "the old sim mode became router.json tick.enabled")
+            if (QuietHours.migrateLegacy(this)) Log.i(TAG, "the old sim quiet hours moved to automations/settings.json")
+        }.onFailure { Log.w(TAG, "the old sim settings were not migrated: ${it.message}") }
+        // 2026-11-21: 按时间的主动对话排期 (ProactiveSchedule) 已撤 —— 主动开口改由判断层挑时机,
+        // 不再有到点投 `source:"proactive"` 那一行
+        // 判断层的唤醒 (2026-11-07): 缺省关着 —— 主人打开 `lw/router.json` 的 `tick.enabled` 之后
+        // 才按 25~55 分钟不定时唤醒一次 "该看一眼了"
         RouterTick.ensure(this)
-        // 「今天用了多久」先算一次 (2026-11-07): 判断层的敲钟随时可能来, 而第一拍心跳还要等 60 秒
+        // 她说的话弹到通知栏 (2.8.1 #7): 与门户、浮球同一个 observer 的第三个听众 —— 应用不在前台时
+        // 每句可读的话弹一条, 于是主人不打开应用也知道她说了一句。水位从这一刻起算, 历史一条不补
+        runCatching { OutNotify.ensure(this) }
+            .onFailure { Log.w(TAG, "the watch on her words did not start: ${it.message}") }
+        // 「今天用了多久」先算一次 (2026-11-07): 判断层的唤醒随时可能来, 而第一拍心跳还要等 60 秒
         runCatching { UsageLedger.maybeRefresh(this, System.currentTimeMillis()) }
         // **唤醒词自愈** (2026-10-10 主人: "让它自愈"): 那个开关开着、又不在省电模式, 就把监听拉起来
         //
@@ -129,14 +153,12 @@ class DshHostService : Service() {
     /**
      * 主人从最近任务里划掉这个应用 (2026-11-07)
      *
-     * 划掉不等于"别再定时": 42 / 43 两个闹钟还挂在系统上, 这里按现在的配置校一遍 —— 有些 ROM
+     * 划掉不等于"别再定时": 判断层那个闹钟还挂在系统上, 这里按现在的配置校一遍 —— 有些 ROM
      * 清后台时连闹钟一起清, 这是最后一次机会。**不重启服务**: Android 12 起从后台启动前台服务
-     * 需要豁免, 划任务这一下没有
+     * 需要豁免, 划任务这一下没有。探索 / 主动对话的 42 / 43 闹钟 2026-11-21 起都不再排
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         runCatching {
-            ExploreSchedule.ensure(this)
-            ProactiveSchedule.ensure(this)
             RouterTick.ensure(this)
         }.onFailure { Log.w(TAG, "the schedules could not be re-armed after the task was removed", it) }
         super.onTaskRemoved(rootIntent)
@@ -164,6 +186,8 @@ class DshHostService : Service() {
     }
 
     override fun onDestroy() {
+        unwatchIcon?.invoke()
+        unwatchIcon = null
         // 会话锁先放: 它是这个进程按住的那一把, 进程要走了留着没人能放 (2026-11-07)
         LwSessionLock.releaseAll()
         DshHost.stop()
@@ -198,13 +222,39 @@ class DshHostService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.host_notification_title))
             .setContentText(getString(R.string.host_notification_text))
-            // 通知的小图标不是启动器图标: 它按模板染色, 只认 alpha 通道, 所以给的是一张纯白的
-            // 水花鲸尾剪影。原来这里用的是 `ic_launcher_foreground` (108dp 的启动器前景), 系统把它
-            // 缩进 24dp 的状态栏位里, 糊成一团
-            .setSmallIcon(R.drawable.ic_notification)
+            // 通知的图标是两枚一起上 (`withLuwiIcon`): small icon 是每套那份纯白剪影, 系统按模板染色;
+            // MIUI / HyperOS 另外还在 extras 里读 `miui.appIcon` 画状态栏与卡片左侧那一枚 ——
+            // 不塞它, 那里回落成清单里静态的 `@mipmap/ic_launcher` (永远是内置那套), 就是
+            // 2026-11-22 主人报的"通知栏和桌面图标不一致"
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .setOngoing(true)
+            // 重投只换图, 不该再响一声 (这条是 LOW 档常驻, 但别让 ROM 把它当新通知动一遍)
+            .setOnlyAlertOnce(true)
             .build()
+    }
+
+    /**
+     * 换了图标套之后把这一条重投一次 (2026-11-22)
+     *
+     * 先按"再进一次前台"走 (`startForeground` 同类型常量): 那是系统认的那条路; 极少数 ROM 从后台
+     * 拒掉这一下 (API 34+ 的 while-in-use 限制那一类), 就退成普通 `notify` —— 同一个 id, 同一条
+     * 通知就地换图, 不叠第二条。两条都失败只留日志, 不把服务带崩
+     */
+    private fun repostNotification() {
+        runCatching {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        }.onFailure { refused ->
+            Log.w(TAG, "re-posting the host notification with the new icon failed: ${refused.message}")
+            runCatching {
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification())
+            }.onFailure { Log.w(TAG, "the host notification could not be re-posted", it) }
+        }
     }
 
     companion object {

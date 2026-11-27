@@ -19,10 +19,12 @@ class SettingsSectionsTest {
     /** D1 拍板的那六段: 省电那一段 + 「常用」一级分组下那五段 (导航那一段 2026-10-17 撤了) */
     private val common = listOf("power", "appearance", "channel", "ball", "wake", "speak")
 
-    /** 「能力」那一组的 14 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成) */
+    /** 「能力」那一组的 15 段, 缺省全收着 (接口那一段 2026-10-25 加在最末, 活动 2026-11-07 由探索与定时对话合成,
+     *  开发 2026-11-16 加在接口后面) */
     private val abilities = listOf(
         "notifications", "screenshot", "look", "lock",
         "activity", "automation", "quick", "plugin", "skills", "linux", "sync", "tavern", "permissions", "api",
+        "dev",
     )
 
     @Test
@@ -89,8 +91,66 @@ class SettingsSectionsTest {
     @Test
     fun sectionKeysAreUnique() {
         assertEquals("段名不能重复", SettingsSectionKeys.size, SettingsSectionKeys.toSet().size)
-        // 2026-11-07: 「探索」与「定时对话」合成「活动」那一段之后是 20 段 (原来写死 21, 这条一直红着)
-        assertEquals("现在页面上是 20 段", 20, SettingsSectionKeys.size)
-        assertEquals("常用六段 + 能力十四段", SettingsSectionKeys.size, common.size + abilities.size)
+        // 2026-11-07: 「探索」与「定时对话」合成「活动」那一段之后是 20 段 (原来写死 21, 那条一直红着);
+        // 2026-11-16: 开发那一段加在接口后面, 于是 21 段
+        assertEquals("现在页面上是 21 段", 21, SettingsSectionKeys.size)
+        assertEquals("常用六段 + 能力十五段", SettingsSectionKeys.size, common.size + abilities.size)
+    }
+
+    /* ── 顶部索引条那张下标表 (2026-11-14) ───────────────────────────────── */
+
+    /**
+     * 每一段都有一个下标, 且严格递增
+     *
+     * 公式错一格的样子很安静: 点「接口」跳到「权限」, 界面上一点异常都没有 —— 所以这里连末项的
+     * 绝对值也钉住 (页面上 24 项: 1 条提示 + 21 段 + 2 处组标题)
+     */
+    @Test
+    fun everySectionHasADistinctRow() {
+        val rows = SettingsSectionKeys.map { settingsSectionRowIndex(SettingsSectionKeys, it) }
+        assertEquals("每一段都要有下标", SettingsSectionKeys.size, rows.filterNotNull().size)
+        assertTrue("下标必须严格递增", rows.filterNotNull().zipWithNext().all { (a, b) -> a < b })
+        assertEquals("第一段紧跟在那条「检查所需依赖」后面", 1, rows.first())
+        assertEquals("末项落在最后一项上", SettingsSectionKeys.size + SettingsGroupTitleBefore.size + 1 - 1, rows.last())
+    }
+
+    /** 页面上的两处组标题各占一个 item, 于是它后面那一段的下标要挪一格 */
+    @Test
+    fun groupTitlesShiftTheRows() {
+        assertEquals("省电站在提示下面第一项", 1, settingsSectionRowIndex(SettingsSectionKeys, "power"))
+        assertEquals("外观排在「常用」这个组标题之后", 3, settingsSectionRowIndex(SettingsSectionKeys, "appearance"))
+        assertEquals("通知排在「能力」这个组标题之后", 9, settingsSectionRowIndex(SettingsSectionKeys, "notifications"))
+    }
+
+    /** 下标 → 段名那一趟要能原路回来 (索引条的高亮就是靠它) */
+    @Test
+    fun rowToSectionRoundTrip() {
+        SettingsSectionKeys.forEach { key ->
+            val row = settingsSectionRowIndex(SettingsSectionKeys, key)
+            assertTrue("$key 没有下标", row != null)
+            assertEquals("$key 的下标反查回来不是它", key, settingsSectionAtRow(SettingsSectionKeys, row!!))
+        }
+    }
+
+    /** 顶上那条提示 (0) 不算任何一段; 组标题那一行算它上面那一段 */
+    @Test
+    fun rowZeroAndGroupRow() {
+        assertEquals("下标 0 是「检查所需依赖」, 不算一段", null, settingsSectionAtRow(SettingsSectionKeys, 0))
+        assertEquals("组标题那一行算它上面那一段", "power", settingsSectionAtRow(SettingsSectionKeys, 2))
+        assertEquals("再往后一项才是外观", "appearance", settingsSectionAtRow(SettingsSectionKeys, 3))
+        assertEquals("越界也不炸", SettingsSectionKeys.last(), settingsSectionAtRow(SettingsSectionKeys, 999))
+    }
+
+    /** 写错一个段名只该"没有那一颗 chip", 不该抛异常 */
+    @Test
+    fun unknownKeyHasNoRow() {
+        assertEquals(null, settingsSectionRowIndex(SettingsSectionKeys, "nope"))
+        assertEquals(null, settingsSectionAtRow(emptyList(), 5))
+    }
+
+    /** 索引条的段名表必须与段名表一一对上 (多一条 / 少一条 / 顺序走岔, 界面上都看不出来) */
+    @Test
+    fun titleResCoversEverySection() {
+        assertEquals("段名表的键与顺序必须与 SettingsSectionKeys 一致", SettingsSectionKeys, SettingsSectionTitleRes.keys.toList())
     }
 }

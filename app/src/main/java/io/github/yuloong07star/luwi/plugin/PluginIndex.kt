@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 插件仓库的那份官方索引 (`lw-plugin-index/1`, 协议第 13 节): **读、搜、下** 的应用侧一半
  *
- * 索引住在生态仓 (`yuloong07-star/luwi-plugins`) 的根上, 由 `tools/lw-plugin-index.mjs` 从 `packages/`
+ * 索引住在生态仓 (`Luwi-developers/luwi-plugins`) 的根上, 由 `tools/lw-plugin-index.mjs` 从 `packages/`
  * 里那些签好名的包**现算**出来: 整包 sha256、逐文件哈希、发布者指纹与签名都验过才进索引。所以它比
  * "一张写死的下载链接表"多了一件要紧的事 —— **它给每份包钉了一个整包摘要**, 装之前对得上才装
  * (协议第 14 节第 3 条点名的洞: 索引被替换会变成"把你引到一个同名不同发布者的包")
@@ -57,11 +57,16 @@ internal object PluginIndex {
      * (点安装只弹「需要 Luwi ≥ 2.7.10」), 所以先退回 2.7.9 发布时那一对 (七条全装得上);
      * 2.7.10 发布时再把这对抬回 `index-10` / `index-9` (那两个 tag 已在线上, 不用重推;
      * 注意 index-9 里 1.1.2 的 minLw 还是 2.8.0, 只当兜底用, 别当现行)
+     *
+     * **2026-11-14 抬到 `index-11` / `index-10`** (2.8.0 出包当天): 上面那句"2.7.10 发布时抬回"当时
+     * 没来得及做, 于是 2.7.10 与这次的 2.8.0 都还在读 10-18 那份 `index-8` —— 那一份里鲸鱼娘外观
+     * 只有 1.0.3, 而 index-11 里有 1.1.3 / 1.1.2 (一档多支动作是 2.7.10 起才画得开)。index-11 那九条
+     * 的 minLw 最高是 2.7.10, 2.8.0 的设备全部过得了版本闸; revoked 为空
      */
-    private const val REF_CURRENT = "index-8"
+    private const val REF_CURRENT = "index-11"
 
     /** 上一份内容 tag: 兜底 (新 tag 还没推上去 / 新 tag 那条链路坏了时, 旧的一份照样能用) */
-    private const val REF_PREVIOUS = "index-7"
+    private const val REF_PREVIOUS = "index-10"
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -114,9 +119,9 @@ internal object PluginIndex {
     /** 默认那一份地址表: 现行 tag 的三个镜像, 再垫一份旧 tag (逐条试, 谁通用谁) */
     fun addresses(): List<String> = buildList {
         for (host in listOf("cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net")) {
-            add("https://$host/gh/yuloong07-star/luwi-plugins@$REF_CURRENT/index.json")
+            add("https://$host/gh/Luwi-developers/luwi-plugins@$REF_CURRENT/index.json")
         }
-        add("https://fastly.jsdelivr.net/gh/yuloong07-star/luwi-plugins@$REF_PREVIOUS/index.json")
+        add("https://fastly.jsdelivr.net/gh/Luwi-developers/luwi-plugins@$REF_PREVIOUS/index.json")
     }
 
     /** 现在缓存里那一份 (没有 / 坏了就是 null —— 那是"还没取过", 不是"没有插件") */

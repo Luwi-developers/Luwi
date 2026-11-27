@@ -26,20 +26,17 @@
 import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { parseComposition } from './parse-composition.mjs'
+import { parseComposition, evaluateDisabledPredicate, profileContextPredicate } from './parse-composition.mjs'
 
 export const BACKEND_ID = 'declarative'
 
-/** Evaluate a `!!js` predicate. Only ever applied to text this feature itself wrote. */
+/** Preserve the host-native predicate node so the loader evaluates it against its real Entry.ctx. */
 function resolveDisabled(value) {
   if (value !== null && typeof value === 'object' && typeof value.__js === 'string') {
-    try {
-      // eslint-disable-next-line no-new-func
-      return Boolean(new Function(`"use strict"; return (${value.__js});`)())
-    } catch {
-      // 表达式求值不了时按"关掉"处理：宁可少一行能力，也不要让整条 preset 挂载失败。
-      return true
-    }
+    // An unknown ctx service can return undefined rather than throw, which would
+    // make the native loader enable it. Keep unsupported conditions truly off.
+    if (profileContextPredicate(value.__js) === null && evaluateDisabledPredicate(value.__js) === undefined) return true
+    return { __jsExpr: value.__js }
   }
   return value === true
 }
@@ -48,6 +45,18 @@ function resolveDisabled(value) {
 export function absoluteSpecifier(specifier, presetDir) {
   if (typeof specifier !== 'string' || !specifier.startsWith('.')) return specifier
   return pathToFileURL(join(presetDir, specifier)).href
+}
+
+/** Preserve config expressions in the host loader's native node representation.
+ * The local parser returns __js without executing it. The host recognizes
+ * __jsExpr and evaluates it with its own baseUrl/context. Passing __js through
+ * as ordinary config broke Creator's customSkillDirs.
+ */
+function loaderConfig(value) {
+  if (value === null || typeof value !== 'object') return value
+  if (typeof value.__js === 'string') return { __jsExpr: value.__js }
+  if (Array.isArray(value)) return value.map(loaderConfig)
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, loaderConfig(item)]))
 }
 
 /**
@@ -72,7 +81,7 @@ export function toPluginRows(rows, presetDir) {
       if (row.isolate !== undefined && row.isolate !== null) plugin.isolate = row.isolate
       plugin.config = toPluginRows(row.config, presetDir)
     } else if (row.config !== undefined && row.config !== null) {
-      plugin.config = row.config
+      plugin.config = loaderConfig(row.config)
     }
     if (row.disabled !== undefined) plugin.disabled = resolveDisabled(row.disabled)
     out.push(plugin)
@@ -90,16 +99,20 @@ export function toPluginRows(rows, presetDir) {
 export function createDeclarativeBackend({ scope, log = console.log, warn = console.error }) {
   /** presetId → { dispose, dir } —— 当前挂在注册表里的东西，注销的唯一凭据。 */
   const mounted = new Map()
+  let mutations = Promise.resolve()
+  let stopped = false
+  const stoppedResult = () => ({ ok: false, code: 'backendStopped', error: 'backend stopped' })
+  const serialize = (work) => {
+    const next = mutations.then(work, work)
+    mutations = next.then(() => undefined, () => undefined)
+    return next
+  }
 
   async function unmount(id) {
     const entry = mounted.get(id)
     if (entry === undefined) return
+    await entry.dispose()
     mounted.delete(id)
-    try {
-      await entry.dispose()
-    } catch (error) {
-      warn(`custom-mode: 注销 preset "${id}" 时出错（已忽略）: ${describe(error)}`)
-    }
   }
 
   /** Build the definition for one assistant directory, or null when it has no composition. */
@@ -121,6 +134,7 @@ export function createDeclarativeBackend({ scope, log = console.log, warn = cons
    * registry refuses a duplicate id outright.
    */
   async function mountOne(assistant) {
+    if (stopped) return stoppedResult()
     let definition
     try {
       definition = buildDefinition(assistant)
@@ -128,26 +142,40 @@ export function createDeclarativeBackend({ scope, log = console.log, warn = cons
       // 解析失败是**用户可见**的问题（手改坏了 composition），要显式说，不能静默跳过。
       warn(`custom-mode: 预设 "${assistant.id}" 的 composition 解析失败 —— ${describe(error)}。该助手不会出现在选择器里。`)
       await unmount(assistant.id)
-      return { ok: false, error: describe(error) }
+      return { ok: false, code: 'compositionParseFailed', error: describe(error) }
     }
     if (definition === null) {
       await unmount(assistant.id)
-      return { ok: false, error: 'no composition' }
+      return { ok: false, code: 'noComposition', error: 'no composition' }
     }
-    await unmount(assistant.id)
+    let registering = false
     try {
+      await unmount(assistant.id)
+      if (stopped) return stoppedResult()
+      registering = true
       const dispose = await scope.agentPresets.register(definition)
+      registering = false
       mounted.set(assistant.id, { dispose, dir: assistant.dir })
+      // register() can finish after the scope starts stopping. Keep its disposer until
+      // it succeeds, and release only this generation's own registration.
+      if (stopped) {
+        await unmount(assistant.id)
+        return stoppedResult()
+      }
       return { ok: true }
     } catch (error) {
       // register 会抛（Duplicate / id 空 / 已存在）：说清是哪个助手、哪条错误。
       warn(`custom-mode: 注册预设 "${assistant.id}" 失败 —— ${describe(error)}`)
-      return { ok: false, error: describe(error) }
+      const code = registering
+        ? describe(error) === 'Duplicate agent preset: ' + assistant.id ? 'registrationConflict' : 'registrationFailed'
+        : 'registrationCleanupFailed'
+      return { ok: false, code, error: describe(error) }
     }
   }
 
   /** Bring the registry in line with the given assistant list: mount all, drop the rest. */
   async function sync(assistants) {
+    if (stopped) return assistants.map(({ id }) => ({ id, ...stoppedResult() }))
     const results = []
     for (const assistant of assistants) results.push({ id: assistant.id, ...(await mountOne(assistant)) })
     const wanted = new Set(assistants.map((a) => a.id))
@@ -161,7 +189,11 @@ export function createDeclarativeBackend({ scope, log = console.log, warn = cons
   }
 
   async function disposeAll() {
-    for (const id of [...mounted.keys()]) await unmount(id)
+    const errors = []
+    for (const id of [...mounted.keys()]) {
+      try { await unmount(id) } catch (error) { errors.push(error) }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, 'preset registration cleanup failed')
   }
 
   /**
@@ -245,11 +277,16 @@ export function createDeclarativeBackend({ scope, log = console.log, warn = cons
     id: BACKEND_ID,
     /** 新线不把 preset 落到磁盘，注册表就是唯一真相。 */
     writesPresetFiles: false,
-    sync,
-    mountOne,
-    unmount,
-    remove,
-    disposeAll,
+    sync: (assistants) => serialize(() => sync(assistants)),
+    mountOne: (assistant) => serialize(() => mountOne(assistant)),
+    unmount: (id) => serialize(() => unmount(id)),
+    remove: (id, dir) => serialize(() => stopped ? stoppedResult() : remove(id, dir)),
+    disposeAll: () => {
+      // Close admission immediately, before awaiting queued/in-flight mutations. A
+      // startup sync still reading host metadata must not resurrect this backend.
+      stopped = true
+      return serialize(disposeAll)
+    },
     fetchBaseCompositions,
     mountedIds: () => [...mounted.keys()],
   }

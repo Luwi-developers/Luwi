@@ -1,10 +1,14 @@
 """把 Luwi 自己的标记做成 Android 要的那几档位图
 
 为什么需要这个脚本: 手机上真正画出来的那一个图标是自适应图标那两份
-(`mipmap-anydpi/ic_launcher.xml` = `drawable/ic_launcher_background.xml` 那条渐变 +
+(`mipmap-anydpi/ic_launcher_builtin.xml` = `drawable/ic_launcher_background.xml` 那条渐变 +
 `drawable/ic_launcher_foreground.xml` 那个标记), 而只要有一处回退到密度位图 (旧启动器、图标
 选择器、任何直接翻 `mipmap-*dpi` 的地方) 拿到的就是下面这几张 —— 两者必须长得一样, 所以位图
 不能靠手画, 于是把它做成可复现的一步
+
+**2026-11-22 起这套产出叫 `ic_launcher_builtin*`, 不再是 `ic_launcher*`**: 应用图标位
+(`mipmap/ic_launcher`) 让给了缺省那套 (女仆), 因为它同时也是 MIUI / HyperOS 画通知栏的那一枚,
+而它没有运行时开关 (见 `IconTheme.MIUI_APP_ICON` 的注释); 自适应 xml 那两份是手写的
 
 源图是 `tools/brand/luwi-mark.png` (主人 2026-10-10 给的品牌图: 一圈水花里一只鲸尾, 白底单色),
 而那份矢量是从同一张描出来的, 见 `tools/vector-trace.py`。**墨迹宽度 0.46 这条规矩三处共用**
@@ -16,9 +20,9 @@
   python tools/make-icons.py --source <mark.png> --res <app/src/main/res>
 
 生成:
-  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.webp        方形, 背景是自适应图标那条渐变 + 标记
-  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_round.webp  同样内容裁成圆
-  drawable/ic_notification.png                        24dp 单色小图标, 通知栏用
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_builtin.webp        方形, 背景是那条渐变 + 标记
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_builtin_round.webp  同样内容裁成圆
+  drawable/ic_notification.png                                24dp 单色小图标, 通知栏用
 
 **不进构建**: 这几个文件是提交进仓库的产物, Gradle 不认识这个脚本, 换图标时手工跑一次
 """
@@ -201,7 +205,10 @@ def main():
     for density, size in DENSITIES.items():
         directory = res / f'mipmap-{density}'
         directory.mkdir(parents=True, exist_ok=True)
-        for name, rounded in (('ic_launcher', False), ('ic_launcher_round', True)):
+        # 2026-11-22: 应用图标位 (`ic_launcher*`) 让给**缺省那套** (女仆), 内置鲸尾这套另存
+        # `ic_launcher_builtin*` —— 那一位的图同时被 MIUI / HyperOS 拿去画通知栏, 而它没有运行时
+        # 开关 (见 IconTheme.MIUI_APP_ICON 的注释); 重跑本脚本时别再写回 `ic_launcher*`
+        for name, rounded in (('ic_launcher_builtin', False), ('ic_launcher_builtin_round', True)):
             icon = launcher_icon(mask, size, rounded)
             target = directory / f'{name}.webp'
             icon.save(target, 'WEBP', lossless=True, quality=100)

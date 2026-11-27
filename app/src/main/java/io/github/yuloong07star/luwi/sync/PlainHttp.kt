@@ -34,6 +34,12 @@ object PlainHttp {
         if (host.startsWith("10.")) return true
         if (host.startsWith("192.168.")) return true
         if (host.startsWith("169.254.")) return true
+        // Tailscale / ZeroTier 这类 mesh VPN 的对端落在 CGNAT 100.64.0.0/10 里, 它们是"对端自己"
+        // 而不是公网出口, 与 192.168 / 10 同等对待 (SyncSettingTest「对端地址只收 http」钉的就是这条)
+        if (host.startsWith("100.")) {
+            val second = host.split('.').getOrNull(1)?.toIntOrNull() ?: return false
+            return second in 64..127
+        }
         if (host.startsWith("172.")) {
             val second = host.split('.').getOrNull(1)?.toIntOrNull() ?: return false
             return second in 16..31

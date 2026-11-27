@@ -1,6 +1,7 @@
 package io.github.yuloong07star.luwi.channel
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,5 +35,16 @@ class OcrBatchTest {
         assertTrue(OcrBatch.groups(0, 4).isEmpty())
         assertTrue(OcrBatch.groups(5, 0).isEmpty())
         assertTrue(OcrBatch.groups(-1, 4).isEmpty())
+    }
+
+    /**
+     * 出网边界: 屏幕画面默认绝不上传 (主人 2026-11-15 12:45 拍板)
+     *
+     * 读屏那条路只有端侧一支, 云端开关是常量且恒为 false —— 谁把它改成 true, 这条当场红
+     */
+    @Test
+    fun `云端 OCR 默认关`() {
+        assertFalse(LwOcr.allowCloud)
+        assertEquals("local", LwOcr.ENGINE)
     }
 }

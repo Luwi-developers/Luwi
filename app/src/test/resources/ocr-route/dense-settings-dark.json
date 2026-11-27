@@ -1,0 +1,24 @@
+{
+  "name": "dense-settings-dark",
+  "about": "设置页深色主题: 同一批行分数整片再降 0.03~0.05, 这是单阈值最先误杀的一屏",
+  "screenLong": 2400,
+  "rows": [
+    { "text": "设置", "score": 0.98, "box": [60, 180, 190, 240], "keep": true },
+    { "text": "显示与亮度", "score": 0.92, "box": [60, 300, 300, 338], "keep": true },
+    { "text": "深色模式", "score": 0.90, "box": [60, 400, 300, 438], "keep": true },
+    { "text": "已选定", "score": 0.29, "box": [420, 400, 600, 438], "keep": true },
+    { "text": "自动调整亮度", "score": 0.27, "box": [60, 500, 360, 538], "keep": true },
+    { "text": "已开启", "score": 0.30, "box": [420, 600, 640, 638], "keep": true },
+    { "text": "跟随系统", "score": 0.28, "box": [420, 700, 700, 738], "keep": true },
+    { "text": "通知", "score": 0.88, "box": [60, 700, 150, 738], "keep": true },
+    { "text": "横幅", "score": 0.85, "box": [60, 800, 150, 838], "keep": true },
+    { "text": "8", "score": 0.58, "box": [60, 900, 104, 944], "keep": false },
+    { "text": "锁定屏幕", "score": 0.91, "box": [60, 1000, 240, 1038], "keep": true },
+    { "text": ">", "score": 0.96, "box": [980, 1100, 1010, 1144], "keep": false },
+    { "text": "关于本机", "score": 0.93, "box": [60, 1200, 240, 1238], "keep": true },
+    { "text": "版本 2.8.1", "score": 0.87, "box": [60, 1300, 320, 1338], "keep": true },
+    { "text": "检查更新", "score": 0.90, "box": [60, 1400, 240, 1438], "keep": true },
+    { "text": "Wi", "score": 0.52, "box": [900, 1500, 980, 1544], "keep": false },
+    { "text": "8:41", "score": 0.86, "box": [500, 60, 580, 96], "keep": true }
+  ]
+}

@@ -14,9 +14,11 @@ import android.os.Environment
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.yuloong07star.luwi.MainActivity
 import io.github.yuloong07star.luwi.R
+import io.github.yuloong07star.luwi.overlay.OverlayService
 import io.github.yuloong07star.luwi.util.Capability
 import io.github.yuloong07star.luwi.util.PermissionGate
 import kotlinx.serialization.json.JsonObject
@@ -24,6 +26,9 @@ import java.io.File
 
 /**
  * 通知、震动、剪贴板、分享与下载
+ *
+ * 通知是**两件事**: [notify] 是模型点名要发的那一条 (`lw_notify`), [say] 是她自己开口时应用替她弹的
+ * 那一条 (判据与水位在 [OutNotify]) —— 两条渠道、两个 id 空间, 谁也不顶掉谁
  *
  * 全是 app 进程里用 Context 就能做的事。共同点是**不需要特权**, 所以没有一行走 binder: 这里的
  * 东西直接执行, 结果由桥按同一套协议回给 host
@@ -46,6 +51,14 @@ internal object LwNotify {
 
     /** 一条工具通知的固定 id: 重复调用是更新同一条, 不是堆一屏 */
     private const val NOTIFICATION_ID = 2
+
+    /** 她的话那条渠道: 与工具那条分开, 于是"她说了没有"和"工具通知"两个开关互不牵连 */
+    private const val SPEECH_CHANNEL_ID = "lw-say"
+
+    /** 同一场的话归一组: 系统把它们收成一摞, 不铺满一屏 */
+    private const val SPEECH_GROUP = "lw-say"
+
+    private const val TAG = "LwNotify"
 
     /** 震动上限: 再长就没有意义, 而且会让人以为卡住了 */
     private const val MAX_VIBRATE_MS = 3_000
@@ -88,7 +101,7 @@ internal object LwNotify {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(body)
-            .setSmallIcon(R.drawable.ic_notification)
+            .withLuwiIcon(context)
             .setContentIntent(open)
             .setAutoCancel(true)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -109,6 +122,92 @@ internal object LwNotify {
                 "; the same id is reused by the next call, so this one is replaced rather than" +
                 " stacked. " + channelLine(manager) + bannerLine(manager, banner),
         )
+    }
+
+    /**
+     * 她刚说的一句, 在手机上弹一条通知 (2.8.1 落实表 #7)
+     *
+     * 与 [notify] 是两条通道、两个 id 空间: 工具那条是模型点名要发、换的是同一条; 这一条是她每次开口
+     * 各一条 (id 由会话与 `seq` 合成, 见 [sayId]), 于是"她刚才说了两句"在通知栏里是两条
+     *
+     * 点它**落到那一场**: `EXTRA_OPEN_SESSION` 交给 [MainActivity], 由 `BallReturn` 送进会话界面
+     * (与浮球那条通知同一个去向)。**不带 `EXTRA_OPEN_LIVE`** —— 那个记号的意思是"以点下去那一刻正在
+     * 跑的那一场为准", 而这里要的恰恰是写下这一句的那一场
+     *
+     * @param session 那一场的 id (就是 jsonl 文件名的本体)
+     * @param seq 那一行的 `seq`
+     * @param at 那一行的时间 (通知上显示的就是它)
+     * @param title 通知标题 (门户那张脸上那个名字)
+     * @param body 通知正文 (她那句话)
+     * @return 真的弹出去了没有: 没有通知许可 / 系统拒收都回 false, 调用方只记一行日志
+     */
+    fun say(context: Context, session: String, seq: Int, at: Long, title: String, body: String): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        if (!manager.areNotificationsEnabled()) {
+            // 主人自己把 Luwi 的通知关掉是**有意的选择**, 所以这里不抛也不补别的东西, 只留一行读数
+            Log.i(TAG, "notifications are turned off, so what she said stays in the portal: $session")
+            return false
+        }
+        ensureSpeechChannel(context, manager)
+        val id = sayId(session, seq)
+        val open = PendingIntent.getActivity(
+            context,
+            id,
+            Intent(context, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+                        or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                )
+                putExtra(OverlayService.EXTRA_OPEN_SESSION, session)
+            },
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val note = NotificationCompat.Builder(context, SPEECH_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(body)
+            .withLuwiIcon(context)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setWhen(at)
+            // at 为 0 (老文件里没写时间的那种行) 时不显示那一刻, 否则通知上会挂一个 1970
+            .setShowWhen(at > 0)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setGroup(SPEECH_GROUP)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .build()
+        return try {
+            manager.notify(id, note)
+            true
+        } catch (refused: SecurityException) {
+            // POST_NOTIFICATIONS 没给时就是这一句: 这条通知发不出去, 写一行而不是静默
+            Log.w(TAG, "the notification for her words was refused: ${refused.message}")
+            false
+        }
+    }
+
+    /**
+     * 一条话的通知 id: 会话与 `seq` 合成, 落在 `0x4C57` (`LW`) 那一段
+     *
+     * 和宿主那条常驻 (1) 与工具通知 (2) 差得远, 于是谁都不会把别人的通知顶掉。撞了也只是更新同一条,
+     * 不会说错一句
+     */
+    fun sayId(session: String, seq: Int): Int =
+        0x4C570000 or ((session.hashCode() * 31 + seq) and 0x000FFFFF)
+
+    /**
+     * 「她的话」那条渠道
+     *
+     * 重要度只在创建时定得下来 (之后归用户管): 这里是 HIGH —— 她说了一句与工具通知一样该弹出来, 而
+     * "别弹"的开关在系统设置里 (`设置 -> 应用 -> Luwi -> 通知 -> 她的话`)
+     */
+    private fun ensureSpeechChannel(context: Context, manager: NotificationManager) {
+        val channel = NotificationChannel(
+            SPEECH_CHANNEL_ID,
+            context.getString(R.string.notification_channel_speech),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply { description = context.getString(R.string.notification_channel_speech_description) }
+        manager.createNotificationChannel(channel)
     }
 
     /**

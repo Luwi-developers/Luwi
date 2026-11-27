@@ -113,12 +113,22 @@ internal object VoiceInbox {
     const val SOURCE_PROACTIVE = "proactive"
 
     /**
-     * 判断层敲的那一下 (2026-11-07)
+     * 判断层唤醒的那一下 (2026-11-07)
      *
      * 它与 [SOURCE_PROACTIVE] 不是一回事: 那一条是"到点了, 开一场"; 这一条只是"该看一眼了" ——
      * 要不要开口、说什么, 由宿主那侧的 `judgeRouter` 定 (见 host-plugin 的 `routerTick`)
      */
     const val SOURCE_ROUTER = "router"
+
+    /**
+     * 判断层里主人亲手点的「唤醒一下」(2.8.1 #8)
+     *
+     * 与 [SOURCE_ROUTER] 分开是刻意的: 那一条是闹钟投的"该看一眼了", 静默时段 / 冷却 / 沉睡前
+     * 等待 / "没什么值得说的"每一道都能把它吃掉; 而这一条是**主人当面戳了一下** —— 宿主看到它就
+     * 一道闸都不看, 直接开一场主动对话并先开口找话题 (`host-plugin` 的 `routerWakeNow`)。混用同一个
+     * 记号的话, "点了却没出声"会原样回来
+     */
+    const val SOURCE_WAKE = "wake"
 
     /** 超过这个大小就从尾部留 [KEEP_LINES] 行重写: 上千句话才可能走到, 到了也不该无限涨 */
     private const val CAP_BYTES = 1 shl 20

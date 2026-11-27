@@ -36,6 +36,20 @@ object SettingsSpace {
     /** 折角与箭头的尺寸 */
     val Chevron = 18.dp
 
+    /** 顶部段名索引条那一行的高度: 与段行同一个"手指好点"的下限, 但比它矮一档, 免得占掉一屏 */
+    val BarHeight = 40.dp
+
+    /** 索引条里每个段名的左右留白 (文字与文字之间靠 [ChipGap] 分开) */
+    val ChipPadding = 10.dp
+
+    /** 相邻两个段名之间的距离 */
+    val ChipGap = 6.dp
+
+    /** 选中段名底下那条短线的长与粗: 与外观段的分段控件同一套 (18dp / 2dp) */
+    val IndicatorWidth = 18.dp
+
+    val IndicatorHeight = 2.dp
+
     /** 细线的粗细 */
     val Hairline = 1.dp
 

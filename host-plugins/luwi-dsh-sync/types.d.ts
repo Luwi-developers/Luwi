@@ -112,6 +112,18 @@ export interface Config {
   registerCommand?: boolean
   /** tools 服务存在时注册 sync_* 工具（默认 true）。 */
   registerTools?: boolean
+  /**
+   * 终端问答中继段 (2026-11-22): 电脑上的 `ask_user_question` 要不要传到手机。
+   * 电脑那一侧且对端通道开着时才装上；手机端不需要任何改动。
+   */
+  ask?: {
+    /** `off` = 与以前一样；`notify` = 只传过去看得见；`relay` = 传过去 + 手机上能答 + 超时自定义回答；`auto` = 根本不问。 */
+    mode?: 'off' | 'notify' | 'relay' | 'auto'
+    /** 等手机多久（毫秒，5000..1800000，缺省 120000）。 */
+    waitMs?: number
+    /** 给"手机驱动的那一场"每轮附一条终端提示（缺省 true）；正文一个字都不改。 */
+    brief?: boolean
+  }
 }
 
 /** sync_status 工具规范结果。 */

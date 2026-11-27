@@ -17,7 +17,7 @@ export const TOOL_PEER = 'sync_peer'
 
 // 版本号（启动行与 /sync doctor 报出来; 与 package.json 的 version 手工保持一致 ——
 // 读 package.json 要走 JSON import, 而载入期"少一个 loader 特性"就是一种启动风险）
-export const PLUGIN_VERSION = '0.3.6'
+export const PLUGIN_VERSION = '0.4.7'
 
 // ctx.storageDomain 领域名（同步元数据：设备 id、最近推/拉时间与错误）。
 // 下划线命名：storage-domain 的域名正则不允许连字符。
@@ -158,6 +158,19 @@ export const LIVE_LIMITS = Object.freeze({
   MAX_MAX_CHARS: 65536,
   MIN_KEEP_MINUTES: 1,
   MAX_KEEP_MINUTES: 1440,
+})
+
+// Luwi 加 (2026-11-22 终端问答): `ask` 段 —— 电脑上的 `ask_user_question` 要不要传到手机,
+// 等多久, 以及要不要给"手机驱动的那一场"附一终端提示。四档模式见 lib/luwi-ask.mjs
+export const ASK_DEFAULTS = Object.freeze({
+  MODE: 'relay',
+  WAIT_MS: 120000,
+  BRIEF: true,
+})
+
+export const ASK_LIMITS = Object.freeze({
+  MIN_WAIT_MS: 5000,
+  MAX_WAIT_MS: 1800000,
 })
 
 // Luwi 加 (G1-2 对端)：影子工作区与投影会话的家。

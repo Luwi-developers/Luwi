@@ -41,7 +41,11 @@ class SyncSettingTest {
         // 对端那三个缺省: 通道默认开 (缺省值跟 DEFAULTS)、listen 与 proxy 也开
         assertTrue(snapshot.peerListen)
         assertTrue(snapshot.peerProxy)
+        // 2026-11-21: 没有配对段 = 这一台不是"手机那一侧", acceptSend 按电脑那一档 (true);
+        // 真配对之后由 applyPairing 写 false, 见下面那条用例
+        assertTrue(snapshot.peerAcceptSend)
         assertFalse("没有口令时通道是关的", snapshot.peerReady)
+        assertFalse("没配对时终端连不上", snapshot.terminalReady)
     }
 
     @Test
@@ -331,7 +335,7 @@ class SyncSettingTest {
     )
 
     @Test
-    fun `扫码配对把该写的写全, lw 与 workspace 一个字节都不动`() {
+    fun `扫码配对把该写的写全, lw 段一个字都不动`() {
         val root = dir()
         val target = file(root)
         target.writeText(
@@ -354,10 +358,50 @@ class SyncSettingTest {
         assertTrue(snapshot.autoPush)
         assertEquals("原来没有拉取间隔, 配对时补 15 分钟", 15, snapshot.pullInterval)
         assertEquals("Luwi 手机", snapshot.deviceName)
+        // 2026-11-21 终端口径: 配对那一刻就把"手机这一侧"钉死 —— 不听、不收指令、工作区镜像关
+        assertFalse("手机不听电脑的调用", snapshot.peerListen)
+        assertFalse("手机不收电脑下发的指令", snapshot.peerAcceptSend)
+        assertFalse("工作区不再同步到电脑", snapshot.workspaceOn)
+        assertTrue("终端能连上 (配对 + 通道 + 口令)", snapshot.terminalReady)
+        // 2026-11-21: 角色必须显式落盘 —— 只靠 `pairing` 段会把生成码的电脑也判成手机
+        assertTrue(
+            "扫过码的这一台要写 role=phone",
+            target.readText().contains("\"role\": \"phone\"") || target.readText().contains("\"role\":\"phone\""),
+        )
         val text = target.readText()
         assertTrue("lw 段一个字都不动", text.contains("savedRemote"))
-        assertTrue("workspace 段一个字都不动", text.contains("git://ws.git"))
+        assertTrue("workspace 的远端地址留着 (只是不启用)", text.contains("git://ws.git"))
         assertTrue("未知键留着", text.contains("futureKey"))
+    }
+
+    @Test
+    fun `老配置 (只有配对段, 没写 listen 与 acceptSend) 按手机那一侧读`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"remote":"https://github.com/me/sessions.git","paired":true,""" +
+                """"pairing":{"v":1,"id":"pair-00000001","at":1760000000000,"from":"书房 电脑"},""" +
+                """"peer":{"token":"0123456789abcdef","url":"http://100.64.0.7:3080"}}""",
+        )
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertTrue(snapshot.paired)
+        assertFalse("没写就是不听 (失败关闭)", snapshot.peerListen)
+        assertFalse("没写就是不收指令", snapshot.peerAcceptSend)
+    }
+
+    @Test
+    fun `打开终端也不会把工作区镜像带回来`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"remote":"https://github.com/me/sessions.git",""" +
+                """"workspace":{"remote":"git://ws.git","enabled":true}}""",
+        )
+        assertNull(SyncSetting.setSyncOnIn(target, true))
+        assertFalse("开终端只同步对话, 不带工作区", SyncSetting.snapshotOf(target).workspaceOn)
+        assertTrue("远端地址还在", SyncSetting.snapshotOf(target).workspaceRemoteSet)
+        assertNull(SyncSetting.setSyncOnIn(target, false))
+        assertFalse("关的时候同样不把工作区打开", SyncSetting.snapshotOf(target).workspaceOn)
     }
 
     @Test
@@ -370,7 +414,10 @@ class SyncSettingTest {
         )
         assertNull(SyncSetting.applyPairingIn(target, paired(peerToken = ""), now = 1L))
         val snapshot = SyncSetting.snapshotOf(target)
-        assertFalse("listen 是别人写的键", snapshot.peerListen)
+        // 2026-11-21: 配对**就是**要把这两个压成 false (手机不听、不收指令) —— 这里钉的是"压成了",
+        // 保留行为由下面那两个真不被碰的键 (`sendTimeoutMs` / 间隔 / 设备名) 钉
+        assertFalse("配对把 listen 压成 false (手机不听)", snapshot.peerListen)
+        assertFalse("配对把 acceptSend 压成 false (手机不收指令)", snapshot.peerAcceptSend)
         assertTrue("间隔已经填过就不覆盖", snapshot.pullInterval == 30)
         assertEquals("设备名已经起过就不覆盖", "我的手机", snapshot.deviceName)
         assertTrue("口令留空就沿用原来那一份", snapshot.peerToken.isNotEmpty())
@@ -395,5 +442,51 @@ class SyncSettingTest {
         val target = file(root)
         assertNotNull(SyncSetting.applyPairingIn(target, paired(remote = "  "), now = 1L))
         assertFalse("拒了就不该写出文件", target.isFile)
+    }
+
+    /* ── 取消配对 (2026-11-22) ─────────────────────────────── */
+
+    @Test
+    fun `取消配对之后 配对段与角色删掉, 地址与口令清掉, 同步停下来`() {
+        val root = dir()
+        val target = file(root)
+        assertNull(SyncSetting.applyPairingIn(target, paired(), now = 1L))
+        assertTrue(SyncSetting.snapshotOf(target).paired)
+
+        assertNull(SyncSetting.unpairIn(target))
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertFalse("配对段删掉之后就是未配对", snapshot.paired)
+        assertEquals("配对 id 也要没", "", snapshot.pairedId)
+        assertEquals("对端地址清掉", "", snapshot.peerUrl)
+        assertEquals("口令清掉", "", snapshot.peerToken)
+        assertFalse("通道关掉", snapshot.peerOn)
+        assertFalse("不再折投影", snapshot.peerProxy)
+        assertFalse("不同步了", snapshot.syncOn)
+        assertEquals("周期拉取归零", 0, snapshot.pullInterval)
+        assertFalse("工作区镜像仍是关的", snapshot.workspaceOn)
+        val text = target.readText()
+        assertFalse("pairing 整段都没了", text.contains("\"pairing\""))
+        assertFalse("role 标记也没了", text.contains("\"role\""))
+    }
+
+    @Test
+    fun `取消配对不碰用户自己填的东西与 peer 段别的键`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText(
+            """{"deviceName":"我的手机","pullIntervalMinutes":30,"branch":"dev",""" +
+                """"pairing":{"v":1,"id":"pair-00000001","at":1760000000000,"from":"书房 电脑"},""" +
+                """"peer":{"listen":false,"acceptSend":false,"token":"0123456789abcdef","sendTimeoutMs":8000,""" +
+                """"url":"http://100.64.0.7:3080"}}""",
+        )
+        assertNull(SyncSetting.unpairIn(target))
+        val text = target.readText()
+        assertTrue("设备名留着", text.contains("我的手机"))
+        assertTrue("分支留着", text.contains("\"dev\""))
+        assertTrue("peer 段别的键 (sendTimeoutMs) 留着", text.contains("sendTimeoutMs"))
+        val snapshot = SyncSetting.snapshotOf(target)
+        assertEquals("30 分钟那个值不再生效", 0, snapshot.pullInterval)
+        assertTrue("关掉时的值挪进 lw 段存着 (重新配对时还回得来)", text.contains("savedInterval"))
+        assertEquals("分支不被取消配对吃掉", "dev", snapshot.branch)
     }
 }

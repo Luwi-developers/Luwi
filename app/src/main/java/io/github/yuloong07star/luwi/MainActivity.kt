@@ -22,10 +22,12 @@ import io.github.yuloong07star.luwi.host.DshHostService
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.overlay.OverlayService
 import io.github.yuloong07star.luwi.theme.ThemeStore
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwOverlay
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.tool.VideoLooks
+import io.github.yuloong07star.luwi.ui.GettingStarted
 import io.github.yuloong07star.luwi.ui.LuwiApp
 import io.github.yuloong07star.luwi.ui.LuwiTavern
 import io.github.yuloong07star.luwi.update.AutoUpdate
@@ -96,6 +98,12 @@ class MainActivity : ComponentActivity() {
         LwApps.attach(this)
         // The host deliberately outlives this activity, so the service owns its lifetime
         DshHostService.start(this)
+        // 图标套那笔账对一次 (2026-11-22): `lw/icon.json` 是权威, 而 PackageManager 里那两个
+        // activity-alias 的状态可能被桌面 / ROM 改过 —— 最坏是两套都停用, 桌面上一个入口都没有。
+        // 没有不一致时它一个字节都不写 (每次冷启动都写会让桌面重绘、图标闪一下)
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { runCatching { IconTheme.sync(this@MainActivity) } }
+        }
         // 冷启动自己查一次更新 (2.7.9 第 3 条): 晚 3 s 起查, 等 host 起来, 别和首屏抢那几秒;
         // 一天最多一次, 失败静默 —— 判据全在 AutoUpdate.shouldCheck, 弹窗那一份状态在 AutoUpdatePrompt
         lifecycleScope.launch {
@@ -114,6 +122,9 @@ class MainActivity : ComponentActivity() {
         runCatching { LwWakeWord.ensure(this) }
         // 浮标那个开关也是存盘的: 开着就照它把球放出来 —— 缺悬浮窗权限或开关关着时, 它什么都不做
         runCatching { LwOverlay.ensure(this) }
+        // 首启那张「开始使用」与加载界面谁先谁后 (落实表 2.8.0 #44): **必须在 setContent 之前判** ——
+        // 引导等的是加载界面 (开屏 + 页面加载), 而那一份状态要在第一帧就位, 否则引导会抢在开屏前面闪一下
+        GettingStarted.prepare(this)
         setContent {
             LuwiApp()
             // 设置页里点过的那条授权申请到这一层才真的弹。挂 Content 外面那一层而不是某一页里,
@@ -144,6 +155,10 @@ class MainActivity : ComponentActivity() {
 
     /**
      * 「回应用」再点一次时走这一条 (SINGLE_TOP: 界面已经在栈里就不再新建一个)
+     *
+     * 那个 `singleTop` 是 `AndroidManifest.xml` 里那一行给的 (2026-11-13 补上): 以前只在这条注释里
+     * 写着, 清单上是缺省的 `standard`, 于是桌面图标能把同一个 task 里堆出第二个实例 (真机现场两个
+     * `HostScreen` / 两个 `FloatingBall` / 两个 renderer, 见 `docs/Luwi-真机-界面加载中-检查-2026-11-13.md`)
      *
      * 那一件事本身 (让会话界面切到浮标那一场) 走 [BallReturn]: 这一次的 intent 里带没带那个 id 都要
      * 传给它 —— 没带就什么都不做, 界面照旧只是被提到前面

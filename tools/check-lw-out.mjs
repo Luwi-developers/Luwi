@@ -161,7 +161,6 @@ const send = {
   longGapProbability: defaults.longGapProbability,
   longGapMinMs: defaults.longGapMinMs,
   longGapMaxMs: defaults.longGapMaxMs,
-  maxMessageChars: 600,
 }
 
 // 方案 §3.3 那组数就是"缺省参数下的真值": 3 字 1060 / 12 字 1240 / 表情 0 字 1000
@@ -263,6 +262,21 @@ check('新会话的第一条也上球 (第一次见到的变更不整场跳过)'
   /if \(changed\.isEmpty\(\)\) \{/.test(overlay),
 ], [true, true, true])
 
+// 2026-11-22: 统一发送出口 —— 她发消息只写 lw/out 那一份, 门户 / 球 / 通知三端各自读它.
+// 以前 `lw_router op=say` / `lw_sticker op=say` 走 `overlay op=say/sticker` 只推球, 门户与通知收不到
+const sayExit = bodyOf(host, 'async function sayToConversation(')
+check('统一出口 sayToConversation 存在, 且只调 lwOutAppend (不另开写路)',
+  sayExit !== '' && /await lwOutAppend\(id, fields\)/.test(sayExit)
+    && !/call\('overlay'/.test(sayExit))
+check('reportSay 走统一出口 (不再 overlay op=say 只推球)',
+  /async function reportSay\(text\)/.test(host)
+    && /sayToConversation\(current, \{ kind: 'text', text: line \}\)/.test(host)
+    && !/call\('overlay', \{ op: 'say'/.test(host))
+check('reportSticker 走统一出口 (不再 overlay op=sticker 只推球)',
+  /async function reportSticker\(id\)/.test(host)
+    && /sayToConversation\(current, \{ kind: 'sticker', sticker: name \}\)/.test(host)
+    && !/call\('overlay', \{ op: 'sticker'/.test(host))
+
 /* ── 九、浮球那侧的正文闸 + persona 的出口 ──────────────────────────────── */
 
 check('luwi 在 BALL_SILENT_PRESETS 里 (正文不进框、不念)', /const BALL_SILENT_PRESETS = new Set\(\['explore', 'luwi'\]\)/.test(host))
@@ -342,10 +356,11 @@ check('一次说几句时朗读等它们上完屏再开口 (耳朵不比眼睛�
     && /const spokenWait = written\.reduce/.test(host))
 // 朗读与显示分离 (2026-11-10, 方案 docs/Luwi-朗读与显示分离-方案-2026-11-09.md §4.2):
 // **jsonl 一个字节都不动**, `voice` 只走朗读流, 绝不进显示字段
-check('jsonl 的显示字段没被朗读稿改动 (数组那三样还是 kind/text/sticker)',
-  /const fields = \{ kind: 'text', text \}/.test(host)
-    && !/const fields = \{[^}]*voice/.test(host)
-    && !/lwOutAppend\([^)]*voice/.test(host))
+check('jsonl 的显示字段没被朗读稿改动 (话那一行只有 kind/text, 数组那三样还是 kind/text/sticker)',
+  /\{ kind: 'text', text: texts\[index\] \}/.test(host)
+    && !/\{ kind: 'text'[^}]*\bvoice\b/.test(host)
+    // 只禁"往 lwOutAppend 里塞 voice 那个键"; `voiceDelivery.current` 是球那一场的会话 id (2.8.1 #31), 不是朗读稿
+    && !/lwOutAppend\([^)]*\bvoice\s*:/.test(host))
 check('`voice` 是念法不是说法: 只交给 readAloudScript, 差异落一行日志',
   /readAloudScript\(shownText, voice\)/.test(host)
     && /lw_say: the spoken line differs from the shown one/.test(host)
@@ -471,13 +486,83 @@ check('发出去那一句带附件段 (与门户逐字相同), 桌面对话那�
 check('摘掉/清空附件在框那一侧有实现', /fun addAttachment\(pick: LwIn\.Pick\)/.test(boxView)
   && /fun clearAttachments\(\)/.test(boxView) && /fun removeAttachment\(pick: LwIn\.Pick\)/.test(boxView))
 check('门户那张图也有长宽上限, 点一下开预览窗 (2026-11-10 各收一半: 43% / 30vh)',
+  // 2026-11-15: 这一拍之前长久是红的 —— 长按菜单进来之后 onclick 多了一句 `consumeHeld` 守卫,
+  // 而那一条钉的是旧的逐字形状。行为没变 (点一下仍然 openPreview, 长按走 openFileMenu),
+  // 所以这里改成钉"守卫之后仍然 openPreview"
   /\.lwp-image\{max-width:43%/.test(client) && /max-height:30vh/.test(client)
-    && /wrap\.onclick = function \(\) \{ openPreview/.test(client))
+    && /wrap\.onclick = function \(\) \{\s*if \(consumeHeld\(wrap\)\) return\s*openPreview/.test(client)
+    && /attachLongPress\(wrap, function \(at\) \{\s*openFileMenu/.test(client))
 check('球那侧长宽各一半 (宽 50% 内容宽 / 高 18% 屏高)', /const val MAX_WIDTH_PERCENT = 50/.test(media)
   && /const val MAX_HEIGHT_PERCENT = 18/.test(media))
 check('门户不再给每一张图垫 72px 幻影最小高', !/\.lwp-image\{max-width:86%;min-height:72px/.test(client))
 check('`lw-in` 的规矩只剩一处实现 (门户桥改调 LwIn)',
   /LwIn\.put\(/.test(bridge) && !/STASH_EXTS/.test(bridge) && /BallAttach/.test(lwIn))
+
+/* ── 十五、她的话也弹到通知栏 (2.8.1 #7: 不打开应用也知道她说了一句) ────────── */
+
+const outNotify = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/OutNotify.kt')
+const lwNotify = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwNotify.kt')
+const hostService = await read('app/src/main/java/io/github/yuloong07star/luwi/host/DshHostService.kt')
+const stringsEn = await read('app/src/main/res/values/strings.xml')
+const stringsZh = await read('app/src/main/res/values-zh/strings.xml')
+const drainBody = bodyOf(outNotify, 'private fun drain(')
+
+// 通知是同一份 jsonl 的**第三个听众**: 解析仍然只有 OutFile 一处, 它不自己 split 也不自己解 JSON
+check('她的话弹通知走同一个 observer + 同一个解析器 (第三个听众)',
+  /OutWatch\.watch\(app\)/.test(outNotify) && /OutFile\.page\(context, id, mark\)/.test(outNotify)
+    && !/split\('\\n'\)/.test(outNotify) && !/JSONObject\(/.test(outNotify))
+check('宿主服务起来那一下把它挂上 (冷启动也在这一条上)',
+  /OutNotify\.ensure\(this\)/.test(hostService))
+check('首拍只记水位, 历史一条不补',
+  /for \(id in OutFile\.sessions\(app\)\) marks\[id\] = OutFile\.maxSeq\(app, id\)/.test(outNotify))
+check('前台那一档不弹 (`importance > IMPORTANCE_FOREGROUND` 才是后台)',
+  /fun wants\(importance: Int\): Boolean =\s*\n\s*importance > ActivityManager\.RunningAppProcessInfo\.IMPORTANCE_FOREGROUND/.test(outNotify))
+check('先推进水位再判要不要弹 (前台画过的那几句不许切出去补弹)',
+  drainBody.includes('marks[id] = page.max')
+    && drainBody.indexOf('marks[id] = page.max') < drainBody.indexOf('wants(importance)'), drainBody.slice(0, 200))
+check('一句一条: id 由会话与 seq 合成, 落在 0x4C57 那一段 (不撞常驻 1 / 工具 2)',
+  /fun sayId\(session: String, seq: Int\): Int =/.test(lwNotify) && /0x4C570000/.test(lwNotify))
+check('点通知落到那一场 (EXTRA_OPEN_SESSION, 不带给"此刻那一场"让路的 LIVE 记号)',
+  /putExtra\(OverlayService\.EXTRA_OPEN_SESSION, session\)/.test(lwNotify)
+    && !/putExtra\(OverlayService\.EXTRA_OPEN_LIVE/.test(lwNotify))
+check('她的话与工具通知两条渠道分开 (一个开关不该连带另一个)',
+  /const val SPEECH_CHANNEL_ID = "lw-say"/.test(lwNotify)
+    && /NotificationChannel\(\s*\n\s*SPEECH_CHANNEL_ID/.test(lwNotify))
+check('表情那行不把占位符写进通知 (取表情名)', /notification_speech_sticker/.test(outNotify))
+// 两份 strings 都得有这六条 (中文界面上冒英文是最容易漏的那一档, 见 check-strings-keys)
+for (const key of [
+  'notification_channel_speech', 'notification_channel_speech_description',
+  'notification_speech_sticker', 'notification_speech_image',
+  'notification_speech_file', 'notification_speech_file_named',
+]) {
+  check(`两份 strings 都有 ${key}`,
+    stringsEn.includes(`name="${key}"`) && stringsZh.includes(`name="${key}"`))
+}
+
+/* ── 十六、一条气泡只装一样东西 (2.8.1 #9: 图 / 文件 / 表情各占自己那一行) ──────── */
+//
+// 主人 (2026-11-15): "表情或图片和文字同时进一条气泡时表情会被吞, 要求表情图片等文件必须单独发一条气泡"
+// 写侧以前有两条路把两样东西塞进同一个对象: 图 / 文件挂在最后一句的 prepare 上 (一个行里同时有
+// `kind:"text"` 与 `kind:"image"`), 表情那一行带一个 `[…]` 占位正文。两条路都断掉之后, 一行就是
+// 一个气泡; 老行由门户拆开 (真值在 `check-luwi-portal` 第十八节真跑)
+
+const sayAt = host.indexOf("name: 'lw_say'")
+const personaAt = host.indexOf("name: 'lw_persona'", sayAt)
+const sayBlock = sayAt >= 0 && personaAt > sayAt ? host.slice(sayAt, personaAt) : ''
+check('lw_say 那一段抠得到 (一条气泡只装一样东西的判据都在里头)', sayBlock !== '',
+  `sayAt=${sayAt} personaAt=${personaAt}`)
+check('话那一行不再并媒体 (没有 withImage / withFile 那种 prepare)',
+  !sayBlock.includes('const withImage') && !sayBlock.includes('const withFile'), sayBlock.slice(0, 160))
+check('话那一行只有 kind 与 text (第二个参数就是那两个字段, 没有 prepare)',
+  /\{ kind: 'text', text: texts\[index\] \}\)\)/.test(sayBlock))
+check('图与文件各落自己那一行 (fields 里只有 kind)',
+  /\{ kind: 'image' \}, async \(seq\) => \{/.test(sayBlock)
+    && /\{ kind: 'file' \}, async \(seq\) => \{/.test(sayBlock))
+check('表情那一行只有 kind 与 sticker, 不再带 `[…]` 占位正文',
+  /\{ kind: 'sticker', sticker \}\)/.test(sayBlock) && !sayBlock.includes("text: '[…]'"))
+check('工具描述写明"一条气泡只装一样东西" (模型读得到的那一句)', /One bubble holds one thing/.test(sayBlock))
+check('门户把老行拆成两项 (outItemsOf 存在, nodesOf 走它)',
+  /function outItemsOf\(line\) \{/.test(client) && /var parts = outItemsOf\(line\)/.test(client))
 
 if (failures > 0) {
   console.error(`check-lw-out: FAIL (${failures}/${count})`)

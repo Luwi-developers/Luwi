@@ -76,9 +76,12 @@ object PrivilegedChannel {
             application = context.applicationContext
             if (routes.isNotEmpty()) return
             val app = context.applicationContext
+            // Shizuku 先试: 它是这个应用的主推通道, 而且不需要 su
+            // root 放后面只在已经授权过时才进 (见 RootAccessBackend.isAvailable):
+            // 首启先弹一个 su 授权, 对没用过 root 的人是惊吓, 也换不来什么
             routes = listOf(
-                Route(RootServiceConnector(app), RootAccessBackend),
                 Route(ShizukuServiceConnector(app), ShizukuAccessBackend),
+                Route(RootServiceConnector(app), RootAccessBackend),
             )
         }
     }
@@ -163,17 +166,25 @@ object PrivilegedChannel {
     /** Try one route end to end, returning the service when it produced a live binder */
     private fun connect(route: Route): LwServiceProxy? {
         val label = route.connector.backend.label
-        if (!route.permission.isAvailable()) {
-            val reason = "$label is not installed, or it is not running"
-            lastError = reason
-            Log.i(TAG, reason)
-            return null
-        }
-        if (!route.permission.isGranted() && !route.permission.requestPermission()) {
-            val reason = "$label was not granted"
-            lastError = reason
-            Log.w(TAG, reason)
-            return null
+        val permission = route.permission
+        // 两个问题分开判 (2.8.1 #30): 这条路在不在, 与现在能不能去要授权, 不再用同一个答案.
+        // 首启那一声不响就在 SKIP 那一条; 主人在设置里点过开关之后 root 才会走到 ASK
+        when (accessStep(permission.isAvailable(), permission.canPrompt(), permission.isGranted())) {
+            AccessStep.SKIP -> {
+                val reason = unavailableReason(permission.backend, label)
+                lastError = reason
+                Log.i(TAG, reason)
+                return null
+            }
+
+            AccessStep.ASK -> if (!permission.requestPermission()) {
+                val reason = refusalReason(label)
+                lastError = reason
+                Log.w(TAG, reason)
+                return null
+            }
+
+            AccessStep.USE -> Unit
         }
 
         val arrived = CountDownLatch(1)
@@ -221,6 +232,28 @@ object PrivilegedChannel {
         return connected
     }
 
+    /**
+     * 这条路现在走不了时说的那句
+     *
+     * root 与 Shizuku 不是同一种"走不了": Shizuku 没跑就是没装或没起, 而 root 在没人表态时只是
+     * **还没问过** —— 这句以前对两者都用"没装, 或者没在跑", 一台明明装着 KernelSU 的机器会被告知
+     * 它没有 root
+     */
+    private fun unavailableReason(backend: RemoteBackend, label: String): String =
+        if (backend == RemoteBackend.ROOT) {
+            "root was not tried yet, turn on \"Connect with root\" in settings to ask for it"
+        } else {
+            "$label is not installed, or it is not running"
+        }
+
+    /**
+     * 问过一次还是没给: 两种路由都走这一句
+     *
+     * 「被拒」要与"没装"分开, 而这句也会进 logcat (真机判据 `adb logcat -d -s LwChannel`)
+     */
+    private fun refusalReason(label: String): String =
+        "$label was not granted (asked once, refused) - 被拒, 允许 $label 之后再点一次"
+
     /** The service, but only while its process is still there */
     private fun live(): LwServiceProxy? {
         val current = service ?: return null
@@ -257,7 +290,6 @@ object PrivilegedChannel {
      */
     private const val NOTHING_TO_CONNECT =
         "the screen side needs root (KernelSU / Magisk) or Shizuku, and neither is usable right now:" +
-            " for root, allow this app in the root manager by hand - nothing pops up on its own to ask," +
-            " and the app cannot even tell whether root is there until you do; for Shizuku, install it," +
-            " start it, and allow this app when it asks"
+            " for root, turn on \"Connect with root\" in this app's settings, allow it in the root manager" +
+            " when it asks, and try again; for Shizuku, install it, start it, and allow this app when it asks"
 }

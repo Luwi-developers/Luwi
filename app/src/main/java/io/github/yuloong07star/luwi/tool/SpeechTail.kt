@@ -30,9 +30,36 @@ internal object SpeechTail {
      *
      * **它只是上限**: 系统那条引擎的 `onDone` 常常在"合成完了"就报 (合成比实时快), 所以引擎报完之后
      * 还要留一段; 而这一段的真实长度由 [holding] 里那两条精确判据说, 到点就放行
+     *
+     * **只按正文算**: 等首包时先出的那一声垫话 (见 [FILLER_AFTER_MS]) 一个字符都不加 —— 它是"等"的
+     * 一声预录, 与这一句正文播多久无关
      */
     fun budgetMs(text: String): Long =
         (text.length * TAIL_MS_PER_CHAR + TAIL_MARGIN_MS).coerceAtMost(TAIL_MAX_MS)
+
+    /**
+     * 垫话 (2.8.1 #14): 等首包时先出一声 —— 起播之后多久还没首片就先响
+     *
+     * 在线那几条引擎的第一片要等一趟网络 (官方 TTS 一次往返常常一秒以上), 这一段里喇叭是静的, 主人容易
+     * 以为"没听见 / 没理我". 于是过了这一拍还没拿到第一片, 就先放一声预录的填音 (见 [FILLER_CLIP],
+     * 走 `LwClips` 那条 SoundPool, 几十毫秒出声); 第一片一到就掐掉, 换成真正的那一片 —— **两段声音不叠**
+     *
+     * 阈值是必须的: 首片比它先到的回答**一声都不多出** (垫话补的是空白, 不是加一句话); 而它**不进
+     * [budgetMs]**: 预算按正文的字数算, 垫话是"等"的那一声, 与正文播多久无关
+     */
+    const val FILLER_AFTER_MS = 250L
+
+    /** 响哪一段: `assets/clips/` 里最短的那一声 (「嗯？」) */
+    const val FILLER_CLIP = "huh"
+
+    /**
+     * 这一拍该不该响垫话
+     *
+     * @param elapsedMs 起播到现在
+     * @param firstClipReady 第一片已经起播了吗 (到了就一声都不多出)
+     */
+    fun fillerDue(elapsedMs: Long, firstClipReady: Boolean): Boolean =
+        !firstClipReady && elapsedMs >= FILLER_AFTER_MS
 
     /** 预算还没过期吗 (系统那条的"可能还在响"窗) */
     fun inTail(now: Long, tailUntil: Long): Boolean = tailUntil > now

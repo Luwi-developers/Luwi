@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标集「maid」的自适应图标 (2026-11-22, 设置 -> 外观 -> Luwi 图标)
+
+     由 tools/make-icon-sets.py 生成, 别手改: 换图重跑那一步
+     背景直接复用内置那一份渐变 (`ic_launcher_background`), 于是两套只在图案上不同 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_maid_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_maid_mono" />
+</adaptive-icon>

@@ -119,6 +119,36 @@ function run(command, args, cwd) {
 }
 
 /**
+ * 原生崩溃时再跑一次 (2026-11-13, 2.8.0 #38 发包那一轮实测)
+ *
+ * `:app:packHostTree` 在 `Client bundle` 那一步整个进程退 **3221226505** (`0xC0000409`) —— 原生
+ * bundler 一次从零打三百多个包时的偶发崩溃, 不是源码红: 同一棵树马上重跑就绿 (run-gates 10/10),
+ * 因为第一趟已经把大部分 `lib/` 写出来了, 第二趟只补剩下的。
+ *
+ * 所以只在**原生崩溃**上重试: 脚本自己退的 1 是真红, 一次都不重试; 进程被信号带走 (`signal`) 或退
+ * 那几个崩溃码 (0xC0000000 及以上 / 134 / 139) 才重来一次, 并把码打出来 (读数要看得见)
+ *
+ * @param command - 可执行文件 (node 自己, 不走 shell)
+ * @param args - 参数
+ * @param cwd - 工作目录
+ * @param attempts - 最多跑几次 (缺省 2 = 原样一次 + 重试一次)
+ */
+function runRetryOnNativeCrash(command, args, cwd, attempts = 2) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      run(command, args, cwd)
+      return
+    } catch (error) {
+      const status = Number(error?.status)
+      const crashed = error?.signal != null
+        || (Number.isFinite(status) && (status < 0 || status >= 0xc0000000 || status === 134 || status === 139))
+      if (attempt >= attempts || !crashed) throw error
+      console.warn(`pack-host: ${command} exited ${String(error?.status ?? error?.signal)} (native crash); retrying once`)
+    }
+  }
+}
+
+/**
  * 一条命令怎么真的跑起来 (Windows 上那两种坑各踩过一次)
  *
  * - **不许套 `shell: true`**: 它把命令行交给 `cmd.exe`, 而 cmd 按空格切词 ——
@@ -172,6 +202,14 @@ function pnpmEnvironment() {
     // chrome-devtools-frontend 的裸 .ts 导入, 而 host 树用不到那一段 —— 这一层直接跳过它。
     // Gradle 的 Exec 会覆盖环境白名单, 所以开关必须写在这里, 不能只靠调用方的 DSH_SKIP_DEVTOOLS
     DSH_SKIP_DEVTOOLS: process.env.DSH_SKIP_DEVTOOLS ?? '1',
+    // **一次从零打三百多个包的 client build 会撞 Node 默认的老空间上限** (2026-11-14 2.8.0 出包那轮:
+    // `FATAL ERROR: NewSpace::EnsureCurrentCapacity Allocation failed - JavaScript heap out of memory`,
+    // 那是 `scripts/build.ts` 里 tsc + 原生 bundler 一起跑的时刻, 机器还有 17 GB 空闲, 缺的是堆上限)。
+    // 这一条以前没暴露, 是因为 packHostTree 一直判 UP-TO-DATE —— 只有改过 pack-host.mjs 自己才会真跑。
+    // 调用方自己设了 NODE_OPTIONS 就尊重它, 别叠两层
+    NODE_OPTIONS: /\bmax-old-space-size\b/u.test(process.env.NODE_OPTIONS ?? '')
+      ? process.env.NODE_OPTIONS
+      : [process.env.NODE_OPTIONS, '--max-old-space-size=8192'].filter(Boolean).join(' '),
     // 本机 %LOCALAPPDATA%\npm-cache 对子进程会拒写 (npm install 的 mkdtemp 报 EPERM, 2026-11-06 实测);
     // Gradle 那一侧会显式传进来, 手工跑这一份时退到工作区的 .lwtmp 下
     npm_config_cache: process.env.npm_config_cache ?? ensureNpmCache(join(process.cwd(), '.lwtmp', 'npm-cache')),
@@ -475,7 +513,8 @@ if (values.install) {
 if (!values['skip-build']) {
   cleanBuildOutputs(dsh)
   dropOrphanPackages(dsh)
-  run(process.execPath, ['--import', 'tsx/esm', 'scripts/build.ts', '--profile', 'official'], dsh)
+  // 原生 bundler 偶发崩溃时补跑一次 (见 [runRetryOnNativeCrash]): 这一趟不重试, 一次失败就白等十分钟
+  runRetryOnNativeCrash(process.execPath, ['--import', 'tsx/esm', 'scripts/build.ts', '--profile', 'official'], dsh)
 }
 
 const packs = {}
@@ -592,7 +631,7 @@ mkdirSync(webuiStage, { recursive: true })
 writeFileSync(join(webuiStage, 'package.json'), `${JSON.stringify({ name: 'lw-webui-stage', private: true }, null, 2)}\n`)
 run(
   'npm',
-  ['install', `${webui}@3.3.0`, '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional', '--legacy-peer-deps'],
+  ['install', `${webui}@3.3.6`, '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional', '--legacy-peer-deps'],
   webuiStage,
 )
 cpSync(join(webuiStage, 'node_modules', webui), join(out, 'node_modules', webui), { recursive: true })
@@ -636,7 +675,18 @@ console.log(`pack-host: ${webui} imports cleanly`)
 // 工具名仍是 `generate_image` / `edit_image`; 依赖仍是 `@deepseek-ai/schemastery` + `lucide-react`,
 // 树里那份 schemastery 是 3.19.0 (要求 ^3.18.4, 满足)。`docs/` 这一版只剩 0.1 MB (演示视频没了),
 // 裁剪照旧。真机读数: host 起得来、生图面板与模板栏渲染、历史记录空但可读 (这台机没生成过图)
-const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.15.6' }
+// **2026-11-13 升到 1.17.0**: 同一套逐条复核 —— 三处 homedir 仍是**恰好 3 次** (下面那道闸会拦)、
+// `src/templates/` 仍是 5 个离线快照、工具名仍是 `generate_image` / `edit_image`、
+// 依赖仍是 `@deepseek-ai/schemastery ^3.18.4` + `lucide-react ^1.41.0`。真机读数: 待装机复验
+// **2026-11-14 升到 1.17.2** (2.8.0 出包当天): 1.17.1 的提交里第一条就是 `fit the 0.2.x shell frame`
+// —— 本树基座正是 0.2.2, 1.17.0 在那一层可能对不上; 1.17.2 另带「恢复历史结果 / 修侧栏 tab / 参考图反推」。
+// 同一套逐条复核照旧: 三处 homedir 仍**恰好 3 次** (下面那道闸会拦)、`src/templates/` 仍是离线快照、
+// 工具名仍是 `generate_image` / `edit_image`、依赖仍是 schemastery + lucide-react。真机读数: 待装机复验
+// **2026-11-18 升到 1.19.0** (2.8.1 每轮一升, 本轮名额给了 image): 本地先取 tarball 逐条复核过
+// —— 三处 homedir 仍**恰好 3 次**、`src/templates/` 仍是 5 个离线快照、工具名仍是
+// `generate_image` / `edit_image`、依赖仍是 `schemastery ^3.18.4` + `lucide-react ^1.41.0`。
+// 真机读数见本轮落实报告 (装完开生图面板 / 模板栏)
+const imagePlugin = { name: '@dickpy/dsh-imagegen', version: '1.19.0' }
 
 /** 拉 npm 的那条 registry: 这台开发机上 registry.npmjs.org 不通, 缺省走 npmmirror */
 const npmRegistry = process.env.LW_NPM_REGISTRY ?? 'https://registry.npmmirror.com'
@@ -752,7 +802,14 @@ console.log(
 // `affective_context` 那一批)。四处补丁的锚点在 0.13.0 上**逐字核对后仍各命中一次**
 // —— `tools/check-mneme-patches.mjs --from npm --version 0.13.0` 就是那次核对的可重跑版;
 // 0.13.0 新增了 `lib/attachment-text.js` (图片块占位), 只在 lib 内, 裁 .map 时不会碰到
-const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.13.0' }
+// **2026-11-13 升到 0.15.0**: 三个酒馆排除锚点照旧各命中一次; 热记忆那条**上游自己修了**
+// (Issue #637 的 `omitPendingRound`, inject.js 传 `{ omitPendingRound: true }`), 旧补丁按
+// `retiredWhen` 自动退役 —— 补丁表里仍留着它, 只为 0.13.x 及更早的版本还能打。
+// 判据 `node tools/check-mneme-patches.mjs --from npm --version 0.15.0` → PASS
+// (applied 3 / already 1 / hot-memory 1 answered 0 unanswered)
+// **2026-11-14 升到 0.15.1** (2.8.0 出包当天): 只改了它自己 wiki/claims 的验证基线 (工作区脏时记不住
+// 那一版改动), 与 Luwi 的面板与补丁面都无关; 判据重跑仍 PASS (applied 3 / already 1 / failed 0)
+const mnemePlugin = { name: '@modusensus/dsh-mneme', version: '0.16.1' }
 
 const mnemeStage = join(out, '.mneme-stage')
 mkdirSync(mnemeStage, { recursive: true })

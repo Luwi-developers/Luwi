@@ -37,6 +37,8 @@ import io.github.yuloong07star.luwi.lock.LockSetting
 import io.github.yuloong07star.luwi.overlay.BallSpot
 import io.github.yuloong07star.luwi.overlay.OverlayService
 import io.github.yuloong07star.luwi.overlay.OverlayState
+import io.github.yuloong07star.luwi.tool.IconTheme
+import io.github.yuloong07star.luwi.tool.withLuwiIcon
 import io.github.yuloong07star.luwi.tool.LwSpeech
 import io.github.yuloong07star.luwi.tool.LwSpeak
 import io.github.yuloong07star.luwi.tool.LwWakeWord
@@ -503,6 +505,9 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
     @Volatile
     private var watchingPower = false
 
+    /** 换套时摘掉那个听众 ([IconTheme.watch]), 服务没了不该还留一个会去碰通知的回调 */
+    private var unwatchIcon: (() -> Unit)? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -512,6 +517,11 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         powerSave = runCatching { LwWakeWord.powerSave(this) }.getOrDefault(false)
         WakeWordState.powerSave = powerSave
         fend()
+        // **换图标要重投这一条** (2026-11-22 主人: "通知图标没有随图标变化"): 这一条只在 [fend] 与
+        // 状态词变化时 build, 切图标本来碰不到它, 状态栏里就一直挂着旧那套的剪影
+        unwatchIcon = IconTheme.watch {
+            handler.post { runCatching { announce(listeningText()) } }
+        }
         startPowerWatch()
     }
 
@@ -627,6 +637,8 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
     }
 
     override fun onDestroy() {
+        unwatchIcon?.invoke()
+        unwatchIcon = null
         stopPowerWatch()
         stopListening()
         // 开门之后那条"预热 + 通知"的待办跟服务一起走 (2026-10-10): [stopListening] 那条路上多半已经
@@ -1176,14 +1188,22 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         voiceHeardAt = System.currentTimeMillis()
     }
 
-    /** 出字那一段有没有模型: 没有就说清楚, 识别器那时**一个都不会建** (240 MB) */
+    /**
+     * 出字那一段有没有东西可用: 没有就说清楚, 识别器那时**一个都不会建** (240 MB)
+     *
+     * **按来源判** (2026-11-15, 2.8.1 #6): 选了 DeepSeek 官方语音输入的机器不需要那 240 MB —— 它缺的
+     * 只是登录, 而那是到真认的时候宿主才会说的事; 这一侧不能说"模型没下, 这条链不通", 那会把一个
+     * 能出字的配法说成坏的
+     */
     private fun prepareRecognition() {
-        val ready = LwSpeech.ready(this)
+        val ready = LwSpeech.readyFor(this)
         VoiceState.asrReady = ready
-        VoiceState.asrDetail = if (ready) {
-            "ready: the SenseVoice model is on disk and gets loaded by the first segment"
-        } else {
-            "the SenseVoice model is not downloaded yet: run lw_speech op=prepare once"
+        VoiceState.asrDetail = when {
+            !ready -> "the SenseVoice model is not downloaded yet: run lw_speech op=prepare once"
+            LwSpeech.engine(this) == LwSpeech.DEEPSEEK ->
+                "ready: the DeepSeek official voice input carries the transcription, so no model is"
+                    .plus(" needed on this phone (it needs a signed-in account)")
+            else -> "ready: the SenseVoice model is on disk and gets loaded by the first segment"
         }
         if (!ready) Log.w(TAG, VoiceState.asrDetail)
     }
@@ -1223,6 +1243,9 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
      */
     private fun preheat() {
         if (!VoiceState.asrReady) return
+        // 云端那一档没有可预热的东西 (2026-11-15, 2.8.1 #6): 它一块模型都不读, 那几秒的"热身"本来
+        // 就不存在 —— 真去调一次只会白占一个线程
+        if (LwSpeech.engine(this) == LwSpeech.DEEPSEEK) return
         if (!preheating.compareAndSet(false, true)) return
         Thread({
             try {
@@ -1706,7 +1729,7 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_notification)
+            .withLuwiIcon(this)
             .setContentIntent(open)
             .addAction(0, "停止", stop)
             .setOngoing(true)

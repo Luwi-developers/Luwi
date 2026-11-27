@@ -54,10 +54,16 @@ internal object ModelSetup {
         return prefs.getInt(COUNT, 0).coerceIn(0, MAX_PROMPTS)
     }
 
-    /** 现在缺哪几个 (按"先唤醒词, 后语音"的固定顺序) */
+    /**
+     * 现在缺哪几个 (按"先唤醒词, 后语音"的固定顺序)
+     *
+     * 语音那一件**按来源算** (2026-11-15, 2.8.1 #4): 选了已登录 DeepSeek 账号那条语音输入的机器
+     * 就不再缺这 240 MB —— 每次冷启动追着人下模型, 与他在引导里做过的选择是打架的
+     */
     fun missing(context: Context): List<Need> = buildList {
         if (!WakeWordDownload.present(context)) add(Need.WAKE)
-        if (!SpeechModelDownload.present(context)) add(Need.SPEECH)
+        val speech = VoiceSource.satisfied(VoiceSource.read(context), SpeechModelDownload.present(context))
+        if (!speech) add(Need.SPEECH)
     }
 
     /**

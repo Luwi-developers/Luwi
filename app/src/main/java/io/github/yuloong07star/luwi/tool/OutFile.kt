@@ -19,14 +19,15 @@ import java.io.File
  * ([io.github.yuloong07star.luwi.overlay.OverlayService]) **读同一份** —— 一条 `seq`、一个 `gapMs`、
  * 同一个条数。所以读法只许有一处实现, 就是这里; 两边各自再写一份 `split('\n')` 就会漂。
  *
- * 一行一条 (宿主是唯一写者, 追加写):
+ * 一行一条 (宿主是唯一写者, 追加写)。**一行只装一样东西** (2026-11-16, 2.8.1 #9): 话、图、文件、
+ * 表情各占自己那一行 —— 门户一行画一个气泡, 球一行落一样东西 (老版本写下的"话与图同一行"由门户拆开):
  *
  * ```json
  * {"seq":1,"at":1730000000000,"gapMs":0,"kind":"text","text":"在的。"}
  * {"seq":2,"at":1730000001060,"gapMs":1060,"roll":0.41,"kind":"text","text":"刚才在写东西。"}
- * {"seq":3,"at":1730000002300,"gapMs":1240,"roll":0.37,"kind":"sticker","sticker":"开心","text":"[…]"}
+ * {"seq":3,"at":1730000002300,"gapMs":1240,"roll":0.37,"kind":"sticker","sticker":"开心"}
  * {"seq":4,"at":1730000003300,"gapMs":1000,"roll":0.55,"kind":"image","rel":"assets/…/4-a.png",
- *  "thumb":"assets/…/4-a.png","w":1080,"h":2460,"text":"这一屏就是那个开关"}
+ *  "thumb":"assets/…/4-a.png","w":1080,"h":2460}
  * ```
  *
  * 三条纪律 (与宿主 `host-plugin/index.mjs` 那一侧逐字对应):

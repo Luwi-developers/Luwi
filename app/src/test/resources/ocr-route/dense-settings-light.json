@@ -1,0 +1,27 @@
+{
+  "name": "dense-settings-light",
+  "about": "设置页浅色主题 1080x2400: 12~14sp 小字, 右侧值在暗色下掉到 0.31~0.36",
+  "screenLong": 2400,
+  "rows": [
+    { "text": "设置", "score": 0.99, "box": [60, 180, 190, 240], "keep": true },
+    { "text": "通用", "score": 0.97, "box": [60, 300, 150, 338], "keep": true },
+    { "text": "深色模式", "score": 0.95, "box": [60, 400, 300, 438], "keep": true },
+    { "text": "已开启深色模式", "score": 0.33, "box": [420, 400, 880, 438], "keep": true },
+    { "text": "跟随系统", "score": 0.31, "box": [420, 500, 760, 538], "keep": true },
+    { "text": "已开启", "score": 0.36, "box": [420, 600, 640, 638], "keep": true },
+    { "text": "通知", "score": 0.94, "box": [60, 700, 150, 738], "keep": true },
+    { "text": "8", "score": 0.62, "box": [60, 800, 104, 844], "keep": false },
+    { "text": "声音", "score": 0.93, "box": [60, 900, 150, 938], "keep": true },
+    { "text": "W", "score": 0.68, "box": [60, 1000, 110, 1060], "keep": false },
+    { "text": "震动", "score": 0.74, "box": [60, 1100, 150, 1138], "keep": true },
+    { "text": "8", "score": 0.66, "box": [980, 1200, 1018, 1244], "keep": false },
+    { "text": "关于本机", "score": 0.96, "box": [60, 1300, 240, 1338], "keep": true },
+    { "text": "1", "score": 0.92, "box": [500, 1300, 530, 1338], "keep": true },
+    { "text": "版本 2.8.1", "score": 0.89, "box": [60, 1400, 320, 1438], "keep": true },
+    { "text": "检查更新", "score": 0.91, "box": [60, 1500, 240, 1538], "keep": true },
+    { "text": "LT", "score": 0.55, "box": [900, 1600, 1000, 1644], "keep": false },
+    { "text": ">", "score": 0.97, "box": [980, 1700, 1010, 1744], "keep": false },
+    { "text": "12:03", "score": 0.88, "box": [500, 60, 590, 96], "keep": true },
+    { "text": "选择深色或浅色", "score": 0.66, "box": [200, 1700, 560, 1738], "keep": true }
+  ]
+}

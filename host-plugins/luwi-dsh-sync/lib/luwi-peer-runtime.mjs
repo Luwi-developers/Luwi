@@ -36,8 +36,11 @@ import {
 import { liveDirectory, liveFileName, readLiveSnapshot, LIVE_SNAPSHOT_VERSION } from './luwi-live.mjs'
 import { TRANSCRIPT_DIR, readTranscriptEntries, transcriptDir } from './luwi-transcript.mjs'
 import { maskSecret, peerHeaders, peerUrlState, sameSecret } from './luwi-peer.mjs'
-import { guardLocalWrite } from './panel-guard.mjs'
 import { readJsonBody, sendJson } from './panel-routes.mjs'
+// 2026-11-22 (2.8.1 #50): 图片与文件跨设备那一条 —— 名单只认附件段, 两边各解析一次
+import { safeFileName, stripAttach, withAttach } from './luwi-attach.mjs'
+// 2026-11-21 终端口径: 本机控制面 (send / peer-live) 只认回环, 见 lib/loopback.mjs
+import { LOOPBACK_ONLY_ERROR, isLocalRequest } from './loopback.mjs'
 
 /** 对端在线判据: 最近一次成功调用在这么久之内 (超过就报 unreachable, 但错误面照旧保留) */
 const REACHABLE_WINDOW_MS = 60_000
@@ -47,6 +50,14 @@ const MAX_QUEUE_LISTED = 20
 
 /** 一次 transcript 应答最多给多远的历史 (条数由 live 段管, 这里只管字节上限) */
 const MAX_TRANSCRIPT_BYTES = 256 * 1024
+
+/**
+ * 一份附件最多多大 (2026-11-22)
+ *
+ * 与手机侧 `BallMedia.MAX_BYTES` 同数 (20 MB): 门户 `+` 收得下的那一份, 跨设备也得收得下。
+ * 超过就整份拒, 不截断 —— 截一半的图在那一头打不开, 比"没传过去"更难查
+ */
+export const MAX_BLOB_BYTES = 20 * 1024 * 1024
 
 /**
  * 建对端运行时。
@@ -62,6 +73,7 @@ const MAX_TRANSCRIPT_BYTES = 256 * 1024
  * @param {() => Promise<Array<{id: string, title: string, cwd: string, workspace: string, running: boolean, updatedAt: number}>>} deps.listSessions - 本机会话摘要 (给 /peer/info 用)。
  * @param {(sessionId: string) => Promise<object|null>} deps.projectSession - 现算一份投影快照 (index.mjs 里接 sessionQuery / live Session)。
  * @param {(sessionId: string) => Promise<object>} deps.deliver - 把一条用户消息投进某一轮 (index.mjs 里接 sessionController.resolveAgent + followup/steer)。
+ * @param {(sessionId: string, text: string) => Promise<{answered: string}|{ok: false, note: string}|null>} [deps.answerAsk] - 这一句是不是在回电脑上那张问答卡 (2026-11-22 终端问答: 命中就地结算, 不进 inbox)。
  * @param {(target: object) => Promise<string|null>} deps.resolveTarget - 把 {kind,id,name} 解析成一个会话 id (工作区目标要落到它最近那一场, 没有就新建)。
  * @param {(text: string) => Promise<object>} deps.makeUserMessage - 造用户消息 (index.mjs 传 createUserMessage 的包装)。
  * @param {() => Promise<object>} deps.readState - 读插件自己的账 (delivered / outbox)。
@@ -89,6 +101,8 @@ export function createPeerRuntime(deps) {
     deliveredFromQueue: 0,
     lastSend: null,
     peer: null,
+    /** 2026-11-22: 最近一份走 blob 的附件 (方向 / 名字 / 字节数; 面板与 doctor 读它) */
+    lastBlob: null,
   }
   let disposed = false
 
@@ -225,6 +239,10 @@ export function createPeerRuntime(deps) {
       body: {
         text,
         target,
+        // 2026-11-22 (2.8.1 #50): 先传上去的那几份 (对端暂存区的绝对路径)。对端收下时把它们
+        // 搬进那一场的工作区 `lw-in/`, 再把正文里那一段名单换成它自己的路径 —— 手机这边不知道
+        // 电脑的路径, 所以只递清单, 不递改写后的正文
+        staged: Array.isArray(request?.staged) ? request.staged.filter(path => typeof path === 'string' && path !== '') : [],
         from: { deviceId: ownDeviceId(), name: ownDeviceName() },
       },
     })
@@ -302,6 +320,9 @@ export function createPeerRuntime(deps) {
    */
   async function consumeInbox() {
     const id = ownDeviceId()
+    // 2026-11-21 终端: 队列是"下发指令"的第二条路 (HTTP 403 之后 send() 会退到队列) ——
+    // 不收指令的那一台连队列都不该消费, 否则 403 只是把它推到没闸的那条路上
+    if (spec !== null && spec.acceptSend !== true) return { delivered: 0, failed: 0, acks: 0, broken: 0, skipped: 'commands-off' }
     if (id === '') return { delivered: 0, failed: 0, acks: 0, broken: 0 }
     const { messages, broken } = await readInbox(inboxDirectory(deps.repoDir, id))
     if (messages.length === 0) return { delivered: 0, failed: 0, acks: 0, broken }
@@ -336,9 +357,14 @@ export function createPeerRuntime(deps) {
   /**
    * 收下对端发来的一句话 (投进它指定的那一场)。
    * @param {object} message - 队列消息或路由体的规范化形态。
-   * @returns {Promise<{ok: boolean, sessionId?: string, running?: boolean, error?: string}>} 结果。
+   * @returns {Promise<{ok: boolean, sessionId?: string, running?: boolean, answered?: string, attachments?: number, error?: string}>} 结果。
    */
   async function receive(message) {
+    // 2026-11-21 终端: `acceptSend` 是**唯一**那道"收不收对端指令"的闸 —— 路由与队列两条路都过它。
+    // 只挡路由的话, send() 在 HTTP 403 之后会无声退到仓库队列, 而这一边 pull 下来照样执行
+    if (spec !== null && spec.acceptSend !== true) {
+      return { ok: false, code: 'COMMANDS_OFF', error: 'this host does not accept cross-device commands' }
+    }
     const text = typeof message?.text === 'string' ? message.text.trim() : ''
     if (text === '') return { ok: false, code: 'EMPTY_MESSAGE', error: 'the peer sent an empty message' }
     let sessionId = ''
@@ -350,15 +376,173 @@ export function createPeerRuntime(deps) {
     if (typeof sessionId !== 'string' || sessionId === '') {
       return { ok: false, code: 'NO_TARGET', error: 'could not resolve the target to a session on this host' }
     }
+    // 2026-11-22 (终端问答): 这一句是不是在回电脑上那张问答卡。**必须在投递之前问** ——
+    // 那一轮正卡在工具里, steer 进去要等工具返回才被读, 而工具等的就是这句答案
+    // (双方互等到超时, 正是手机端"没反应"的成因)。命中就地结算, 不投递, 也不改人家的正文
+    if (typeof deps.answerAsk === 'function') {
+      try {
+        const answered = await deps.answerAsk(sessionId, text)
+        if (answered !== null && answered !== undefined && typeof answered.answered === 'string') {
+          state.received += 1
+          return { ok: true, sessionId, running: true, answered: answered.answered }
+        }
+        if (answered !== null && answered !== undefined && typeof answered.note === 'string' && answered.note !== '') {
+          warn(`peer: ${answered.note}`)
+        }
+      } catch (error) {
+        warn(`peer: answering the pending question on ${sessionId} failed: ${messageOf(error)}`)
+      }
+    }
+    // 2026-11-22 (2.8.1 #50): 对端先传上来的那几份附件 —— 搬进**这一场的工作区** `lw-in/`,
+    // 再把正文里那一段名单换成这边真实存在的路径。搬不动的不假装搬过 (那几行原样留着),
+    // 并在回执里数一下, 面板与日志都读得到
+    let finalText = text
+    let adopted = 0
+    const staged = Array.isArray(message?.staged) ? message.staged.filter(path => typeof path === 'string' && path !== '') : []
+    if (staged.length > 0 && typeof deps.adoptStaged === 'function') {
+      try {
+        const answer = await deps.adoptStaged(sessionId, staged)
+        adopted = answer?.paths?.length ?? 0
+        if (adopted > 0) {
+          // 只换名单, 不碰人话: 手机那边写的路径这一段被换成电脑这边的
+          const { paths } = stripAttach(finalText)
+          const replaced = paths.map(path => {
+            const at = staged.indexOf(path)
+            return at >= 0 && answer.paths[at] !== undefined ? answer.paths[at] : path
+          })
+          finalText = withAttach(finalText, replaced)
+        }
+      } catch (error) {
+        warn(`peer: adopting ${staged.length} staged attachment(s) failed: ${messageOf(error)}`)
+      }
+    }
     try {
-      const userMessage = await deps.makeUserMessage(text)
+      const userMessage = await deps.makeUserMessage(finalText)
       const outcome = await deps.deliver(sessionId, userMessage)
       state.received += 1
-      return { ok: true, sessionId, running: outcome?.running === true }
+      // 附件数是**多出来的一格**: 没带附件的那一句话, 回执与以前逐字相同 (老对端与老判据都不用改)
+      return {
+        ok: true,
+        sessionId,
+        running: outcome?.running === true,
+        ...(adopted > 0 ? { attachments: adopted } : {}),
+      }
     } catch (error) {
       return { ok: false, code: 'DELIVERY_FAILED', sessionId, error: messageOf(error) }
     }
   }
+
+  /**
+   * 把一份附件传给对端 (2026-11-22, 2.8.1 #50)。
+   *
+   * 走 `/luwi-sync/peer/blob` 的 POST: 纯字节, 不做 base64、不塞进 `/peer/send` 那 8 KB 的正文。
+   * 对端把它落在**自己的暂存区**, 回一条绝对路径; 那一句话随后带 `staged: [路径]` 过去, 由它
+   * 在收下时搬进那一场的工作区 `lw-in/` —— 手机这边永远不知道电脑的目录结构。
+   *
+   * 三种失败分开说: 名字/大小不合格 (`ok:false`, 没有 `legacy`)、对端太旧 (`legacy:true`,
+   * 两边照旧走纯文本)、网络不通 (`ok:false` + `error`)。
+   * @param {string} name - 原始文件名 (只在最后一段里用)。
+   * @param {Uint8Array} bytes - 字节。
+   * @returns {Promise<{ok: boolean, path?: string, name?: string, legacy?: boolean, tooLarge?: boolean, error?: string}>} 结果。
+   */
+  async function uploadBlob(name, bytes) {
+    const safe = safeFileName(name)
+    if (safe === '') return { ok: false, error: 'that attachment has no usable file name' }
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) return { ok: false, error: 'that attachment is empty' }
+    if (bytes.length > MAX_BLOB_BYTES) {
+      return { ok: false, tooLarge: true, error: `that attachment is larger than ${MAX_BLOB_BYTES / (1024 * 1024)} MB` }
+    }
+    if (spec === null) return { ok: false, legacy: true, error: 'the peer channel is off on this host' }
+    const base = await peerBase()
+    if (base.url === '') return { ok: false, error: 'no peer url: nothing to upload to' }
+    // 20 MB 上传比一句话久得多: 超时按 sendTimeoutMs 的三倍算, 且不少于 60 s
+    const budget = Math.max(spec.sendTimeoutMs, 60_000) * 3
+    let response
+    try {
+      response = await fetch(`${base.url}/luwi-sync/peer/blob?name=${encodeURIComponent(safe)}`, {
+        method: 'POST',
+        headers: { ...peerHeaders(spec.token), 'content-type': 'application/octet-stream' },
+        body: bytes,
+        signal: AbortSignal.timeout(budget),
+      })
+    } catch (error) {
+      state.reachable = 'unreachable'
+      state.lastError = messageOf(error)
+      return { ok: false, error: state.lastError }
+    }
+    let body = null
+    try {
+      body = await response.json()
+    } catch {
+      body = null
+    }
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      // 对端那一版还没有这条路: 不是错, 是"这一档传不了"
+      return { ok: false, legacy: true, error: body?.error !== undefined ? String(body.error) : `the peer does not take attachments (${response.status})` }
+    }
+    if (!response.ok || body === null || body.ok !== true) {
+      const why = body !== null && typeof body.error === 'string' ? body.error : `the peer answered ${response.status}`
+      state.lastError = why
+      return { ok: false, error: why }
+    }
+    state.reachable = 'ok'
+    state.lastOkAt = now()
+    return { ok: true, path: String(body.path ?? ''), name: String(body.name ?? safe) }
+  }
+
+  /**
+   * 从对端取回一份附件的字节 (2026-11-22, 2.8.1 #50)。
+   * @param {string} sessionId - 对端那一场。
+   * @param {{attachmentId?: string, path?: string}} ref - 二选一: 附件块 id, 或工作区里的绝对路径。
+   * @returns {Promise<{ok: boolean, bytes?: Uint8Array, name?: string, legacy?: boolean, error?: string}>} 结果。
+   */
+  async function fetchBlob(sessionId, ref) {
+    if (typeof sessionId !== 'string' || sessionId === '') return { ok: false, error: 'a peer session id is required' }
+    if (spec === null) return { ok: false, legacy: true, error: 'the peer channel is off on this host' }
+    const query = new URLSearchParams({ sessionId })
+    if (typeof ref?.attachmentId === 'string' && ref.attachmentId !== '') query.set('attachmentId', ref.attachmentId)
+    else if (typeof ref?.path === 'string' && ref.path !== '') query.set('path', ref.path)
+    else return { ok: false, error: 'nothing to fetch' }
+    const base = await peerBase()
+    if (base.url === '') return { ok: false, error: 'no peer url: nothing to fetch from' }
+    const budget = Math.max(spec.sendTimeoutMs, 60_000) * 3
+    let response
+    try {
+      response = await fetch(`${base.url}/luwi-sync/peer/blob?${query.toString()}`, {
+        headers: peerHeaders(spec.token),
+        signal: AbortSignal.timeout(budget),
+      })
+    } catch (error) {
+      state.reachable = 'unreachable'
+      state.lastError = messageOf(error)
+      return { ok: false, error: state.lastError }
+    }
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      return { ok: false, legacy: true, error: `the peer does not serve attachments (${response.status})` }
+    }
+    if (!response.ok) {
+      let why = `the peer answered ${response.status}`
+      try {
+        const body = await response.json()
+        if (typeof body?.error === 'string') why = body.error
+      } catch { /* 字节流上没有 JSON 就按状态码说 */ }
+      return { ok: false, error: why }
+    }
+    const buffer = await response.arrayBuffer().catch(() => null)
+    if (buffer === null || buffer.byteLength === 0) return { ok: false, error: 'the peer sent no bytes' }
+    if (buffer.byteLength > MAX_BLOB_BYTES) return { ok: false, error: 'the peer sent an attachment that is too large' }
+    const header = String(response.headers.get('x-lw-name') ?? '')
+    let name = ''
+    try {
+      name = header === '' ? '' : decodeURIComponent(header)
+    } catch {
+      name = ''
+    }
+    state.reachable = 'ok'
+    state.lastOkAt = now()
+    return { ok: true, bytes: new Uint8Array(buffer), name }
+  }
+
 
   /**
    * 向对端要某一场的投影快照 —— 投影会话靠它把"对端的回答"折进本地 (只取 user 与 assistant 文本)。
@@ -785,6 +969,13 @@ export function createPeerRuntime(deps) {
         handler: async (req, res) => {
           const gate = authorize(req)
           if (gate !== null) return sendJson(res, gate.status, gate.body)
+          // 2026-11-21 终端口径: 这一台只由手机来管电脑. 控制器 (手机) 侧 acceptSend 缺省关,
+          // 于是电脑那边发过来的"在我这跑一句话"一律 403 —— 收不收指令与读不读会话是两件事,
+          // 所以它单独一档, 不复用 listen
+          if (spec.acceptSend !== true) {
+            state.lastError = 'a peer call was refused: this host does not accept cross-device commands'
+            return sendJson(res, 403, { ok: false, error: 'this host does not accept cross-device commands' })
+          }
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'peer/send is POST-only' })
           let body
           try {
@@ -798,37 +989,91 @@ export function createPeerRuntime(deps) {
       },
       {
         kind: 'exact',
+        path: '/luwi-sync/peer/blob',
+        handler: async (req, res) => {
+          const gate = authorize(req)
+          if (gate !== null) return sendJson(res, gate.status, gate.body)
+          if (req.method === 'POST') {
+            // 2026-11-22 (2.8.1 #50): 对端先把它那几份附件传上来, 落在本机的**暂存区**;
+            // 真正搬进工作区 `lw-in/` 是收那句话时 (`receive()` 的 adoptStaged) —— 那时才知道
+            // 这一句要落到哪一场, 也才搬得对
+            if (spec.acceptSend !== true) {
+              state.lastError = 'a peer call was refused: this host does not accept cross-device commands'
+              return sendJson(res, 403, { ok: false, error: 'this host does not accept cross-device commands' })
+            }
+            if (typeof deps.acceptBlob !== 'function') {
+              return sendJson(res, 501, { ok: false, error: 'this host cannot store peer attachments' })
+            }
+            const query = queryOf(req)
+            const name = safeFileName(query.get('name') ?? '')
+            if (name === '') return sendJson(res, 400, { ok: false, error: 'the attachment needs a plain file name' })
+            let bytes
+            try {
+              bytes = await readRawBody(req, MAX_BLOB_BYTES)
+            } catch (error) {
+              return sendJson(res, 400, { ok: false, error: messageOf(error) })
+            }
+            if (bytes.length === 0) return sendJson(res, 400, { ok: false, error: 'the attachment is empty' })
+            try {
+              const saved = await deps.acceptBlob(name, bytes)
+              state.lastBlob = { at: now(), direction: 'in', name: saved?.name ?? name, bytes: bytes.length }
+              sendJson(res, 200, { ok: true, path: String(saved?.path ?? ''), name: String(saved?.name ?? name), bytes: bytes.length })
+            } catch (error) {
+              sendJson(res, 400, { ok: false, error: messageOf(error) })
+            }
+            return
+          }
+          if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: '/luwi-sync/peer/blob is GET or POST' })
+          // 下载: 两种来处 —— ① 那一场里的附件块 (`attachmentId`) ② 那一场工作区里的文件 (`path`)
+          const query = queryOf(req)
+          const sessionId = String(query.get('sessionId') ?? '')
+          const attachmentId = String(query.get('attachmentId') ?? '')
+          const path = String(query.get('path') ?? '')
+          if (sessionId === '' || (attachmentId === '' && path === '')) {
+            return sendJson(res, 400, { ok: false, error: 'sessionId plus attachmentId or path is required' })
+          }
+          const reader = attachmentId !== '' ? deps.readAttachmentBytes : deps.readWorkspaceFile
+          if (typeof reader !== 'function') {
+            return sendJson(res, 501, { ok: false, error: 'this host cannot serve peer attachments' })
+          }
+          let blob
+          try {
+            blob = attachmentId !== ''
+              ? await deps.readAttachmentBytes(sessionId, attachmentId)
+              : await deps.readWorkspaceFile(sessionId, path)
+          } catch (error) {
+            return sendJson(res, 404, { ok: false, error: messageOf(error) })
+          }
+          const bytes = blob?.bytes
+          if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+            return sendJson(res, 404, { ok: false, error: 'that attachment could not be read' })
+          }
+          if (bytes.length > MAX_BLOB_BYTES) {
+            return sendJson(res, 413, { ok: false, error: 'that attachment is too large to hand over' })
+          }
+          state.lastBlob = { at: now(), direction: 'out', name: String(blob?.name ?? ''), bytes: bytes.length }
+          res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(bytes.length),
+            'Cache-Control': 'no-store',
+            'X-Lw-Name': encodeURIComponent(String(blob?.name ?? '')),
+          })
+          res.end(bytes)
+        },
+      },
+      {
+        kind: 'exact',
         path: '/luwi-sync/peer-live',
         handler: async (req, res) => {
           // 本机界面读对端进行中的回答: 同源那一路, 令牌留在宿主里
-          // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 「同源」得真的查 —— 原来谁都能读对端的实时回答
-          const liveGate = guardLocalWrite(req, { spec, what: '读对端实时回答' })
-          if (liveGate !== null) return sendJson(res, liveGate.status, liveGate.body)
           if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: '/luwi-sync/peer-live is GET-only' })
+          // 2026-11-21: 这条读面带"探一次对端"的副作用, 所以只认回环 (method 那一条先判, 与老读数一致)
+          if (!isLocalRequest(req)) return sendJson(res, 403, { ok: false, error: LOOPBACK_ONLY_ERROR })
           try {
             sendJson(res, 200, await peerLive())
           } catch (error) {
             sendJson(res, 200, { ok: false, error: messageOf(error), live: [] })
           }
-        },
-      },
-      {
-        kind: 'exact',
-        path: '/luwi-sync/send',
-        handler: async (req, res) => {
-          // 本机面板发起的发送: 同源 (浏览器) 那一侧, 令牌不出宿主
-          // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 这是"以本机身份给对端发消息", 只能本机发起
-          const sendGate = guardLocalWrite(req, { spec, what: '面板发送' })
-          if (sendGate !== null) return sendJson(res, sendGate.status, sendGate.body)
-          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '/luwi-sync/send is POST-only' })
-          let body
-          try {
-            body = await readJsonBody(req, 8192)
-          } catch (error) {
-            return sendJson(res, 400, { ok: false, error: messageOf(error) })
-          }
-          const answer = await send(body)
-          sendJson(res, answer.ok ? 200 : 502, answer)
         },
       },
     ]
@@ -856,6 +1101,9 @@ export function createPeerRuntime(deps) {
   return {
     send,
     receive,
+    // 2026-11-22 (2.8.1 #50): 图片与文件那一条 —— 手机发上去 / 手机取回来
+    uploadBlob,
+    fetchBlob,
     info,
     peerInfo,
     peerLive,
@@ -912,6 +1160,38 @@ function queryOf(req) {
   } catch {
     return new URLSearchParams()
   }
+}
+
+/**
+ * 原样收一段请求体 (2026-11-22, 2.8.1 #50)。
+ *
+ * 附件走的是纯字节, 不是 JSON —— `readJsonBody` 那条 8 KB 的口子塞不下, 也不该塞。
+ * **先看 `content-length` 再收**: 超限的那一份直接拒, 不把几十 MB 拉进内存再判。
+ * @param {import('node:http').IncomingMessage} req - 请求。
+ * @param {number} cap - 字节上限。
+ * @returns {Promise<Buffer>} 字节。
+ */
+function readRawBody(req, cap) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers?.['content-length'] ?? Number.NaN)
+    if (Number.isFinite(declared) && declared > cap) {
+      reject(new Error(`the attachment is larger than ${cap / (1024 * 1024)} MB`))
+      return
+    }
+    const chunks = []
+    let total = 0
+    req.on('data', (chunk) => {
+      total += chunk.length
+      if (total > cap) {
+        reject(new Error(`the attachment is larger than ${cap / (1024 * 1024)} MB`))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', error => reject(error))
+  })
 }
 
 /** 列目录里的文件名 (目录不在 = 空, 绝不抛) */

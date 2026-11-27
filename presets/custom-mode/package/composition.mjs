@@ -24,6 +24,18 @@
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { decodeJsExpression, evaluateDisabledPredicate } from './preset-backend/parse-composition.mjs'
+
+// Capabilities belong to the request that observed them, never to a module-global
+// host context. Store only known booleans, not service objects or arbitrary ctx access.
+const predicateCapabilities = new AsyncLocalStorage()
+export function withPredicateCapabilities(snapshot, work) {
+  const capabilities = typeof snapshot?.profileContext === 'boolean'
+    ? Object.freeze({ profileContext: snapshot.profileContext })
+    : Object.freeze({})
+  return predicateCapabilities.run(capabilities, work)
+}
 
 // 出厂组成「从哪来」是两条 dsh 线唯一还没收进后端的一处：旧线是文件，0.1.7 是
 // agentPresets.readDocument()。解析链整个搬到了 base-composition.mjs（含它的理由与实测），
@@ -66,14 +78,14 @@ export {
  * it never asks the host for the user's own preset.
  */
 export const BASE_MODES = [
-  { id: 'standard', label: '标准模式', note: '完整编码能力：Shell、文件、检索、技能、计划、目标、子代理、工作流' },
-  { id: 'ptc', label: 'PTC 模式', note: '在标准模式基础上启用 PTC 工具呈现（tool-presentation）' },
-  { id: 'minimal', label: '极简模式', note: '只有 Shell 与终端，共 7 行；没有文件、检索、技能、子代理' },
-  { id: 'cordis', label: 'Cordis 模式', note: '标准模式 + 读写运行时的 Cordis 工具集，可让 agent 自己改 harness' },
+  { id: 'standard', label: '标准模式', note: '出厂的完整工具集。' },
+  { id: 'ptc', label: 'PTC 模式', note: '标准模式，另开 PTC 工具呈现。' },
+  { id: 'minimal', label: '极简模式', note: '只有 Shell 与终端。提示词仍以本页为准。' },
+  { id: 'cordis', label: '创造模式', note: '标准模式，另开 Cordis 运行时工具。' },
   {
     id: UNION_MODE_ID,
-    label: '自定义模式',
-    note: '不继承任何单一原生模式：以标准模式的全套行为底，补上只有 PTC / 极简 / 创造模式才有的行，全部都能逐行开关',
+    label: '全部出厂行',
+    note: '四套官方预设的行合在一处，均可开关。',
   },
 ]
 
@@ -126,14 +138,16 @@ export const ROW_META = {
   'tool-workflow': { label: '工作流工具' },
   'tool-ralph': { label: 'Ralph 工作流', note: '默认关闭' },
   'tool-web': { label: '网页检索与抓取' },
+  'tool-plugin-market': { label: '插件市场检索', note: '发现插件；安装与启停仍由插件管理工具负责' },
   'tool-skill': { label: '技能工具' },
   'skill-filesystem': { label: '技能发现' },
   'tool-cordis': { label: 'Cordis 运行时工具', note: '可读写 harness 运行时' },
   'tool-plugin-manager': {
     label: '插件管理（安装 / 启停）',
-    note: '模型侧可安装/启停插件；标准与 PTC 模式里出厂即关闭（只有创造模式默认开），本模式可以显式打开它',
+    note: '供模型安装或启停插件；出厂状态由当前宿主的基础模式声明决定',
   },
   'tool-presentation': { label: 'PTC 工具呈现' },
+  'tool-executor-ptc': { label: 'PTC 程序执行器', note: '通过 run_code 执行程序并调用工具，同时向模型提供工具 SDK' },
   present: { label: '交付文件（present）' },
   'custom-prompt-tool': { label: 'custom_prompt 工具', note: '关掉后无法用对话改提示词（设置页仍可用）' },
   'persistent-shell': { label: '持久 Shell' },
@@ -240,9 +254,9 @@ export function readBaseComposition(modeId) {
  * First writer, in `BASE_MODE_IDS` order (`standard` → `ptc` → `minimal` → `cordis`). The order is not
  * cosmetic: `standard` is the mode this product's own preset is derived from, so a row declared in more
  * than one mode keeps **standard's text and standard's shipped default**. The visible consequence is
- * deliberate — `tool-plugin-manager` ships disabled in `standard` and enabled in `cordis`, and the union
- * keeps it disabled (the user turns it on per assistant if they want it). The alternative rule, "enabled
- * if any mode enables it", would silently arm the model's plugin manager in a mode the user never chose.
+ * deliberate: the union follows this host's `standard` declaration, including any condition on
+ * `tool-plugin-manager`. Its shipped state varies by host version; do not hard-code it as disabled.
+ * Enabling a row merely because another mode does so would change the selected baseline.
  *
  * ## Nothing is cached
  *
@@ -458,7 +472,7 @@ function setDisabled(segmentText, disabled) {
     const shipped = lines[index].trim().replace(/^disabled:\s*/, '')
     if (disabled) {
       lines[index] = `${' '.repeat(indent)}disabled: true${carriage}`
-    } else if (shipped.startsWith('!!js') && evalDisabledExpression(shipped) !== true) {
+    } else if (shipped.startsWith('!!js') && evalDisabledExpression(shipped) === false) {
       // 显式打开，但出厂那行是平台表达式、且它在本机求值就是"开"：这不是覆盖，而是**撤销覆盖** ——
       // 保持出厂表达式原样，这一行就回到"跟随平台"。（原先这里删掉整行，结果是文件既不是出厂原样、
       // 也不是显式覆盖，页面却显示"未拨过" —— 文件与显示同时失真。）
@@ -494,9 +508,8 @@ function setDisabled(segmentText, disabled) {
 function evalDisabledExpression(expression) {
   if (typeof expression !== 'string' || !expression.startsWith('!!js')) return undefined
   try {
-    // eslint-disable-next-line no-new-func -- evaluating the composition's own predicate is the point
-    const fn = new Function('process', `return (${expression.slice(4).trim()});`)
-    return fn(process) === true
+    const source = decodeJsExpression(expression.slice(4))
+    return evaluateDisabledPredicate(source, predicateCapabilities.getStore())
   } catch {
     // 求值失败与「表达式不存在」都是 undefined。调用方若已经确认这是 `!!js`，
     // 必须把 undefined 当成关闭：挂载侧同样按关闭处理，两边不能一个开一个关。
@@ -1018,11 +1031,17 @@ export function overridesOf(text, modeId) {
     // 某个字面量一致 —— 只看求值结果，会把"表达式被换成字面量"误判成"没动过"。
     const sameForm = baseRow !== undefined
       && baseRow.disabled === row.disabled
-      && baseRow.disabledExpression === row.disabledExpression
+      && predicateForm(baseRow.disabledExpression) === predicateForm(row.disabledExpression)
     if (sameForm) continue
     overrides[id] = row.disabled !== true
   }
   return overrides
+}
+
+/** YAML quoting is transport syntax, while literal versus expression remains significant. */
+function predicateForm(expression) {
+  if (typeof expression !== 'string') return expression
+  try { return decodeJsExpression(expression.slice(4)) } catch { return expression }
 }
 
 /**

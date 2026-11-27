@@ -7,11 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import io.github.yuloong07star.luwi.automation.AutomationRule
-import io.github.yuloong07star.luwi.automation.AutomationStore
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.voice.VoiceInbox
-import io.github.yuloong07star.luwi.wake.PowerWindow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -77,9 +75,11 @@ internal object ProactiveSchedule {
     /** 缺省时刻: 上午九点半 (夜里不打扰, 一天先问一次) */
     const val DEFAULT_AT = "09:30"
 
-    /** 卡是空的时候投什么 —— 启动顺序那四步, 与宿主 `proactiveStartLine` 的缺省同一段
-     *  (2026-11-07 起"记忆搜索"换成"记着的事": Luwi 上那一档没有记忆插件, 读的是 `wishes.json`) */
-    const val FALLBACK_TEXT = "最新探索摘要 -> 记着的事 (lw_wish) -> 今天的日历 -> 通知摘要, 再决定要不要开口"
+    /** 卡是空的时候投什么 —— 启动顺序那四步, 与宿主 `PROACTIVE_ASK_DEFAULT` **逐字相同**
+     *  (2026-11-07 起"记忆搜索"换成"记着的事": Luwi 上那一档没有记忆插件, 读的是 `wishes.json`;
+     * 2026-11-13 #43 改措辞: 同一件事用一句话说, 不做箭头清单 —— 它进的是她那场的开场, 语气要像人话;
+     * 两处字面量由 `tools/check-proactive.mjs` 比对) */
+    const val FALLBACK_TEXT = "最新探索摘要, 记着的事 (lw_wish), 今天的日历, 通知摘要 —— 看完再决定要不要开口"
 
     /** 与自动指令 (41) / 探索 (42) 两个闹钟分开, 三个 requestCode 互不覆盖 */
     private const val REQUEST = 43
@@ -260,13 +260,12 @@ internal object ProactiveSchedule {
     /**
      * 静默时段 (B4-b ⑨): 落在里面就回那一句, 不在就 null
      *
-     * 窗口与自动指令是同一份 (`automations/settings.json` 的 `quiet.enabled` / `quiet.window`, 缺省
-     * 23:00-07:00) —— 主动排期没有"这条规则要不要静默"的那一栏, 所以只看总开关
+     * **2026-11-20 起只有一份真源** ([QuietHours]): `automations/settings.json` 的
+     * `quiet.enabled` / `quiet.window` (缺省 23:00-07:00) —— 活动那一页的静默三行写的也是它,
+     * 判断层读的也是它。以前这一条读自动指令那一份、判断层读 `sim.json` 那一份, 两边会漂
      */
-    fun quietWhy(context: Context, now: Long, zone: ZoneId = ZoneId.systemDefault()): String? {
-        val on = AutomationStore.settings(context)
-        return quietWhy(on.quietEnabled, on.quietWindow, now, zone)
-    }
+    fun quietWhy(context: Context, now: Long, zone: ZoneId = ZoneId.systemDefault()): String? =
+        QuietHours.why(context, now, zone)
 
     /**
      * 纯函数那一半 (单测钉着): 开关关着 / 窗口认不出来 / 空窗都不算静默
@@ -279,12 +278,7 @@ internal object ProactiveSchedule {
         window: String?,
         now: Long,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): String? {
-        if (!enabled) return null
-        val parsed = window?.let { PowerWindow.parse(it) }?.takeIf { !it.empty } ?: return null
-        if (!PowerWindow.inside(PowerWindow.minutesOfDay(now, zone), parsed)) return null
-        return "静默时段 (${PowerWindow.describe(parsed)})"
-    }
+    ): String? = QuietHours.why(enabled, window, now, zone)
 
     /** 宿主起来 / 设置页改完时叫一次: 开着就排, 关着就撤 */
     fun ensure(context: Context) {

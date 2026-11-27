@@ -62,6 +62,23 @@ check('客户端那一半在 ctx.effect 里挂一段 <style>, 并且交回摘掉
   client.includes('ctx.effect(install)'),
 ], [true, true, true, true])
 
+/* ── 一之二、键盘让位那一层 (2026-11-22) ──────────────────────────────────
+ *
+ * 宿主不再逐帧缩 WebView, 而是把高度推给页面 (`HostScreen` 的 `ImeLiftPusher` -> 这里的
+ * `__LUWI_IME__`)。三件事必须同时在: 入口函数、写进 `<html>` 的那两个东西、消费它们的 CSS。
+ * 少一件的表现是"输入框被键盘盖住" —— 屏幕上不会有任何报错, 所以钉在这里
+ */
+check('页面认下宿主推来的键盘高度 (入口 + 两个写点 + 摘掉的路)', [
+  client.includes('window.__LUWI_IME__ = applyIme'),
+  client.includes("root.setAttribute('data-lw-ime', 'on')"),
+  client.includes("root.style.setProperty('--lw-dsh-ime'"),
+  client.includes('delete window.__LUWI_IME__'),
+  client.includes('ctx.effect(installIme)'),
+], [true, true, true, true, true])
+check('把它挂在 <html> 上而不是某个容器 (壳与 #root 两条路都读它)', [
+  client.includes('var root = document.documentElement'),
+], [true])
+
 /* ── 二、选择器必须在已构建的树里命中 ──────────────────────────────────── */
 
 const selectors = [...client.matchAll(/'[ ]{2}((?:[a-z-]+\[[^\]]+\]|[.\w-]+(?:\[[^\]]+\])?)) ?\{'/g)]
@@ -106,6 +123,22 @@ if (!existsSync(treePath('@modusensus/dsh-mneme/lib/client.js'))) {
   ], [false, 'ok'])
 
   check('两段补丁用到的那个 CSS 变量在这棵树里有定义', frontendText.includes('--dsw-alias-border-l2'), true)
+
+  // 键盘让位那两条是**复合选择器** (`html[attr]` + 后代 / `:not(:has())`), 上面那条提取正则抓不到,
+  // 所以逐条点名核对: 壳的标记与插件自己发布的那个变量, 都得在已构建的 dsh-web-mobile 里
+  check('键盘让位: 手机壳的 frame 标记与可见带变量都在这棵树里 (壳那条 CSS 才命中得到)', [
+    (await contains('dsh-web-mobile/lib/client.js', 'data-mobile-nav')),
+    (await contains('dsh-web-mobile/lib/client.js', '--dsha-mobile-visible-vh')),
+    client.includes('[data-mobile-nav="frame"]'),
+  ], [true, true, true])
+  check('键盘让位: 没有那一层壳时退到 #root (挂载点必须还是 height:100%)', [
+    client.includes('#root:not(:has([data-mobile-nav="frame"]))'),
+    frontendText.includes('html,body,#root'),
+  ], [true, true])
+  check('键盘让位: 写的是自己的变量, 不碰门户那个 (两个入口各写各的)', [
+    client.includes("root.style.setProperty('--lw-dsh-ime'"),
+    (client.match(/setProperty\('--lwp-ime'/g) ?? []).length,
+  ], [true, 0])
 }
 
 /* ── 三、挂的位置 ──────────────────────────────────────────────────────── */

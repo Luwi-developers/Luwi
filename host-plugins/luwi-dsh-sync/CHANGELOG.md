@@ -7,6 +7,264 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-22
+
+### Added
+
+- **Terminal questions reach the phone, and the phone can answer them (2026-11-22, owner: "手机端没有反应，有办法解决吗？…问答也要传并默认使用自定义回答").**
+  The question card lives in dsh's own session UI and answers travel over a client remote event, so the
+  phone (a different host, showing a text-only projection) never saw it — and `ask_user_question` is a
+  `tool/call`, which `condense` counts but never folds. Worse, a question does not touch the session log,
+  so `/peer/info`'s `updatedAt` (the projection `revision`) never moved and the phone never refetched.
+  - **Four modes** in the new `ask` section (`lib/luwi-ask.mjs`, pure): `off` / `notify` / `relay`
+    (default) / `auto`. PC side only, and only while the peer channel is on.
+  - **Handoff is `prepend`**: the client answerer rides the same `user-questions/request` waterfall, so
+    the relay has to claim the request first. Only sessions the phone drives (a `source.via === 'peer'`
+    line, or a session opened for `target: {kind:'new'}`) are claimed; PC-local sessions still `next()`.
+  - **The question becomes a snapshot entry**: `condense(events, {extra})` merges it before windowing, so it
+    lands in `entries` but never in the conversation ledger `all`. Its `seq` is the real `tool/call` seq
+    (ordered and idempotent for free). `LIVE_SNAPSHOT_VERSION` stays 3 — old phone plugins still fold it.
+  - **The phone is asked to refetch**: `ownSessions()` raises that session's `updatedAt` to the question's
+    timestamp, so the next poll (5 s) pulls the transcript again.
+  - **Answering reuses `/luwi-sync/peer/send`**: `receive()` asks the new `deps.answerAsk(sessionId, text)`
+    **before delivering** — the turn is blocked inside the tool, so a steered message would only be read
+    after it returns. Parse rules: `1`/`1,2` (indices), an exact option label, or free text as `custom`;
+    several questions split on `;` or newlines. Unknown text falls through and is delivered as a message.
+  - **Timeout continues on its own**: `ask.waitMs` (default 120 s) then a `custom` answer telling the model
+    to decide and say "我替你定了：…" in its reply. `auto` mode never waits.
+  - **The line from the phone carries a standing brief**: a second `agent/pre-step` listener appends one
+    context message (`source.kind` = the plugin, never `user`, so it never becomes a projection entry) at
+    most every 30 minutes. **The user's text itself is never rewritten** — echo dedupe compares the human
+    part only (`pendingKeyOf`), so one changed character would draw the same line twice on the phone.
+  - `/sync ask [状态|关|提示|中继|自动]` (English aliases kept), `ask` written through `applyConfigure`,
+    and a doctor line (`问答: relay · 等 120s · 终端提示 开 · 此刻在等 0`).
+  - No new route, no new snapshot version, and **nothing changes on the phone**.
+
+## [0.4.6] - 2026-11-22
+
+### Added
+
+- **Pictures and files now travel both ways (2026-11-22, owner: "终端显示图片, 图片与文件都要传").**
+  Everything rides the existing attachment section (`[附件 N 个, 图片用 read_image 打开]` + `1. /abs/path`),
+  never an attachment block: the phone's `lw-in/` copy is what the portal draws (`.lwp-image` /
+  `.lwp-file` read `/lw-out/in/<name>`), so cross-device only needs "move the bytes, rewrite the paths".
+  - **Phone → PC**: `lib/luwi-attach.mjs` (new, pure) parses the section; `carryAttachments()` in
+    `agent/pre-step` uploads every `<HOME>/lw-in/` file to the peer's staging area through the new
+    `POST /luwi-sync/peer/blob` (octet-stream, 20 MB cap) and rewrites the section to the staging paths;
+    when the line arrives, `receive()` calls `adoptStaged({sessionId, staged})` which moves each staged
+    file into **that session's workspace** `lw-in/` (dedupe `_2`, no overwrite) and rewrites the section
+    to the real local paths — the model on the PC can then `read_image` / read them. One file failing keeps
+    the whole line as-is (no half-rewritten list) and lands a one-line notice in the projection.
+  - **PC → Phone**: snapshot entries (v3) carry `media` — image/file attachment refs plus paths from the
+    attachment section; `materializeEntryMedia()` fetches each one through `GET /luwi-sync/peer/blob`
+    (`attachmentId` via `ctx.attachments.readImage`, or a workspace `path`), stores it under the phone's
+    `<HOME>/lw-in/peer-<device8>-<name>`, and rewrites the entry text to those local paths. Cache:
+    `$DSH_HOME/lw/peer-media.json` (atomic rename; a broken one costs a re-download, nothing else).
+  - `pendingTexts` echo matching now compares **the words only** (`pendingKeyOf`): the local echo carries
+    the phone's paths and the folded copy carries the PC's, so a whole-string compare drew every line twice.
+  - An image-only user message is now an entry too (its text is the `[图片]` placeholder `textOfContent`
+    already produced) — media never gets dropped on the floor.
+- **Snapshot v3 is a one-off re-projection.** Reading a snapshot whose `v` is ahead re-opens the projection
+  (old session archived, new one folded from the current window) — the only way the older conversations get
+  their media. `readLiveSnapshot` validates `media` (unknown kinds dropped, `..`/NUL paths refused).
+- **"Install luwi terminal on the PC" from the unpaired card**, and **Unpair** in Settings → Terminal
+  (app side; see `docs/Luwi-终端图片与文件-方案-2026-11-22.md`).
+
+### Removed
+
+- **Everything below the repository card on the PC panel (2026-11-22, owner: "优化一下 PC 的 luwi 终端面板,
+  将仓库以下的面板全部删除").** The panel is now three things — the status bar, the pairing card and the
+  repository card (with the sync toggle in the status bar and the two-click confirm strip) — plus the
+  auto-refresh footer:
+  - gone: the mirror readouts (`renderOverview` / `renderMirror`), the operations card (pull / push), the
+    peer card (reachable / address / token mask / shadow workspaces / queue / counters / adb reverse),
+    the P2P card (path / trust / SAS / the three write buttons) and the "run result" block;
+  - the same readings stay reachable in `/sync doctor`, `sync_status` / `sync_peer` and the `/sync` command —
+    only the panel stopped repeating them;
+  - a failed action (pair / configure / prune) now says why on the one line under the status bar
+    (`key: 'action-error'`), since the receipt block that used to show it is gone;
+  - the phone-side read-only panel (`runner: 'luwi-bridge'`) is untouched;
+  - 83 now-unused translation entries removed; the two panel tests were rewritten to pin the new shape
+    (`check-terminal` grew three checks for it).
+- **The P2P switch and trust actions moved into `/sync p2p` (2026-11-22, owner: "挪到命令里").** With the
+  P2P card gone the panel had no entry left for them, so the command takes over — it writes through the
+  **same** seams the panel used, so both halves keep landing in `$DSH_HOME/lw/session-sync.json` and the
+  same trust table:
+  - `/sync p2p` (or `state`) — the card's lines, verbatim: switch, transport (`direct 12 ms` / `relay …` /
+    `falling back to git`), peer, trust + SAS, counters, cooling, last error, and **which device is waiting
+    for a re-confirmation**;
+  - `/sync p2p on|off` → `applyConfigure(syncConfigFile, { p2p: { enabled } })` (restart the host, same as
+    the panel said);
+  - `/sync p2p confirm <deviceId>` → `p2pConfirmPeer` (re-admits a machine whose node id changed);
+  - `/sync p2p revoke <deviceId>` → `p2pRevokePeer` (trust table rejects it; git sync is unaffected);
+  - `/sync p2p` and `p2p` are in the help block; `renderP2pState` in `lib/render.mjs` and five tests in
+    `test/render-p2p.test.mjs` cover the read side.
+- **`/sync p2p` speaks Chinese (2026-11-22 晚, owner: "那些命令你都改成中文").** Chinese is now the
+  canonical spelling, the old English words stay as aliases — `/sync p2p 状态` / `开` / `关` /
+  `确认 <设备 id>` / `吊销 <设备 id>` (`state` / `on` / `off` / `confirm` / `revoke` still work, `读数` /
+  `打开` / `关闭` / `确认换机` / `撤销` also accepted). The action-word table lives in the new zero-dependency
+  `lib/command-words.mjs` (`normalizeP2pAction`, `P2P_ACTIONS`) so the mapping has its own unit test;
+  `index.mjs` imports and re-exports it. The readout is Chinese all the way down (`p2p: 开 · 传输 直连 9 ms`,
+  `信任: 换机待确认 · SAS 123 456`, `计数: 发出 5 · 收到 2`, `等确认换机: …`, `冷却中: …`, `最近错误: …`),
+  the trust words are mapped (`已信任` / `新对端` / `换机待确认` / `已吊销`), and machine-readable error
+  codes stay verbatim (`P2P_TIMEOUT`).
+
+## [0.4.5] - 2026-11-22
+
+### Added
+
+- **The PC repairs its own `adb reverse` (2026-11-22, owner: "先尝试三次…电脑重启时跑一次").** The
+  phone stores a loopback address (`peer.url = http://127.0.0.1:63560/`) and the tunnel is
+  `adb reverse tcp:63560 tcp:<PC port>`; the desktop host picks a new port on every restart (62666 →
+  60878 → 55856 → 58717 …) and adb drops every reverse when the cable reconnects, which is exactly the
+  phone's "电脑没连上 … (fetch failed)" screen. On the PC side (`controller: false`, Windows, peer
+  channel on) the plugin now:
+  - runs `D:\apk\Luwi\tools\lw-peer-reverse.ps1` **once at mount** (that is "电脑重启时跑一次") —
+    only when the entry is actually stale, so a healthy restart does not spawn pwsh for nothing;
+  - re-checks `adb reverse --list` every `peer.reverseCheckSeconds` (default 60 s) and repairs a missing
+    or wrongly-targeted entry, **up to three attempts** with 1 s / 2 s backoff, then logs
+    `peer: adb reverse … is still stale after 3 attempt(s)`;
+  - reports it as the peer card's `对端口子` row (`tcp:63560 → tcp:58717 · 在/断了 · 修过 N 次`) and a
+    `/sync doctor` note, and exposes `peer.reverse` on the panel snapshot.
+  Config (all optional, under `peer` in `$DSH_HOME/lw/session-sync.json`): `reverseRepair: false` to
+  turn it off, `reverseScript`, `reverseAdb`, `reverseDevicePort` (63560), `reverseCheckSeconds` (60).
+  Pure logic lives in `lib/lw-reverse.mjs` (`parseReverseList`, `reverseIsStale`, `repairReverse`) with
+  six tests in `test/lw-reverse.test.mjs`.
+
+## [0.4.4] - 2026-11-21
+
+### Fixed
+
+- **The desktop mount no longer dies on the load-time `sessionRoot` / `repoDir` guards (2026-11-21
+  late, second round).** 0.4.3 taught `lib/paths.mjs` to fall back to `~/.dsh`, but `resolveConfig`
+  itself still threw `sessionRoot is empty and $DSH_HOME is not set` **before** that resolver ever ran,
+  so a desktop restart kept mounting nothing (no `/luwi-sync/*`, no `sync_*` tools, no left seat —
+  and no mount report either, because `apply()` returned at that throw). Both load-time guards are
+  gone; the path resolvers own that decision now and only fail when even the home directory is
+  unavailable. `test/luwi-doctor.test.mjs` pins `resolveConfig({ enabled: true })` with `DSH_HOME`
+  deleted. This matches the documented desktop behaviour: `DSH_HOME` resolves from the `dshHome`
+  setting, then the environment, then `~/.dsh`
+  ([dsh-shell-env](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/shell/shell-env/README.zh.md),
+  [desktop spike](https://raw.githubusercontent.com/A7m0spHere/dsh-feiyuFM/fabfb16de1289d45bc124256eecf14a443320e23/docs/spikes/U5-official-desktop.md)),
+  and the desktop Host is known not to export it.
+
+## [0.4.3] - 2026-11-21
+
+### Fixed
+
+- **The plugin mounts on the desktop host even when `$DSH_HOME` is not in the environment yet
+  (2026-11-21 late).** This is why the `luwi终端` sidebar entry kept disappearing after a PC restart:
+  the Electron main process mounts plugins a beat before it exports `DSH_HOME`, so `resolveSessionRoot('')`
+  threw `sessionRoot is empty and $DSH_HOME is not set`, `apply()` bailed out at that line, and the
+  process stayed up with **no panel routes, no `sync_*` tools and no left seat** — and the mount report
+  did not exist to say so. `lib/paths.mjs` now falls back to `os.homedir()/.dsh` (the desktop host's
+  home), and `configHome` uses the same fallback, so both the session root and the
+  `lw/session-sync.json` layer resolve at boot. A successful mount also clears a stale
+  `mountState.disabledReason` left by an earlier failed boot. Remounting the plugin by hand used to
+  "fix" it — that was the same bug, not a workaround.
+  `test/paths.test.mjs` pins the fallback for both roots.
+
+## [0.4.2] - 2026-11-21
+
+### Changed
+
+- **One-way by role (2026-11-21 evening, owner: "只由 PC 向 Luwi 同步…PC 不再接收 Luwi 的对话和发送
+  会话").** `resolvePeerSpec` now derives the direction from the role instead of trusting the JSON:
+  the PC (`role: pc`, anything but a paired controller) keeps `listen`/`acceptSend` (the phone still
+  reads its snapshots and still drives it from the terminal) but **forces `proxy: false`** — it no
+  longer builds shadows or projections for the phone's sessions. The phone (`role: phone`) is
+  unchanged (`listen: false`, `acceptSend: false`, `proxy: true`). The panel's "send to the peer"
+  box, its workspace picker and `POST /luwi-sync/send` are gone; the peer card is read-only and
+  says so. A test asserts the route is not registered and `peer/send` still is.
+- **P2P is on by default (owner: "p2p 的设置没开…应当使用").** `P2P_DEFAULTS.enabled` is now `true`;
+  an explicit `p2p.enabled: false` still turns it off. The panel's P2P card gained a toggle that
+  writes `p2p.enabled` through the same `configure` path (restart required, as with every config
+  write), and `p2p` joins `/sync doctor` readings. The phone already ships `lib/arm64-v8a/liblwiroh.so`
+  and the PC ships `native/win32-x64/lwiroh.exe`, so both sides resolve a sidecar; when one is missing
+  the transfer falls back to git and the card/doctor say why.
+
+### Fixed
+
+- **The sidebar entry can no longer vanish silently (2026-11-21 evening).** `installSeats` used to
+  swallow a failing left seat with `catch {}` — after a host restart the left sidebar simply had no
+  `luwi终端` and nothing was logged. The left seat is now installed first, disposes its previous
+  registration (HMR / repeated apply used to throw `duplicate id`), rolls the icon back when the
+  body fails, and logs `console.warn('[luwi-dsh-sync] left seat not registered: …')`.
+- **Mount self-report.** The host writes `$DSH_HOME/lw/plugin-mount.json`
+  (`mounted / disabledReason / routes / seats / peer / p2p / runner`) and `/sync doctor` prints the
+  route counts; registering routes goes through `withWebServer()`, which reads the service directly
+  first and **logs an error** when neither path yields one — the old `return` left a mounted plugin
+  with zero routes and no evidence. The panel snapshot's `mount` block carries `routes` too.
+
+## [0.4.1] - 2026-11-21
+
+### Fixed
+
+- **The storage record that carries the ledger validates again (2026-11-21).** The root cause of the
+  frozen ledger was upstream of `persistProxyState()`: `syncStateSchema.lastPushHead` was pinned to a
+  sha regex (`^[0-9a-f]{40,64}$`), and on the phone that field had been written as a whole multi-line
+  `git status` dump back on 2026-10-21. Since then every `open` / `get` / `put` of the `session_sync`
+  domain threw `invalid-record`, so **every** state write failed silently — projection cursors,
+  baselines, queue acknowledgements. The field is diagnostic only, so it now accepts any string (the
+  payload is rewritten with a real head on the next report), and `lastError` allows 4000 chars.
+  `restoreProxyState()` no longer lets a failing storage read skip the file mirror — the two channels
+  are read independently — and `peer.ledger.error` reports the exact domain error when one of them
+  fails. A first fold that finds its local session not awake yet no longer caches the peer revision,
+  so the next poll retries instead of leaving the projection at `applied 0` forever.
+- **The projection ledger is written to disk again, and says so when it is not (2026-11-21).** On the
+  phone the ledger (`storages/session_sync.json` → `peerProxies`) had stopped updating at 21:11 while
+  `workspace.json` kept being written: the write path swallowed its own failure, so every remount
+  restored stale cursors and opened a **new** projection session next to the old one (one peer
+  session ended up with three local copies, and the panel sat on the stale copy that never advanced).
+  `persistProxyState()` now: builds its payload inside its own `try`; writes storage under a 4 s
+  timeout; **always** writes the plain-JSON mirror `<DSH_HOME>/lw/peer-ledger.json` (atomic rename);
+  reports failures through `logger.error` and the new `peer.ledger` reading (`source / at / error /
+  records`) on the panel, `/sync doctor` and `peerRefresh()`; and skips the write when the payload
+  hash did not change. `restoreProxyState()` reads both channels and takes the newer one. A record's
+  `lastSeq / snapshotV / turnCounter` never move backwards for the same `localId`.
+- **Remounts adopt the projection that already exists instead of opening another (2026-11-21).**
+  `reconcileProjections()` runs before the projection loop: a ledger `localId` that was archived is
+  unarchived first; if it is gone, the local session with the same title inside the same shadow
+  workspace is adopted (the one the user has open wins over the newest), its cursor is aligned to the
+  `peer-<seq>` ids it already folded, and same-title duplicate **projections** (`peer-<seq>` events)
+  are archived (reversible) — including when the tracked session is alive, so the history list stops
+  showing two rows with the same name. Creation goes through the same lookup (`ensureProjectionFor`),
+  `applyTranscript` refuses to fold — and to move its cursor — when the local session is missing, and
+  the version bump (`reopenProjection`) persists right after `snapshotV` is recorded. Records now
+  carry their `title` so this works across restarts.
+- **A turn with no text answer still leaves something on the phone (2026-11-21).** `collectLiveEntries`
+  counts `tool/call` events per turn and folds `exit_plan_mode`'s `plan` body as that turn's answer
+  (prefixed with `（这一轮在电脑上给出了计划）`); a turn with tools but no text becomes
+  `（这一轮在电脑上跑了 N 次工具，没有文字回复）`. Tool names and arguments still never reach the
+  projection, text always wins, and a turn that is still running still stays out of `entries`.
+  `LIVE_SNAPSHOT_VERSION` stays at 2 on purpose — bumping it would re-open every projection again.
+
+## [0.4.0] - 2026-11-21
+
+### Removed
+
+- **The Luwi account / entitlement surface is gone (2026-11-21).** `lib/luwi-license.mjs`, the
+  `sync-license.json` bookkeeping, the four panel ops (`login-start` / `login-poll` / `logout` /
+  `license-refresh`), the snapshot's `license` block and the panel's account card were removed
+  together with the P2P plan gate. The gate never mattered in practice: `p2p.enabled` defaults to
+  `false`, the phone never writes a `p2p` section, and pairing / git sync / the terminal never read
+  it — so signing in only decided whether an unused transport was allowed. `P2pService` keeps its
+  optional `requirePlan` hook (defaults to allow) for a future paid tier. The site's
+  `/api/account/*` endpoints are untouched; the client just never calls them again. An existing
+  `sync-license.json` on disk stays where it is (not deleted) and is no longer read.
+- **The phone-sandbox terminal panel is gone (2026-11-21).** The second `sidebar.panellist` entry
+  (`luwi-term`) and its `POST /luwi-sync/term` route (with `lib/term-channel.mjs` and its tests)
+  were unrelated to sync and were retired together. The Linux sandbox itself, the app's privileged
+  channel and `lib/luwi-bridge-runner.mjs` (which is what phone-side git runs through) are
+  untouched.
+
+### Changed
+
+- **The left sidebar entry is now called `luwi终端` (2026-11-21).** The `luwi-sync` panellist row
+  used to read `同步`; with the sandbox terminal gone it is the only row this plugin registers. The
+  right-sidebar tab keeps its `同步` title (that surface is the sync operations page).
+- Panel snapshot schema version `4` → `5` (the `license` block is gone).
+
 ## [0.3.6] - 2026-10-25
 
 ### Removed

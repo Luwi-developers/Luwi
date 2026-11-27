@@ -79,27 +79,14 @@ function makePanel(opts = {}) {
       lastError: opts.lastError,
     }),
     readPeers: opts.readPeers ?? (async () => ({ cards: [{ deviceId: 'p1', name: 'PC', url: '', updatedAt: '' }], broken: 0 })),
+    // Luwi 修 (2026-11-23, 审计 P1 第 9 条): 配置面每趟重读文件, 这两口由面板往宿主半传
+    readConfig: opts.readConfig,
     readP2p: opts.readP2p,
     p2pConfirm: opts.p2pConfirm,
     p2pRevoke: opts.p2pRevoke,
-    // Luwi 加 (2026-10-23): 账号那四个口 (登录 / 轮询 / 退出 / 刷新权益)
-    readLicense: opts.readLicense,
-    loginStart: opts.loginStart,
-    loginPoll: opts.loginPoll,
-    logout: opts.logout,
-    refreshLicense: opts.refreshLicense,
+    // 2026-11-21: 账号那四个口 (readLicense / loginStart / loginPoll / logout / refreshLicense) 与
+    // 沙盒终端那三个口 (runTerm / termStatus / termInterrupt) 连同宿主半一起下线, 这里不再注入
     collectDoctor: opts.collectDoctor ?? (async () => ({ status: 'PASS', mount: { mounted: true, runner: 'subprocess' }, peers: [], problems: [], warnings: [], notes: [] })),
-    // Luwi 加 (2026-11-05/06): 终端面板三档 (run / status / interrupt)
-    runTerm: opts.runTerm,
-    termStatus: opts.termStatus,
-    termInterrupt: opts.termInterrupt,
-    // Luwi 修 (2026-11-23): 配置面与卡片 remote 的即时读数口
-    readConfig: opts.readConfig,
-    // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 写口径的门槛看对端通道的 spec
-    peerSpec: opts.peerSpec,
-    // 写配置 / 出配对码这两个口 (面板路由层要能测到)
-    configure: opts.configure,
-    buildPairing: opts.buildPairing,
     info: {
       plugin: 'luwi-dsh-sync',
       version: '0.2.24',
@@ -130,9 +117,10 @@ function makePanel(opts = {}) {
 function fakeRequest(text, extra = {}) {
   return {
     method: 'POST',
-    // 默认按"来自本机"造 —— 真跑起来时浏览器面板就是回环地址;
-    // 想演远端的, 传 extra.socket.remoteAddress 覆盖
+    // 2026-11-21: 写面 (op) 与终端 (term) 只认回环, 判据读的就是这个字段; 默认按本机浏览器发
     socket: { remoteAddress: '127.0.0.1' },
+    // Host 头也要是回环 (2026-11-21: 挡 DNS rebinding 与同机反代)
+    headers: { host: '127.0.0.1:3080' },
     async *[Symbol.asyncIterator]() {
       if (text !== null) yield Buffer.from(text, 'utf8')
     },
@@ -248,45 +236,6 @@ test('snapshot: 握手标记 / 两根镜像 / 元数据 / 名片 / 成本预告'
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
-})
-
-test('snapshot: 配置面每趟重读文件, 卡片 remote 也取即时值 (不在挂载快照上冻住)', async () => {
-  // 症状 (2026-11-23 真机): 面板里刚保存完仓库地址, 仓库那张卡仍写"未配置"、按钮还是灰的;
-  // 二维码里的设备名也是旧的。根因: 快照里的 config 与 mirrors[].remote 都来自挂载那一刻的
-  // resolved —— 保存写进文件, 但读数不重读。
-  let reads = 0
-  const { panel } = makePanel({
-    remote: '', // 挂载时还没配
-    readConfig: async () => {
-      reads += 1
-      return {
-        repoDir: '', branch: 'main', deviceName: 'PC', backend: 'git', confirmVia: 'auto',
-        autoPullOnStart: true, autoPushOnTurnEnd: true, pullIntervalMinutes: 0,
-        remoteState: 'set', hasRemoteToken: true, panelSeats: 'both', panelOps: true,
-        workspace: { enabled: false, root: '', device: '', name: '', mirrorDir: '', maxFiles: null, maxBytes: null },
-        sessions: { currentWindowMinutes: 0 },
-        pairing: { paired: true, id: 'id-from-file' },
-      }
-    },
-    readRemote: () => 'https://x-access-token:secret@github.com/o/r.git',
-  })
-  const snap = await panel.snapshot({ withStatus: false })
-  assert.equal(reads, 1, '每趟快照都要重读一次文件')
-  assert.equal(snap.config.remoteState, 'set', '保存之后不该还写未配置')
-  assert.equal(snap.config.hasRemoteToken, true)
-  assert.equal(snap.config.pairing.id, 'id-from-file')
-  assert.equal(snap.mirrors[0].remote.state, 'set', '卡片上的远端也要是即时值')
-  assert.ok(!JSON.stringify(snap).includes('secret'), '即时值同样不许把令牌带出去')
-})
-
-test('snapshot: 重读失败时退回挂载快照, 整块不报错', async () => {
-  const { panel } = makePanel({
-    remote: 'https://example.com/r.git',
-    readConfig: async () => { throw new Error('file unreadable') },
-  })
-  const snap = await panel.snapshot({ withStatus: false })
-  assert.equal(snap.ok, true)
-  assert.equal(snap.config.remoteState, describeRemote('https://example.com/r.git').state)
 })
 
 test('snapshot: withStatus:false 不跑 git', async () => {
@@ -417,7 +366,7 @@ test('runOp: doctor / peers 自己抛错时回 ok:false 而不是 5xx', async ()
 
 // ── routes ─────────────────────────────────────────────────────────────────
 
-test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', async () => {
+test('routes: 四条精确路由, 前缀命中, /op 只收 POST', async () => {
   const { panel } = makePanel()
   const routes = panel.routes()
   assert.deepEqual(routes.map(r => r.path), [
@@ -425,7 +374,6 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
     `${PANEL_PREFIX}/doctor`,
     `${PANEL_PREFIX}/peers`,
     `${PANEL_PREFIX}/op`,
-    `${PANEL_PREFIX}/term`,
   ])
   assert.equal(routes.every(r => r.kind === 'exact'), true)
 
@@ -447,108 +395,23 @@ test('routes: 五条精确路由, 前缀命中, /op 与 /term 只收 POST', asyn
   assert.equal(ok.statusCode, 200)
   assert.equal(JSON.parse(ok.body).ok, true)
 
-  // Luwi 加 (2026-11-05): 终端面板那条路由 —— 只收 POST, 宿主没有通道时如实说没有
-  const term = routes[4]
-  assert.equal(term.path, `${PANEL_PREFIX}/term`)
-  const termGet = fakeResponse()
-  await term.handler(fakeRequest(null, { method: 'GET' }), termGet)
-  assert.equal(termGet.statusCode, 405)
-  const termNoChannel = fakeResponse()
-  await term.handler(fakeRequest('{"command":"echo hello"}'), termNoChannel)
-  assert.equal(termNoChannel.statusCode, 200)
-  assert.equal(JSON.parse(termNoChannel.body).ok, false)
-  assert.match(JSON.parse(termNoChannel.body).error, /not started by Luwi/)
+  // 2026-11-21: /term 那条路由 (沙盒终端) 已下线 —— 面上不该再有它
+  assert.equal(routes.some(r => r.path === `${PANEL_PREFIX}/term`), false)
 
   const panelRoute = routes[0]
   const snap = fakeResponse()
   await panelRoute.handler(fakeRequest(null, { method: 'GET' }), snap)
   assert.equal(snap.statusCode, 200)
   assert.equal(JSON.parse(snap.body).handshake, PANEL_HANDSHAKE)
-})
 
-test('routes: 写操作与终端只在电脑本机可用 (审计 P0 第 1 条)', async () => {
-  const { panel } = makePanel({
-    runTerm: async () => ({ ok: true, text: 'ran\n' }),
-    configure: async () => ({ ok: true, changed: ['remote = x'] }),
-    buildPairing: async () => ({ ok: true, text: 'luwi-sync://pair?d=xxx', svg: '<svg/>' }),
-  })
-  const routes = panel.routes()
-  const op = routes[3]
-  const term = routes[4]
-  const lan = { socket: { remoteAddress: '192.168.31.145' } }
-
-  // 别的设备: 改配置 / 出配对码 / 跑命令 全部拒
-  for (const body of ['{"op":"configure","confirm":true,"remote":"https://attacker/x.git"}', '{"op":"pair"}']) {
-    const res = fakeResponse()
-    await op.handler(fakeRequest(body, lan), res)
-    assert.equal(res.statusCode, 403, body)
-    assert.equal(JSON.parse(res.body).ok, false)
-    assert.match(JSON.parse(res.body).error, /本机/u)
-  }
-  const termLan = fakeResponse()
-  await term.handler(fakeRequest('{"command":"whoami"}', lan), termLan)
-  assert.equal(termLan.statusCode, 403)
-
-  // 只读的那几条不设门槛: 局域网浏览器打开面板也要能读
-  for (const body of ['{"op":"status"}', '{"op":"peers"}', '{"op":"doctor"}']) {
-    const res = fakeResponse()
-    await op.handler(fakeRequest(body, lan), res)
-    assert.notEqual(res.statusCode, 403, body)
-  }
-
-  // 本机照旧
-  const local = fakeResponse()
-  await op.handler(fakeRequest('{"op":"configure","confirm":true,"remote":"https://github.com/a/b.git"}'), local)
-  assert.equal(local.statusCode, 200)
-
-  // 别的设备带对端共享令牌也放行 —— 手机端走这条
-  const withToken = makePanel({
-    peerSpec: () => ({ token: 'shared-secret', listen: true }),
-    configure: async () => ({ ok: true, changed: [] }),
-  })
-  const res2 = fakeResponse()
-  await withToken.panel.routes()[3].handler(
-    fakeRequest('{"op":"configure","confirm":true,"remote":"https://github.com/a/b.git"}', {
-      socket: { remoteAddress: '192.168.31.145' },
-      headers: { authorization: 'Bearer shared-secret' },
-    }),
-    res2,
-  )
-  assert.equal(res2.statusCode, 200)
-})
-
-test('routes: /term 的 status / run / interrupt 三档 (2.8.0 #32)', async () => {
-  const calls = []
-  const { panel } = makePanel({
-    termStatus: async () => ({ ok: true, installed: false, version: '' }),
-    runTerm: async (command, timeoutMs) => {
-      calls.push({ command, timeoutMs })
-      return { ok: true, text: 'hi\n' }
-    },
-    termInterrupt: async () => ({ ok: true, interrupted: true }),
-  })
-  const term = panel.routes().find(route => route.path === `${PANEL_PREFIX}/term`)
-
-  const status = fakeResponse()
-  await term.handler(fakeRequest('{"op":"status"}'), status)
-  assert.equal(status.statusCode, 200)
-  assert.deepEqual(JSON.parse(status.body), { ok: true, installed: false, version: '', action: PANEL_OPS.TERM })
-
-  // 老面板不带 op 也按 run 算 (2026-11-05 那条通道的兼容面)
-  const legacy = fakeResponse()
-  await term.handler(fakeRequest('{"command":"echo hi"}'), legacy)
-  assert.equal(JSON.parse(legacy.body).ok, true)
-  assert.equal(JSON.parse(legacy.body).text, 'hi\n')
-  assert.deepEqual(calls, [{ command: 'echo hi', timeoutMs: undefined }])
-
-  const interrupt = fakeResponse()
-  await term.handler(fakeRequest('{"op":"interrupt"}'), interrupt)
-  assert.deepEqual(JSON.parse(interrupt.body), { ok: true, interrupted: true, action: PANEL_OPS.TERM })
-
-  const unknown = fakeResponse()
-  await term.handler(fakeRequest('{"op":"nope"}'), unknown)
-  assert.equal(unknown.statusCode, 400)
-  assert.match(JSON.parse(unknown.body).error, /unknown term op/)
+  // 2026-11-21 终端口径: 局域网里别的机器打过来的写面一律 403 (控制面只认回环)
+  const lanOp = fakeResponse()
+  await op.handler(fakeRequest(
+    '{"op":"push","target":"sessions","confirm":true}',
+    { socket: { remoteAddress: '192.168.1.20' } },
+  ), lanOp)
+  assert.equal(lanOp.statusCode, 403)
+  assert.match(JSON.parse(lanOp.body).error, /loopback-only/)
 })
 
 test('routes: dispose 清掉成本缓存 (下一次快照重新量)', async () => {
@@ -607,81 +470,50 @@ test('the snapshot carries the p2p readings when the host provides them', async 
   assert.equal('p2p' in without, false)
 })
 
-// ── 账号 (2026-10-23): 生成配对码的前提 ─────────────────────────────────────
+// ── 账号 / 权益 (2026-11-21 下线): 四个 op 与 license 块都不在面上 ─────────────
 
-test('login ops: start returns a one-time state in the url, poll hands back the entitlement', async () => {
-  let polls = 0
+test('账号那一组 op 与 license 块整条下线: 发过来就是未知 op, 快照里也没有 license', async () => {
   const { panel } = makePanel({
-    loginStart: async () => ({ ok: true, url: 'https://luwi.dpdns.org/login?ls=abc123', state: 'abc123', expiresAt: 1 }),
-    loginPoll: async () => {
-      polls += 1
-      return polls === 1 ? { ok: true, waiting: true } : { ok: true, signedIn: true, license: { state: 'active', login: 'octo' } }
-    },
-    logout: async () => ({ ok: true }),
-    refreshLicense: async () => ({ ok: true, license: { state: 'active' } }),
+    // 就算有人还往装配面上塞这几口, 它们也不该再被认 (op 词汇已经没了)
+    readLicense: async () => ({ state: 'active', login: 'octo', hasToken: true }),
+    loginStart: async () => ({ ok: true, url: 'https://example.com/login?ls=x' }),
   })
-
-  const started = await panel.runOp({ op: 'login-start' })
-  assert.equal(started.status, 200)
-  assert.equal(started.body.ok, true)
-  assert.match(started.body.url, /\/login\?ls=/u)
-  // 不针对哪根镜像: 不传 target 也得能跑
-  assert.equal(new URL(started.body.url).searchParams.get('ls'), 'abc123')
-
-  const waiting = await panel.runOp({ op: 'login-poll' })
-  assert.equal(waiting.body.ok, true)
-  assert.equal(waiting.body.waiting, true)
-
-  const signed = await panel.runOp({ op: 'login-poll' })
-  assert.equal(signed.body.signedIn, true)
-  assert.equal(signed.body.license.login, 'octo')
-
-  assert.equal((await panel.runOp({ op: 'license-refresh' })).body.ok, true)
-  assert.equal((await panel.runOp({ op: 'logout' })).body.ok, true)
-})
-
-test('login ops respect panelOps:false and a host without the account hooks', async () => {
-  const off = makePanel({ panelOps: false, loginStart: async () => ({ ok: true, url: 'x' }) })
-  assert.equal((await off.panel.runOp({ op: 'login-start' })).status, 403)
-
-  const bare = makePanel()
-  assert.equal((await bare.panel.runOp({ op: 'login-start' })).status, 501)
-  assert.equal((await bare.panel.runOp({ op: 'login-poll' })).status, 501)
-})
-
-test('a throwing login hook degrades to {ok:false} instead of failing the channel', async () => {
-  const { panel } = makePanel({ loginStart: async () => { throw new Error('boom') } })
-  const answer = await panel.runOp({ op: 'login-start' })
-  assert.equal(answer.status, 200)
-  assert.equal(answer.body.ok, false)
-  assert.match(answer.body.error, /boom/u)
-})
-
-test('the snapshot carries the license block, and never a token', async () => {
-  const license = {
-    state: 'grace',
-    login: 'octo',
-    email: 'octo@example.com',
-    accountId: 7,
-    plan: 'sync',
-    expiresAt: 1000,
-    graceUntil: 2000,
-    issuedAt: 500,
-    hasToken: true,
+  for (const op of ['login-start', 'login-poll', 'logout', 'license-refresh']) {
+    const answer = await panel.runOp({ op })
+    assert.equal(answer.status, 400)
+    assert.match(answer.body.error, /unknown op/u)
   }
-  const snapshot = await makePanel({ readLicense: async () => license }).panel.snapshot()
-  assert.equal(snapshot.license.state, 'grace')
-  assert.equal(snapshot.license.login, 'octo')
-  assert.equal(snapshot.license.hasToken, true)
-  assert.equal('token' in snapshot.license, false)
-  assert.equal(JSON.stringify(snapshot).includes('tok-'), false)
-
-  const without = await makePanel().panel.snapshot()
-  assert.equal('license' in without, false)
+  const snapshot = await panel.snapshot()
+  assert.equal('license' in snapshot, false)
+  assert.equal(snapshot.v, 5)
 })
 
-test('a broken license reader degrades to invalid instead of failing the snapshot', async () => {
-  const snapshot = await makePanel({ readLicense: async () => { throw new Error('disk gone') } }).panel.snapshot()
-  assert.equal(snapshot.license.state, 'invalid')
-  assert.match(snapshot.license.reason, /disk gone/u)
+// ── 配置面取即时值 (2026-11-23, 审计 P1 第 9 条) ─────────────────────────────
+
+test('snapshot: 配置面每趟重读文件, 卡片 remote 也取即时值', async () => {
+  let reads = 0
+  const { panel } = makePanel({
+    // info.config 是 host 启动那一刻的 (remote 空 = 未配置), 文件里其实已经填好了
+    readConfig: async () => {
+      reads += 1
+      return { repoDir: '', branch: 'main', deviceName: 'PC', backend: 'git', remoteState: 'set', hasRemoteToken: true }
+    },
+    readRemote: () => 'https://github.com/octo/sessions.git',
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(reads, 1)
+  assert.equal(snap.config.remoteState, 'set')
+  assert.equal(snap.config.hasRemoteToken, true)
+  assert.equal(snap.mirrors[0].remote.state, 'set')
+})
+
+test('snapshot: 重读失败时退回挂载快照, 整块不报错', async () => {
+  const { panel } = makePanel({
+    readConfig: async () => {
+      throw new Error('disk gone')
+    },
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(snap.config.remoteState, 'unset')
+  assert.equal(snap.v, 5)
 })

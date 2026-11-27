@@ -21,21 +21,17 @@ import java.io.File
  * 主人那一句是"功能与 QQ 桥接里的二代仿真一致" —— 所以这里的键名与缺省值照 `qq-bridge` 的
  * `config.json → socialV2` 抄了一遍, 只把它搬到球这一侧能用的载体上:
  *
- * - **时机与节奏归这一页**: 多久敲一次钟 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值
+ * - **时机与节奏归这一页**: 多久唤醒一次 / 沉睡前等多久 / 一次说几条 / 条间多长 / 判断层那几个阈值
  * - **检测内容归探索**: `router.json` 的 `checks` 由探索收尾写 (见 [RouterChecks]), 这一页只列出来
  *   给主人开关与删掉
  *
  * 落 `$DSH_HOME/lw/sim.json`, **应用单写者**; 宿主只读 (见 `host-plugin` 的 `readRouterInputs`)。
- * 读法一律逐键兜底: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的文件不该让敲钟停下来
+ * 读法一律逐键兜底: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的文件不该让唤醒停下来
  */
 internal object SimSetting {
 
     const val DIRECTORY = "lw"
     const val FILE = "sim.json"
-
-    /** 潜水的意思是不主动敲钟; 活跃的意思是到点就敲 (与 tick.enabled 任一为开都算开) */
-    const val MODE_DIVING = "diving"
-    const val MODE_ACTIVE = "active"
 
     /**
      * 主动场能做什么 (2026-11-10, 方案 `docs/Luwi-主动场硬闸与解闸开关-方案-2026-11-10.md`)
@@ -72,9 +68,37 @@ internal object SimSetting {
     val STICKER_MB_RANGE = 1..20
     val STICKER_COUNT_RANGE = 20..500
 
+    /**
+     * 多久贴一张表情 (2026-11-15, 主人: "当前发送表情包的概率太小")
+     *
+     * 这一格不是物理上限, 是一条**行为**的刻度 —— 宿主把它换成提示词里的一句密度
+     * (`host-plugin` 的 `stickerMoodLine`), 于是"她贴得太少"这件事在设置页就能拨,
+     * 不用改预设、也不用重打宿主。0 = 不贴
+     */
+    val STICKER_EVERY_RANGE = 0..20
+
+    /**
+     * 打扰成本那三档的范围 (2.8.1 #29, 主人: "压得住的事不必这一刻说")
+     *
+     * 0 = 这一档不扣分, 3 = 这一档单独就能把这一拍压到底 (宿主 `routerWorthwhile` 读同一个上界);
+     * 三档相加也夹在 3 以内 —— 顶上那一档是"这一刻根本不该开口"
+     */
+    val INTERRUPT_COST_RANGE = 0..3
+
+    /**
+     * 情绪与关系那五格的范围 (2026-11-20, 方案 `docs/Luwi-活动板块情感化-主动对话方案-2026-11-20.md` §9.2)
+     *
+     * 与宿主 `emotion.affectSettingsOf` 的 `AFFECT_SETTING_RANGES` 逐字同一套: 四格 0..2,
+     * 只有「提旧事的频率」是 0..3 (0 / 2 / 4 / 6 条旧事)
+     */
+    val AFFECT_BASELINE_RANGE = 0..2
+    val AFFECT_EMPATHY_RANGE = 0..2
+    val AFFECT_BOUNDARY_RANGE = 0..2
+    val AFFECT_RECALL_RANGE = 0..3
+    val AFFECT_HONESTY_RANGE = 0..2
+
     /** 每一档的缺省值 (与 `qq-bridge/config.json` 的 `socialV2` 对齐, 见 `tools/check-sim.mjs`) */
     object Default {
-        const val WAKE_MODE = MODE_DIVING
         const val WAKE_GAP_MIN_MS = 1_500_000L
         const val WAKE_GAP_MAX_MS = 3_300_000L
         const val PRE_SLEEP_WAIT_MS = 300_000L
@@ -85,37 +109,61 @@ internal object SimSetting {
         const val LONG_GAP_PROBABILITY = 0.2f
         const val LONG_GAP_MIN_MS = 5_000L
         const val LONG_GAP_MAX_MS = 10_000L
-        const val MAX_MESSAGE_CHARS = 600
-        const val MAX_SEND_PER_MINUTE = 7
-        const val MAX_SEND_PER_HOUR = 60
         const val COOLDOWN_MS = 1_800_000L
         const val CHAT_CHANCE = 0.35f
+        /**
+         * 每错过一次唤醒, 随口问一句的概率涨多少 (2.8.1 #11)
+         *
+         * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口
+         * 即清零". 0 = 不递增 (回到 2.8.0 那条常数概率), 1 = 一拍就顶到必说
+         */
+        const val CHAT_CHANCE_STEP = 0.2f
         const val CHAT_AFTER_MS = 14_400_000L
         const val IGNORED_COOLDOWN_MS = 86_400_000L
-        const val QUIET_FROM = "23:00"
-        const val QUIET_TO = "07:00"
+        /**
+         * 打扰成本那三档 (2.8.1 #29, 与宿主 `ROUTER_DEFAULTS` 是同一套数)
+         *
+         * 游戏 / 视频在前台 2 / 半小时内有过通话 3 / 刚说过话 1 —— 三项相加夹到 3, 顶到 3 就一句
+         * 都不说。改这三个数就是改"她多怕打扰你", 判断层的净收益那一侧不用再动
+         */
+        const val GAME_COST = 2
+        const val CALL_COST = 3
+        const val RECENT_COST = 1
         const val ACTING = ACTING_REMIND
         const val STICKER_MAX_MB = 2
         const val STICKER_MAX_COUNT = 200
+        const val STICKER_EVERY_N = 4
+        /**
+         * 情绪与关系那五格的缺省 (方案 §9.2, 与宿主 `AFFECT_SETTING_DEFAULTS` 同一套数)
+         *
+         * 缺键就是这一份: 老 `sim.json` 里没有 `affect` 段, 读起来正是
+         * 「温和 / 先陪 / 正常 / 经常 / 点到」
+         */
+        const val AFFECT_BASELINE = 1
+        const val AFFECT_EMPATHY = 0
+        const val AFFECT_BOUNDARY = 1
+        const val AFFECT_RECALL = 2
+        const val AFFECT_HONESTY = 1
     }
 
     /**
      * 主动程度 (2026-11-10 改名, 原「潜水与唤醒」; 2026-11-10 去群味: 群里那 9 条"什么算一次唤醒"
-     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"她多主动、隔多久来敲一次"
+     * 在这里没有语义 —— 单聊里你开口就是对她说的 —— 已撤, 这段只剩"隔多久唤醒一次")
+     *
+     * **2026-11-20 两处搬走**:
+     * - `mode` (潜水 / 活跃) 整格删掉 —— 它唯一的作用是 `RouterTick.enabled()` 的"或", 而界面上那一行
+     *   读起来像"她多主动", 实际只是判断层闹钟的第二个开关; 现在判断层只有 `router.json` 的
+     *   `tick.enabled` 一个来源 (老 `sim.json` 里还写着 `mode: active` 的由 `RouterTick.migrateMode` 搬过去)
+     * - `quiet*` 搬进 [QuietHours] —— 与自动指令那一份 (`automations/settings.json`) 是同一个接口,
+     *   两个开关以前各管一半 (到点主动场认自动指令那一份, 判断层认这一份)
      */
     data class Wake(
-        val mode: String = Default.WAKE_MODE,
         val gapMinMs: Long = Default.WAKE_GAP_MIN_MS,
         val gapMaxMs: Long = Default.WAKE_GAP_MAX_MS,
         val preSleepWaitMs: Long = Default.PRE_SLEEP_WAIT_MS,
-        val quietEnabled: Boolean = true,
-        val quietFrom: String = Default.QUIET_FROM,
-        val quietTo: String = Default.QUIET_TO,
-    ) {
-        val active: Boolean get() = mode == MODE_ACTIVE
-    }
+    )
 
-    /** 开口节奏与分条 */
+    /** 开口节奏与分条 (2026-11-20: 「一条最多几个字」「一分钟/一小时最多几条」三格删掉 —— 它们只写盘, 没有任何读者) */
     data class Send(
         val burstEnabled: Boolean = true,
         val burstMaxMessages: Int = Default.SEND_BURST_MAX,
@@ -125,9 +173,6 @@ internal object SimSetting {
         val longGapProbability: Float = Default.LONG_GAP_PROBABILITY,
         val longGapMinMs: Long = Default.LONG_GAP_MIN_MS,
         val longGapMaxMs: Long = Default.LONG_GAP_MAX_MS,
-        val maxMessageChars: Int = Default.MAX_MESSAGE_CHARS,
-        val maxPerMinute: Int = Default.MAX_SEND_PER_MINUTE,
-        val maxPerHour: Int = Default.MAX_SEND_PER_HOUR,
     )
 
     /**
@@ -139,6 +184,7 @@ internal object SimSetting {
     data class Router(
         val cooldownMs: Long = Default.COOLDOWN_MS,
         val chatChance: Float = Default.CHAT_CHANCE,
+        val chatChanceStep: Float = Default.CHAT_CHANCE_STEP,
         val chatAfterMs: Long = Default.CHAT_AFTER_MS,
         val ignoredCooldownMs: Long = Default.IGNORED_COOLDOWN_MS,
     )
@@ -164,16 +210,46 @@ internal object SimSetting {
     data class Sticker(
         val maxMb: Int = Default.STICKER_MAX_MB,
         val maxCount: Int = Default.STICKER_MAX_COUNT,
+        val everyN: Int = Default.STICKER_EVERY_N,
     ) {
         val maxBytes: Long get() = maxMb.toLong() * 1024L * 1024L
     }
+
+    /**
+     * 打扰成本那三档 (2.8.1 #29)
+     *
+     * 判断层以前只看"这件事有多重"; 现在再扣一笔"这一刻开口有多贵", 三档相加夹到 3.
+     * 宿主读 `sim.json` 的 `interrupt` 段 (`simRouterRules`), 判断与排序都在那一侧 (`routerCostOf`)
+     */
+    data class Interrupt(
+        val gameCost: Int = Default.GAME_COST,
+        val callCost: Int = Default.CALL_COST,
+        val recentCost: Int = Default.RECENT_COST,
+    )
+
+    /**
+     * 情绪与关系那五格 (2026-11-20, 方案 §9.2)
+     *
+     * 五格全是**行为刻度**不是物理上限: 宿主把它们换成提示词里的几句话 (`affectMoodLines` /
+     * `recallRowsOf` / `honestyLine`), 于是"拨一格, 下一场主动开口就变"。顺序就是 `sim.json`
+     * 里那五个键的顺序
+     */
+    data class Affect(
+        val baseline: Int = Default.AFFECT_BASELINE,
+        val empathy: Int = Default.AFFECT_EMPATHY,
+        val boundary: Int = Default.AFFECT_BOUNDARY,
+        val recall: Int = Default.AFFECT_RECALL,
+        val honesty: Int = Default.AFFECT_HONESTY,
+    )
 
     data class Plan(
         val wake: Wake = Wake(),
         val send: Send = Send(),
         val router: Router = Router(),
+        val interrupt: Interrupt = Interrupt(),
         val proactive: Acting = Acting(),
         val sticker: Sticker = Sticker(),
+        val affect: Affect = Affect(),
     )
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -193,20 +269,17 @@ internal object SimSetting {
         val wake = root?.obj("wake")
         val send = root?.obj("send")
         val router = root?.obj("router")
+        val interrupt = root?.obj("interrupt")
         val proactive = root?.obj("proactive")
         val sticker = root?.obj("sticker")
+        val affect = root?.obj("affect")
         val gapMin = wake.long("gapMinMs", Default.WAKE_GAP_MIN_MS, GAP_RANGE)
         val gapMax = wake.long("gapMaxMs", Default.WAKE_GAP_MAX_MS, GAP_RANGE)
         return Plan(
             wake = Wake(
-                mode = wake.text("mode", Default.WAKE_MODE).takeIf { it == MODE_DIVING || it == MODE_ACTIVE }
-                    ?: Default.WAKE_MODE,
                 gapMinMs = minOf(gapMin, gapMax),
                 gapMaxMs = maxOf(gapMin, gapMax),
                 preSleepWaitMs = wake.long("preSleepWaitMs", Default.PRE_SLEEP_WAIT_MS, PRE_SLEEP_RANGE),
-                quietEnabled = wake.bool("quietEnabled", true),
-                quietFrom = wake.text("quietFrom", Default.QUIET_FROM),
-                quietTo = wake.text("quietTo", Default.QUIET_TO),
             ),
             send = Send(
                 burstEnabled = send.bool("burstEnabled", true),
@@ -217,19 +290,23 @@ internal object SimSetting {
                 longGapProbability = send.float("longGapProbability", Default.LONG_GAP_PROBABILITY, 0f..1f),
                 longGapMinMs = send.long("longGapMinMs", Default.LONG_GAP_MIN_MS, BURST_GAP_RANGE),
                 longGapMaxMs = send.long("longGapMaxMs", Default.LONG_GAP_MAX_MS, BURST_GAP_RANGE),
-                maxMessageChars = send.int("maxMessageChars", Default.MAX_MESSAGE_CHARS, 60..4_000),
-                maxPerMinute = send.int("maxPerMinute", Default.MAX_SEND_PER_MINUTE, 1..60),
-                maxPerHour = send.int("maxPerHour", Default.MAX_SEND_PER_HOUR, 1..600),
             ),
             router = Router(
                 cooldownMs = router.long("cooldownMs", Default.COOLDOWN_MS, 60_000L..86_400_000L),
                 chatChance = router.float("chatChance", Default.CHAT_CHANCE, 0f..1f),
+                chatChanceStep = router.float("chatChanceStep", Default.CHAT_CHANCE_STEP, 0f..1f),
                 chatAfterMs = router.long("chatAfterMs", Default.CHAT_AFTER_MS, 60_000L..172_800_000L),
                 ignoredCooldownMs = router.long(
                     "ignoredCooldownMs",
                     Default.IGNORED_COOLDOWN_MS,
                     60_000L..604_800_000L,
                 ),
+            ),
+            // 打扰成本那三档 (2.8.1 #29): 越界夹回 [INTERRUPT_COST_RANGE], 缺键取缺省
+            interrupt = Interrupt(
+                gameCost = interrupt.int("gameCost", Default.GAME_COST, INTERRUPT_COST_RANGE),
+                callCost = interrupt.int("callCost", Default.CALL_COST, INTERRUPT_COST_RANGE),
+                recentCost = interrupt.int("recentCost", Default.RECENT_COST, INTERRUPT_COST_RANGE),
             ),
             proactive = Acting(
                 // 不认识的串按最保守的那一档; 旧布尔 allowActing 只读迁移一次 (true → act, false → remind)
@@ -243,6 +320,15 @@ internal object SimSetting {
             sticker = Sticker(
                 maxMb = sticker.int("maxMb", Default.STICKER_MAX_MB, STICKER_MB_RANGE),
                 maxCount = sticker.int("maxCount", Default.STICKER_MAX_COUNT, STICKER_COUNT_RANGE),
+                everyN = sticker.int("everyN", Default.STICKER_EVERY_N, STICKER_EVERY_RANGE),
+            ),
+            // 情绪与关系那五格 (方案 §9.2): 越界夹回 [AFFECT_*_RANGE], 缺键取缺省
+            affect = Affect(
+                baseline = affect.int("baseline", Default.AFFECT_BASELINE, AFFECT_BASELINE_RANGE),
+                empathy = affect.int("empathy", Default.AFFECT_EMPATHY, AFFECT_EMPATHY_RANGE),
+                boundary = affect.int("boundary", Default.AFFECT_BOUNDARY, AFFECT_BOUNDARY_RANGE),
+                recall = affect.int("recall", Default.AFFECT_RECALL, AFFECT_RECALL_RANGE),
+                honesty = affect.int("honesty", Default.AFFECT_HONESTY, AFFECT_HONESTY_RANGE),
             ),
         )
     }
@@ -262,13 +348,9 @@ internal object SimSetting {
     fun toJson(plan: Plan): JsonObject = buildJsonObject {
         put("v", 1)
         put("wake", buildJsonObject {
-            put("mode", plan.wake.mode)
             put("gapMinMs", plan.wake.gapMinMs)
             put("gapMaxMs", plan.wake.gapMaxMs)
             put("preSleepWaitMs", plan.wake.preSleepWaitMs)
-            put("quietEnabled", plan.wake.quietEnabled)
-            put("quietFrom", plan.wake.quietFrom)
-            put("quietTo", plan.wake.quietTo)
         })
         put("send", buildJsonObject {
             put("burstEnabled", plan.send.burstEnabled)
@@ -279,15 +361,19 @@ internal object SimSetting {
             put("longGapProbability", plan.send.longGapProbability)
             put("longGapMinMs", plan.send.longGapMinMs)
             put("longGapMaxMs", plan.send.longGapMaxMs)
-            put("maxMessageChars", plan.send.maxMessageChars)
-            put("maxPerMinute", plan.send.maxPerMinute)
-            put("maxPerHour", plan.send.maxPerHour)
         })
         put("router", buildJsonObject {
             put("cooldownMs", plan.router.cooldownMs)
             put("chatChance", plan.router.chatChance)
+            put("chatChanceStep", plan.router.chatChanceStep)
             put("chatAfterMs", plan.router.chatAfterMs)
             put("ignoredCooldownMs", plan.router.ignoredCooldownMs)
+        })
+        // 打扰成本那三档 (2.8.1 #29): 宿主 `simRouterRules` 读的正是这一段
+        put("interrupt", buildJsonObject {
+            put("gameCost", plan.interrupt.gameCost)
+            put("callCost", plan.interrupt.callCost)
+            put("recentCost", plan.interrupt.recentCost)
         })
         put("proactive", buildJsonObject {
             put("acting", plan.proactive.tier)
@@ -295,6 +381,15 @@ internal object SimSetting {
         put("sticker", buildJsonObject {
             put("maxMb", plan.sticker.maxMb)
             put("maxCount", plan.sticker.maxCount)
+            put("everyN", plan.sticker.everyN)
+        })
+        // 情绪与关系那五格 (方案 §9.2): 老 sim.json 缺这一段天然就是缺省, 所以 v 仍是 1
+        put("affect", buildJsonObject {
+            put("baseline", plan.affect.baseline)
+            put("empathy", plan.affect.empathy)
+            put("boundary", plan.affect.boundary)
+            put("recall", plan.affect.recall)
+            put("honesty", plan.affect.honesty)
         })
     }
 

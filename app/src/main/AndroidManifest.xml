@@ -137,6 +137,24 @@
         android:protectionLevel="signature|dangerous" />
     <uses-permission android:name="io.github.yuloong07star.luwi.permission.PLUGIN" />
 
+    <!-- 连接接口 (2.8.1 B1): 别的应用问 Luwi 状态的那扇门。signature 级 = 只有和我同一张证书
+         签出来的应用绑得上, 不需要用户在弹窗里点任何东西; 第三方逐 scope 授权那一档还没开,
+         等它开了再把这一条降级, 而不是现在就留个口子 -->
+    <permission
+        android:name="io.github.yuloong07star.luwi.permission.LINK"
+        android:protectionLevel="signature" />
+
+    <!-- 开发台那条路 (2.8.1): 「安卓开发工具」与「Luwi 开发台」两件伴侣的 Service 用它护住。
+         signature 级 = 只有同一张证书签出来的应用绑得上 —— 那两件与主 APK 同一把 debug key,
+         于是"自行下载"进来的东西天然是同一档, 不需要谁点同意; 我们自己也要 uses-permission,
+         否则绑不上护住了的 Service -->
+    <permission
+        android:name="io.github.yuloong07star.luwi.permission.DEV"
+        android:label="@string/permission_dev_label"
+        android:description="@string/permission_dev_description"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="io.github.yuloong07star.luwi.permission.DEV" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -159,18 +177,60 @@
             android:name="libcdsprpc.so"
             android:required="false" />
 
+        <!-- singleTop (2026-11-13): 少了这一条, 桌面上再点一次图标会在同一个 task 里又建一个实例 ——
+             真机现场 (docs/Luwi-真机-界面加载中-检查-2026-11-13.md 第四节) 就是 shell `am start` 那个
+             与桌面图标那个一起活着, 两份 HostScreen / 两个 FloatingBall / 两个 renderer 各吃 200~260 MB,
+             把一台 5.6 GB 的机器直接推进 lmkd 连环杀那一段。它的复位逻辑本来就在 onNewIntent 里 -->
+        <activity
+            android:name=".ui.DevConsoleActivity"
+            android:exported="true"
+            android:label="@string/dev_console_title"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.Luwi"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 图标套的桌面入口 (2026-11-22, 设置 -> 外观 -> Luwi 图标): 启动器读的是 APK 里的资源,
+             系统没有"运行时替换自己 launcher icon"的 API, 于是每套图标预置一个 activity-alias,
+             切换 = enable 目标 + disable 别的 (见 tool/IconTheme.kt 的 apply / switchPlan)。
+             **MainActivity 本体因此不再带 LAUNCHER**: 留着就是同一个应用两个桌面入口。
+             两个 alias 的 android:enabled 是"还没写过 lw/icon.json"时的初值 —— 女仆那张是缺省
+             (主人 2026-11-22 点名), 内置鲸尾那一套要人自己切; 切过一次之后由 PackageManager 记住,
+             升级不重置。`am start -n …/.MainActivity` 与通知的 PendingIntent 照旧走 activity 本体 -->
+        <activity-alias
+            android:name=".IconBuiltin"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_builtin"
+            android:label="@string/app_name"
+            android:roundIcon="@mipmap/ic_launcher_builtin_round"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconMaid"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_maid"
+            android:label="@string/app_name"
+            android:roundIcon="@mipmap/ic_launcher_maid_round"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- 球那块框上的 ＋: 挑一张图发给她 (2026-11-07). 它没有界面, 一闪就过 —— 透明主题见
              values/themes.xml 的 Theme.Luwi.Transparent -->
@@ -188,6 +248,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="runs the dsh agent host and its Web GUI in the background" />
+        </service>
+
+        <!-- 连接接口: 只有拿到 signature 级 LINK 权限的应用绑得上, 也就是和我们同签名那一档。
+             门在 permission 上, 服务这一层再验一次 uid 的签名并写审计 -->
+        <service
+            android:name=".link.LwLinkService"
+            android:exported="true"
+            android:permission="io.github.yuloong07star.luwi.permission.LINK">
+            <intent-filter>
+                <action android:name="io.github.yuloong07star.luwi.link.BIND" />
+            </intent-filter>
         </service>
 
         <!-- 浮在别的应用上面的输入窗: 长跑的前台服务, 类型跟 DshHostService 同一套
@@ -290,20 +361,17 @@
             android:name=".automation.AutomationAlarmReceiver"
             android:exported="false" />
 
-        <!-- 探索的排期 (2.7.8 批次 8): 每天一个时刻, 到点读那张任务卡写一行收件箱。与上面那个闹钟
-             分开一个 requestCode (42 对 41), 两边互不覆盖; exported=false 的理由与上一条相同 -->
-        <receiver
-            android:name=".tool.ExploreAlarmReceiver"
-            android:exported="false" />
+        <!-- 探索**没有**闹钟 (2026-11-21 起): 它由判断层挑时机开, 应用这一侧不排任何时刻 —— 原来那个
+              requestCode 42 的接收器已随排期一起删掉 -->
 
         <!-- 主动对话的排期 (2.8.0 B4-a): 一天几个时刻, 到点读 proactive-card.md 写一行收件箱。
-             与上面两个闹钟分开一个 requestCode (43 对 41 / 42), 三个互不覆盖; exported=false 的
+             与自动化那个闹钟分开一个 requestCode (43 对 41), 两个互不覆盖; exported=false 的
              理由与上一条相同 -->
         <receiver
             android:name=".tool.ProactiveAlarmReceiver"
             android:exported="false" />
 
-        <!-- 判断层的敲钟 (2026-11-07): 25~55 分钟不定时投一行 source:"router", 说"该看一眼了"。
+        <!-- 判断层的唤醒 (2026-11-07): 25~55 分钟不定时投一行 source:"router", 说"该看一眼了"。
              要不要开口由宿主那侧判 (见 host-plugin 的 judgeRouter), 缺省关着 -->
         <receiver
             android:name=".tool.RouterTickReceiver"

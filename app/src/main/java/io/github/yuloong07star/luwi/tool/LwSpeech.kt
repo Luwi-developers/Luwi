@@ -10,6 +10,7 @@ import com.k2fsa.sherpa.onnx.VersionInfo
 import com.k2fsa.sherpa.onnx.WaveReader
 import io.github.yuloong07star.luwi.voice.SpeechSegmenter
 import io.github.yuloong07star.luwi.voice.TranscriptClean
+import io.github.yuloong07star.luwi.voice.VoiceSource
 import io.github.yuloong07star.luwi.voice.VoiceState
 import java.io.File
 import kotlinx.serialization.json.JsonObject
@@ -28,9 +29,14 @@ import kotlinx.serialization.json.put
  * 三个动作: `status` 看模型与引擎在不在, `transcribe` 认一段录音, `release` 把认出来的实例
  * 放掉 —— SenseVoice int8 的模型是 240 MB 量级, 装进内存之后不便宜, 长时间不用值得放
  *
- * **两套引擎**: 这里这一套是 SenseVoice (快, 常驻语音链走它); 另有 [GlmAsr] 那一套
+ * **两套本地引擎**: 这里这一套是 SenseVoice (快, 常驻语音链走它); 另有 [GlmAsr] 那一套
  * (GLM-ASR-Nano, 1.5B, 准但慢一个数量级), 由 `engine` 这个参数选, 缺省还是 SenseVoice ——
  * 换引擎是调用方的决定, 不是这里的默认
+ *
+ * **第三档在云端** (2026-11-15, 2.8.1 #6): `engine=deepseek` 是 DeepSeek 官方语音输入 —— 本地一个
+ * 模型都不碰, 一段 wav 经 [LwDeepseekTranscribe] 交给宿主那条回环路由, 由宿主带上账号令牌去打官方
+ * `POST /v1/tools/asr`。**常驻链走哪一档由 `lw/voice-source.json` 那一份选择定** ([engine]), 而页面
+ * 那颗麦克风由宿主按同一份文件分岔 —— 两处认的是同一个字面量
  */
 internal object LwSpeech {
 
@@ -76,6 +82,23 @@ internal object LwSpeech {
         val directory = modelDirectory(context)
         return File(directory, MODEL_FILE).isFile && File(directory, TOKENS_FILE).isFile
     }
+
+    /**
+     * 这台机器这一句话该按哪一档认 (纯读那份选择, 缺文件 / 写坏都是本地那一档)
+     *
+     * 只在**没点名 engine** 的地方用: 常驻链 ([recognize]) 与 `op=status` 的读数。点名了的一律按点名
+     * 的那一档 —— `lw_speech engine=glm` 不该因为这台机器选了账号就改用云端
+     */
+    fun engine(context: Context): String =
+        if (VoiceSource.usesAccount(context)) DEEPSEEK else ENGINE
+
+    /**
+     * 这一档现在能不能出字
+     *
+     * 本地两档看模型在不在位; 云端那一档**永远算就绪** —— 它缺的只是登录, 而"有没有登录"只有宿主
+     * 知道; 这一侧先答应下来, 到真认的时候宿主会回一句"还没登录", 那句话会如实报出去
+     */
+    fun readyFor(context: Context): Boolean = engine(context) == DEEPSEEK || ready(context)
 
     /** 切段模型在不在位: 缺了它语音输入切不出句子 */
     fun vadReady(context: Context): Boolean = vadModel(context).let { it.isFile && it.length() > 0 }
@@ -130,13 +153,45 @@ internal object LwSpeech {
             put("languages", LANGUAGES.joinToString(", "))
             // 另一套引擎的状态放在同一个答复里: 调用方问一次就知道两档各能不能用
             put("glm", GlmAsr.status(context))
+            // 第三档 (2026-11-15, 2.8.1 #6): 云端那一条 —— 端点与限制照官方文档写死, 令牌不在这一侧
+            put("source", VoiceSource.read(context))
+            put("chosen", engine(context))
+            put("deepseek", buildJsonObject {
+                put("endpoint", LwDeepseekAsr.ENDPOINT)
+                put("route", LwDeepseekAsr.ROUTE_PATH)
+                put("maxBytes", LwDeepseekAsr.MAX_BYTES)
+                put("maxSeconds", LwDeepseekAsr.MAX_SECONDS)
+                put("chunkSeconds", LwDeepseekAsr.CHUNK_SECONDS)
+                // 登录状态只有宿主知道 (令牌在它那里): 这一侧不猜, 只把"还没问过"说出来
+                put("signedInKnown", false)
+            })
         }
     }
 
     /** 认一段录音: 只认 16 kHz 单声道的 WAV, 也就是页面那一侧录出来的样子 */
     private fun transcribe(context: Context, request: JsonObject): JsonObject {
         val path = request.string("wav")
-        if (engineOf(request) == GLM) {
+        val engine = engineOf(request)
+        if (engine == DEEPSEEK) {
+            // 云端那一档 (2026-11-15, 2.8.1 #6): 本地一个模型都不碰, 交给宿主转一手
+            val recording = File(path)
+            if (!recording.isFile) unavailable("transcribing $path", "there is no such file")
+            val startedAt = System.currentTimeMillis()
+            val answer = LwDeepseekTranscribe.answer(context, runCatching { recording.readBytes() }
+                .getOrElse { error ->
+                    unavailable("reading ${recording.name}", error.message ?: error.toString())
+                })
+            return buildJsonObject {
+                // 与另外两档同一个清洁口: 云端回来的那一句也要过一遍
+                put("text", TranscriptClean.clean(answer.text))
+                put("raw", answer.text)
+                put("engine", DEEPSEEK)
+                put("durationMs", answer.durationMs)
+                put("requestId", answer.requestId)
+                put("elapsedMs", System.currentTimeMillis() - startedAt)
+            }
+        }
+        if (engine == GLM) {
             val startedAt = System.currentTimeMillis()
             val text = GlmAsr.transcribe(context, File(path))
             return buildJsonObject {
@@ -201,6 +256,9 @@ internal object LwSpeech {
      */
     fun recognize(context: Context, samples: FloatArray, language: String = "auto"): String? {
         if (samples.isEmpty()) return null
+        // 选了账号那条的机器 (2026-11-15, 2.8.1 #6): 这一段采样交给宿主送去官方接口 —— 本地那 240 MB
+        // 一个字节都不碰, 于是"没下模型也能出字"这一条在这里才真的成立
+        if (engine(context) == DEEPSEEK) return recognizeByAccount(context, samples)
         val directory = modelDirectory(context)
         val model = File(directory, MODEL_FILE)
         val tokens = File(directory, TOKENS_FILE)
@@ -228,15 +286,37 @@ internal object LwSpeech {
     }
 
     /**
+     * 云端那一档认一段采样
+     *
+     * 与本地那一条的区别: **出错要抛**而不是回 null —— null 在常驻链那里的意思是"模型不在, 这一句
+     * 就没人认", 而云端那一档缺的可能是登录 / 网络 / 一次 4xx, 那三种都得说给主人听 (调用方把抛出
+     * 来的那句话记进 [VoiceState.lastError])
+     *
+     * 出字之后照样过 [TranscriptClean]: 云端与本地两套引擎的输出在同一个口子出去
+     */
+    private fun recognizeByAccount(context: Context, samples: FloatArray): String {
+        val said = LwDeepseekTranscribe.text(context, samples)
+        val clean = TranscriptClean.clean(said)
+        // **丢掉了要说一声** (与本地那条同一个口径)
+        if (clean.isEmpty() && said.isNotBlank()) {
+            VoiceState.lastError = "a segment came back as text this app cannot speak (" +
+                said.take(20) + "), so it was dropped"
+        }
+        return clean
+    }
+
+    /**
      * 把那 240 MB 先装进内存, 不出字
      *
      * 第一次 [recognize] 与第一次 [warmUp] 走的是同一条 [recognizerFor], 所以预热过的下一次认就是
      * 纯推理 —— 常驻语音链在**命中唤醒词那一下**调它, 那笔加载的时间因此落在主人还在说话的那几秒里,
      * 而不是落在他"说完了在等"的那几秒里
      *
-     * 回 false 表示模型不在位, 什么都没做 (与 [recognize] 回 null 是同一个意思)
+     * 回 false 表示模型不在位, 什么都没做 (与 [recognize] 回 null 是同一个意思)。**云端那一档没有
+     * 可预热的东西**: 它一块内存都不占, 直接答应下来 (常驻链少一次 240 MB 的读盘)
      */
     fun warmUp(context: Context): Boolean {
+        if (engine(context) == DEEPSEEK) return true
         val directory = modelDirectory(context)
         val model = File(directory, MODEL_FILE)
         val tokens = File(directory, TOKENS_FILE)
@@ -273,9 +353,14 @@ internal object LwSpeech {
 
     /** 把 SenseVoice 那 240 MB 先读进内存, 等真要认的时候只剩推理 */
     private fun warmUp(context: Context, request: JsonObject): JsonObject {
-        if (engineOf(request) == GLM) {
+        val engine = engineOf(request)
+        if (engine == GLM) {
             val ready = GlmAsr.warmUp(context)
             return buildJsonObject { put("warmed", ready); put("engine", GLM) }
+        }
+        if (engine == DEEPSEEK) {
+            // 云端那一档没有可预热的东西: 一块内存都不占, 也不该在这里读出那 240 MB (2.8.1 #6)
+            return buildJsonObject { put("warmed", true); put("engine", DEEPSEEK) }
         }
         return buildJsonObject {
             put("warmed", warmUp(context))
@@ -328,10 +413,22 @@ internal object LwSpeech {
         return if (asked in LANGUAGES) asked else "auto"
     }
 
-    /** 引擎那两个字: 不认识的一律落回 SenseVoice, 一个拼错的名字不该把转写变成"没有" */
-    private fun engineOf(request: JsonObject): String =
-        if (request.stringOrNull("engine")?.trim()?.lowercase() == GLM) GLM else ENGINE
+    /**
+     * 引擎那两个字: 不认识的一律落回 SenseVoice, 一个拼错的名字不该把转写变成"没有"
+     *
+     * **没点名也算 SenseVoice** —— 按引导里那份选择分岔是 [engine] 的事, 而那条只给常驻链用:
+     * 页面那颗麦克风与 `lw_speech` 都由宿主先按同一份文件算好再点名, 免得"调用方点了 glm, 而机器
+     * 选了账号"时两边各认一个
+     */
+    private fun engineOf(request: JsonObject): String = when (request.stringOrNull("engine")?.trim()?.lowercase()) {
+        GLM -> GLM
+        DEEPSEEK -> DEEPSEEK
+        else -> ENGINE
+    }
 
     const val ENGINE = "sherpa"
     const val GLM = "glm"
+
+    /** 第三档 (2026-11-15, 2.8.1 #6): DeepSeek 官方语音输入 —— 云端那一条 */
+    const val DEEPSEEK = "deepseek"
 }

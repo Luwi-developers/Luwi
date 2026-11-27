@@ -173,3 +173,58 @@ export function renderPeers(cards, broken = 0) {
 }
 
 export { MERGE_KINDS, timeOf }
+
+/**
+ * P2P 传输那一段的人话 (2026-11-22; 2026-11-22 晚改成中文)。
+ *
+ * 原来是面板上那张 P2P 卡; 面板瘦身之后 (`/sync p2p`) 这里就是唯一的读数口 —— 所以卡上那几行
+ * 一句不少地搬过来: 开关 / 这一趟走的哪条路 / 对端 / 信任 / SAS / 计数 / 冷却 / 最近错误,
+ * 以及"哪一台在等确认换机"。**末尾那一行是下一步该打什么命令** (中文写法, 英文别名也认),
+ * 不必再去翻文档
+ * @param {object} state - `p2pService.status()` 的产物。
+ * @returns {string} 文本。
+ */
+export function renderP2pState(state) {
+  const enabled = state?.enabled === true
+  const path = typeof state?.path === 'string' ? state.path : ''
+  const pathText = path === 'ip'
+    ? `直连 ${state?.rttMs ?? '?'} ms`
+    : path === 'relay'
+      ? `中转 ${state?.rttMs ?? '?'} ms（比直连慢）`
+      : path === 'offline'
+        ? '对端不在, 这一趟走 git'
+        : path === 'disabled'
+          ? '关着'
+          : '还没试过'
+  const trust = (() => {
+    const raw = typeof state?.trustState === 'string' ? state.trustState : ''
+    if (raw === 'trusted') return '已信任'
+    if (raw === 'new') return '新对端'
+    if (raw === 'changed') return '换机待确认'
+    if (raw === 'revoked') return '已吊销'
+    return '还没核过'
+  })()
+  const lines = [enabled ? `p2p: 开 · 传输 ${pathText}` : 'p2p: 关']
+  if (state?.peerName || state?.peerId) {
+    lines.push(`  对端: ${state.peerName || '?'} · ${String(state.peerId || '').slice(0, 8)}…`)
+  }
+  const sas = typeof state?.sas === 'string' && state.sas !== ''
+    ? ` · SAS ${state.sas.replace(/(\d{3})(\d{3})/u, '$1 $2')}`
+    : ''
+  lines.push(`  信任: ${trust}${sas}`)
+  if (enabled) {
+    lines.push(`  计数: 发出 ${state?.sent ?? 0} · 收到 ${state?.received ?? 0} · 跳过 ${state?.skipped ?? 0} · 失败 ${state?.failures ?? 0}`)
+  }
+  if (state?.cooling === true) lines.push('  冷却中: 上一次没成, 这一分钟先走 git')
+  const blocked = state?.blockedPeer
+  if (blocked !== null && blocked !== undefined && typeof blocked.id === 'string' && blocked.id !== '') {
+    lines.push(`  等确认换机: ${blocked.name || blocked.id}（设备 ${blocked.id}, 节点 ${String(blocked.nodeId || '').slice(0, 8)}…）`)
+  }
+  if (state?.lastError) {
+    const code = typeof state.lastError.code === 'string' ? state.lastError.code : ''
+    const message = typeof state.lastError.message === 'string' ? state.lastError.message : ''
+    lines.push(`  最近错误: ${`${code} ${message}`.trim()}`)
+  }
+  lines.push('  开关: /sync p2p 开|关 · 信任: /sync p2p 确认 <设备 id> · /sync p2p 吊销 <设备 id>（英文 on|off|confirm|revoke 也认）')
+  return lines.join('\n')
+}

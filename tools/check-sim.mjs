@@ -1,13 +1,13 @@
 /**
  * 「更多设置」那一页的判据表 (2026-11-07 晚)
  *
- * 这一页的每一行都**只是数字**: 写歪一个也不会报错, 只会让"她多久敲一次钟 / 一次说几条 /
+ * 这一页的每一行都**只是数字**: 写歪一个也不会报错, 只会让"她多久唤醒一次 / 一次说几条 /
  * 什么时候该闭嘴"悄悄换了一套。所以四件事分开钉:
  *
  *   1. **缺省值与 QQ 桥接的二代仿真同一套** (`config.json → socialV2`, 值写死在这里比对) ——
  *      主人那一句是"功能与 qq 桥接里的二代仿真一致", 数不一样就等于没对上
  *   2. **读盘逐键兜底**: 缺键取缺省、越界夹进范围、类型不对取缺省 —— 一份写坏的 `sim.json`
- *      不该让敲钟停下来
+ *      不该让唤醒停下来
  *   3. **写盘是原子的, 而且只写自己那一份** (`sim.json` 单写者; `router.json` 读-改-写)
  *   4. **检测项的所有权在探索**: 宿主 `finishExplore` 收 `checks` → `router.json`, 应用只开关与忘掉;
  *      判断层那一侧 (分数、今天提过、关掉不判) 由 `check-router.mjs` 跑
@@ -32,6 +32,9 @@ const host = await read('host-plugin/index.mjs')
 const persona = await read('presets/explore/cordis.patch.yml')
 const zh = await read('app/src/main/res/values-zh/strings.xml')
 const en = await read('app/src/main/res/values/strings.xml')
+const quietHours = await read('app/src/main/java/io/github/yuloong07star/luwi/tool/QuietHours.kt')
+const portal = await read('presets/luwi-portal/lib/client.js')
+const bridge = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/PortalBridge.kt')
 
 let failures = 0
 let count = 0
@@ -66,32 +69,170 @@ const expected = {
   LONG_GAP_PROBABILITY: 0.2, // send.longGapProbability
   LONG_GAP_MIN_MS: 5_000, // send.longGapMinMs
   LONG_GAP_MAX_MS: 10_000, // send.longGapMaxMs
-  MAX_MESSAGE_CHARS: 600, // send.maxMessageChars
-  MAX_SEND_PER_MINUTE: 7, // send.maxPerMinute
-  MAX_SEND_PER_HOUR: 60, // send.maxPerHour
   COOLDOWN_MS: 1_800_000, // ROUTER_DEFAULTS.cooldownMs
   CHAT_CHANCE: 0.35, // ROUTER_DEFAULTS.chatChance
+  CHAT_CHANCE_STEP: 0.2, // ROUTER_DEFAULTS.chatChanceStep (2.8.1 #11)
   CHAT_AFTER_MS: 14_400_000, // ROUTER_DEFAULTS.chatAfterMs
   IGNORED_COOLDOWN_MS: 86_400_000, // ROUTER_DEFAULTS.ignoredCooldownMs
+  GAME_COST: 2, // ROUTER_DEFAULTS.gameCost (2.8.1 #29)
+  CALL_COST: 3, // ROUTER_DEFAULTS.callCost
+  RECENT_COST: 1, // ROUTER_DEFAULTS.recentCost
 }
 
 check('缺省值逐个与 QQ 桥接 socialV2 对齐', Object.fromEntries(
   Object.keys(expected).map((name) => [name, kotlinConst(sim, name)]),
 ), expected)
 
-check('潜水/活跃两个档名就是 diving 与 active, 缺省是潜水', [
-  sim.includes('const val MODE_DIVING = "diving"'),
-  sim.includes('const val MODE_ACTIVE = "active"'),
-  sim.includes('const val WAKE_MODE = MODE_DIVING'),
-], [true, true, true])
-
 check('宿主的 ROUTER_DEFAULTS 与这一页同一套数', [
   /cooldownMs: 30 \* 60 \* 1000,/.test(host),
   /chatChance: 0\.35,/.test(host),
+  /chatChanceStep: 0\.2,/.test(host),
   /chatAfterMs: 4 \* 60 \* 60 \* 1000,/.test(host),
   /ignoredCooldownMs: 24 \* 60 \* 60 \* 1000,/.test(host),
   /preSleepWaitMs: 5 \* 60 \* 1000,/.test(host),
-], [true, true, true, true, true])
+], [true, true, true, true, true, true])
+
+/* ── 一之一、2026-11-20 删掉的那几格 (只写不读 / 名不符实) ──────────────── */
+
+/*
+ * 主人 2026-11-20: 「一条最多几个字」「一分钟最多说几条」「一小时最多说几条」三行删掉 —— 它们
+ * 只进 `sim.json`, 宿主读出 `maxMessageChars` 却没有任何截断点, 另外两格连读者都没有;
+ * 「她现在的状态 (潜水 / 活跃)」也删掉 —— 那一格唯一的作用是 `RouterTick.enabled()` 的第二个来源,
+ * 界面上写着"到点就看一眼"而代码里没有这件事。这一节钉住负方向: 数据层 / 页面 / 宿主都别再长回来
+ */
+check('三格只有数字的开口设置删干净了 (数据层 / 页面 / 宿主都不再有)', [
+  !/MAX_MESSAGE_CHARS|MAX_SEND_PER_MINUTE|MAX_SEND_PER_HOUR/.test(sim),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(sim),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(page),
+  !/maxMessageChars|maxPerMinute|maxPerHour/.test(host),
+  !/name="settings_sim_max_chars"/.test(zh) && !/name="settings_sim_max_chars"/.test(en),
+  !/name="settings_sim_send_per_minute"/.test(zh) && !/name="settings_sim_send_per_minute"/.test(en),
+  !/name="settings_sim_send_per_hour"/.test(zh) && !/name="settings_sim_send_per_hour"/.test(en),
+], [true, true, true, true, true, true, true])
+
+check('「她现在的状态」那一格删干净了 (数据层 / 页面 / 门户都不再有)', [
+  !/MODE_DIVING|MODE_ACTIVE|WAKE_MODE/.test(sim),
+  !/wake\.mode/.test(sim),
+  !/setWakeMode/.test(sim),
+  !/settings_sim_mode/.test(page),
+  !/name="settings_sim_mode"/.test(zh) && !/name="settings_sim_mode"/.test(en),
+  !/bySim/.test(host) && !/bySim/.test(portal),
+], [true, true, true, true, true, true])
+
+check('静默只有一份真源: sim.json 的 wake.quiet* 退役, 宿主只读 automations/settings.json', [
+  !/val quietEnabled|val quietFrom|val quietTo/.test(sim),
+  !/sim\?\.wake\?\.quietFrom/.test(host),
+  !/sim\?\.wake\?\.quietTo/.test(host),
+  /const quiet = \{ enabled: settings\?\.quiet\?\.enabled === true, from, to \}/.test(host),
+  /object QuietHours/.test(quietHours),
+  /base\.copy\(quietEnabled = plan\.enabled, quietWindow = window\)/.test(quietHours),
+  // 门户读数那一处也算读者 (2026-11-20 差点漏掉的那一个): 走同一个接口, 不再自己解 sim.json
+  /QuietHours\.read\(context\)/.test(bridge) && !/wake\?\.optString\("quietFrom"\)/.test(bridge),
+], [true, true, true, true, true, true, true])
+
+
+/* ── 一之二、每错过一次加 20% 那一格 (2.8.1 #11) ────────────────────────── */
+
+/*
+ * 主人 2026-11-16: "每错过一次唤醒 chatChance 加 20%(缺省基准 0.35, 上限 1.0), 任意一次开口即清零".
+ * 这一节钉三件: ① 这一页的缺省与范围 (0..1) ② 落盘与读回走同一个键 ③ 写 0 时概率恒等于 chatChance,
+ * 也就是"与改动前逐字一致" —— 最后一条是真跑宿主那段纯函数, 不是查字符串
+ */
+
+check('chatChanceStep 缺省 0.2, 范围 0..1, 落盘与读回走同一个键', [
+  kotlinConst(sim, 'CHAT_CHANCE_STEP'),
+  /val chatChanceStep: Float = Default\.CHAT_CHANCE_STEP,/.test(sim),
+  /chatChanceStep = router\.float\("chatChanceStep", Default\.CHAT_CHANCE_STEP, 0f\.\.1f\)/.test(sim),
+  /put\("chatChanceStep", plan\.router\.chatChanceStep\)/.test(sim),
+  // 宿主从 sim.json 的 router 段读它 (缺键 / 坏值都不放进规则表, 由 ROUTER_DEFAULTS 兜底)
+  /put\('chatChanceStep', sim\?\.router\?\.chatChanceStep\)/.test(host),
+  // 这一页有一行能改它
+  /R\.string\.settings_sim_router_chance_step\b/.test(page)
+    && /settings_sim_router_chance_step_summary/.test(page),
+], [0.2, true, true, true, true, true])
+
+/** 抽宿主那段纯函数出来真跑 (`routerChatChance` 与 `ROUTER_DEFAULTS` 在同一段里) */
+const chatAt = host.indexOf('const ROUTER_DEFAULTS')
+const chatEnd = host.indexOf('function ballReplyPolicy', chatAt)
+if (chatAt < 0 || chatEnd < 0) {
+  console.error('FAIL the router block is not in host-plugin/index.mjs any more')
+  process.exit(1)
+}
+const { routerChatChance, routerCostOf, ROUTER_DEFAULTS: HOST_ROUTER, ROUTER_COST_MAX } = new Function(
+  `${host.slice(chatAt, chatEnd)}\nreturn { routerChatChance, routerCostOf, ROUTER_DEFAULTS, ROUTER_COST_MAX }`,
+)()
+
+check('宿主那侧缺省就是 0.35 起 / 每次 0.2 / 夹 1.0', [
+  HOST_ROUTER.chatChance,
+  HOST_ROUTER.chatChanceStep,
+  [0, 1, 2, 3, 4, 5].map((n) => routerChatChance({}, n)),
+], [0.35, 0.2, [0.35, 0.55, 0.75, 0.95, 1, 1]])
+
+check('写 0 时行为与改动前逐字一致 (概率恒等于 chatChance)', [0, 1, 2, 3, 9].map(
+  (n) => routerChatChance({ chatChanceStep: 0 }, n),
+), [0.35, 0.35, 0.35, 0.35, 0.35])
+
+/* ── 一之三、打扰成本那三档 (2.8.1 #29) ─────────────────────────────────── */
+
+/*
+ * 主人那一句: "判断层加一档打扰成本: 压得住的事不必这一刻说". 这一页给三个 0..3 的格子, 宿主
+ * 判断层按它扣分 (`routerCostOf`). 这一节钉三件:
+ *   ① 缺省值 (2 / 3 / 1) 与宿主 `ROUTER_DEFAULTS` 是同一套数
+ *   ② 落盘与读回走同一个键, 范围 0..3 (写 9 就夹回 3)
+ *   ③ 宿主那一侧真跑一遍: 写 9 进来, 读到的成本是 3 (不是 9, 也不是 0)
+ */
+
+check('三档成本缺省 2 / 3 / 1, 范围 0..3', [
+  kotlinConst(sim, 'GAME_COST'),
+  kotlinConst(sim, 'CALL_COST'),
+  kotlinConst(sim, 'RECENT_COST'),
+  /val INTERRUPT_COST_RANGE = 0\.\.3/.test(sim),
+], [2, 3, 1, true])
+
+check('宿主那侧是同一套数 (缺省 2 / 3 / 1, 封顶 3)', [
+  HOST_ROUTER.gameCost,
+  HOST_ROUTER.callCost,
+  HOST_ROUTER.recentCost,
+  ROUTER_COST_MAX,
+], [2, 3, 1, 3])
+
+check('三个格子写进 sim.json 的 interrupt 段, 读回时夹进范围', [
+  /data class Interrupt\(\s*val gameCost: Int = Default\.GAME_COST,\s*val callCost: Int = Default\.CALL_COST,\s*val recentCost: Int = Default\.RECENT_COST,\s*\)/.test(sim),
+  /gameCost = interrupt\.int\("gameCost", Default\.GAME_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /callCost = interrupt\.int\("callCost", Default\.CALL_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /recentCost = interrupt\.int\("recentCost", Default\.RECENT_COST, INTERRUPT_COST_RANGE\)/.test(sim),
+  /put\("interrupt", buildJsonObject \{/.test(sim),
+  /put\("gameCost", plan\.interrupt\.gameCost\)/.test(sim),
+  /put\("callCost", plan\.interrupt\.callCost\)/.test(sim),
+  /put\("recentCost", plan\.interrupt\.recentCost\)/.test(sim),
+  // 宿主从 sim.json 的 interrupt 段读它 (缺键 / 坏值都不放进规则表, 由 ROUTER_DEFAULTS 兜底)
+  /put\('gameCost', sim\?\.interrupt\?\.gameCost\)/.test(host),
+  /put\('callCost', sim\?\.interrupt\?\.callCost\)/.test(host),
+  /put\('recentCost', sim\?\.interrupt\?\.recentCost\)/.test(host),
+], [true, true, true, true, true, true, true, true, true, true, true])
+
+check('写 9 夹回 3 (真跑宿主那段: 9 进来读到的成本是 3)', [
+  routerCostOf({
+    now: 0,
+    usage: { today: [], foreground: { pkg: 'com.tencent.tmgp.sgame' } },
+  }, { gameCost: 9 }).cost,
+  routerCostOf({ now: 600_000, lastSpokenAt: 1 }, { recentCost: 99 }).cost,
+], [3, 3])
+
+check('这一页有三行能改它 (游戏 / 通话 / 刚说过话), 摆在判断层那张卡里', [
+  /R\.string\.settings_sim_interrupt_game\b/.test(page),
+  /settings_sim_interrupt_game_summary/.test(page),
+  /R\.string\.settings_sim_interrupt_call\b/.test(page),
+  /settings_sim_interrupt_call_summary/.test(page),
+  /R\.string\.settings_sim_interrupt_recent\b/.test(page),
+  /settings_sim_interrupt_recent_summary/.test(page),
+  /settings_sim_interrupt_note/.test(page),
+  /SimSetting\.INTERRUPT_COST_RANGE/.test(page),
+  // 与判断层那几个阈值同一张卡 (这一页仍是四段, 不另起一组)
+  page.indexOf('settings_sim_interrupt_note') > page.indexOf('settings_sim_router_ignored'),
+  page.indexOf('settings_sim_interrupt_note') < page.indexOf('settings_sim_sticker_group'),
+  !page.includes('settings_sim_interrupt_group'),
+], [true, true, true, true, true, true, true, true, true, true, true])
 
 // 2026-11-10 主人: "那两个设置应该由探索或主动对话时自己决定" —— 游戏线 / 提前天数从这一页搬走,
 // 改由 `router.json.rules` 写; 这两条负断言钉住"界面与数据层都不再回潮", 并确认老 sim.json 不再盖住它
@@ -107,13 +248,15 @@ check('两把尺子不再在 SimSetting 与这一页里', [
 
 check('宿主不再从 sim.json 读这两把尺子, 而给她留了两个写入口', [
   !/put\('gameMinutes', sim\?\.router\?\.gameMinutes\)/u.test(host),
+  !/put\('appMinutes', sim\?\.router\?\.appMinutes\)/u.test(host),
   !/put\('wishDays', sim\?\.router\?\.wishDays\)/u.test(host),
   /const ROUTER_RULE_RANGES = Object\.freeze\(\{/u.test(host),
   /function normalizeRouterRules\(input\)/u.test(host),
   /async function writeRouterRules\(rules\)/u.test(host),
-  /gameMinutes: args\?\.gameMinutes, wishDays: args\?\.wishDays/u.test(host),
+  // 2.8.1 #10: 尺子改名 appMinutes (旧名 gameMinutes 只作只读迁移的入口)
+  /appMinutes: args\?\.appMinutes,\s*gameMinutes: args\?\.gameMinutes,\s*wishDays: args\?\.wishDays/u.test(host),
   /exploreRulesWrite\(args\?\.rules\)/u.test(host),
-], [true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true])
 
 /* ── 二、读盘逐键兜底 ───────────────────────────────────────────────────── */
 
@@ -147,13 +290,11 @@ check('router.json 那一侧是读-改-写, 只替换 checks 这一项', [
 
 /* ── 四、接线: 时机与节奏 ───────────────────────────────────────────────── */
 
-check('敲钟的间隔读 sim.json (不传就用原来那 25~55 分钟)', [
+check('唤醒的间隔读 sim.json (不传就用原来那 25~55 分钟)', [
   /fun gapFor\(roll: Float, minMs: Long = MIN_GAP_MS, maxMs: Long = MAX_GAP_MS\): Long/.test(tick),
   /plan\?\.gapMinMs \?: MIN_GAP_MS/.test(tick),
   /plan\?\.gapMaxMs \?: MAX_GAP_MS/.test(tick),
 ], [true, true, true])
-
-check('活跃那一档也算开 (mode = active)', /SimSetting\.plan\(context\)\.wake\.active/.test(tick), true)
 
 check('分条的停顿与条数读 sim.json', [
   /fun limitOf\(send: SimSetting\.Send\): Int/.test(outbox),
@@ -234,17 +375,33 @@ const simLines = (text) => text
   .split('\n')
   .filter((line) => line.includes('name="settings_sim_') || line.includes('name="settings_activity_more'))
   .join('\n')
-check('四组都在 (wake / send / router / sticker), 检测项只读 + 开关 + 忘掉', [
+check('活动板块六组: 设置页仍是 SIM_GROUPS 那四组, 判断面板多收一组 affect', [
+  /private val SIM_GROUPS = listOf\("wake", "send", "router", "sticker"\)/u.test(page),
+  // 2026-11-21 主人 07:17 拍板第 ③ 条: 情绪与关系那五格只进门户判断面板, 不进设置页
+  /private val ACTIVITY_GROUPS = listOf\("explore", "proactive"\) \+ SIM_GROUPS \+ listOf\("affect"\)/u
+    .test(page),
+  /!withActivity -> SIM_GROUPS/u.test(page),
+  // 判断面板吃下活动里除探索之外的全部 (六组), 探索面板仍只看一组
+  /else -> ACTIVITY_GROUPS\.filter \{ it != "explore" \}/u.test(page),
+  /focus\.trim\(\) == "explore" -> listOf\("explore"\)/u.test(page),
+], [true, true, true, true, true])
+
+check('判断面板那六组都在 (wake / send / router / sticker / proactive / affect), 检测项只读 + 开关 + 忘掉', [
   page.includes('settings_sim_wake_group'),
   page.includes('settings_sim_send_group'),
   page.includes('settings_sim_router_group'),
   // 2026-11-10 主人: "在设置活动的更多设置版块里加表情包图片上限设置"
   page.includes('settings_sim_sticker_group'),
+  // 2026-11-20 方案 §9: 最后一组「情绪与关系」
+  page.includes('settings_sim_affect_group'),
+  page.includes('ProactiveItems()'),
+  // 2.8.1 #29 的打扰成本不另起一段: 它落在判断层那张卡里 (见上面那一节)
+  !page.includes('settings_sim_interrupt_group'),
   !page.includes('settings_sim_wait_group'),
   !page.includes('settings_sim_context_group'),
   /RouterChecks\.setEnabled\(context, one\.id, on\)/.test(page),
   /RouterChecks\.drop\(context, one\.id\)/.test(page),
-], [true, true, true, true, true, true, true, true])
+], [true, true, true, true, true, true, true, true, true, true, true])
 
 // 防回潮: 那 14 项的名字一个都不许再出现在数据层与页面里 (写回来 = 又长了群味)
 check('数据层与页面里不再有群味那 14 项的名字', [
@@ -257,42 +414,130 @@ check('数据层与页面里不再有群味那 14 项的名字', [
   !/data class Wait\(/.test(sim) && !/data class ContextSize\(/.test(sim),
 ], [true, true, true, true, true, true, true])
 
-// 第一段标题已从「潜水与唤醒」改成「主动程度」(只改值不动键); 「唤醒」与 Diving and waking 都不该
+// 第一段标题已从「潜水与唤醒」改成「主动程度」(只改值不动键); "Diving and waking" 那种群味长句不该
 // 再出现在这一页的文案里 —— 上面那一大段「唤醒词」是另一件事, 不在这条判据的范围里
-check('这一页的文案里没有「唤醒」/ Diving and waking 的群味词', [
-  !simLines(zh).includes('唤醒'),
+//
+// **2026-11-13 改口**: 主人把主动场那一下统一叫「唤醒」("敲钟改成唤醒"), 于是「唤醒」这个词本身不再
+// 算群味词 (原来那条 `!simLines(zh).includes('唤醒')` 与本次口径直接冲突, 以主人这一句为准撤掉);
+// 留着的仍是那句英文长句与第一段的标题
+check('这一页的文案里没有 Diving and waking 那种群味长句', [
   !simLines(en).includes('Diving and waking'),
   zh.includes('<string name="settings_sim_wake_group">主动程度</string>'),
   en.includes('<string name="settings_sim_wake_group">How active she is</string>'),
-  zh.includes('<string name="settings_activity_more_summary">潜水 / 节奏 / 判断层 / 表情</string>'),
-  en.includes('<string name="settings_activity_more_summary">Diving, pacing, decision layer, stickers</string>'),
-], [true, true, true, true, true, true])
+  zh.includes('<string name="settings_activity_more_summary">节奏 / 静默 / 判断层 / 表情</string>'),
+  en.includes('<string name="settings_activity_more_summary">Pacing, quiet hours, decision layer, stickers</string>'),
+], [true, true, true, true, true])
 
-// 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount`, 读的时候夹进各自范围
-check('表情那两格写进 sim.json 的 sticker.maxMb / maxCount, 读回时夹进范围', [
+// 那一格的落盘与读回 (2026-11-10): 写 `sim.json` 的 `sticker.maxMb` / `maxCount` / `everyN`,
+// 读的时候夹进各自范围。`everyN` 是 2026-11-15 加的"多久贴一张" (主人: 发得太少)
+check('表情那三格写进 sim.json 的 sticker.maxMb / maxCount / everyN, 读回时夹进范围', [
   /val STICKER_MB_RANGE = 1\.\.20/.test(sim),
   /val STICKER_COUNT_RANGE = 20\.\.500/.test(sim),
-  /data class Sticker\(\s*val maxMb: Int = Default\.STICKER_MAX_MB,\s*val maxCount: Int = Default\.STICKER_MAX_COUNT,\s*\)/.test(sim),
+  /val STICKER_EVERY_RANGE = 0\.\.20/.test(sim),
+  /data class Sticker\(\s*val maxMb: Int = Default\.STICKER_MAX_MB,\s*val maxCount: Int = Default\.STICKER_MAX_COUNT,\s*val everyN: Int = Default\.STICKER_EVERY_N,\s*\)/.test(sim),
   /maxMb = sticker\.int\("maxMb", Default\.STICKER_MAX_MB, STICKER_MB_RANGE\)/.test(sim),
   /maxCount = sticker\.int\("maxCount", Default\.STICKER_MAX_COUNT, STICKER_COUNT_RANGE\)/.test(sim),
+  /everyN = sticker\.int\("everyN", Default\.STICKER_EVERY_N, STICKER_EVERY_RANGE\)/.test(sim),
   /put\("sticker", buildJsonObject \{/.test(sim),
   /put\("maxMb", plan\.sticker\.maxMb\)/.test(sim),
   /put\("maxCount", plan\.sticker\.maxCount\)/.test(sim),
-], [true, true, true, true, true, true, true, true])
+  /put\("everyN", plan\.sticker\.everyN\)/.test(sim),
+], [true, true, true, true, true, true, true, true, true, true, true])
+
+/* ── 六之二、情绪与关系那五格 (2026-11-20, 方案 §9.2) ───────────────────── */
+
+/*
+ * 方案 §9 的验收点: 五格只写 `sim.json` 的 `affect` 段, 宿主 `emotion.affectSettingsOf(sim?.affect)`
+ * 读同一套键与范围. 这一节钉三件:
+ *   ① 五个范围常量与宿主 `AFFECT_SETTING_RANGES` 逐字同一套, 缺省也是那五个数
+ *   ② 读盘逐键夹取 / 写盘一段五键同序 (`v` 仍是 1, 旧文件天然是缺省, 不做迁移)
+ *   ③ 页面上那一组 (五个下拉 + 一句注) 与宿主读的那一行都还在
+ */
+
+check('情绪与关系那五格的范围 (与宿主 AFFECT_SETTING_RANGES 逐字同一套)', [
+  /val AFFECT_BASELINE_RANGE = 0\.\.2/u.test(sim),
+  /val AFFECT_EMPATHY_RANGE = 0\.\.2/u.test(sim),
+  /val AFFECT_BOUNDARY_RANGE = 0\.\.2/u.test(sim),
+  /val AFFECT_RECALL_RANGE = 0\.\.3/u.test(sim),
+  /val AFFECT_HONESTY_RANGE = 0\.\.2/u.test(sim),
+], [true, true, true, true, true])
+
+check('情绪与关系那五格的缺省 (1 / 0 / 1 / 2 / 1), data class Affect 就摆在 Plan 末尾', [
+  [
+    kotlinConst(sim, 'AFFECT_BASELINE'),
+    kotlinConst(sim, 'AFFECT_EMPATHY'),
+    kotlinConst(sim, 'AFFECT_BOUNDARY'),
+    kotlinConst(sim, 'AFFECT_RECALL'),
+    kotlinConst(sim, 'AFFECT_HONESTY'),
+  ],
+  /data class Affect\(\s*val baseline: Int = Default\.AFFECT_BASELINE,\s*val empathy: Int = Default\.AFFECT_EMPATHY,\s*val boundary: Int = Default\.AFFECT_BOUNDARY,\s*val recall: Int = Default\.AFFECT_RECALL,\s*val honesty: Int = Default\.AFFECT_HONESTY,\s*\)/u
+    .test(sim),
+  /val sticker: Sticker = Sticker\(\),\s*val affect: Affect = Affect\(\),\s*\)/u.test(sim),
+], [[1, 0, 1, 2, 1], true, true])
+
+check('情绪与关系那五格写进 sim.json 的 affect 段, 读回时夹进范围', [
+  /val affect = root\?\.obj\("affect"\)/u.test(sim),
+  // 五行 affect.int(...) 与五行 put(...)
+  (sim.match(/affect\.int\("(?:baseline|empathy|boundary|recall|honesty)", Default\.AFFECT_/gu) ?? [])
+    .length,
+  (sim.match(/put\("(?:baseline|empathy|boundary|recall|honesty)", plan\.affect\./gu) ?? []).length,
+  /baseline = affect\.int\("baseline", Default\.AFFECT_BASELINE, AFFECT_BASELINE_RANGE\)/u.test(sim),
+  /empathy = affect\.int\("empathy", Default\.AFFECT_EMPATHY, AFFECT_EMPATHY_RANGE\)/u.test(sim),
+  /boundary = affect\.int\("boundary", Default\.AFFECT_BOUNDARY, AFFECT_BOUNDARY_RANGE\)/u.test(sim),
+  /recall = affect\.int\("recall", Default\.AFFECT_RECALL, AFFECT_RECALL_RANGE\)/u.test(sim),
+  /honesty = affect\.int\("honesty", Default\.AFFECT_HONESTY, AFFECT_HONESTY_RANGE\)/u.test(sim),
+  /put\("affect", buildJsonObject \{/u.test(sim),
+  // 新增段对旧文件天然是缺省: 版本号不抬
+  /put\("v", 1\)/u.test(sim),
+], [true, 5, 5, true, true, true, true, true, true, true])
+
+check('情绪与关系那一组在页面上 (五个标题 + 一句注), 宿主读同一套键', [
+  page.includes('settings_sim_affect_group'),
+  /R\.string\.settings_sim_affect_baseline\b/u.test(page),
+  /R\.string\.settings_sim_affect_empathy\b/u.test(page),
+  /R\.string\.settings_sim_affect_boundary\b/u.test(page),
+  /R\.string\.settings_sim_affect_recall\b/u.test(page),
+  /R\.string\.settings_sim_affect_honesty\b/u.test(page),
+  /settings_sim_affect_note/u.test(page),
+  // 五格都是下拉 (有名字的档), 这是对 §9.4 那个滑块的有意偏差; 原先还有一格「模式」也是下拉,
+  // 那格在整合线上已改成 NumberRow, 所以门槛按眼下这五格算
+  (page.match(/OverlayDropdownPreference\(/gu) ?? []).length >= 5,
+  // recall = 0 (不提旧事) 时透明程度那一格没有落点: 主人 2026-11-21 定「置灰」, 摆灰字不给下拉
+  /if \(plan\.affect\.recall == 0\) \{/u.test(page),
+  /R\.string\.settings_sim_affect_honesty_muted/u.test(page),
+  /private fun MutedRow\(title: String, summary: String\)/u.test(page),
+  // 这一组排在表情那一组之后 (小节标题就是「五、情绪与关系」)
+  page.indexOf('settings_sim_affect_group') > page.indexOf('settings_sim_sticker_group'),
+  // 宿主读的正是 sim.json 的 affect 段
+  /emotion\.affectSettingsOf\(sim\?\.affect\)/u.test(host),
+], [true, true, true, true, true, true, true, true, true, true, true, true, true])
 
 check('那条弹窗的形状与插件能力那张一样 (OverlayDialog + 可滚动的一坨 + 底部按钮)', [
-  /fun SimSettingsDialog\(onDismiss: \(\) -> Unit\)/.test(page),
+  /fun SimSettingsDialog\(/.test(page),
   /OverlayDialog\(/.test(page),
   /show = true,/.test(page),
-  /height\(\(screenHeight \* 0\.58f\)\.dp\)/.test(page),
+  // 高度按屏算; 2026-11-14 起门户那两颗「设置」按可见组数收 (1~2 组 0.52 / 更多 0.66)
+  // —— 设置页那侧仍是 0.58, 认不出来的写法就红
+  /!withActivity -> 0\.58f/.test(page) && /visible\.size <= 2 -> 0\.52f/.test(page),
+  // 2026-11-21: 判断面板第六组进来后, 六组以上再开一档 0.72 (0.66 要滚两屏)
+  /visible\.size >= 6 -> 0\.72f/.test(page),
   /R\.string\.settings_sim_close/.test(page),
   /verticalScroll|LazyColumn\(/.test(page),
-], [true, true, true, true, true, true])
+], [true, true, true, true, true, true, true])
 
 check('那一页没有"手写一条检测项"的入口 (检测项只由探索加)', [
   !/RouterChecks\.add\(/.test(page),
   !/settings_sim_checks_add/.test(page),
 ], [true, true])
+
+// 手打那一档也要落盘 (2026-11-13 真机上量到: 只改内存里的那份, 关掉再打开又回到 30)
+{
+  const at = page.indexOf('onInputConfirm = { text ->')
+  const body = at < 0 ? '' : page.slice(at, at + 260)
+  check('数字项手打之后也写一遍 (不是只改内存)', [
+    at >= 0 && /onCommit\(\)/.test(body),
+  ], [true])
+}
 
 /* ── 七、两份 strings.xml ───────────────────────────────────────────────── */
 
@@ -301,6 +546,17 @@ const keys = [
   'settings_activity_more_summary',
   'settings_sim_title',
   'settings_sim_note',
+  // 2026-11-16: 每错过一次加多少 (2.8.1 #11, 紧跟在"随口问一句的概率"那两行后面)
+  'settings_sim_router_chance_step',
+  'settings_sim_router_chance_step_summary',
+  // 2.8.1 #29: 打扰成本那三行 (紧跟在判断层那几行后面, 同一张卡)
+  'settings_sim_interrupt_game',
+  'settings_sim_interrupt_game_summary',
+  'settings_sim_interrupt_call',
+  'settings_sim_interrupt_call_summary',
+  'settings_sim_interrupt_recent',
+  'settings_sim_interrupt_recent_summary',
+  'settings_sim_interrupt_note',
   'settings_sim_checks_note',
   'settings_sim_checks_empty',
   'settings_sim_checks_how',
@@ -309,12 +565,47 @@ const keys = [
   // 2026-11-10: 表情那一格 (插入位置就是文件里的相对位置, 顺序对不上会在这里红)
   'settings_sim_unit_mb',
   'settings_sim_unit_sheets',
+  // 2.8.1 #29: 打扰成本那一组用的单位 (排在 sheets 后面, 两份文件同址)
+  'settings_sim_unit_points',
   'settings_sim_sticker_group',
   'settings_sim_sticker_max',
   'settings_sim_sticker_max_summary',
   'settings_sim_sticker_count',
   'settings_sim_sticker_count_summary',
+  // 2026-11-15: 多久贴一张 (同一个 sticker 段, 写在 note 前面 —— 顺序对不上会红)
+  'settings_sim_sticker_every',
+  'settings_sim_sticker_every_summary',
   'settings_sim_sticker_note',
+  // 2026-11-20 (方案 §9.2): 情绪与关系那五格, 紧跟在表情那一段的 note 之后 (两份同址)
+  'settings_sim_affect_group',
+  'settings_sim_affect_baseline',
+  'settings_sim_affect_baseline_summary',
+  'settings_sim_affect_baseline_l0',
+  'settings_sim_affect_baseline_l1',
+  'settings_sim_affect_baseline_l2',
+  'settings_sim_affect_empathy',
+  'settings_sim_affect_empathy_summary',
+  'settings_sim_affect_empathy_l0',
+  'settings_sim_affect_empathy_l1',
+  'settings_sim_affect_empathy_l2',
+  'settings_sim_affect_boundary',
+  'settings_sim_affect_boundary_summary',
+  'settings_sim_affect_boundary_l0',
+  'settings_sim_affect_boundary_l1',
+  'settings_sim_affect_boundary_l2',
+  'settings_sim_affect_recall',
+  'settings_sim_affect_recall_summary',
+  'settings_sim_affect_recall_l0',
+  'settings_sim_affect_recall_l1',
+  'settings_sim_affect_recall_l2',
+  'settings_sim_affect_recall_l3',
+  'settings_sim_affect_honesty',
+  'settings_sim_affect_honesty_summary',
+  'settings_sim_affect_honesty_l0',
+  'settings_sim_affect_honesty_l1',
+  'settings_sim_affect_honesty_l2',
+  'settings_sim_affect_honesty_muted',
+  'settings_sim_affect_note',
 ]
 
 check(`${keys.length} 个关键文案两份都在, 而且顺序一致`, [
@@ -337,6 +628,15 @@ check('新增的那些文案里没有裸 % (Android 会抛 UnknownFormatConversi
 check('设置页段数没变 (活动段还是那一段, 新的是一页而不是一段)', (await read(
   'app/src/main/java/io/github/yuloong07star/luwi/ui/SettingsScreen.kt',
 )).includes('key = "activity"'), true)
+
+// 2026-11-14: 一场主动对话的条数上限由 `send.burstMaxMessages` 定;
+// **2026-11-20**: `lw_say` 那一侧也真的按它切了 (以前写死 6, 于是设置里拨到 3 只有球认, 门户照旧 6 个气泡)
+check('一次最多几条真的接到 lw_say 上 (宿主按 send.burstMaxMessages 切, 上界仍是 6)', [
+  host.includes('Math.min(6, Math.max(1, wanted))'),
+  /const cap = Math\.min\(6, Math\.max\(1, Number\(send\.burstMaxMessages\) \|\| 6\)\)/.test(host)
+    && /texts = texts\.slice\(0, cap\)/.test(host),
+  kotlinConst(sim, 'SEND_BURST_MAX'),
+], [true, true, 6])
 
 console.log(`\n${count - failures} / ${count} checks passed`)
 if (failures > 0) process.exit(1)

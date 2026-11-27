@@ -14,7 +14,10 @@ param(
     [string]$RepoRoot = 'D:\apk\Luwi',
     [string]$Repo = 'Luwi-developers/Luwi',
     [string]$Gh = 'D:\Codex\gh-cli\gh.exe',
-    [string]$RemoteRef = 'luwi/main',
+    # **写全名** (2026-11-14): `luwi/main` 这种短名在仓库里同时命中 `refs/heads/luwi/main`
+    # (本地一条陈旧分支) 与 `refs/remotes/luwi/main`, git 取前者 —— base 因此一直是旧的,
+    # 会把别人的提交重放一遍. 全名不会歧义; 推功能分支时传 `refs/remotes/luwi/<分支>`
+    [string]$RemoteRef = 'refs/remotes/luwi/main',
     [string]$Tag = 'v1.0.3',
     # 推**功能分支**（PR 用）：留空＝老行为（推 heads/main 并打标）；填了就只动 refs/heads/<Branch>。
     # 分支已存在 → PATCH；不存在 → POST 创建。对象照旧逐个比对 SHA，全对才动 ref。
@@ -75,9 +78,9 @@ $localTree = (git rev-parse "$base^{tree}").Trim()
 if ($remoteTree -ne $localTree) { throw "base tree differs: remote=$remoteTree local=$localTree" }
 Write-Host "base $base : tree $localTree matches the API" -ForegroundColor Green
 
-$commits = @(git rev-list --reverse "$RemoteRef..HEAD")
+$commits = @(git rev-list --reverse --topo-order "$RemoteRef..HEAD")
 if ($Limit -gt 0) { $commits = @($commits[0..($Limit - 1)]) }
-Write-Host "replaying $($commits.Count) of $((@(git rev-list --reverse "$RemoteRef..HEAD")).Count) commit(s)"
+Write-Host "replaying $($commits.Count) of $((@(git rev-list --reverse --topo-order "$RemoteRef..HEAD")).Count) commit(s)"
 
 $known = @{}
 # 提交 -> 它那棵树的 SHA。**历史里有 merge**, 所以"上一次重放的那个提交"不等于"这个提交的父提交":
@@ -95,6 +98,12 @@ foreach ($commit in $commits) {
     $parts = $line -split ' '
     if ($parts.Count -lt 2) { throw "$commit has no parent to base its tree on" }
     $parentSha = $parts[1]
+    if (-not $trees.ContainsKey($parentSha)) {
+        # 第一父可能落在 $RemoteRef 之前 (分支从更早的远端提交长出来, 或合进来的那一支早已在远端) ——
+        # 那时它不在 $commits 里, 也不等于 base; 直接问 API 要它那棵树, 不猜
+        $knownTree = (& $Gh api "repos/$Repo/git/commits/$parentSha" --jq '.tree.sha' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $knownTree) { $trees[$parentSha] = $knownTree.Trim() }
+    }
     if (-not $trees.ContainsKey($parentSha)) {
         throw "$($commit.Substring(0, 7)) 的第一父 $($parentSha.Substring(0, 7)) 还没被重放过"
     }
@@ -212,7 +221,7 @@ if (-not $Apply) {
     Write-Host "dry run: the ref was NOT moved (rerun with -Apply to move it)" -ForegroundColor Yellow
     exit 0
 }
-if ($commits.Count -ne @(git rev-list --reverse "$RemoteRef..HEAD").Count) { throw "refusing -Apply on a partial replay" }
+if ($commits.Count -ne @(git rev-list --reverse --topo-order "$RemoteRef..HEAD").Count) { throw "refusing -Apply on a partial replay" }
 
 $targetRef = if ($Branch) { "refs/heads/$Branch" } else { 'refs/heads/main' }
 $body = @{ sha = $parentSha; force = $false } | ConvertTo-Json -Compress

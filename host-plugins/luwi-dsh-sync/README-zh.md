@@ -142,6 +142,9 @@ dsh --profile web --dump-config | grep -A2 'id: session-sync'
 | `registerTools` | `true` | tools 服务存在时注册 `sync_*` 工具 |
 | `panelSeats` | `both` | 官方侧边栏那块操作面板装哪些座位：`both`／`right`（只右侧栏 tab）／`left`（只左侧栏全局入口）／`off`（关掉面板） |
 | `panelOps` | `true` | 面板能不能发起写操作（`pull`／`push`）。`false` = 只留读面；工具与 `/sync` 不受它管 |
+| `ask.mode` | `relay` | 终端问答（2026-11-22）：`off` = 与以前一样（电脑上弹卡）；`notify` = 只传到手机看得见，仍回电脑上答；`relay` = 传到手机 + 手机上能答 + 超时按自定义回答继续；`auto` = 根本不问 |
+| `ask.waitMs` | `120000` | `relay` 等手机多久（5000..1800000）；到点由模型自己定，并在正文写「我替你定了：…」 |
+| `ask.brief` | `true` | 给"手机驱动的那一场"附一条终端提示（每轮至多一次，30 分钟节流）；**只追加一条上下文消息，正文一个字都不改** |
 
 在你的 profile patch 中的覆盖示例：
 
@@ -172,6 +175,55 @@ dsh --profile web --dump-config | grep -A2 'id: session-sync'
 | `sync_push` | | ✅ | 模型可调用的推送 |
 | `sync_doctor` | ✅ | — | 只读自检：peer 解析落点 / ② 层 extraneous / git 能不能跑 / 有效挂载态 |
 | **官方侧边栏面板** | 部分 | 两次点击 | `panelSeats` 决定装在右侧栏 tab 与／或左侧栏全局入口；读面随时可用，`pull`／`push` 要"点按钮 → 点确认"两下。数据走同源 `GET/POST /luwi-sync/*`，宿主没有 HTTP 服务时面板如实报"通道没开"并禁用按钮。设计见 `../../docs/Luwi-dsh-sync-设计.md` 第 11 节 |
+
+## 终端问答：手机看得见电脑在问什么（2026-11-22）
+
+**症状**：电脑上的 agent 用了 `ask_user_question`，手机终端那一页毫无反应，两边一起等到超时。
+
+**根因**（三条都得治）：
+
+1. 那张问答卡片长在 dsh 自己的会话界面里，答案走客户端 remote event `user-questions/request` —— 手机连的是它自己的 host，永远收不到；
+2. 手机终端画的是**投影会话**，只由快照 `entries`（user / assistant 文本）折出来，而 `ask_user_question` 是 `tool/call`，只数次数、不折文本；
+3. 问一句不改会话日志，而手机要不要重新取快照看的是 `/peer/info` 的 `updatedAt`（账上叫 revision）—— 不抬这一格，连"有一行字"都不会出现。
+
+**做法**（`ask` 段，四档）：
+
+| 档 | 手机上看得到 | 能回手机答 | 超时/无人 |
+|---|---|---|---|
+| `off` | 否 | 否 | 电脑上弹卡（与以前一样） |
+| `notify` | 是（写明"只能在电脑上答"） | 否 | 电脑上弹卡 |
+| **`relay`（缺省）** | 是 | **是** | `waitMs` 后按自定义回答继续 |
+| `auto` | 是（一行"我自己定了"） | 否 | 立刻自定义回答 |
+
+- **问题那一行**：插件在 `projectSession` 里把它作为**合成条目**并进快照（`condense` 的 `extra`）—— 进 `entries`、不进对话账 `all`，`seq` 取那一笔 `tool/call` 的真号（天然有序、天然幂等）。快照版本仍是 v3，**老手机插件照样折得动**。
+- **让手机来取**：`/peer/info` 里那一场的 `updatedAt` 被抬到"问题出现的时刻"，5 秒那一拍就会重新拉快照。
+- **手机怎么答**：就在终端输入框里回 `1` / `2`（多选 `1,2`，多问用 `;` 分隔），或者直接打一句话当自定义回答。`receive()` 在**投递之前**先问 `answerAsk` —— 那一轮正卡在工具里，steer 进去要等工具返回才被读，而工具等的就是这句答案，所以命中就地结算、**不进 agent inbox**。
+- **接管请求必须 `prepend`**：dsh 自己的问答卡片也挂在这个 waterfall 上（客户端 remote 监听），谁先谁拿到请求。晚一步就只能眼看着 PC 的卡片弹出来而手机永远不知道。
+- **手机发来的话带提示**：`agent/pre-step` 给"手机驱动的那一场"追加一条上下文消息（`source.kind` 是本插件，**不是 `user`**，所以不会折成投影条目、手机上不多一行）。**正文一个字都不改** —— 跨设备回声去重只比"人话"（`pendingKeyOf`），动了正文同一句会画两遍。
+- **谁是"手机驱动的那一场"**：收到过 `source.via === 'peer'` 的那一句，或者由对端的 `target: {kind:'new'}` 新开的那一场。电脑本地那一场一个字都不动。
+
+命令（中文为主，英文留别名）：
+
+```text
+/sync ask            状态：模式 / 等多久 / 终端提示 / 计数 / 此刻在等谁
+/sync ask 关         与以前一样（电脑上弹卡）
+/sync ask 提示       传过去看得见，但要回电脑上答
+/sync ask 中继       缺省：传过去 + 手机上能答 + 超时自定义回答
+/sync ask 自动       不问，直接按自定义回答继续
+```
+
+配置示例：
+
+```jsonc
+// $DSH_HOME/lw/session-sync.json
+"ask": { "mode": "relay", "waitMs": 120000, "brief": true }
+```
+
+**要知道的三件事**：
+
+1. `relay` 会把请求从电脑的卡片上抢走（这是 `prepend` 的代价）。人就在电脑前、想自己答：`/sync ask 关`。
+2. 只走队列 / 没配对 / 手机离线时，手机那边本来就送不出回答 —— `relay` 退化成"等满 `waitMs` 后按自定义回答继续"。
+3. 手机端**不用改**：问题走的是已有快照、回答走的是已有 `POST /luwi-sync/peer/send`（回执多一格 `answered`）。没有新路由、没有新快照版本。
 
 ## 权限与数据
 

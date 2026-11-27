@@ -1,15 +1,21 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.Manifest
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Insets
 import android.net.Uri
 import android.os.Environment
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import android.view.DragEvent
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.webkit.ConsoleMessage
@@ -27,6 +33,9 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -112,6 +121,8 @@ import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
 import io.github.yuloong07star.luwi.overlay.OverlayState
 import io.github.yuloong07star.luwi.sync.SyncSetting
+import io.github.yuloong07star.luwi.tool.IconTheme
+import io.github.yuloong07star.luwi.tool.LwForge
 import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.OpenFile
 import androidx.core.content.ContextCompat
@@ -119,6 +130,7 @@ import io.github.yuloong07star.luwi.wake.WakeWordDownload
 import io.github.yuloong07star.luwi.voice.VoiceState
 import io.github.yuloong07star.luwi.wake.WakeWordService
 import io.github.yuloong07star.luwi.wake.WakeWordState
+import org.json.JSONArray
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.DropdownEntry
@@ -132,10 +144,13 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Remove
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -195,6 +210,17 @@ internal class ScreenErrorOnce(private val windowMs: Long = SCREEN_ERROR_WINDOW_
 private val screenErrorOnce = ScreenErrorOnce()
 
 /**
+ * 虚拟屏那扇小窗现在收着没有
+ *
+ * 原来是这一页的一个 `remember` (标题栏的减号收掉, 菜单里那一项叫回来)。2026-11-14 起球菜单里
+ * 那一条也搬进了门户「⋯」抽屉, 而抽屉那一侧是 [PortalMenu] 一个 object —— 拿不到这一页的状态,
+ * 于是这一格挪到进程里, 三处 (小窗 / 球菜单 / 抽屉) 读的是同一份
+ */
+internal object ScreenWindow {
+    var hidden by mutableStateOf(false)
+}
+
+/**
  * 主页面: dsh 的 Web GUI 占满, 虚拟屏的画面浮在它上面
  *
  * 画面是一个可拖动的小窗而不是占一条高度: 屏在后台跑着, 人要能一边看着它一边用会话, 而占高度
@@ -218,11 +244,98 @@ fun HostScreen(modifier: Modifier = Modifier) {
     val preview = selected
 
     // 减号把整扇窗收掉, 收起来之后界面上一点痕迹都不留; 要它回来走 ⋮ 菜单里那一项
-    var windowHidden by remember { mutableStateOf(false) }
+    // 2026-11-14: 这一格挪到 [ScreenWindow] (门户「⋯」抽屉也要读它), 这里只留一个本地别名
+    val windowHidden = ScreenWindow.hidden
+    val setWindowHidden: (Boolean) -> Unit = { ScreenWindow.hidden = it }
     // 浮标菜单里的「Luwi反馈」: 与设置页 ⋮ 第一条同一个窗 (2026-10-29)
     var feedbackOpen by remember { mutableStateOf(false) }
+    // 门户 / 球菜单那一行「开发」: 弹的是与设置页同一份 DevItems (2026-11-17)
+    var devOpen by remember { mutableStateOf(false) }
     // 正在弹的那条虚拟屏错误, null 表示没有 (2.8.0 B2-c): 以前这里是一行常驻文字, 现在是一次性的
     var screenError by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // 前台「开发」面板里那两件要人动手的: 起名字 / 选一份 zip (2026-11-17)
+    val devImport = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val line = withContext(Dispatchers.IO) { importToolchain(context, uri) }
+                PortalDev.note(line)
+                Toast.makeText(context, line, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // 门户那颗「按住 说话」要的那一问 (2026-11-20): 系统授权窗只有 Activity 弹得出来, 而门户那座桥
+    // 拿的是 applicationContext —— 页面落一个 [PortalAsk.Target.MIC] 掷标, 这里接住并弹窗; 结果
+    // 再经 `PortalVoice.reportPermission` 回推页面 (页面据此说"给好了"或"去设置里开")
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        PortalVoice.reportPermission(granted)
+    }
+
+    // 终端那个弹窗里的「扫码配对」(2026-11-21, 落实表 #48): 相机权限只有 Activity 弹得出来,
+    // 扫码窗也要这一层才画得出来 —— 页面点那颗钮只落一个 [PortalAsk.Target.PAIR] 掷标
+    var pairing by remember { mutableStateOf(false) }
+    // 「现在重启 dsh 吗」那一问的标题 (2026-11-22): 非空时就是开着那一扇 [RestartHostDialog],
+    // 标题按场景换 (配对成功 / 终端已打开 / 终端已关闭 / 已取消配对), 一份状态只挂一扇窗
+    var restartAsk by remember { mutableStateOf<String?>(null) }
+    val pairDenied = stringResource(R.string.settings_sync_pair_error_camera)
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            pairing = true
+        } else {
+            Toast.makeText(context, pairDenied, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // 门户「⋯」抽屉里那三件"要 navigator 或这一页状态"的活 (2026-11-14): 抽屉那一侧是
+    // [PortalMenu] 一个 object, 拿不到 CompositionLocal, 于是只落一个掷标, 这里消费完就清掉
+    val askTarget = PortalAsk.pending.value
+    LaunchedEffect(askTarget) {
+        when (askTarget) {
+            PortalAsk.Target.SETTINGS -> navigator.push(Screen.Settings)
+            PortalAsk.Target.TAVERN -> navigator.push(Screen.TavernHome)
+            PortalAsk.Target.FEEDBACK -> feedbackOpen = true
+            PortalAsk.Target.DEV -> devOpen = true
+            // 已经给过就直接回推一句 (页面不必再等一个弹窗); 没给才弹系统窗
+            PortalAsk.Target.MIC -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) PortalVoice.reportPermission(true)
+                else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
+            // 终端: 权限给过就直接开扫码窗, 没给先弹系统那一问
+            PortalAsk.Target.PAIR -> {
+                val granted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) pairing = true else cameraPermission.launch(Manifest.permission.CAMERA)
+            }
+            // 终端那张未配对卡片上的「去给 PC 装 luwi终端」(2026-11-22): 开系统浏览器，
+            // 页面自己跳外链会把门户顶掉
+            PortalAsk.Target.PC_INSTALL -> {
+                openPage(context, PortalTerminal.PC_INSTALL_URL)?.let { problem ->
+                    Toast.makeText(context, problem, Toast.LENGTH_SHORT).show()
+                }
+            }
+            PortalAsk.Target.DEV_NEW -> askProjectName(context) { name ->
+                if (name != null) {
+                    scope.launch {
+                        val line = withContext(Dispatchers.IO) { LwForge.newProject(context, name) }
+                        PortalDev.note(line)
+                        Toast.makeText(context, line, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            PortalAsk.Target.DEV_IMPORT -> devImport.launch("application/zip")
+            null -> Unit
+        }
+        if (askTarget != null) PortalAsk.clear()
+    }
 
     // lastError 一变就判一次该不该弹: 同一句 30 s 内只弹一次 (⑩), 判过就把它记进 screenError
     LaunchedEffect(VirtualScreen.lastError) {
@@ -230,11 +343,58 @@ fun HostScreen(modifier: Modifier = Modifier) {
         if (screenErrorOnce.take(reason, SystemClock.uptimeMillis())) screenError = reason
     }
 
+    // 终端那张扫码窗 (2026-11-21): 解出第一张合法的码就写配置, 然后**问一句要不要现在重启 dsh**
+    // (2026-11-22 主人: "成功配对或关闭终端等需要重新启动的情况, 要弹出重启 dsh 启动终端的弹窗"——
+    // 以前这里一声不吭就把 host 掀掉)。重启回来页面自己回到终端 (页面把 `terminal=on` 记在
+    // localStorage, 原生这边 [PortalTerminal.open] 也还立着)。
+    // 已经和**另一台**电脑配过的不在这条路上重配: 那要重置基线, 走设置页那一段 (那边有确认窗)
+    if (pairing) {
+        val otherPc = stringResource(R.string.terminal_pair_other_pc)
+        val pairedTitle = stringResource(R.string.terminal_pair_done)
+        QrScanDialog(
+            onDismissRequest = { pairing = false },
+            onPayload = { payload ->
+                pairing = false
+                val now = SyncSetting.snapshot(context)
+                if (now.paired && now.pairedId.isNotBlank() && now.pairedId != payload.id) {
+                    Toast.makeText(context, otherPc, Toast.LENGTH_LONG).show()
+                } else {
+                    val problem = SyncSetting.applyPairing(context, payload)
+                    if (problem == null) {
+                        // 配置已经落盘: 重启这一问由下面那扇窗说完, 不再叠一句 Toast
+                        restartAsk = pairedTitle
+                    } else {
+                        Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+        )
+    }
+
+    // 需要重启 dsh 才生效的那一问 (2026-11-22): 四个写入点共用 `RestartHostDialog` ——
+    // 门户扫码配对走这里, 设置页那三处 (配对 / 总开关开与关 / 取消配对) 在 `SettingsScreen` 自己弹
+    restartAsk?.let { said ->
+        RestartHostDialog(
+            title = said,
+            onDismissRequest = { restartAsk = null },
+            onRestart = {
+                restartAsk = null
+                DshHost.restart(context)
+            },
+        )
+    }
+
     // **这一页没有顶栏**: 原来那条写着应用名的 `SmallTopAppBar` 去掉了, 顶上那点位置让给会话。
     // 唯一的菜单入口是浮标 (见 FloatingBall)。`innerPadding` 仍然带着状态栏那条 inset, 所以内容
     // 不会钻到时钟底下 - 顶栏在的时候那条 inset 是由顶栏自己吃的, 现在改由 Scaffold 给
     Scaffold(modifier = modifier.fillMaxSize()) { innerPadding ->
-        Box(modifier = Modifier.fillMaxSize()) {
+        // 2026-11-21 终端: 门户那一页整页变黑时, 原生这一层也铺黑 —— 状态栏底下、WebView 之外
+        // 那一圈不留白, 换屏 (页面重载) 的那一帧也不会闪一下底色
+        Box(
+            modifier = Modifier.fillMaxSize().background(
+                if (PortalTerminal.open) Color.Black else Color.Transparent,
+            ),
+        ) {
             Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
                 // 画面空着就是空着, 页面上不留一行字 - 有没有屏、选中哪一块, ⋮ 菜单里都写着
                 when (val status = DshHost.status) {
@@ -244,31 +404,73 @@ fun HostScreen(modifier: Modifier = Modifier) {
                         // 永远在组合绘制内容之上), 所以反过来: 页面先以 alpha 0 挂着加载, 开屏那块画在
                         // 它底下; 页面 ready 之后它淡进来, 淡到 1 才把开屏撤掉
                         var pageUp by remember(status) { mutableStateOf(false) }
+                        // 页面那一层现在什么光景 (2026-11-13): 它决定开屏那块画哪一句、要不要给那个
+                        // 「重新加载界面」的按钮 —— 以前 `halted` 之后这一屏没有任何出口, 只能重启 host
+                        var layer by remember(status) { mutableStateOf(PageStage.UP) }
+                        // 人点那个按钮: 一变就让 `HostWebView` 换一块新的重新加载
+                        var retryTick by remember(status) { mutableIntStateOf(0) }
                         val alpha by animateFloatAsState(
                             targetValue = if (pageUp) 1f else 0f,
                             animationSpec = tween(260),
                             label = "page-fade",
                         )
+                        // 页面照旧 host 一就绪就挂 (落实表 2.8.0 #44 把 #39 那条让路撤了): 加载界面在前,
+                        // 首启引导在后 —— 顺序反过来就是"先看见一张没有底的开屏, 引导关掉之后界面才开始加载";
+                        // 首启那张「开始使用」现在等这一页真的画出来 (见 [GettingStarted.settle])
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                             HostWebView(
                                 url = status.url,
                                 modifier = Modifier.fillMaxSize(),
                                 alpha = alpha,
-                                onReady = { pageUp = true },
+                                onReady = {
+                                    pageUp = true
+                                    // 页面画出来了 = 加载界面走完: 首启引导从这一帧起才弹 (2.8.0 #44)
+                                    GettingStarted.settle()
+                                    // 终端开着时页面重载过 (配对重启 host / renderer 重建): 让它接着画终端。
+                                    // 这时 `PortalState.run` 已经挂上新那一块 WebView, 于是这一句必到
+                                    if (PortalTerminal.open) {
+                                        PortalState.run?.invoke(TERMINAL_ON_SCRIPT)
+                                    }
+                                },
                                 // renderer 真的死了 (重建过一次): 把开屏再盖回去, 别让人对着
                                 // 一块空白的子 View 等新页面加载
                                 onLost = { pageUp = false },
+                                // 页面那一层现在什么光景 / 人点了按钮 (2.8.0 renderer-retry)
+                                onStage = { layer = it },
+                                retryTick = retryTick,
                             )
-                            if (alpha < 1f) {
+                            // `alpha < 1f` 是"页面还没淡进来"; `layer != UP` 是"这一格现在
+                            // 根本没有 WebView / 它卡住了" —— 后者以前只有 `halted` 一条路,
+                            // 那时 alpha 停在 0, 所以这一条其实一直被前一条顺带盖住了;
+                            // 现在把它写出来, 是因为 `STUCK` 那一档 alpha 也是 0 但没有重建
+                            if (alpha < 1f || layer != PageStage.UP) {
                                 HostBootPanel(
                                     status = status,
-                                    pageStage = stringResource(R.string.boot_stage_page),
+                                    // 页面掉了就别再说"加载中": 那一句在真机上正是骗了主人
+                                    // 十六分钟的那一句 (报告 2026-11-13)
+                                    pageStage = stringResource(
+                                        if (layer == PageStage.DOWN_GAVE_UP) R.string.boot_stage_page_lost
+                                        else R.string.boot_stage_page,
+                                    ),
+                                    // 自动退避途中 (`DOWN`) 不需要人管, 不给按钮
+                                    onRetry = if (layer == PageStage.DOWN_GAVE_UP || layer == PageStage.STUCK) {
+                                        { retryTick += 1 }
+                                    } else {
+                                        null
+                                    },
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
                         }
                     }
-                    else -> HostBootPanel(status = status, modifier = Modifier.weight(1f).fillMaxWidth())
+                    else -> {
+                        // host 起不来时加载界面就到头了: 首启引导该出来了, 它里面那张体检表正是修这一步的地方
+                        // (落实表 2.8.0 #44)
+                        LaunchedEffect(status) {
+                            if (status is HostStatus.Failed) GettingStarted.settle()
+                        }
+                        HostBootPanel(status = status, modifier = Modifier.weight(1f).fillMaxWidth())
+                    }
                 }
             }
             // 小窗直接挂在 Scaffold 的内容里, **中间不留任何一层容器**: 拖动范围就是这一层按 inset
@@ -276,23 +478,31 @@ fun HostScreen(modifier: Modifier = Modifier) {
             // 上一版为了拿到这个范围套了一个 fillMaxSize 的空 Box, 而 Compose 的 Box 默认参与命中
             // 测试 - "空盒子不吃事件"是错的, 它把窗口底下 1600 多像素的触摸全吃了, 用户的原话是
             // "虚拟屏下面一半都用不了"。所以这里宁可让窗口自己量, 也不再放一个会占满屏幕的东西
-            if (preview != null && !windowHidden) {
+            // 终端那一页开着时不画这块小窗: 那是一位全黑的面, 上面浮一块虚拟屏就不是"全变黑"了
+            if (preview != null && !windowHidden && !PortalTerminal.open) {
                 FloatingScreenWindow(
                     screen = preview,
-                    onMinimize = { windowHidden = true },
+                    onMinimize = { setWindowHidden(true) },
                     modifier = Modifier.padding(innerPadding),
                 )
             }
-            // 浮标: 顶栏那个按钮的替身, 白底不透明、能拖到任何地方
-            FloatingBall(
-                selected = selected,
-                onSettings = { navigator.push(Screen.Settings) },
-                onTavern = { navigator.push(Screen.TavernHome) },
-                onFeedback = { feedbackOpen = true },
-                windowHidden = windowHidden,
-                onToggleWindow = { windowHidden = !windowHidden },
-                modifier = Modifier.padding(innerPadding),
-            )
+            // 浮标: 后台那一层的菜单入口, 白底不透明、能拖到任何地方
+            //
+            // **门户盖着 (前台) 就不画它** (2026-11-14 主人: "不再显示 luwi 的设置浮标"): 前台那一层
+            // 右上角有门户自己的 `⋯`, 球菜单里的东西全搬进去了 ([PortalMenu])。回到 dsh 后台时页面报
+            // `portalVisible false`, 这里立刻把它画回来 —— 后台没有门户头栏, 那时候球是唯一的门
+            if (!PortalState.open) {
+                FloatingBall(
+                    selected = selected,
+                    onSettings = { navigator.push(Screen.Settings) },
+                    onTavern = { navigator.push(Screen.TavernHome) },
+                    onFeedback = { feedbackOpen = true },
+                    onDev = { devOpen = true },
+                    windowHidden = windowHidden,
+                    onToggleWindow = { setWindowHidden(!windowHidden) },
+                    modifier = Modifier.padding(innerPadding),
+                )
+            }
             // 错误只弹一次 (2.8.0 B2-c ⑨): 与浮标同级, 所以**有没有屏在看都会弹** —— 以前那一行
             // 只在 `selected == null` 时出现, 于是"正看着一块坏屏"反倒没有任何提示
             screenError?.let { reason ->
@@ -317,6 +527,27 @@ fun HostScreen(modifier: Modifier = Modifier) {
             if (feedbackOpen) {
                 FeedbackDialog(onDismissRequest = { feedbackOpen = false })
             }
+            // 门户「更多」与球菜单那一行「开发」: 与设置页同一份 DevItems, 一个普通应用内弹窗
+            if (devOpen) {
+                DevPanelDialog(onDismissRequest = { devOpen = false })
+            }
+            // 门户判断 / 探索面板动作行最右那颗「设置」(2026-11-13 主人: "加在打开唤醒/刷新 的右侧"):
+            // 页面只翻 `PortalAsk` 这一个开关, 弹的窗与设置页那一张是**同一份** (`SimSettingsDialog`),
+            // 门户侧多两组 (探索 / 主动对话) 并按 focus 滚到对应那一组
+            PortalAsk.activitySettings.value?.let { focus ->
+                SimSettingsDialog(
+                    onDismiss = {
+                        PortalAsk.close()
+                        // 弹窗改的就是面板上那几行读数: 不推这一句, 面板会停在旧数 (冷却改了还写着 30 分)
+                        PortalState.run?.invoke(
+                            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.onSettingsClosed" +
+                                " && window.__LUWI_PORTAL__.onSettingsClosed()",
+                        )
+                    },
+                    focus = focus,
+                    withActivity = true,
+                )
+            }
             // 「再按一次退出」走这里。挂在主页而不是脚手架上, 是因为提示只有主页会用到:
             // 按返回从设置页回来的时候不该弹它, 弹的是这一页的返回
             SnackbarHost(
@@ -339,6 +570,7 @@ private fun MenuButton(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -351,6 +583,7 @@ private fun MenuButton(
             onSettings = onSettings,
             onTavern = onTavern,
             onFeedback = onFeedback,
+            onDev = onDev,
             windowHidden = windowHidden,
             onToggleWindow = onToggleWindow,
         ),
@@ -531,6 +764,7 @@ private fun FloatingBall(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -649,6 +883,7 @@ private fun FloatingBall(
                 onSettings = onSettings,
                 onTavern = onTavern,
                 onFeedback = onFeedback,
+                onDev = onDev,
                 windowHidden = windowHidden,
                 onToggleWindow = onToggleWindow,
                 // 球的底由外面这层给, 菜单按钮自己就不用再画一层
@@ -675,6 +910,7 @@ private fun mainMenu(
     onSettings: () -> Unit,
     onTavern: () -> Unit,
     onFeedback: () -> Unit,
+    onDev: () -> Unit,
     windowHidden: Boolean,
     onToggleWindow: () -> Unit,
 ): List<DropdownEntry> {
@@ -682,13 +918,15 @@ private fun mainMenu(
     val screens = VirtualScreen.screens
     // 「停止朗读」那一条 2026-10-24 撤掉了 (主人: "设置浮标的停止说话去掉") —— 球与设置页里都停得掉,
     // 菜单里再留一条只是占位置; 那 500 ms 一拍的状态轮询跟着一起去掉
-    // 「同步」那一行 (2026-10-14 主人: 加在"进设置之前的那个菜单按钮"里): 它与设置页那一段是**同一件事**
-    // —— `session-sync.json` 里的远端地址配没配。插件是**挂载时**读配置的, 所以这一个动作要顺带重启
-    // host, 否则这一行等于没点。`SyncSetting.revision` 是它在文件被改过之后重读的记号 (菜单自己改的
-    // 那一次也走同一条路 —— setSyncOn 会把它 +1)
+    // 「终端」那一行 (原「同步」, 2026-11-21 改口径): 点它是**打开终端那一页** (手机管电脑),
+    // 不再在这里翻开关 —— 开关归设置页那一段。这一行只借 SyncSetting.revision 重读一次"配没配对",
+    // 于是配完对回来那一行立刻说「已配对: 谁」
     val syncSnapshot = remember(SyncSetting.revision) { SyncSetting.snapshot(context) }
-    val syncOnToast = stringResource(R.string.menu_sync_switched_on)
-    val syncOffToast = stringResource(R.string.menu_sync_switched_off)
+    val terminalPaired = if (syncSnapshot.paired) {
+        stringResource(R.string.menu_sync_paired, syncSnapshot.pairedFrom.ifBlank { "PC" })
+    } else {
+        stringResource(R.string.menu_sync_need_remote)
+    }
     // 先算好: 下面那个下拉栏是 buildList 里拼的, 而那不是 composable 作用域, stringResource 进不去
     val windowToggle = stringResource(
         if (windowHidden) R.string.screen_window_show else R.string.screen_window_hide,
@@ -700,88 +938,51 @@ private fun mainMenu(
             items = listOfNotNull(
                 DropdownItem(
                     text = "虚拟屏",
-                    summary = selected?.label,
+                    // 2026-11-17 主人: 触摸控制收进这一层; 屏名与「接受控制」那行刹车撤掉
                     children = buildList {
                         if (screens.isEmpty()) {
                             add(DropdownItem(text = "还没有已创建的虚拟屏", enabled = false))
                         }
-                        screens.forEach { screen ->
-                            add(
-                                DropdownItem(
-                                    text = screen.label,
-                                    summary = screen.shape,
-                                    selected = screen.displayId == selected?.displayId,
-                                    onClick = { VirtualScreen.toggle(screen) },
-                                ),
-                            )
-                        }
-                        // 手动的刹车: 停的是模型的下一步动作, 不是这块屏也不是预览, 用户自己的手指
-                        // 照样能碰画面
+                        // "现在这块画面能不能摸"要边看边切, 所以放在这一层第一条
                         add(
                             DropdownItem(
-                                text = if (selected?.acceptsControl == false) {
-                                    "继续接受控制"
-                                } else {
-                                    "暂停接受控制"
-                                },
-                                summary = selected?.label,
-                                enabled = selected != null,
-                                onClick = {
-                                    selected?.let { VirtualScreen.setAcceptsControl(it, !it.acceptsControl) }
-                                },
+                                text = "虚拟屏触摸控制",
+                                summary = "禁用以避免误操作",
+                                selected = PreviewControl.allowed,
+                                onClick = { PreviewControl.set(context, !PreviewControl.allowed) },
                             ),
                         )
                         // 建屏不在这里: 一块屏叫什么、多大, 是工具在造它的时候决定的, 界面只负责看和关
-                        // byUser = true: 之后模型再动这个 id, 桥要能说出"这是用户关的"
                         add(
                             DropdownItem(
                                 text = "释放虚拟屏",
-                                summary = selected?.label,
                                 enabled = selected != null,
                                 onClick = { selected?.let { VirtualScreen.release(it, byUser = true) } },
                             ),
                         )
-                        // 减号收起来的窗从这里叫回来: 它收得干净, 界面上不留把手, 所以这一项是唯一
-                        // 的路。放在"虚拟屏"这一栏里而不是一级菜单, 是因为它管的正是这一块屏
+                        // 减号收起来的窗从这里叫回来: 它收得干净, 界面上不留把手
                         add(
                             DropdownItem(
                                 text = windowToggle,
-                                summary = selected?.label,
                                 enabled = selected != null,
                                 onClick = onToggleWindow,
                             ),
                         )
                     },
                 ),
-                // 这个开关放在一级菜单而不是设置页: 它是"现在这块画面能不能摸", 边看边切才对
+                // 「开发」: 与门户「更多」里那一行同一件事, 弹出设置页同一份 DevItems (2026-11-17)
                 DropdownItem(
-                    text = "虚拟屏触摸控制",
-                    summary = "禁用以避免误操作",
-                    selected = PreviewControl.allowed,
-                    onClick = { PreviewControl.set(context, !PreviewControl.allowed) },
+                    text = "开发",
+                    summary = "新建应用 / 工具链 / 打开开发台",
+                    onClick = onDev,
                 ),
-                // 「同步」: 与设置页那一段同一个开关 (默认关)。关→开需要先有仓库地址, 没有就把人送到
-                // 设置页那一段去填; 改完必须重启 host 才生效, 所以这一下顺手重启 (主人点的那一下)
+                // 「终端」(原「同步」): 2026-11-21 起这一行只做一件事 —— 打开终端那一页。
+                // 开关仍在设置页那一段 (翻完要重启 host), 这里不再重复一份动作
                 DropdownItem(
                     text = stringResource(R.string.menu_sync),
-                    summary = when {
-                        syncSnapshot.syncOn -> stringResource(R.string.menu_sync_on)
-                        syncSnapshot.resumableRemote.isNotBlank() -> stringResource(R.string.menu_sync_off)
-                        else -> stringResource(R.string.menu_sync_need_remote)
-                    },
-                    selected = syncSnapshot.syncOn,
-                    onClick = {
-                        val wanted = !syncSnapshot.syncOn
-                        val problem = SyncSetting.setSyncOn(context, wanted)
-                        if (problem == null) {
-                            Toast.makeText(context, if (wanted) syncOnToast else syncOffToast, Toast.LENGTH_LONG).show()
-                            DshHost.restart(context)
-                        } else {
-                            // 没有地址可填: 把原因说清并把人送到设置页那一段 (那一行就在那儿)
-                            Toast.makeText(context, problem, Toast.LENGTH_LONG).show()
-                            onSettings()
-                        }
-                    },
+                    summary = terminalPaired,
+                    selected = false,
+                    onClick = { PortalTerminal.open(context) },
                 ),
                 // 酒馆 (2026-10-24 主人: "在会话界面右上角加入「酒馆」选项, 点击进入"): 从这里进的是
                 // **首页** (进入酒馆 / 选择存档 / 选择主题 / 打开配置 都在那儿); 设置页那一段的
@@ -798,8 +999,10 @@ private fun mainMenu(
                 // 门户那一层的进出口 (2026-11-07 主人: "回到对话层没有按钮补一下, 和返回 dsh 这些都
                 // 加到 luwi 菜单里, 不放界面上"): 界面上不放按钮, 两个动作都在这里 —— 收起门户看 dsh,
                 // 或者从 dsh 回到门户。方向由页面报上来的 `PortalState.open` 决定
+                // 2026-11-13 (#40): 口径改成「后台 = dsh」「前台 = 门户」, 于是这两句分别是
+                // 回到后台 / 回到前台
                 DropdownItem(
-                    text = if (PortalState.open) "回到 dsh" else "回到对话层",
+                    text = if (PortalState.open) "回到后台" else "回到前台",
                     onClick = {
                         val run = PortalState.run
                         val script = if (PortalState.open) {
@@ -825,6 +1028,19 @@ private fun mainMenu(
 }
 
 /**
+ * 页面那一层现在是什么光景 (2026-11-13 那一档卡死之后才有这个读数)
+ *
+ * 以前 `halted` 只有一个状态: 额度用光就到底, 于是整屏只剩开屏那块「界面加载中…」, 而唯一的复位口是
+ * host 地址变 (重启 host) —— 主人切后台再回来看到的还是同一屏。现在这一层要分得开:
+ *
+ * - [UP]: WebView 挂着
+ * - [DOWN]: renderer 刚死, 正在按 1 s / 3 s / 8 s 退避重建 (**不需要人管**)
+ * - [DOWN_GAVE_UP]: 窗口内额度用光, 进了 30 s 慢档 —— 开屏那块要给一个「重新加载界面」的真按钮
+ * - [STUCK]: WebView 挂着但 12 s 没画出 `root` ([STUCK_SECONDS] 那个看门狗), 也给同一个按钮
+ */
+internal enum class PageStage { UP, DOWN, DOWN_GAVE_UP, STUCK }
+
+/**
  * The dsh GUI itself, which is a normal browser page served from loopback
  *
  * The host authenticates a browser by answering the token URL with a redirect that sets an
@@ -838,11 +1054,17 @@ private fun mainMenu(
  * renderer 的优先级钉住 (不因为不可见就被降级回收), 以及 renderer 真死时自己换一块新的
  * (那只的缺省行为是把整个应用进程一起带走, 而进程里还有 host 与虚拟屏)
  *
+ * **死掉之后不再是"4 次打完就永久放弃"** (2026-11-13 真机: 界面永远停在「界面加载中…」): 重建按
+ * [REBUILD_BACKOFF_MS] 退避, 额度按 [REBUILD_WINDOW_MS] 的时间窗归还, 用光之后走 [SLOW_RETRY_MS]
+ * 慢档并把出口交给开屏那块那个按钮; 回前台一趟也会再试一次
+ *
  * @param url the token-carrying URL the host printed once its tree settled.
  * @param modifier layout modifier from the caller.
  * @param alpha 页面还没画出来时给 0: 开屏那块画在它底下, 靠这一层透明才看得见 (见调用处那段注释)
  * @param onReady 页面真的画出东西了 (`root` 有子节点) 时叫一次
  * @param onLost renderer 死了、这一页要重建时叫一次 (调用方据此把开屏盖回去)
+ * @param onStage 这一层现在是什么光景 (见 [PageStage]): 开屏那块据此换文案与那个按钮
+ * @param retryTick 人点了「重新加载界面」/ 回前台那一趟: 一变就换一块新的 WebView 重新加载
  */
 @Composable
 private fun HostWebView(
@@ -851,6 +1073,8 @@ private fun HostWebView(
     alpha: Float = 1f,
     onReady: () -> Unit = {},
     onLost: () -> Unit = {},
+    onStage: (PageStage) -> Unit = {},
+    retryTick: Int = 0,
 ) {
     val context = LocalContext.current
     // 「回应用」那一跳: **请求一变就跑一次** (见下面那个 LaunchedEffect), 而不押在 `AndroidView` 的
@@ -859,25 +1083,40 @@ private fun HostWebView(
     val ballRequest = BallReturn.request
     // WebView 实例与"这个文档加载完过几次": 切换那一步要拿它跑 JS, 还要等重载真的落地
     var page by remember { mutableStateOf<WebView?>(null) }
-    // 2026-10-28: 键盘起来时这块 WebView 让出贴底键盘那一段 (悬浮键盘不让), 否则会话输入框被压在键盘后面
-    // 2026-11-09: **门户盖着时不再让 WebView 变矮** —— 让位改由页面自己抬 (`--lwp-ime`), 见下面那段
-    val imeLift = rememberImeLift()
+    // 键盘那一格 (2026-11-22 起 dsh 后台也走门户那一套): **这块 WebView 的尺寸一次都不动** ——
+    // 上移交给页面自己 (门户 `--lwp-ime` / dsh 后台 `--lw-dsh-ime`), 于是背景图 / 头栏 / 会话区
+    // 都不重排。页面接不了 (`__LUWI_IME__` 不在) 才退回旧的缩边路, 用的数是"停稳"的终值
+    // (见 [ImeLiftPusher]), 不再逐帧 resize —— 那一串才是"呼出键盘卡一下"的现场
     val portalOpen = PortalState.open
-    // 推给页面的数**必须是 dp 而不是设备像素**: WebView 里 1 CSS px 就是 1 dp (393 宽的屏报 393 CSS px,
-    // 屏本身 1080 设备像素), 拿 `roundToPx()` 那笔 (922) 当 CSS px 写下去就是整屏高 —— 2026-11-09 真机
-    // 踩到, 输入卡被顶到顶栏下面
-    val imeLiftDp = imeLift.value.roundToInt()
+    /** 这一页认不认 `__LUWI_IME__`: null = 还没问出来, false = 退回缩 WebView 那条老路 */
+    var pageTakesIme by remember { mutableStateOf<Boolean?>(null) }
+    /** 安全网那条路的当前高度 (只在 [pageTakesIme] 不是 true 时才写, 页面自己抬的时候恒为 0) */
+    var fallbackLift by remember { mutableStateOf(0.dp) }
     var finishes by remember { mutableIntStateOf(0) }
     // renderer 是 Chrome 那边独立的一个进程: 它一死这块 WebView 就再也不能用, 只能整块重建 ——
-    // generation 一变就换一块新的 (key 在 AndroidView 外面), rebuilds 是"同一个窗最多自动重建几次";
-    // halted 是额度用完之后那一档: 那时 composition 里干脆不挂 WebView, 免得还有代码去碰那块
-    // 已经 destroy 掉的旧实例
+    // generation 一变就换一块新的 (key 在 AndroidView 外面); halted 是"这一格现在不挂 WebView"
+    // (等退避 / 额度用光等慢档), 免得还有代码去碰那块已经 destroy 掉的旧实例;
+    // 重建该不该、等多久这一笔账在 [PageRebuild] 里 (2026-11-13 真机连死四回那一档)
     var generation by remember { mutableIntStateOf(0) }
-    var rebuilds by remember { mutableIntStateOf(0) }
+    val rebuildPlan = remember { PageRebuild(windowMs = REBUILD_WINDOW_MS, backoffMs = REBUILD_BACKOFF_MS, maxRebuilds = MAX_PAGE_REBUILDS) }
     var halted by remember { mutableStateOf(false) }
+    // 死亡事件计数: 它一变下面那个 LaunchedEffect 就按 waitMs 说的等一会儿再重建
+    var deaths by remember { mutableIntStateOf(0) }
+    /** 这一次死亡给的处置: 等这么多毫秒; null = 额度用光, 进慢档 */
+    var waitMs by remember { mutableStateOf<Long?>(null) }
+    /** 额度真的用光了 (只有人的按钮 / 回前台 / 慢档那一趟才能把它翻回来) */
+    var exhausted by remember { mutableStateOf(false) }
+    /** 回前台那一趟要的重试信号 (与 caller 那个 `retryTick` 各记各的, 一起进同一个 effect) */
+    var resumeTick by remember { mutableIntStateOf(0) }
     // A file input can only be answered by an activity, so the page's request parks here until
     // the picker it launched comes back
     var pending by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    // 门户那座桥 (2.8.1 #13): 选图那条路也要用它 —— 选中的那几份由宿主自己读下来落进 `lw-in`,
+    // 页面不再经 `content://` 去读 (渲染器读相册 Uri 有的机器上就是空的, 于是"点了确定没反应")
+    val portal = remember(context) { PortalBridge(context.applicationContext) }
+    // 这一次选择器是给谁挑的: `false` = 门户那个 `+` (宿主读、宿主落), `true` = 表情包那格「加一张」
+    // (还是老路, Uri 交回页面)。页面在点 `<input>` 之前报一次, 这里在选择器起来那一刻取走
+    var pendingSticker by remember { mutableStateOf(false) }
     // 老 WebView 那一摊 (2.7.10, 见 [WebCompat]): 那段 polyfill 是"文档开始"注入的, 垫的是
     // `Promise.withResolvers` 这类 Chrome 119 才有的 API; 页面还会把"还缺什么"报回来
     val compat = remember(context) { WebCompat.script(context) }
@@ -886,12 +1125,50 @@ private fun HostWebView(
     // `root` 有子节点就算起来了 —— 那是"界面真的画出来"的判据 (与 SHELL_PROBE 那个日志同一件事)
     var readyAt by remember { mutableIntStateOf(0) }
     var stuck by remember { mutableStateOf(false) }
+    // 这一屏的协程作用域: 选图那条路要把几 MB 的字节读下来落盘 (下 IO 那一趟), 返回键问页面那一句
+    // 也走它 —— 同一个作用域, 离开这一屏就一起停
+    val scope = rememberCoroutineScope()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val answer = pending ?: return@rememberLauncherForActivityResult
         pending = null
         // The platform helper reads either form of result the picker can return, a single data
         // URI or the clip data of a multiple selection
-        answer.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+        val picked = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        val view = page
+        val sticker = pendingSticker
+        if (picked.isNullOrEmpty()) {
+            // 回来是空的 = **人自己退出来的**: 这一档屏上不留一个字 (2026-11-15 主人: "没有选择直接
+            // 退出...要求这种情况下不要显示这个报错"), 只把页面那侧"WebView 没回调"的计时器撤掉
+            Log.i(WEB_TAG, "picker came back empty, sticker=$sticker")
+            answer.onReceiveValue(null)
+            view?.pickState(PICK_EMPTY)
+            return@rememberLauncherForActivityResult
+        }
+        if (sticker) {
+            // 表情包那格「加一张」: 老路不动 —— Uri 交回页面, 它读成 base64 交 `portalStickerAdd`,
+            // 落的是 `lw/stickers` (不是 `lw-in/`), 所以这里一个字节都不读
+            Log.i(WEB_TAG, "picker handed ${picked.size} uri(s) to the sticker panel")
+            answer.onReceiveValue(picked)
+            view?.pickState(PICK_PICKED)
+            return@rememberLauncherForActivityResult
+        }
+        // **字节由宿主读、宿主落** (2.8.1 #13): 相册那种 `content://` Uri 交给渲染器去读, 有的机器上
+        // 读到的是空的 (FileReader 的 onerror / 空 buffer) —— 页面上就是"点了确定什么都没有"
+        // 宿主本来就拿着这几个 Uri, 这里读下来落进 `<工作区>/lw-in/` (与球那条 `+` 同一份 `LwIn.put`),
+        // 再把落好的几份**交回页面**, 页面只管画
+        //
+        // 答给 WebView 的是"没选": 页面那一侧不能再读一遍 —— 读一遍就会落第二份 (同一次发送只落 1 个)
+        // 读 + 落盘放在 IO 上 (一份 3 MB 的图从相册读出来再写进 /sdcard 是几百毫秒, 压在主线程上界面会
+        // 顿住), 所以先把 `picked` 这个状态推出去 —— 页面的看门狗到这里就撤了, 落好的那几份随后就到
+        answer.onReceiveValue(null)
+        view?.pickState(PICK_PICKED)
+        scope.launch {
+            val landed = withContext(Dispatchers.IO) {
+                runCatching { JSONObject(portal.stashPicked(picked.toList())) }.getOrNull()
+            }
+            // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
+            view?.pickedFiles(landed ?: nothingLanded(picked.size))
+        }
     }
     // **已经交给 WebView 的那一条地址** (不是 `view.url`): host 打印的 token URL 会 302 到根路径,
     // 所以 `view.url` 永远不等于它 —— 拿这两者比, 每一次重组 (开屏淡出那一串 alpha 就是几十次)
@@ -902,11 +1179,12 @@ private fun HostWebView(
     // halted 那一档整块不挂, 所以不会有人再去用已经 destroy 的旧实例
     if (!halted) key(generation) {
         // 键盘那一格 (2026-11-09 主人: "呼出键盘时不应整个界面上移, 只要输入框和聊天记录向上移"):
-        // **门户盖着时这一块尺寸一点都不动** —— 变矮的是页面里那层 flex (对话区 + 输入卡), 于是
-        // 背景图 / 头栏 / 底下那屏 dsh 都不重排, 起落也就不卡了。门户收起时仍是旧做法: 缩 WebView
-        // (dsh 自己的输入框靠这个贴到键盘上沿, 它不认识 `--lwp-ime`)
+        // **这一块尺寸一点都不动** —— 变矮的是页面里那一层壳, 于是背景图 / 头栏 / 下面那屏一个像素
+        // 都不重排。2026-11-22 起门户与 dsh 后台都是这么办的 (门户 `--lwp-ime` / 后台 `--lw-dsh-ime`,
+        // 见 `ImeLiftPusher`); 只有页面明说接不了 (`pageTakesIme != true`) 才退回缩 WebView 那条老路,
+        // 而且用的数是"停稳"的终值, 不再逐帧 resize
         AndroidView(
-            modifier = if (portalOpen) modifier else modifier.padding(bottom = imeLift),
+            modifier = if (!portalOpen && pageTakesIme != true) modifier.padding(bottom = fallbackLift) else modifier,
             factory = { viewContext ->
                 CookieManager.getInstance().setAcceptCookie(true)
                 WebView(viewContext).apply {
@@ -950,7 +1228,7 @@ private fun HostWebView(
                     addJavascriptInterface(WakeBridge(viewContext.applicationContext), WAKE_BRIDGE)
                     // 门户那一层 (2026-11-07): 判断层与工作结构在 `$DSH_HOME/lw` 里, 球那场的账在
                     // `$DSH_HOME/voice/session.json` 里 —— 页面读不到 app 沙盒, 所以从这座桥走
-                    addJavascriptInterface(PortalBridge(viewContext.applicationContext), PORTAL_BRIDGE)
+                    addJavascriptInterface(portal, PORTAL_BRIDGE)
                     // 老 WebView 那一档: 先把桥挂上 (页面把"还缺什么"报回来), 再让 polyfill 在文档
                     // **开始**时跑 —— 顺序不能反, 反了那段报告就没人接
                     addJavascriptInterface(
@@ -978,10 +1256,12 @@ private fun HostWebView(
                          *
                          * 这个进程里还有 host 与虚拟屏, 一起死掉等于"回来要从解压与起 host 重来一遍"。
                          * 所以这里接住: 拆掉这一块已经不能用的 WebView (之后一个方法都不许再调它),
-                         * 换一块新的重新加载同一页; 返回 true = "我自己处理了", 别动进程
+                         * 记一笔账再**退避**换一块新的重新加载同一页; 返回 true = "我自己处理了", 别动进程
                          *
-                         * 连着死超过 [MAX_PAGE_REBUILDS] 次就不再自动重建 (那会变成重建循环),
-                         * 直接把"还缺什么"那个真 Dialog 摆出来
+                         * 2026-11-13 之前这里是"立刻换新的", 额度用光就 `halted = true` 到底 —— 真机上
+                         * 那台机器 1.2 s 连死四回, 界面从此只剩开屏那块「界面加载中…」。现在换页的时机
+                         * 交给 [PageRebuild] (1 s / 3 s / 8 s, 额度按时间窗还), 额度用光只表示进慢档,
+                         * 而慢档与那个按钮都在下面那段里
                          */
                         override fun onRenderProcessGone(
                             view: WebView,
@@ -991,21 +1271,14 @@ private fun HostWebView(
                             (view.parent as? ViewGroup)?.removeView(view)
                             runCatching { view.destroy() }
                             if (page === view) page = null
-                            rebuilds += 1
-                            if (rebuilds > MAX_PAGE_REBUILDS) {
-                                Log.w(WEB_TAG, "the renderer died $rebuilds times; asking the person instead")
-                                // 不重建了: halted 让 composition 把 WebView 摘掉, 开屏盖回去,
-                                // 决定权交给那个更新弹窗
-                                halted = true
-                                stuck = true
-                                onLost()
-                                return true
-                            }
+                            // 先摘掉: composition 里那一格不再挂这块已经 destroy 的实例, 开屏盖回去
+                            halted = true
+                            onLost()
                             stuck = false
                             compatMissing = emptyList()
                             readyAt = 0
-                            generation += 1
-                            onLost()
+                            waitMs = rebuildPlan.death(SystemClock.uptimeMillis())
+                            deaths += 1
                             return true
                         }
 
@@ -1046,8 +1319,8 @@ private fun HostWebView(
                                 if (result.trim('"').toIntOrNull()?.let { it > 0 } == true) {
                                     readyAt += 1
                                     // 这一页真的画出来了: 上一次那几笔 renderer 事故就不该再
-                                    // 占着"最多重建几次"的额度
-                                    rebuilds = 0
+                                    // 占着"最多自动重建几次"的额度
+                                    rebuildPlan.rendered()
                                     onReady()
                                 }
                             }
@@ -1119,6 +1392,11 @@ private fun HostWebView(
                             params: FileChooserParams,
                         ): Boolean {
                             Log.i(WEB_TAG, "file chooser ${params.acceptTypes.joinToString()}")
+                            // 这一次是给谁挑的 (2.8.1 #13): 页面点之前报过一次, 这里取走 (只认一次)
+                            pendingSticker = portal.takePickMode() == PICK_MODE_STICKER
+                            // 选择器真的起来了: 页面那侧"WebView 没回调"的计时器到此为止 (落实表 #35) ——
+                            // 这一句落地的时机是"页面回到前台", 所以页面那边按可见性停/续 (2.8.1 #13)
+                            view.pickState(PICK_SHOWN)
                             // A second request supersedes the first, and every callback has to be
                             // answered exactly once
                             pending?.onReceiveValue(null)
@@ -1130,12 +1408,21 @@ private fun HostWebView(
                                 Log.w(WEB_TAG, "no picker for ${params.acceptTypes.joinToString()}: ${error.message}")
                                 pending = null
                                 callback.onReceiveValue(null)
+                                view.pickState(PICK_NONE)
                                 true
                             }
                         }
                     }
                     setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
                         startDownload(context, downloadUrl, contentDisposition, mimeType)
+                    }
+                    // **系统文件管理器拖进来的文件也要能进待发栏** (2.8.1 #34): Android 的 WebView
+                    // 对系统拖过来的 `content://` **不派发 HTML5 的 dragenter / dragover / drop** ——
+                    // 页面那一侧挂再多监听也等不到 drop, 真机上就是"拖过来什么都不发生"。所以在原生
+                    // 这一层接: 与 `+` 选完同一条链 (宿主读字节、宿主落进 `lw-in/`, 落好的几份再交回
+                    // 页面画成待发 chip)。只认带 Uri 的拖拽, 页面自己的拖拽与拖纯文本都不抢
+                    setOnDragListener { _, event ->
+                        acceptDrop(event, portal = portal, scope = scope)
                     }
                     loadUrl(url)
                     launched[0] = url
@@ -1154,20 +1441,33 @@ private fun HostWebView(
         )
     }
 
-    // 键盘那一格 (2026-11-09): 门户盖着时只把这个数推给页面 —— 页面自己写 `--lwp-ime`, 抬的是对话区
-    // 与输入卡, **这一块 WebView 不动**。变了才推 (一次起落十来帧, 每帧一句 evaluateJavascript 就够;
-    // 页面那头同值直接返回)。`PortalState.imePx` 是给"页面刷新 / 收起再张"那一档留的: 那时页面挂载
-    // 会来问一次 (`LuwiPortal.portalIme()`), 正好补上错过的那一下
-    LaunchedEffect(portalOpen, imeLiftDp, page) {
-        // 门户收起时清 0: dsh 那一屏走的是缩 WebView 那条路, 与这个数无关
-        PortalState.imePx = if (portalOpen) imeLiftDp else 0
-        if (!portalOpen) return@LaunchedEffect
-        // 一行读数: "整页被顶上去 / 卡一下" 时先看这一行 (值与页面拿到的那个数逐字相同, 单位 dp)
-        Log.i(WEB_TAG, "ime lift ${imeLiftDp}dp portal=$portalOpen")
-        page?.evaluateJavascript(
-            "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.setKeyboard($imeLiftDp)",
-            null,
-        )
+    // 键盘那一格 (2026-11-09 门户 / 2026-11-22 dsh 后台): 高度只推给页面, **这一块 WebView 不动** ——
+    // 推哪一路由 [ImeLiftPusher] 判, 这里只管"页面认不认 `__LUWI_IME__`"这一问
+    ImeLiftPusher(
+        page = page,
+        readyAt = readyAt,
+        portalOpen = portalOpen,
+        takesIme = pageTakesIme == true,
+        onFallback = { lift -> if (fallbackLift != lift) fallbackLift = lift },
+    )
+
+    // 页面认不认宿主推过去的键盘高度 (2026-11-22): 换一次文档就问一遍。ui-fix 是在 boot 里 apply 的,
+    // 比 onPageFinished 晚, 所以隔 300 ms 再问, 最多 20 次; 一直没有就只留一行 warn 并退回缩 WebView
+    // 那条老路 (这条探针答 false 也不会让键盘盖住输入框, 只是没用上"不缩边"那条快路)
+    LaunchedEffect(page) {
+        val view = page ?: return@LaunchedEffect
+        pageTakesIme = null
+        for (attempt in 0 until IME_PROBE_TRIES) {
+            if (attempt > 0) delay(IME_PROBE_EVERY_MS)
+            // 600 ms 就够: 探针只是读一个 typeof, 页面没起来时它会挂到那条超时上
+            if (imeTakesLift(view)) {
+                pageTakesIme = true
+                Log.i(WEB_TAG, "the page lifts its own composer (ime probe answered after ${attempt + 1} try/tries)")
+                return@LaunchedEffect
+            }
+        }
+        pageTakesIme = false
+        Log.w(WEB_TAG, "the page has no __LUWI_IME__ after ${IME_PROBE_TRIES} tries, the keyboard falls back to shrinking this view")
     }
 
     // 12 秒还没画出界面: 那就不是"慢", 是老 WebView 在解析期就死了 (或者别的硬故障) —— 弹窗说清,
@@ -1181,7 +1481,65 @@ private fun HostWebView(
     LaunchedEffect(url) {
         // 换了一个 host 地址 (重启 host 那一档): 上一轮的额度与停摆都不作数了
         halted = false
-        rebuilds = 0
+        exhausted = false
+        deaths = 0
+        waitMs = null
+        rebuildPlan.reset()
+    }
+    // renderer 死了之后**退避**重建 (2026-11-13 真机那一档): 以前的写法是一死在回调里就
+    // `generation += 1`, 于是上一版在 1.2 s 里连要了四次 200 MB, 四次都被 lmkd 当场收掉。
+    // 现在按 [PageRebuild] 说的等 (1 s / 3 s / 8 s); 额度用光就进 [SLOW_RETRY_MS] 慢档 ——
+    // **慢档不是放弃**: 到点自己再试一次, 界面同时给一个按钮 (`retryTick`)
+    LaunchedEffect(deaths) {
+        if (deaths == 0) return@LaunchedEffect
+        val wait = waitMs
+        if (wait == null) {
+            exhausted = true
+            Log.w(WEB_TAG, "the renderer died ${rebuildPlan.rebuilds} times in ${REBUILD_WINDOW_MS / 1000}s; waiting ${SLOW_RETRY_MS / 1000}s before trying again")
+            val seen = generation
+            delay(SLOW_RETRY_MS)
+            // 这期间人点了按钮 / 回前台 / host 换了地址: 这一趟作废
+            if (generation != seen || !halted) return@LaunchedEffect
+            exhausted = false
+            rebuildPlan.reset()
+            generation += 1
+            halted = false
+            return@LaunchedEffect
+        }
+        Log.w(WEB_TAG, "rebuild ${rebuildPlan.rebuilds} of the page in ${wait}ms")
+        val seen = generation
+        delay(wait)
+        if (generation != seen || !halted) return@LaunchedEffect
+        generation += 1
+        halted = false
+    }
+    // 开屏那块那个「重新加载界面」/ 回前台那一趟都走这里: 把额度还回来, 换一块新的 WebView 重载
+    LaunchedEffect(retryTick, resumeTick) {
+        if (retryTick == 0 && resumeTick == 0) return@LaunchedEffect
+        Log.i(WEB_TAG, "reloading the page on request (rebuilds was ${rebuildPlan.rebuilds})")
+        rebuildPlan.reset()
+        exhausted = false
+        stuck = false
+        halted = false
+        generation += 1
+    }
+    // 切后台再回来那一下 (2026-11-13): 以前 `MainActivity.onResume` 只把 host 服务拉一次,
+    // 页面这一层已经废了却没人管 —— 于是回来看到的还是同一屏「界面加载中…」。这里只在
+    // **自动重试已经用光 (exhausted)** 时才插一脚 (退避途中它自己会重来), 并且 30 s 只试一次
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val lastTry = longArrayOf(0L)
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (!exhausted) return@LifecycleEventObserver
+            val now = SystemClock.uptimeMillis()
+            if (now - lastTry[0] < SLOW_RETRY_MS) return@LifecycleEventObserver
+            lastTry[0] = now
+            Log.i(WEB_TAG, "came back to the foreground with no page; retrying")
+            resumeTick += 1
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(url, finishes, generation) {
         stuck = false
@@ -1195,7 +1553,19 @@ private fun HostWebView(
     // 「WebView 版本太旧 / 卡住了」那个弹窗 **2026-11-07 撤掉了** (主人: "这个也去掉"): 它原来
     // 兜的是"polyfill 没垫全"与"12 秒没画出 root"两档, 而这两档在真机上一直是"看见了也做不了什么"
     // —— 那四条更新指引对普通人来说只是在开屏上多挡一层。**检测本身留着**: 上面那句
-    // `Log.w(page never rendered)` 与桥报上来的 missing 仍然进日志, 出事时有读数可查
+    // `Log.w(page never rendered)` 与桥报上来的 missing 仍然进日志, 出事时有读数可查。
+    // **2026-11-13 起 `stuck` 有读者了**: 它让开屏那块多一个「重新加载界面」的按钮 ——
+    // 那一档以前只能干等, 现在至少有一条自己动手的路
+    LaunchedEffect(halted, exhausted, stuck) {
+        onStage(
+            when {
+                !halted && stuck -> PageStage.STUCK
+                !halted -> PageStage.UP
+                exhausted -> PageStage.DOWN_GAVE_UP
+                else -> PageStage.DOWN
+            },
+        )
+    }
 
     /**
      * 等下一次 `onPageFinished` (超时回 false): "重载真的落地了没有"只有它答得上来
@@ -1218,7 +1588,7 @@ private fun HostWebView(
 
     // 返回键先问页面一句 (见 [PageBack]): 网页里那一层 (右栏的浏览器格, 手机上它是全屏的) 收得掉就
     // 收掉, 收不掉把这一下还回去。超时按 [PAGE_BACK_MS] 而不是 `ask` 那个 5 s —— 返回键不能挂着等
-    val scope = rememberCoroutineScope()
+    // (用上面那个 `scope`: 同一屏一个作用域, 离开这一屏一起停)
     DisposableEffect(page) {
         val view = page
         PageBack.handle = view?.let { target ->
@@ -1291,6 +1661,88 @@ private fun HostWebView(
         BallReturn.done(request.seq)
     }
 }
+
+/**
+ * 键盘高度的推送器 (2026-11-22)
+ *
+ * 以前这一格是 `modifier.padding(bottom = imeLift)`: IME inset 在 Compose 里是**逐帧**的动画值,
+ * 于是呼一次键盘这块 WebView 被 resize 二十来次 (每次换 surface + 全页重排 + 重栅格) —— 那就是
+ * "呼出键盘卡一下"的现场。现在与门户 (2026-11-09) 同一套: 高度只推给页面, 这一块尺寸一次都不动。
+ *
+ * 三条通道:
+ * 1. 门户盖着 -> `__LUWI_PORTAL__.setKeyboard` (与 2026-11-09 起逐字相同), 顺手把下面那屏清零
+ * 2. dsh 后台且页面认 `__LUWI_IME__` -> 推给页面 (ui-fix 写 `--lw-dsh-ime` + `data-lw-ime`)
+ * 3. 页面接不了 -> [onFallback] 收"停稳"的终值, 由外面缩 WebView (一步跳变, 不逐帧)
+ *
+ * 单独一个 composable 是有意的: 逐帧变的是这里, `HostWebView` 那一大段不该跟着重组
+ *
+ * @param page 当前那块 WebView (还没挂上时什么都不做)
+ * @param readyAt 页面画出来的次数: 它一变说明文档换过了, 当前值要补推一次 (html 上的属性随文档一起没了)
+ * @param portalOpen 门户是不是盖在上面
+ * @param takesIme 这一页认不认 `__LUWI_IME__`
+ * @param onFallback 安全网那条路要的"该缩多少"
+ */
+@Composable
+private fun ImeLiftPusher(
+    page: WebView?,
+    readyAt: Int,
+    portalOpen: Boolean,
+    takesIme: Boolean,
+    onFallback: (Dp) -> Unit,
+) {
+    // 推给页面的数**必须是 dp 而不是设备像素**: WebView 里 1 CSS px 就是 1 dp (393 宽的屏报 393
+    // CSS px, 屏本身 1080 设备像素), 拿 `roundToPx()` 那笔 (922) 当 CSS px 写下去就是整屏高 ——
+    // 2026-11-09 真机踩到, 输入卡被顶到顶栏下面
+    val imeLift = rememberImeLift()
+    val imeLiftDp = imeLift.value.roundToInt()
+    // 安全网那条的"停稳": 一次键盘动画里只有停下来的那个值算数 (与插件自己判可见带的口径相同)
+    val settle = remember { IntArray(2) }
+    LaunchedEffect(portalOpen, imeLiftDp, page, readyAt, takesIme) {
+        val view = page ?: return@LaunchedEffect
+        when {
+            portalOpen -> {
+                PortalState.imePx = imeLiftDp
+                view.evaluateJavascript(
+                    "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.setKeyboard($imeLiftDp)",
+                    null,
+                )
+                // 门户盖着时把下面那一屏清零: 两层一起抬就是"抬两次"
+                view.evaluateJavascript("window.__LUWI_IME__ && window.__LUWI_IME__(0)", null)
+            }
+            takesIme -> {
+                PortalState.imePx = 0
+                view.evaluateJavascript("window.__LUWI_IME__ && window.__LUWI_IME__($imeLiftDp)", null)
+            }
+            else -> {
+                PortalState.imePx = 0
+                if (settle[0] == imeLiftDp) {
+                    settle[1] += 1
+                } else {
+                    settle[0] = imeLiftDp
+                    settle[1] = 1
+                }
+                if (settle[1] >= IME_SETTLE_FRAMES) onFallback(imeLift)
+            }
+        }
+        // 一行读数: "整页被顶上去 / 卡一下" 时先看这一行 (值与页面拿到的那个数逐字相同, 单位 dp)
+        Log.i(WEB_TAG, "ime lift ${imeLiftDp}dp portal=$portalOpen page=$takesIme")
+    }
+}
+
+/**
+ * 问一句"这一页认不认 `window.__LUWI_IME__`" (2026-11-22)
+ *
+ * 超时 / 页面被换掉都回 false (那只是没用上"不缩边"那条快路), 要不要退回缩 WebView 由调用方的
+ * 重试次数决定
+ */
+private suspend fun imeTakesLift(view: WebView): Boolean = withTimeoutOrNull(IME_ASK_MS) {
+    suspendCancellableCoroutine { continuation ->
+        view.evaluateJavascript(IME_PROBE_JS) { answer ->
+            // 超时之后回调还会来一次, 已取消的续体不再喂值
+            if (continuation.isActive) continuation.resume(answer?.contains("true") == true)
+        }
+    }
+} ?: false
 
 /**
  * 「回应用」那一跳走到哪一步: 一行日志 + 一笔状态
@@ -1469,12 +1921,36 @@ private val WINDOW_START_TOP = 120.dp
 private const val WEB_TAG = "DshWebView"
 
 /**
- * renderer 死了之后**同一个窗最多自动换几次新的**
+ * **一个 [REBUILD_WINDOW_MS] 窗口里**最多自动换几次新页
  *
- * 一次是正常的恢复 (系统回收 / OOM 各是一次意外); 连着死三次还自动重建就是在重建循环里烧电,
- * 那时把手交给那个真 Dialog, 让主人自己决定要不要重试
+ * 一次是正常的恢复 (系统回收 / OOM 各是一次意外); 连着死三次还自动重建就是在重建循环里烧电。
+ * 2026-11-13 之前这里是"整个会话的额度", 于是真机上一次内存抖动 (1.2 s 连死四回) 就把额度一口气
+ * 用光, 之后这一屏再也不自动重建 —— 现在额度按时间窗归还, 且用光只表示"进慢档", 不是终态
  */
 private const val MAX_PAGE_REBUILDS = 3
+
+/**
+ * 多远的死亡还算"同一场事故"的额度
+ *
+ * 一次抖动 (lk 连环杀 / 一次大内存申请失败) 里连着死几回是正常的; 而半小时后再死一次是另一件事,
+ * 不该被上一场事故的计数吃掉
+ */
+private const val REBUILD_WINDOW_MS = 60_000L
+
+/**
+ * 第 1 / 2 / 3 次重建各等多久
+ *
+ * 2026-11-13 真机现场: 上一版是一死就立刻换新的, 从上一次死亡到下一次申请内存只隔 0.3~0.6 s ——
+ * 在内存最紧的时刻连续要 200 MB, 必然连续被杀。退避就是让那一阵抖动先过去
+ */
+private val REBUILD_BACKOFF_MS = longArrayOf(1_000L, 3_000L, 8_000L)
+
+/**
+ * 额度用光之后的慢档: 隔这么久再自己试一次, 界面同时留一个可点的按钮
+ *
+ * 同一个数也是"回前台那一趟要不要重试"的闸 —— 两条都是"别再连着要内存"
+ */
+private const val SLOW_RETRY_MS = 30_000L
 
 /**
  * 预览里那颗「用系统文件管理器打开」用的自定义 scheme
@@ -1545,6 +2021,194 @@ private const val RETURN_TRIES = 2
 private const val PAGE_BACK_MS = 500L
 
 /**
+ * 键盘让位那三笔 (2026-11-22)
+ *
+ * - [IME_PROBE_JS]: 问页面认不认宿主推过去的高度 (ui-fix 的 `__LUWI_IME__`, 见 `presets/ui-fix`)
+ * - [IME_ASK_MS]: 探针自己那句只读一个 `typeof`, 页面没起来时不该挂到 [RETURN_ASK_MS] 那么久
+ * - [IME_PROBE_TRIES] x [IME_PROBE_EVERY_MS]: 插件是在页面 boot 里 apply 的, 比 `onPageFinished` 晚, 所以要重试
+ * - [IME_SETTLE_FRAMES]: 安全网那条路只要"停稳"的终值 —— 一次键盘动画里连着的两帧一样才算数
+ */
+private const val IME_PROBE_JS =
+    "(function(){try{return typeof window.__LUWI_IME__ === 'function'}catch(e){return false}})()"
+private const val IME_ASK_MS = 600L
+private const val IME_PROBE_TRIES = 20
+private const val IME_PROBE_EVERY_MS = 300L
+private const val IME_SETTLE_FRAMES = 2
+
+/**
+ * 选图那一路的四个词 (落实表 #35, 2026-11-12; 2.8.1 #13 收紧): 页面 `__LUWI_PORTAL__.pickState(state)`
+ * 认的就是这一套
+ *
+ * `shown` = `onShowFileChooser` 进来了 (选择器起来了) / `picked` = 选择器回来了而且选到了东西 (随后
+ * 宿主把落好盘的那几份交回页面, 见 [pickedFiles]) /
+ * `empty` = 回来是空的 (**人自己退出来的**, 页面上一个字都不写 —— 2026-11-15 主人: "没有选择直接
+ * 退出...要求这种情况下不要显示这个报错") / `none` = 选择器起不来 (这一档才是真的"点了没反应",
+ * 页面说一句「图片发送失败：webview 未回调」)
+ *
+ * **每一次请求都只答一个终态** (`picked` / `empty` / `none`): 页面的看门狗只认这个, 而选择器盖着时
+ * 渲染器是停着的 —— 那几句 `evaluateJavascript` 要等页面回到前台才落地 (2026-11-12 的 logcat:
+ * `file chooser` 之后 5.2 s 才出一条假的「webview 未回调」) —— 所以页面那边**在选择器盖着时把计时器
+ * 停住, 回来之后再给一段宽限**, 见 client.js 的 `pickWatchVisibility`
+ */
+private const val PICK_SHOWN = "shown"
+private const val PICK_PICKED = "picked"
+private const val PICK_EMPTY = "empty"
+private const val PICK_NONE = "none"
+
+/**
+ * 把选图那一下的结论推给门户 (空页面 / 门户没挂上时这一步什么都不做)
+ *
+ * 只走一条 `evaluateJavascript`: 页面那一侧拿它撤计时器或者报一句带原因的话, 宿主不重复判"该不该说"
+ * @param state 见 [PICK_SHOWN] 那四个词
+ */
+private fun WebView.pickState(state: String) {
+    evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.pickState('$state')", null)
+}
+
+/**
+ * 把宿主落好的那几份交给门户 (2.8.1 #13)
+ *
+ * 交回去的是 [PortalBridge.stashPicked] 那一份 JSON (名字 / 路径 / 字节数 / 是不是图 / MIME), 页面照它
+ * 直接把待发栏里那几行画成 ready —— **不再过 WebView 的 `content://` 读法**, 也不再走 base64 那座桥
+ * (一份 3 MB 的图要过两次桥, 而落盘本来就是宿主的事)
+ *
+ * 行分隔符要转义: `JSONObject` 不转 `\u2028` / `\u2029`, 而它们在 JS 里是换行 —— 文件名里带上就会把
+ * 这一句拆成语法错误
+ * @param payload [PortalBridge.stashPicked] 回来的那段 JSON
+ */
+private fun WebView.pickedFiles(payload: JSONObject) {
+    val literal = payload.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    evaluateJavascript("window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.picked($literal)", null)
+}
+
+/**
+ * 系统文件管理器把一份文件拖进这一屏时该做什么 (2.8.1 #34)
+ *
+ * 页面那一侧的 `dragenter` / `dragover` / `drop` 只对浏览器自己造出来的 `DataTransfer` 有效: 从文件
+ * 管理器拖过来的 `content://` 在 Android 的 WebView 里**不派发 HTML5 drop**, 页面上永远等不到那一拍
+ * (2026-11-19 复核: 只有 JS 侧监听时真机拿不到"投 1 个文件 -> 出 1 个 chip"的读数)。于是改在原生这一
+ * 层接: [ClipData] 里的 Uri 交给 [PortalBridge.stashPicked] (与 `+` 选完那一趟同一份落盘实现), 落好的
+ * 几份再经 [pickedFiles] 交回页面, 页面照 `picked` 画成待发 chip
+ *
+ * 只认 `content` / `file` 两种 scheme: 拖一段选中的文本进来时用户要的是"粘贴", 那一档留给页面自己,
+ * 这里返回 false 放行 —— 也不能把所有拖拽都吃了, 否则页面内的拖拽 (排序、它自己的上传区) 全哑
+ * @param event 那一拍拖拽事件
+ * @param portal 门户桥 (读字节与落 `lw-in/` 都在它那边, 与 `+` 同一条链)
+ * @param scope 这一屏的作用域: 一份 3 MB 的图从相册读出来再写进 `/sdcard` 是几百毫秒, 要下 IO
+ * @return 这一拍接没接 (false = 交给系统继续问别人)
+ */
+private fun WebView.acceptDrop(
+    event: DragEvent,
+    portal: PortalBridge,
+    scope: CoroutineScope,
+): Boolean = when (event.action) {
+    DragEvent.ACTION_DRAG_STARTED -> dropUris(event.clipData).isNotEmpty()
+    // 拖进来了: 页面那侧的说明牌与虚线一起亮 (2026-11-19 主人: "再加上如图所示的提示")
+    DragEvent.ACTION_DRAG_ENTERED -> {
+        dropOver(true)
+        true
+    }
+    DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {
+        dropOver(false)
+        true
+    }
+    DragEvent.ACTION_DROP -> {
+        dropOver(false)
+        val uris = dropUris(event.clipData)
+        // 一行读数: 真机上"拖进来没有 / 几份 / 叫什么"只能看这一行
+        val names = uris.joinToString(", ") { it.lastPathSegment ?: it.toString() }
+        Log.i(WEB_TAG, "drop -> ${uris.size} 份: $names")
+        if (uris.isEmpty()) {
+            false
+        } else {
+            // **拖放那份读权限只在这一拍有效** (2026-11-19 真机踩到): 系统给拖进来那张
+            // `content://` 的授权是"一次性的", 松手之后 `openInputStream` 就再也打不开 —— 落盘那
+            // 一侧只看到"这一份读不动" (落成 0 份, 页面上就是一句"这些没进"). 所以先在主线程把
+            // 它要到手 (问的是 Activity), 读完再 release
+            val grant = runCatching { context.findActivity()?.requestDragAndDropPermissions(event) }
+                .getOrNull()
+            Log.i(WEB_TAG, "drop grant=${grant != null}")
+            scope.launch {
+                val landed = withContext(Dispatchers.IO) {
+                    runCatching { JSONObject(portal.stashPicked(uris)) }.getOrNull()
+                }
+                runCatching { grant?.release() }
+                // 一份都没落成 / 整个读挂了: 也得说一句, 别让页面停在"什么都没发生"
+                pickedFiles(landed ?: nothingLanded(uris.size))
+            }
+            true
+        }
+    }
+    else -> true
+}
+
+/**
+ * 告诉页面"现在有没有东西拖在这一块上" (2026-11-19 主人: "再加上如图所示的提示")
+ *
+ * 系统拖放不给页面 HTML5 事件, 所以那块说明牌 (`#lwp-drop-hint`) 与那圈虚线只能由原生这一层喊醒:
+ * `ACTION_DRAG_ENTERED` 亮, 松手 / 拖走 / 拖拽结束灭 —— 与桌面浏览器那条路同一个 `markDrop`
+ * @param on 拖进来为 true, 其余三拍为 false
+ */
+private fun WebView.dropOver(on: Boolean) {
+    evaluateJavascript(
+        "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.dropOver(${if (on) "true" else "false"})",
+        null,
+    )
+}
+
+/**
+ * 从这一层 [Context] 往上找到那个 Activity (2.8.1 #34)
+ *
+ * 拖放那份读权限 (`requestDragAndDropPermissions`) 只有 Activity 问得到; Compose 里拿到的是
+ * `LocalContext.current`, 宿主是 Activity 时它就是 Activity, 套了一层主题包装时不是 —— 所以往上走
+ */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
+/**
+ * 拖进来的那份 [ClipData] 里有哪几个能落盘的 Uri (2.8.1 #34)
+ *
+ * 文件管理器给的是 `content://`; 有的机型另塞一条 `text/uri-list` 文本项 —— 两种都认. 只有文字
+ * (拖一段选中的文本) 的那种不算, 交给页面自己处理
+ * @param clip 那一拍事件带的 ClipData (可能为 null)
+ */
+private fun dropUris(clip: ClipData?): List<Uri> {
+    if (clip == null) return emptyList()
+    val out = ArrayList<Uri>(clip.itemCount)
+    for (index in 0 until clip.itemCount) {
+        val item = clip.getItemAt(index)
+        val uri = item.uri ?: item.text?.toString()
+            ?.takeIf { it.startsWith("content://") || it.startsWith("file://") }
+            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        if (uri != null && (uri.scheme == "content" || uri.scheme == "file") && !out.contains(uri)) {
+            out.add(uri)
+        }
+    }
+    return out
+}
+
+/**
+ * 读那一趟整个挂了的时候交回页面的说法 (2.8.1 #13)
+ *
+ * 一份都没落成时页面不能停在"什么都没发生": 这条走 `rejected` 那一支, 门户会照原样说一句
+ * @param count 这一次选了几份
+ */
+private fun nothingLanded(count: Int): JSONObject = JSONObject().apply {
+    put("ok", false)
+    put("files", JSONArray())
+    put("rejected", JSONArray().put(JSONObject().apply {
+        put("name", "选中的 $count 份")
+        put("reason", PICKED_UNREADABLE)
+    }))
+}
+
+/**
  * 返回键那一下该按页面上的哪个东西: 右栏那个展开着的格右上角的「收起」
  *
  * 手机上 (视口窄于 768 px) 那一格是**全屏**的, 点一条网页链接之后会话连同顶栏一起被它盖住, 而系统
@@ -1559,6 +2223,9 @@ private const val PAGE_BACK_MS = 500L
  */
 private const val PAGE_BACK_JS = """
 (function () {
+  // 2026-11-21 终端: 页面先说话 —— 终端 / 历史窗 / 抽屉收得掉就由它收, 收不掉才轮到下面那一层
+  var portal = window.__LUWI_PORTAL__
+  if (portal && typeof portal.back === 'function' && portal.back() === 'closed') return 'closed'
   var panel = document.querySelector('[data-sidebar-right-panel][data-sidebar-right-open]')
   if (!panel) return 'none'
   var collapse = panel.querySelector('[data-sidebar-right-toggle]')
@@ -1567,6 +2234,15 @@ private const val PAGE_BACK_JS = """
   return 'closed'
 })()
 """
+
+/**
+ * 页面重载之后把终端接着画起来的那一句 (2026-11-21, 落实表 #48)
+ *
+ * 与 [PortalTerminal.open] 里那句不同的是这里**不再**调 `show()`: 页面刚画出来, 门户开着还是后台
+ * 以页面自己的开关为准, 这里只补"进终端"这一个动作
+ */
+private const val TERMINAL_ON_SCRIPT =
+    "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.terminal(true)"
 
 /** Shell facts worth logging after a load: boot globals, DOM size, and whatever text rendered */
 private const val SHELL_PROBE = """(function () {
@@ -1842,6 +2518,9 @@ private const val WAKE_BADGE_JS = """
  *
  * @param status the state to describe.
  * @param modifier layout modifier from the caller.
+ * @param onRetry 页面那一层已经停摆时给的那条出路 (2026-11-13): null = 不画按钮 —— 自动退避那一档
+ *   不需要人管; 而"额度用光"那一档不给按钮, 就等于把主人锁在一屏「界面加载中…」上 (真机上正是这样
+ *   坐了十六分钟)
  */
 @Composable
 private fun HostBootPanel(
@@ -1849,12 +2528,16 @@ private fun HostBootPanel(
     modifier: Modifier = Modifier,
     /** host 已经就绪、只剩页面还在加载时的那一句 (那一档 [HostStatus] 自己说不出来) */
     pageStage: String? = null,
+    onRetry: (() -> Unit)? = null,
 ) {
     val colors = MiuixTheme.colorScheme
     val context = LocalContext.current
     val failure = status as? HostStatus.Failed
     // 失败时一进来就是展开的: 那时日志就是唯一的线索, 不该再让人点一下
     var expanded by remember(failure) { mutableStateOf(failure != null) }
+    // 起不来的时候设置页可能都进不去, 自检这条路得摆在这一屏上
+    // (2026-11-08 主人: 自检修不了, 由他自己决定要不要匿名上报)
+    var reportFailure by remember(failure) { mutableStateOf(false) }
     // 主人 / agent 写的那份 splash.json (见 [SplashSetting]): 每次进来现读, 改完下一次开屏就是新的
     val splash = SplashSetting.config(context)
     // 自己那张图标: 只在文件真的换了 (大小/时间变了) 才重新解一遍
@@ -1896,11 +2579,27 @@ private fun HostBootPanel(
                     modifier = Modifier.size(112.dp),
                 )
             } else {
-                Image(
-                    painter = painterResource(R.drawable.ic_launcher_foreground),
-                    contentDescription = null,
-                    modifier = Modifier.size(112.dp),
-                )
+                // 设置 -> 外观里挑的那一套图标 (2026-11-22): 上一支的 `splash.json` 是主人的显式覆写,
+                // 没配时画当前套的标记。画框两套共用一个数 (`SPLASH_BOX_DP`), 墨迹由 `splashBitmap`
+                // 统一收到画框的 0.46 —— 换套时图标高度与下面那几行字的位置都不跳 (2026-11-22 主人:
+                // "启动时的不同的图标, 位置不同" 与 "开屏高度采用第一张鲸尾图标的高度")
+                val iconStamp = remember { IconTheme.stamp(context) }
+                val iconSet = remember(iconStamp) { IconTheme.current(context) }
+                val mark = remember(iconStamp, iconSet) { IconTheme.splashBitmap(context, iconSet) }
+                if (mark != null) {
+                    Image(
+                        bitmap = mark.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.size(IconTheme.SPLASH_BOX_DP.dp),
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(R.drawable.ic_launcher_foreground),
+                        contentDescription = null,
+                        modifier = Modifier.size(112.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             BootIndicator(
@@ -1915,6 +2614,21 @@ private fun HostBootPanel(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (failure != null) {
+                TextButton(
+                    text = stringResource(R.string.boot_failed_report),
+                    onClick = { reportFailure = true },
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+            // 页面那一层停摆时的那条出路 (2026-11-13): 与上面那颗「上报」同一形状, 位置也一样
+            if (onRetry != null) {
+                TextButton(
+                    text = stringResource(R.string.boot_page_retry),
+                    onClick = onRetry,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
             if (splash.subtitle.isNotBlank()) {
                 Text(
                     text = splash.subtitle,
@@ -1986,6 +2700,7 @@ private fun HostBootPanel(
         }
         // 「开始使用」那张体检表**不再挂在启动页底部** (2026-11-04 主人 #2: 不要放底部): 它现在是
         // 一个居中对话框, 首启由 [ReadyPrompt] 弹一次, 之后走设置页那一行「检查所需依赖」
+        if (reportFailure) DoctorDialog(onDismissRequest = { reportFailure = false })
         if (splash.credit.isNotBlank()) {
             Text(
                 text = splash.credit,

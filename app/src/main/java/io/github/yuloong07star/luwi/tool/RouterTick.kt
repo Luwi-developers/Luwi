@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /**
- * 判断层敲钟的那一下 (2026-11-07, 球是门户)
+ * 判断层唤醒的那一下 (2026-11-07, 球是门户)
  *
  * 它这一侧**只做一件事**: 隔一段**不定长**的时间往收件箱投一行 `source:"router"`, 说"该看一眼了" ——
  * 要不要开口、说什么, 全在宿主那一侧 (`host-plugin` 的 `judgeRouter`)。划界这么切有三个好处:
@@ -36,13 +36,13 @@ import kotlin.random.Random
  * 1. 判断要读的那些账 (`usage.json` / `wishes.json` / `signals.jsonl`) 都在 `$DSH_HOME` 里,
  *    宿主本来就在读它们
  * 2. 应用这一侧不必知道"什么算久"、"谁快考试了" —— 规则改了不用重装 APK
- * 3. 敲钟与说话分开之后, "她挑时机"与"她说人话"可以各自单独验
+ * 3. 唤醒与说话分开之后, "她挑时机"与"她说人话"可以各自单独验
  *
  * **间隔是随机的** (25~55 分钟): 固定的时刻会让人觉出"这是闹钟", 而不定时才像有人在过日子 ——
  * 这是"活人感"里最便宜也最有效的一条
  *
  * 开关是 `$DSH_HOME/lw/router.json` 的 `tick.enabled`, **缺省关**: 这一批先关着发, 主人自己打开
- * 才敲。与探索 (41) / 主动对话 (43) 两个闹钟分开, requestCode 44 不覆盖任何一个
+ * 才唤醒。与探索 (41) / 主动对话 (43) 两个闹钟分开, requestCode 44 不覆盖任何一个
  */
 internal object RouterTick {
 
@@ -51,10 +51,10 @@ internal object RouterTick {
     const val DIRECTORY = "lw"
     const val FILE = "router.json"
 
-    /** 敲钟那一行的正文: 宿主那一侧只认这一行是不是 `router`, 正文本身不参与判断 */
+    /** 唤醒那一行的正文: 宿主那一侧只认这一行是不是 `router`, 正文本身不参与判断 */
     const val TEXT = "tick"
 
-    /** 两次敲钟之间最短 / 最长各是多少毫秒 */
+    /** 两次唤醒之间最短 / 最长各是多少毫秒 */
     const val MIN_GAP_MS = 25 * 60_000L
     const val MAX_GAP_MS = 55 * 60_000L
 
@@ -68,7 +68,7 @@ internal object RouterTick {
     /** 提前量最多看多远: 两小时以内的事件才值得为它把闹钟提前 */
     const val LEAD_WINDOW_MS = 2 * 60 * 60 * 1000L
 
-    /** 窗口**已经开着**却没说过时, 一分钟后再敲一次 (说过了就交回随机间隔) */
+    /** 窗口**已经开着**却没说过时, 一分钟后再唤醒一次 (说过了就交回随机间隔) */
     const val LEAD_SOON_MS = 60_000L
 
     /** 排闹钟的下限: 已经到点的那一刻也不要排到"现在" */
@@ -95,21 +95,38 @@ internal object RouterTick {
      *
      * 缺省关是刻意的: 一个"会自己开口"的东西, 装上就开始说, 比装上不说话糟得多
      *
-     * **2026-11-07 晚**: 「更多设置」里那一档 `sim.json` 的 `wake.mode = active` 也算开 —— 那是
-     * 主人对这一页的直说, 与这里的开关任一为开就敲
+     * **2026-11-20 起只有一个来源**: `router.json` 的 `tick.enabled`。原先 `sim.json` 的
+     * `wake.mode = active` 也算开 —— 那一格 2026-11-20 已从界面与数据层删掉 (它读起来像"她多主动",
+     * 实际只是这里的第二个开关), 老文件里的 `active` 由 [migrateMode] 搬一次
      */
-    fun enabled(context: Context): Boolean {
-        val bySwitch = runCatching {
-            val raw = file(context).takeIf { it.isFile }?.readText()
-            if (raw == null) {
-                false
-            } else {
-                val root = json.parseToJsonElement(raw).jsonObject
-                root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
-            }
-        }.getOrDefault(false)
-        if (bySwitch) return true
-        return runCatching { SimSetting.plan(context).wake.active }.getOrDefault(false)
+    fun enabled(context: Context): Boolean = runCatching {
+        val raw = file(context).takeIf { it.isFile }?.readText() ?: return@runCatching false
+        val root = json.parseToJsonElement(raw).jsonObject
+        root["tick"]?.jsonObject?.get("enabled")?.jsonPrimitive?.booleanOrNull ?: false
+    }.getOrDefault(false)
+
+    /**
+     * 老 `sim.json` 的 `wake.mode = active` 搬成 `tick.enabled = true` (2026-11-20)
+     *
+     * 界面删了那一格之后, 只在 `sim.json` 里选过"活跃"的机器不能就此静悄悄地停掉判断层。规矩:
+     * ① `router.json` 原文里已经有 `tick` 段 → 那是更明确的账, 不动它
+     * ② 老 `sim.json` 写着 `active` → 写 `tick.enabled = true` 一次
+     * ③ 写完之后 `sim.json` 那一格本来就没人读了, 不需要再摘 (下一次保存 `sim.json` 会自然瘦身)
+     *
+     * @returns 这一趟真的写过没有
+     */
+    fun migrateMode(context: Context): Boolean {
+        val target = file(context)
+        val root = runCatching {
+            target.takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it).jsonObject }
+        }.getOrNull()
+        if (root?.get("tick") is JsonObject) return false
+        val active = runCatching {
+            SimSetting.file(context).takeIf { it.isFile }?.readText()?.let { json.parseToJsonElement(it) }
+                ?.jsonObject?.get("wake")?.jsonObject?.get("mode")?.jsonPrimitive?.contentOrNull
+        }.getOrNull() == "active"
+        if (!active) return false
+        return setEnabled(context, true)
     }
 
     /**
@@ -166,7 +183,7 @@ internal object RouterTick {
      *
      * 与宿主 `routerEventHit` 同一套三条规矩: 全天事件不算、已经开始的 lead 不算、标题与日历要匹配
      * (两边漂开的样子是"闹钟按点响了, 判断层却说不该响")。`said` 是 `router.json` 的 `checksSaid`:
-     * 一场会说过之后它在窗口里不再算"该敲", 于是不会每分钟响一次
+     * 一场会说过之后它在窗口里不再算"该唤醒", 于是不会每分钟响一次
      */
     fun leadAtOf(
         checks: List<RouterChecks.Check>,
@@ -186,7 +203,7 @@ internal object RouterTick {
                 if (!wanted.isNullOrBlank() && !event.title.contains(wanted, ignoreCase = true)) continue
                 val leadAt = event.begin - beforeMs
                 if (leadAt <= now) {
-                    // 窗口已经开着: 没说过就补一敲, 说过了交给随机间隔
+                    // 窗口已经开着: 没说过就补一次唤醒, 说过了交给随机间隔
                     if (said[one.id] != dayKeyOf(now) + "@" + event.begin) open = true
                     continue
                 }
@@ -291,7 +308,7 @@ internal object RouterTick {
                 Log.w(TAG, "the router tick could not be fired", problem)
             } finally {
                 release()
-                // **无论成没成都要排下一次**: 这一次宿主起不来不代表下一次不敲
+                // **无论成没成都要排下一次**: 这一次宿主起不来不代表下一次不唤醒
                 runCatching { arm(application) }
             }
         }
@@ -316,7 +333,7 @@ internal object RouterTick {
     }
 }
 
-/** 敲钟的闹钟广播: `exported=false`, 只可能被本应用自己的 `PendingIntent` 叫到 */
+/** 唤醒的闹钟广播: `exported=false`, 只可能被本应用自己的 `PendingIntent` 叫到 */
 class RouterTickReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val pending = goAsync()

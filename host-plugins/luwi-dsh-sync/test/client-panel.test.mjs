@@ -149,14 +149,11 @@ test('座位齐 (both): 左栏图标 + main 整页 + 右侧栏 tab 两段式', a
     assert.deepEqual(specs, [
       { name: 'sidebar.panellist', id: 'luwi-sync', order: 40, label: specs[0].label },
       { name: 'main', key: 'luwi-sync' },
-      // Luwi 加 (2026-11-05): 终端面板 —— 同一个 panellist 槽里的第二个条目, 排在「同步」后面
-      { name: 'sidebar.panellist', id: 'luwi-term', order: 41, label: specs[2].label },
-      { name: 'main', key: 'luwi-term' },
       { name: 'sidebar.right.pane.tab', key: 'luwi-dsh-sync/panel' },
     ])
     assert.equal(typeof specs[0].label, 'function')
-    assert.equal(specs[0].label(), '同步')
-    assert.equal(specs[2].label(), '终端')
+    // 2026-11-21 主人: 侧边栏那一行显示名改成「luwi终端」; 原「终端」(手机沙盒) 那两处注册整条下线
+    assert.equal(specs[0].label(), 'luwi终端')
     assert.deepEqual(state.injects, ['sidebar.right.pane.tab'])
     assert.equal(services.tabs.registrations.length, 1)
     const tab = services.tabs.registrations[0]
@@ -167,10 +164,10 @@ test('座位齐 (both): 左栏图标 + main 整页 + 右侧栏 tab 两段式', a
     assert.equal(tab.guide.length, 1)
     assert.equal(tab.guide[0].id, 'sync')
 
-    // 卸载: 五处注册全被摘掉 (同步的两处 + 终端的两处 + 右侧栏 tab)
+    // 卸载: 三处注册全被摘掉 (左栏两处 + 右侧栏 tab)
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     for (const off of state.injectedCleanups) off()
-    assert.equal(state.removed.length, 5)
+    assert.equal(state.removed.length, 3)
   } finally {
     restoreFetch()
     restore()
@@ -186,7 +183,7 @@ test('宿主说 left: 右侧栏一条注册都不发生', async () => {
     const { ctx, state } = makeCtx(services)
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
     assert.equal(state.injects.length, 0)
     assert.equal(services.tabs.registrations.length, 0)
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
@@ -223,7 +220,7 @@ test('探针失败 (通道没开): 退回 both —— 入口要看得见, 面板
     const { ctx, state } = makeCtx(services)
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main', 'sidebar.right.pane.tab'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.right.pane.tab'])
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     for (const off of state.injectedCleanups) off()
   } finally {
@@ -240,14 +237,14 @@ test('右侧栏可选服务缺失: 只装左栏那条, 不抛, 卸载时把轮�
     const { ctx, state } = makeCtx({})
     mod.apply(ctx)
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
     // 座位回调跑过 (能力门过了), 只是服务没就绪 → 一圈轮询排着
     assert.deepEqual(state.injects, ['sidebar.right.pane.tab'])
     for (const off of state.injectedCleanups) off()
     for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
     // 卸载之后再等几拍: 没有迟到的注册
     await flush()
-    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main', 'sidebar.panellist', 'main'])
+    assert.deepEqual(state.registrations.map(r => r.spec.name), ['sidebar.panellist', 'main'])
   } finally {
     restoreFetch()
     restore()
@@ -276,7 +273,7 @@ test('面板渲染: 通道没开时画"通道没开"那一屏, 不抛', async ()
   }
 })
 
-test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊断板块与名片', async () => {
+test('面板渲染: 单页只剩配对卡与仓库卡, 配对在前; 镜像读数 / 操作 / 对端 / P2P / 运行结果都不画', async () => {
   const { definition, restore } = await loadBundle()
   const snapshot = {
     ok: true,
@@ -289,6 +286,17 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
     config: { deviceName: 'PC', remoteState: 'set', panelOps: true, panelSeats: 'both', branch: 'main' },
     peers: { cards: [{ deviceId: 'p1', name: 'PC' }], broken: 0 },
     op: null,
+    pairing: { paired: false, repoHost: 'github.com' },
+    peer: {
+      enabled: true,
+      token: '••••cdef',
+      url: { state: 'set', display: 'http://100.64.0.7:3080/' },
+      reachable: 'ok',
+      queue: { pending: 2, acks: 0 },
+      counters: { sent: 3, received: 1 },
+      workspace: { on: true, shadows: [{ key: 'a' }], proxies: [{ peerSessionId: 's1' }] },
+    },
+    p2p: { enabled: true, path: 'ip', rttMs: 12, trustState: 'trusted' },
     mirrors: [
       {
         target: 'sessions',
@@ -303,7 +311,7 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
       { target: 'workspace', label: '工作区', on: false, remote: { state: 'unset', display: '' }, cost: null, meta: {}, status: null },
     ],
   }
-  // useState 顺序: [bump(useLocaleTick), snap, fault, pending, answer, auto, busy, copied, actionTarget, loadedAt]
+  // useState 顺序: [bump(useLocaleTick), snap, fault, pending, auto, busy, copied, actionTarget, loadedAt]
   const React = fakeReact([0, snapshot, null])
   const services = sidebarServices()
   const restoreFetch = stubFetch({ handshake: 'luwi-dsh-sync/panel', config: { panelSeats: 'both', panelOps: true } })
@@ -319,10 +327,15 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
     // 2026-10-24: runner=subprocess 那个徽标改成中文了 (「本机进程」/「手机桥接」)
     assert.match(text, /本机进程/)
     assert.match(text, /v=0\.2\.24/)
-    assert.match(text, /会话/)
-    assert.match(text, /工作区/)
-    assert.match(text, /221/)
-    assert.match(text, /187\.8 MB/)
+    // 2026-11-22 主人: "将仓库以下的面板全部删除" —— 仓库卡以下五块整块撤掉
+    assert.match(text, /配对手机/, '配对卡还在')
+    assert.match(text, /仓库/, '仓库卡还在')
+    assert.doesNotMatch(text, /会话 · |工作区 · /, '镜像卡片不再画')
+    assert.doesNotMatch(text, /221/, '镜像体积那一行不在了')
+    assert.doesNotMatch(text, /操作/, '操作卡不在了')
+    assert.doesNotMatch(text, /跨设备对端/, '对端卡不在了')
+    assert.doesNotMatch(text, /P2P 直连/, 'P2P 卡不在了')
+    assert.doesNotMatch(text, /运行结果/, '运行结果那一块不在了')
     // 2026-10-22 主人: 配对操作放最上方 —— 配对卡必须排在仓库卡前面
     const atPair = text.indexOf('配对手机')
     const atRepo = text.indexOf('仓库')
@@ -340,7 +353,7 @@ test('面板渲染: 单页里配对在最上方、两根镜像都在, 没有诊�
   }
 })
 
-test('面板渲染: 对端那一块按快照画出来 (令牌只有打码形态), 没有这一段时不多画', async () => {
+test('面板渲染: 对端那块读数整块撤掉 —— 快照里有 peer 也不画, 令牌一个字都不进面板', async () => {
   const { definition, restore } = await loadBundle()
   const base = {
     ok: true,
@@ -391,24 +404,19 @@ test('面板渲染: 对端那一块按快照画出来 (令牌只有打码形态)
   }
 
   try {
+    // 2026-11-22: 五块整块撤掉之后, peer 那些读数 (可达 / 地址 / 影子工作区 / 队列) 一个都不该上屏
     const withPeer = await run({ ...base, peer })
-    assert.match(withPeer, /跨设备对端/)
-    assert.match(withPeer, /可达/)
-    assert.match(withPeer, /••••cdef/)
+    assert.doesNotMatch(withPeer, /跨设备对端/)
+    assert.doesNotMatch(withPeer, /可达/)
+    assert.doesNotMatch(withPeer, /影子工作区/)
+    assert.doesNotMatch(withPeer, /等着过去/)
+    assert.doesNotMatch(withPeer, /••••cdef/, '打码的令牌也不该出现 —— 那一张卡整块没了')
     assert.doesNotMatch(withPeer, /0123456789abcdef/)
-    assert.match(withPeer, /影子工作区/)
-    assert.match(withPeer, /1 \/ 1/, '影子工作区那一行报的是 工作区数 / 投影会话数')
-    assert.match(withPeer, /等着过去/)
-    assert.match(withPeer, /发过去/, '写面开着时那一个发消息按钮在')
-
-    // panelOps 关掉时那一个输入框与按钮不出现 (读面照旧)
-    const readonly = await run({ ...base, peer, config: { ...base.config, panelOps: false } })
-    assert.match(readonly, /跨设备对端/)
-    assert.doesNotMatch(readonly, /发过去/)
-
-    // 没有 peer 块的宿主 (老版本那一侧) 那一张卡整块不画
+    // 没有 peer 块的宿主: 面板长得一模一样 (读数撤掉之后两者没区别)
     const without = await run(base)
     assert.doesNotMatch(without, /跨设备对端/)
+    assert.match(without, /配对手机/, '配对卡照旧在')
+    assert.match(without, /仓库/, '仓库卡照旧在')
   } finally {
     restore()
   }
@@ -443,14 +451,20 @@ function expand(element) {
   return { ...element, children }
 }
 
-test('面板渲染: 未登录时生成配对码是灰的, 登录后显示账号与到期', async () => {
+/**
+ * 面板渲染: 账号那一段下线之后, 配对卡上只剩配对本身。
+ *
+ * 2026-11-21 主人: 登录 Luwi 账号 / 刷新权益 / 退出登录 整条删掉 (它只给 P2P 到期闸供读数, 而 P2P
+ * 缺省关、手机侧从不启用)。同时钉住"生成配对码与账号无关"这条老口径: 按钮不许带门槛 title。
+ */
+test('面板渲染: 账号那一段整条下线, 生成配对码照旧可点', async () => {
   const { definition, restore } = await loadBundle()
   const snapshot = {
     ok: true,
     handshake: 'luwi-dsh-sync/panel',
-    v: 4,
+    v: 5,
     plugin: 'luwi-dsh-sync',
-    version: '0.3.3',
+    version: '0.4.0',
     serverTime: 1000,
     mount: { mounted: true, runner: 'subprocess' },
     config: { deviceName: 'PC', remoteState: 'set', panelOps: true, panelSeats: 'both', branch: 'main' },
@@ -468,16 +482,9 @@ test('面板渲染: 未登录时生成配对码是灰的, 登录后显示账号�
       },
     ],
   }
-  const services = sidebarServices()
   const restoreFetch = stubFetch({ handshake: 'luwi-dsh-sync/panel', config: { panelSeats: 'both', panelOps: true } })
-
-  /**
-   * 用一份 license 渲染一次单页。
-   * @param {object|null} license - 快照里的 license 块 (null = 从未登录)。
-   * @returns {Promise<{text: string, buttons: object[]}>} 文本与按钮。
-   */
-  async function render(license) {
-    const React = fakeReact([0, license === null ? snapshot : { ...snapshot, license }, null])
+  try {
+    const React = fakeReact([0, snapshot, null])
     const { ctx, state } = makeCtx(sidebarServices())
     try {
       const mod = definition.factory(() => React)
@@ -485,37 +492,22 @@ test('面板渲染: 未登录时生成配对码是灰的, 登录后显示账号�
       await flush()
       const component = state.registrations.find(r => r.spec.name === 'main').component
       const tree = expand(component({}))
-      return { text: textsOf(tree).join(' | '), buttons: buttonsOf(tree) }
+      const text = textsOf(tree).join(' | ')
+      // 账号那一段一个字都不许再出现
+      assert.doesNotMatch(text, /账号/)
+      assert.doesNotMatch(text, /登录 Luwi 账号/)
+      assert.doesNotMatch(text, /退出登录/)
+      assert.doesNotMatch(text, /刷新权益/)
+      // 配对卡本身还在, 而且生成码那颗钮没有任何门槛 title (与账号无关)
+      assert.match(text, /配对手机/)
+      const labelOf = (candidate) => Array.isArray(candidate.children) ? candidate.children[0] : candidate.children
+      const button = buttonsOf(tree).find(candidate => labelOf(candidate) === '生成配对码' || labelOf(candidate) === '生成中')
+      assert.ok(button, '生成配对码那颗钮应该在')
+      assert.equal(button.title, undefined)
     } finally {
       for (const effect of state.effects) { if (typeof effect.off === 'function') effect.off() }
       for (const off of state.injectedCleanups) off()
     }
-  }
-
-  try {
-    /** 那一颗「生成配对码」按钮的 title (找不到时回 'MISSING', 免得静默通过) */
-    const pairTitleOf = (view) => {
-      const labelOf = (candidate) => Array.isArray(candidate.children) ? candidate.children[0] : candidate.children
-      const button = view.buttons.find(candidate => labelOf(candidate) === '生成配对码' || labelOf(candidate) === '生成中')
-      return button ? button.title : 'MISSING'
-    }
-
-    const anonymous = await render(null)
-    assert.match(anonymous.text, /未登录/)
-    assert.match(anonymous.text, /登录 Luwi 账号/)
-    // 2026-10-25 主人: 取消登录要求 —— 生成配对码与账号无关, 未登录也不许再挂门槛文案
-    assert.equal(pairTitleOf(anonymous), undefined)
-
-    const signedIn = await render({ state: 'active', login: 'octo', expiresAt: Date.now() + 86_400_000, hasToken: true })
-    assert.match(signedIn.text, /@octo/)
-    assert.match(signedIn.text, /退出登录/)
-    assert.doesNotMatch(signedIn.text, /登录 Luwi 账号/)
-    assert.equal(pairTitleOf(signedIn), undefined)
-
-    // 过期的人仍然能生成配对码 (要去续费), 但面板要说清
-    const expired = await render({ state: 'expired', login: 'octo', expiresAt: 1, graceUntil: 2, hasToken: true })
-    assert.match(expired.text, /已到期, git 同步照旧可用/)
-    assert.equal(pairTitleOf(expired), undefined)
   } finally {
     restoreFetch()
     restore()

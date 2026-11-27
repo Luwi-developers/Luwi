@@ -53,9 +53,11 @@
 // （缺失 = 失败关闭）。lib/ 零 DSH 依赖，服务只在边界接线。
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmdirSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, writeFileSync } from 'node:fs'
 import { readFile, readdir, rm, stat } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -100,7 +102,7 @@ import { EncryptedBackend, encryptTree, decryptTree, mergeTrees } from './lib/en
 import { selectEncryptionMode } from './lib/backend.mjs'
 import { detectAge, ageEncrypt, ageDecrypt } from './lib/age.mjs'
 import { collectStatus } from './lib/status.mjs'
-import { renderDiff, renderPeers, renderPull, renderPush, renderStatus, errorValue } from './lib/render.mjs'
+import { renderDiff, renderP2pState, renderPeers, renderPull, renderPush, renderStatus, errorValue } from './lib/render.mjs'
 import { confirmSync, hasOpenTurn, makeEventGate, maybeAppendSessionEvent, openTurnFromProjection } from './lib/gate.mjs'
 import { sessionSyncDomainSpec } from './lib/domain.mjs'
 import { luwiBridgeFromEnv, luwiWorktreeProblem, makeLuwiBridgeRunner, readLuwiSyncConfig } from './lib/luwi-bridge-runner.mjs'
@@ -117,14 +119,20 @@ import { encodePairing, pairingPayloadFromConfig, pairingSummary, remoteHostOf }
 import { qrSvg } from './lib/qr-svg.mjs'
 import { materializeSyncShadows, readWorkspaceCards, writeWorkspaceCard } from './lib/luwi-sync-shadow.mjs'
 // Luwi 加 (G1-2 对端): 通道的配置面 (peer/live 两段)、投影算术与运行时
-import { resolveLiveSpec, resolvePeerSpec, annotateWorkspaceNames, shadowDirName } from './lib/luwi-peer.mjs'
+import { resolveLiveSpec, resolvePeerSpec, resolveRole, annotateWorkspaceNames, shadowDirName } from './lib/luwi-peer.mjs'
 import { condense, liveSnapshot, LIVE_SNAPSHOT_VERSION, LIVE_SNAPSHOT_VERSION_LEGACY } from './lib/luwi-live.mjs'
 import { appendTranscriptEntries, transcriptDir } from './lib/luwi-transcript.mjs'
-import { createPeerRuntime } from './lib/luwi-peer-runtime.mjs'
+import { createPeerRuntime, MAX_BLOB_BYTES } from './lib/luwi-peer-runtime.mjs'
+// 2026-11-22 (2.8.1 #50): 附件段的解析 / 名字去重, 与手机侧 `BallAttach` 同一串
+import { dedupeFileName, rewriteAttachPaths, safeFileName, stripAttach, withAttach } from './lib/luwi-attach.mjs'
 import { makeGithubApi, looksLikeNetworkFailure } from './lib/github-api.mjs'
 import { appendProxyEvents, proxyEventsFrom, proxyNoticeEvents, proxyTitleOf, proxyUserMessage } from './lib/luwi-proxy.mjs'
 // Luwi 加 (G1 收口): 只读自检的纯函数 —— peer 落点 / ② 层 extraneous / 汇总文本
 import { formatDoctor, runDoctor } from './lib/luwi-doctor.mjs'
+// Luwi 加 (2026-11-22 终端问答): 问题条目 / 回答解析 / ask 段规格 (纯算术, 单测直接吃)
+import { TERMINAL_BRIEF, TERMINAL_BRIEF_LOCAL, autoAnswers, createAskRelay, renderAskState, resolveAskSpec } from './lib/luwi-ask.mjs'
+// 2026-11-22: adb reverse 那条管子的读数与修补 (手机回环口 -> 电脑这一趟的端口)
+import { parseReverseList, repairReverse } from './lib/lw-reverse.mjs'
 // Luwi 加 (P2P T2): sidecar 监管与它的配置段 —— 只定位/起停/读状态, 不实现同步协议
 import { P2pSidecar } from './lib/p2p-sidecar.mjs'
 import { P2pService } from './lib/p2p-service.mjs'
@@ -132,22 +140,8 @@ import { confirmPeer, readTrust, revokePeer, writeTrust } from './lib/p2p-trust.
 import { resolveP2pConfig } from './lib/p2p-config.mjs'
 // Luwi 加 (G1 面板): 官方侧边栏那块操作面板的宿主半 (同源 HTTP 数据通道)
 import { createPanel, describeRemote, PANEL_PREFIX, PANEL_TARGETS } from './lib/panel-routes.mjs'
-// Luwi 加 (2026-11-05): 终端面板 —— 借 App 交给宿主的特权通道, 在手机的沙盒里跑一条命令
-import { createTermChannel } from './lib/term-channel.mjs'
-// Luwi 加 (2026-10-23): 账号登录与权益 (本地验签 + 7 天宽限 + 到期闸)
-import {
-  accountBaseOf,
-  accountRequest,
-  clearLicenseFile,
-  licensePathOf,
-  loginUrlOf,
-  newLoginState,
-  planAllowsP2p,
-  readLicenseFile,
-  statusOf,
-  storedFromPoll,
-  writeLicenseFile,
-} from './lib/luwi-license.mjs'
+// 2026-11-21: 沙盒终端通道 (createTermChannel) 与账号权益 (lib/luwi-license.mjs) 整条下线 ——
+// 前者与同步无关 (主人点名删), 后者只给 P2P 到期闸供读数而 P2P 缺省关、手机侧从不启用
 
 export const name = PLUGIN_NAME
 
@@ -341,12 +335,9 @@ export function resolveConfig(config = {}) {
   if (resolved.publicUrl !== '' && !/^https?:\/\//iu.test(resolved.publicUrl.trim())) {
     throw badConfig('publicUrl must be an http(s) URL (the peer rows open it in a WebView)')
   }
-  if (resolved.sessionRoot === '' && process.env.DSH_HOME === undefined) {
-    throw badConfig('sessionRoot is empty and $DSH_HOME is not set; run under dsh or set sessionRoot explicitly')
-  }
-  if (resolved.repoDir === '' && process.env.DSH_HOME === undefined) {
-    throw badConfig('repoDir is empty and $DSH_HOME is not set; run under dsh or set repoDir explicitly')
-  }
+  // 2026-11-21 深夜: 这两条加载期校验删掉 —— 桌面宿主装载插件时 env 里还没有 DSH_HOME,
+  // 它们在这里先把 apply 打断 (侧边栏与路由一起没了), 而 lib/paths.mjs 的 resolveSessionRoot /
+  // resolveRepoDir 现在已经会退 ~/.dsh; 真拿不到家目录时那一层照旧响亮失败
   // Luwi 加 (G1 面板): 座位词汇的加载期校验 —— 拼错一个值就是"面板整个不见", 响亮失败比静默好
   if (!PANEL_SEAT_MODES.includes(resolved.panelSeats)) {
     throw badConfig(`panelSeats ${JSON.stringify(resolved.panelSeats)} must be one of ${PANEL_SEAT_MODES.join('|')}`)
@@ -589,6 +580,14 @@ export function losslessStatus(value) {
   }
   return out
 }
+
+/**
+ * `/sync p2p` 的动作词归一化 —— 词表在 `lib/command-words.mjs` (那边零依赖, 单测能直接跑),
+ * 这里 import 之后转出去, 命令那一侧与判据都按同一个名字找它
+ */
+import { normalizeAskAction, normalizeP2pAction } from './lib/command-words.mjs'
+
+export { normalizeP2pAction }
 
 /**
  * sync_status 工具定义（read-only：不确认、不触网）。
@@ -1099,7 +1098,13 @@ function applyInner(ctx, config = {}) {
   const configHome = (() => {
     const explicitSessionRoot = typeof config.sessionRoot === 'string' ? config.sessionRoot.trim() : ''
     if (explicitSessionRoot !== '') return dirname(explicitSessionRoot)
-    return typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME.trim() : ''
+    const envHome = typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME.trim() : ''
+    // 2026-11-21 深夜: 桌面宿主装载那一刻 env 里还没有 DSH_HOME (它晚一步才设) —— 这一档以前
+    // 直接回 ''，于是整份 session-sync.json 读不到、sessionRoot 也算不出来, 插件在启动那一趟
+    // 整个停用 (侧边栏没有 luwi终端)。dsh 桌面版的 home 恒为 ~/.dsh, 兜住
+    if (envHome !== '') return envHome
+    const home = homedir()
+    return typeof home === 'string' && home.length > 0 ? join(home, '.dsh') : ''
   })()
   const fileLayer = readLuwiSyncConfig(process.env, configHome)
   const merged = {}
@@ -1134,6 +1139,14 @@ function applyInner(ctx, config = {}) {
   // Luwi 加 (P2P T2): p2p 段与 peer/live 同一个形制 (主要住 JSON 层)
   if (config.p2p !== undefined) merged.p2p = config.p2p
   else if (fileLayer.p2p !== undefined) merged.p2p = fileLayer.p2p
+  // Luwi 加 (2026-11-22 终端问答): ask 段 (模式 / 等多久 / 终端提示) 同一个形制, 只住 JSON 层
+  if (config.ask !== undefined) merged.ask = config.ask
+  else if (fileLayer.ask !== undefined) merged.ask = fileLayer.ask
+  // Luwi 加 (2026-11-21 终端): 角色是**顶层字符串键** (`phone` / `pc`), 与 peer/live 同一个形制 ——
+  // 它不在 CONFIG_KEYS 里, 所以必须在这里显式并进来, 否则下面那条 `merged.role` 永远读到 undefined
+  // (那样显式的 role 成了死代码, 只能靠 pairing + peer.url 回退, 两端都会误判)
+  if (config.role !== undefined) merged.role = config.role
+  else if (fileLayer.role !== undefined) merged.role = fileLayer.role
 
   const logger = ctx.logger(PLUGIN_NAME)
   const warn = (message) => logger.warn(message)
@@ -1193,6 +1206,11 @@ function applyInner(ctx, config = {}) {
   }
 
   const attempt = tryResolveConfig(merged)
+  // 2026-11-21 晚: 上一次挂载留下的投影入口先摘掉 —— 电脑侧 (proxy=false) 不装配它们时,
+  // 面板/测试读到的 `mountState.peerRefresh` 不能还是上一台那一份
+  delete mountState.peerRefresh
+  delete mountState.peerView
+  delete mountState.routes
   if (!attempt.ok) {
     mountState.mounted = false
     mountState.disabledReason = messageOf(attempt.error)
@@ -1249,135 +1267,19 @@ function applyInner(ctx, config = {}) {
   const syncConfigFile = syncConfigPath(dirname(sessionRoot))
   /** 影子根: `<DSH_HOME>/lw/peer-workspaces` —— 对端会话影子与同步来的工作区文件都住这儿 */
   const shadowRoot = join(dirname(sessionRoot), 'lw', 'peer-workspaces')
-  // Luwi 加 (2026-10-23): 账号权益落在 `<DSH_HOME>/lw/sync-license.json` (与 session-sync.json 同层)
-  // 这个文件里只有账号、到期与 device_token —— 没有密码, 也不进仓库/镜像 (lw/ 不在两根镜像的根里)
-  const licenseFile = licensePathOf(dirname(sessionRoot))
-  /** 登录中的那一次 (state + 起始时刻); 只在内存里, 宿主重启就作废 */
-  let loginPending = null
-  /** 1 秒内的状态缓存: P2P 每次同步前都问一次, 没必要每次读盘 */
-  let licenseCache = { at: 0, status: null }
-
   /**
-   * 读一次权益状态 (文件 → 验签 → 六档)
-   * @param {boolean} [force] - 跳过 1 秒缓存 (刚写完文件时用)
-   * @returns {Promise<object>} statusOf 的产物
+   * 投影账本的文件镜像 (2026-11-21)
+   *
+   * 主路是 `storageDomain` 那张 `state` 表, 可它在真机上出现过"读得到、写不进去也不报错"的一档
+   * (手机 2026-11-21 21:11 之后账本文件一直停着, 而同一目录的 workspace.json 还在写) —— 于是
+   * 每次落账都同时写这一份纯 JSON (原子 rename), 恢复时取较新的那个。**不含凭据**
    */
-  async function readLicenseStatus(force = false) {
-    const now = Date.now()
-    if (!force && licenseCache.status !== null && now - licenseCache.at < 1000) return licenseCache.status
-    const stored = await readLicenseFile(licenseFile)
-    const status = statusOf({ stored, now })
-    licenseCache = { at: now, status }
-    return status
-  }
-
-  /**
-   * P2P 收费闸的判据: active / grace 放行, 其余一律 P2P_PLAN_REQUIRED
-   * @returns {Promise<{ok: boolean, reason?: string, plan: object|null}>} 闸的答案。
-   */
-  async function licensePlanGate() {
-    const status = await readLicenseStatus()
-    const allowed = planAllowsP2p(status)
-    return {
-      ok: allowed,
-      reason: allowed ? undefined : 'P2P_PLAN_REQUIRED',
-      plan: {
-        state: status.state,
-        login: status.login,
-        expiresAt: status.expiresAt,
-        graceUntil: status.graceUntil,
-      },
-    }
-  }
-
-  /**
-   * 面板点「登录」: 只生成一次性 state 与官网地址, 浏览器由面板那一侧打开
-   * @returns {Promise<{ok: boolean, url: string, state: string, expiresAt: number}>} 结果。
-   */
-  async function licenseLoginStart() {
-    const state = newLoginState()
-    const base = accountBaseOf()
-    const startedAt = Date.now()
-    loginPending = { state, url: loginUrlOf(base, state), startedAt }
-    return { ok: true, url: loginPending.url, state, expiresAt: startedAt + 5 * 60_000 }
-  }
-
-  /**
-   * 面板轮询: 官网那边登录完了没有
-   * 404 = 还没好 (稍后再问), 410 = 这枚 state 已经作废 (要重新点登录)
-   * @returns {Promise<object>} {ok, waiting?, signedIn?, license?, error?}
-   */
-  async function licenseLoginPoll() {
-    if (loginPending === null) {
-      return { ok: false, error: 'no sign-in is in progress: click "sign in" on this panel first' }
-    }
-    if (Date.now() - loginPending.startedAt > 5 * 60_000) {
-      loginPending = null
-      return { ok: false, error: 'the sign-in window expired: click "sign in" again' }
-    }
-    const base = accountBaseOf()
-    const answer = await accountRequest(base, `/api/account/poll?state=${encodeURIComponent(loginPending.state)}`)
-    if (answer.status === 404) return { ok: true, waiting: true }
-    if (answer.status === 410) {
-      loginPending = null
-      return { ok: false, error: 'the sign-in code was used or expired before this panel picked it up: sign in again' }
-    }
-    if (answer.status !== 200 || !answer.body || answer.body.ok !== true) {
-      const reason = answer.error ?? (answer.body && answer.body.error) ?? `HTTP ${answer.status}`
-      return { ok: false, error: `sign-in did not complete: ${reason}` }
-    }
-    const stored = storedFromPoll(answer.body, { base })
-    if (stored === null) {
-      loginPending = null
-      return { ok: false, error: 'the server answered without an entitlement: sign in again' }
-    }
-    await writeLicenseFile(licenseFile, stored)
-    licenseCache = { at: 0, status: null }
-    loginPending = null
-    logger.info(`luwi account: signed in as ${stored.login || '(no login)'} (expires ${new Date(Number(stored.expiresAt) || 0).toISOString()})`)
-    return { ok: true, signedIn: true, license: await readLicenseStatus(true) }
-  }
-
-  /**
-   * 退出登录: 只删本机这一份 (服务端那条会话 90 天后自然过期)
-   * @returns {Promise<{ok: boolean}>} 结果。
-   */
-  async function licenseLogout() {
-    loginPending = null
-    await clearLicenseFile(licenseFile)
-    licenseCache = { at: 0, status: null }
-    logger.info('luwi account: signed out on this machine')
-    return { ok: true }
-  }
-
-  /**
-   * 刷新权益: 续费之后由面板点一下, 拿一份新签的凭证 (token 不变)
-   * @returns {Promise<object>} {ok, license?, error?}
-   */
-  async function licenseRefresh() {
-    const stored = await readLicenseFile(licenseFile)
-    const token = stored && typeof stored.token === 'string' ? stored.token : ''
-    if (token === '') return { ok: false, error: 'not signed in on this machine' }
-    const base = typeof stored.base === 'string' && stored.base !== '' ? stored.base : accountBaseOf()
-    const answer = await accountRequest(base, `/api/account/entitlement?token=${encodeURIComponent(token)}`)
-    if (answer.status !== 200 || !answer.body || answer.body.ok !== true) {
-      const reason = answer.error ?? (answer.body && answer.body.error) ?? `HTTP ${answer.status}`
-      return { ok: false, error: `could not refresh: ${reason}` }
-    }
-    const next = {
-      ...stored,
-      entitlement: String(answer.body.entitlement || ''),
-      login: String((answer.body.account && answer.body.account.login) || stored.login || ''),
-      email: String((answer.body.account && answer.body.account.email) || stored.email || ''),
-      expiresAt: Number.isFinite(Number(answer.body.expiresAt)) ? Number(answer.body.expiresAt) : stored.expiresAt,
-      paidUntil: answer.body.paidUntil === null || answer.body.paidUntil === undefined ? null : Number(answer.body.paidUntil),
-      fetchedAt: Date.now(),
-    }
-    await writeLicenseFile(licenseFile, next)
-    licenseCache = { at: 0, status: null }
-    return { ok: true, license: await readLicenseStatus(true) }
-  }
-
+  const peerLedgerFile = join(dirname(sessionRoot), 'lw', 'peer-ledger.json')
+  /** 写 storage 的超时 (挂住的一条不能把后面的账全堵死) */
+  const LEDGER_WRITE_TIMEOUT_MS = 4000
+  // 2026-11-21: 账号权益 (sync-license.json / 登录 / 到期闸) 整条下线 —— 它只给 P2P 到期闸供读数,
+  // 而 P2P 缺省 enabled=false、手机侧从不写 p2p 段; 配对码 / git / 终端都不看它 (CHANGELOG 0.4.0).
+  // 老机器上那份 sync-license.json 不再被读, 文件本身留在原地 (不删人家的凭据)
   // Luwi 加 (2026-10-20): 扫码配对段 (插件只读)。配对 id 决定"这是不是一次新的同步开始":
   // 没有它 = 旧模式 (全量镜像); 有它 = 只同步窗口内/之后有写入的会话, 首次同步清旧
   const pairing = normalizePairing(merged.pairing)
@@ -1385,6 +1287,20 @@ function applyInner(ctx, config = {}) {
     warn('luwi-dsh-sync: the pairing section is malformed, this host stays in legacy full-mirror mode')
   }
   const currentWindowMinutes = readCurrentWindowMinutes(merged.sessions)
+  // 2026-11-21 终端口径: **谁扫了配对码, 谁就是控制器 (手机)**。判据不能只看 `pairing` 段 ——
+  // 生成配对码的电脑那一侧保存仓库时也会写一份 `pairing` (见 configureFromPanel), 于是"有 pairing"
+  // 在两端都成立。所以按三条走:
+  //   ① 显式 `role` (`phone` / `pc`) —— 2026-11-21 起两侧各写一个 (App 扫码写 phone, 电脑面板保存写 pc)
+  //   ② 老配置没有 role: 有 `pairing` **且** `peer.url` 非空 = 手机 (手机记着电脑的地址;
+  //      电脑那一侧通常没有 peer.url —— 它是被连的那一头)
+  //   ③ 其余 = 电脑 (被管的那一侧, 行为与以前一个字节不变)
+  // 判定本体在 `lib/luwi-peer.mjs` 的 `resolveRole` —— 纯函数, 单测直接量 (2026-11-21 审查:
+  // 原来这段写在这里, 判据只能读源码文本, 是"假绿")
+  const legacyPeerUrl = merged.peer !== null && typeof merged.peer === 'object' && !Array.isArray(merged.peer)
+    ? String(merged.peer.url ?? '').trim()
+    : ''
+  const role = resolveRole({ role: merged.role, paired: pairing !== null, peerUrl: legacyPeerUrl })
+  const controller = role === 'phone'
   // Luwi 加 (2026-10-20): 工作区源 —— 每台设备一根 (host 的 cwd), 仓库里按设备分命名空间
   // (两台设备的同名工作区不合并; 手机侧仍然是 dsh（PC）这种带设备名的分组)
   let workspaceSources = []
@@ -1399,7 +1315,10 @@ function applyInner(ctx, config = {}) {
       lwRoot: join(dirname(sessionRoot), 'lw'),
       titleFor: (root) => workspaceTitleOf(root),
     })
-    workspaceSources = resolvedSources.sources
+    workspaceSources = controller ? [] : resolvedSources.sources
+    if (controller) {
+      logger.info('sync: controller role (this host scanned a computer pairing code) — the workspace mirror stays off')
+    }
     for (const problem of resolvedSources.problems) warn(`luwi-dsh-sync: ${problem}`)
   } catch (error) {
     warn(`luwi-dsh-sync: workspace config rejected, the workspace mirror stays off: ${messageOf(error)}`)
@@ -1409,6 +1328,9 @@ function applyInner(ctx, config = {}) {
   // C6: 挂载记号用 effect 拿, 卸载时自己清 —— 不占任何全局 handler
   const runner = bridge === null ? 'subprocess' : 'luwi-bridge'
   mountState.mounted = true
+  // 上一次失败留下的原因不能挂在这一次成功挂载上 (2026-11-21 真机: 重挂成功之后 mount
+  // 仍在报上一趟的 "sessionRoot is empty…", 排查时直接看歪)
+  mountState.disabledReason = ''
   mountState.resolved = resolved
   mountState.runner = runner
   // --- Luwi 加 (G1-2 对端): peer / live 两段的规格解析 (启动行要用到, 所以放在它前面)。
@@ -1418,7 +1340,7 @@ function applyInner(ctx, config = {}) {
   let liveSpec = resolveLiveSpec(undefined)
   if (merged.peer !== undefined) {
     try {
-      peerSpec = resolvePeerSpec(merged.peer)
+      peerSpec = resolvePeerSpec(merged.peer, { controller })
     } catch (error) {
       warn(`luwi-dsh-sync: peer config rejected, the cross-device channel stays off: ${messageOf(error)}`)
     }
@@ -1435,10 +1357,22 @@ function applyInner(ctx, config = {}) {
     peerSpec = null
     liveSpec = { ...liveSpec, enabled: false }
   }
+  // Luwi 加 (2026-11-22 终端问答): `ask` 段的规格。段坏了只关这一件 (与 peer/live 同一条降级口径),
+  // 两根镜像与终端照跑
+  let askSpec = resolveAskSpec(undefined)
+  if (merged.ask !== undefined) {
+    try {
+      askSpec = resolveAskSpec(merged.ask)
+    } catch (error) {
+      warn(`luwi-dsh-sync: ask config rejected, the phone relay stays at its defaults: ${messageOf(error)}`)
+    }
+  }
   // 对端那一段的启动读数 (与前面两个字段同一纪律: 地址里可能有凭据, 只报形态)
   const peerLine = peerSpec === null
     ? 'peer=off'
-    : `peer=on mode=${peerSpec.mode} listen=${peerSpec.listen ? 'on' : 'off'} proxy=${peerSpec.proxy ? 'on' : 'off'} url=${peerSpec.url === '' ? 'card' : 'set'} live=${liveSpec.enabled ? 'on' : 'off'}`
+    : `peer=on role=${peerSpec.controller ? 'controller' : 'peer'} mode=${peerSpec.mode} listen=${peerSpec.listen ? 'on' : 'off'} accept=${peerSpec.acceptSend ? 'on' : 'off'} proxy=${peerSpec.proxy ? 'on' : 'off'} url=${peerSpec.url === '' ? 'card' : 'set'} live=${liveSpec.enabled ? 'on' : 'off'}`
+  // 2026-11-22: 问答中继只在电脑那一侧、且通道开着时才有意义 —— 这一行让人一眼看出它到底装没装上
+  const askLine = `ask=${askSpec.mode} wait=${Math.round(askSpec.waitMs / 1000)}s${askSpec.brief ? ' brief=on' : ''}`
   ctx.effect(() => {
     globalThis[MOUNT_KEY] = `${PLUGIN_NAME}@${PLUGIN_VERSION}`
     return () => {
@@ -1453,6 +1387,7 @@ function applyInner(ctx, config = {}) {
       + ` ws=${workspaceSources.length}`
       + ` baseline=${pairing === null ? 'legacy' : 'set'}`
       + ` ${peerLine}`
+      + ` ${askLine}`
       + ` plugin=${PLUGIN_NAME} v=${PLUGIN_VERSION}`,
   )
   // 工作区那根是第二棵工作树、第二个远端, 但它跟会话那根**共用同一条 runner** —— 桥那边的
@@ -1608,15 +1543,19 @@ function applyInner(ctx, config = {}) {
     // Luwi 加 (2026-10-20): 顺手写"我这台设备有哪些工作区"的名片 —— 对端拉取之后靠它
     // 把 `workspaces/<设备名>/<工作区名>/` 物化到自己的影子目录里。fail-soft: 一张卡不该让同步变红
     let wroteWorkspace = false
-    try {
-      wroteWorkspace = await writeWorkspaceCard({
-        repoDir,
-        deviceId: peerIdentity.deviceId,
-        name: resolved.deviceName,
-        workspaces: workspaceCardEntries(),
-      })
-    } catch (error) {
-      warn(`luwi-dsh-sync: writing the workspace card failed: ${messageOf(error)}`)
+    // 2026-11-21 终端口径: 控制器 (手机) 不报工作区名片 —— 报了电脑那边就会为手机建影子分组与物化目录,
+    // 那是"工作区同步到电脑"的另一半
+    if (!controller) {
+      try {
+        wroteWorkspace = await writeWorkspaceCard({
+          repoDir,
+          deviceId: peerIdentity.deviceId,
+          name: resolved.deviceName,
+          workspaces: workspaceCardEntries(),
+        })
+      } catch (error) {
+        warn(`luwi-dsh-sync: writing the workspace card failed: ${messageOf(error)}`)
+      }
     }
     return wroteCard || wroteWorkspace
   }
@@ -1637,8 +1576,8 @@ function applyInner(ctx, config = {}) {
     deviceId: () => peerIdentity.deviceId,
     readCards: async () => (await readPeerCards(repoDir)).cards,
     periodicPull: () => periodicPullMinutes > 0,
-    // Luwi 加 (2026-10-23): 到期闸 —— 订阅过期 (超过 7 天宽限) 后 P2P 不可用, git 链路一个字不改
-    requirePlan: licensePlanGate,
+    // 2026-11-21: `requirePlan` 不再注入 —— P2P 不再要求订阅 (注入点仍留在 lib/p2p-service.mjs,
+    // 缺省恒放行; 以后真要收费再挂一条实现)
     sidecar: new P2pSidecar({
       config: resolved.p2p,
       pluginDir: fileURLToPath(new URL('.', import.meta.url)),
@@ -1657,12 +1596,7 @@ function applyInner(ctx, config = {}) {
     const result = await p2pService.beforeSync()
     if (result.ok === true) return
     if (p2pWarned) return
-    // Luwi 加 (2026-10-23): 订阅到期不是"坏了", 是"这一趟走 git" —— 单独一句话, 别混进故障里
-    if (result.reason === 'P2P_PLAN_REQUIRED') {
-      p2pWarned = true
-      warn('sync: the subscription has expired, this round goes over git (see the pairing card on the panel)')
-      return
-    }
+    // 2026-11-21: `P2P_PLAN_REQUIRED` 那一支随到期闸一起下线 (闸不再存在, 这一句就永远走不到)
     if (['P2P_TIMEOUT', 'P2P_CRASH', 'P2P_IO', 'P2P_PROTOCOL'].includes(result.reason)) {
       p2pWarned = true
       warn(`sync: p2p ${result.reason}; the existing transport keeps the sync going`)
@@ -2082,6 +2016,26 @@ function applyInner(ctx, config = {}) {
   /** 会话摘要的短缓存 (面板与 /peer/info 都会问, 一次拉取就够) */
   let summariesCache = { at: 0, value: [] }
 
+  // --- Luwi 加 (2026-11-22 终端问答): 手机那一头看不见 dsh 的问答卡片, 于是问一句就双方都卡着。
+  // 账本身在 `lib/luwi-ask.mjs` 的 `createAskRelay` (纯内存, 好单测); 这里只留三样本机记账:
+  //   · `askCalls`    —— 最近一次 `ask_user_question` 的 tool/call (callId 对答案, seq 让条目有序)
+  //   · `peerDriven`  —— 哪些会话是**手机在用的** (只对那些接管问答; 电脑本地那些一个字都不动)
+  //   · `askBriefed`  —— 上一次给这一场附终端提示的时间 (节流)
+  /** sessionId -> {callId, seq, at, questions} */
+  const askCalls = new Map()
+  /** sessionId -> 第一次发现它是手机驱动的时间 */
+  const peerDriven = new Map()
+  /** 上一次给这一场附终端提示的时间 (节流) */
+  const askBriefed = new Map()
+  /** 问答中继真正装上的那一档 (off / 不是电脑那一侧 / 通道没开 = 不装) */
+  const askRelayOn = askSpec.mode !== 'off' && controller === false && peerSpec !== null
+  /** 那一摊状态: 板上那几件 / 计数 / 快照里那两行 / 手机回的答案 */
+  const askRelay = createAskRelay(askSpec, { log: line => logger.info(line) })
+  /** 终端提示的节流 (同一场多久才再附一次) */
+  const ASK_BRIEF_AGAIN_MS = 30 * 60 * 1000
+  /** 那个会卡住的工具名 (上游 `@deepseek-ai/dsh-tool-ask-user` 的 legacy 与 timed 两个 schema 同名) */
+  const ASK_USER_QUESTION_TOOL = 'ask_user_question'
+
   /**
    * 本机工作区列表 (workspaceRegistry 是可选服务; 缺了就是空)。
    *
@@ -2257,14 +2211,18 @@ function applyInner(ctx, config = {}) {
           .map((item) => {
             const cwd = String(item.cwd ?? '')
             const workspace = workspaces.find(entry => entry.path !== '' && entry.path === cwd)
+            const id = String(item.sessionId ?? '')
+            // 2026-11-22 (终端问答): 问一句不改会话日志, 而对端的投影刷新判据就是这里的
+            // updatedAt (账上叫 revision) —— 不抬这一格, 手机上永远不会重新取快照
+            const askedAt = askRelayOn ? askRelay.askedAt(id) : 0
             return {
-              id: String(item.sessionId ?? ''),
+              id,
               title: String(item.title ?? item.projections?.values?.title ?? ''),
               cwd,
               workspace: workspace === undefined ? '' : workspace.title,
               running: item.running === true,
               blank: item.blank === true,
-              updatedAt: Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : 0,
+              updatedAt: Math.max(Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : 0, askedAt),
             }
           })
       } catch (error) {
@@ -2368,7 +2326,15 @@ function applyInner(ctx, config = {}) {
     if (events === null) return null
     // running 要进来: 主路载体 (readSurface) 里没有 turn/end, "最后那一轮落没落定"只有它说了算 ——
     // 少了这一句, 每一轮的回答都判成"还在流", 投影里就永远只有主人那几句话
-    const condensed = condense(events, { maxEntries: liveSpec.maxEntries, maxChars: liveSpec.maxChars, running })
+    //
+    // 2026-11-22 (终端问答): 手机上那张"电脑在问你"的一行是**合成条目** —— 它不在会话日志里
+    // (模型侧不该看见它), 只在快照里, 所以走 `extra` 并进窗口
+    const condensed = condense(events, {
+      maxEntries: liveSpec.maxEntries,
+      maxChars: liveSpec.maxChars,
+      running,
+      extra: askExtraEntries(sessionId),
+    })
     return {
       snapshot: liveSnapshot({
         deviceId: engine.deviceId === 'pending' ? '' : engine.deviceId,
@@ -2433,6 +2399,8 @@ function applyInner(ctx, config = {}) {
     if (controller === undefined || typeof controller.resolveAgent !== 'function') {
       throw new Error('this profile has no session controller, so a cross-device line has nowhere to go')
     }
+    // 2026-11-22 (终端问答): 这一句是从手机来的 —— 这一场从此算"手机在用", 它再问一句就走中继
+    markPeerDriven(sessionId)
     const run = async () => {
       const resolvedAgent = await controller.resolveAgent(sessionId)
       if (resolvedAgent !== undefined && 'error' in resolvedAgent) throw resolvedAgent.error
@@ -2612,6 +2580,509 @@ function applyInner(ctx, config = {}) {
   /** 当前时刻 (测试与"相连那一条线"共用同一个入口) */
   const nowMs = () => Date.now()
 
+  // --- 2026-11-22 (2.8.1 #50): 图片与文件跨设备
+  //
+  // 三条路, 各自只管一件事:
+  //   · 对端把它那几份**先传上来** → [acceptPeerBlob] 落本机暂存区 (`<DSH_HOME>/lw/peer-inbox/<本机 id>`);
+  //     收那一句话时 [adoptStagedBlobs] 才把它们搬进**那一场工作区**的 `lw-in/` —— 那时才知道这一句
+  //     要落到哪一场, 也才搬得对 (手机永远不知道电脑的目录结构)
+  //   · 手机要取电脑这一侧的图 → [readAttachmentBytes] (按附件块 id, 走宿主附件仓) 或
+  //     [readWorkspaceFile] (按工作区里的绝对路径)
+  //
+  // 闸: 只写暂存区、只读**那一场工作区**之下的路径; 单份 [MAX_BLOB_BYTES]; 文件名只取最后一段
+  const peerInboxDirectory = () => {
+    const id = String(peerIdentity.deviceId ?? '').replace(/[^0-9A-Za-z._-]/gu, '').slice(0, 64) || 'own'
+    return join(configHome, 'lw', 'peer-inbox', id)
+  }
+
+  /** 一个目录里现成的名字 (目录不在 = 空; 绝不抛) */
+  async function namesIn(directory) {
+    try {
+      return await readdir(directory)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 收下对端先传上来的一份附件 (落在暂存区)。
+   * @param {string} rawName - 对端给的原始名字 (只取最后一段)。
+   * @param {Uint8Array} bytes - 字节。
+   * @returns {Promise<{path: string, name: string}>} 暂存路径与干净的名字。
+   */
+  async function acceptPeerBlob(rawName, bytes) {
+    const name = safeFileName(rawName)
+    if (name === '') throw new Error('the attachment needs a plain file name')
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error('the attachment is empty')
+    if (bytes.length > MAX_BLOB_BYTES) throw new Error(`the attachment is larger than ${MAX_BLOB_BYTES / (1024 * 1024)} MB`)
+    const dir = peerInboxDirectory()
+    mkdirSync(dir, { recursive: true })
+    // 名字前面挂一个时间戳: 暂存区是多份文件的落脚点, 同名不许互相盖掉
+    const stem = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    const finalName = dedupeFileName(`${stem}-${name}`, await namesIn(dir))
+    const target = join(dir, finalName)
+    writeFileSync(target, bytes)
+    const info = await stat(target).catch(() => null)
+    if (info === null || info.size !== bytes.length) throw new Error('the attachment did not land on disk')
+    return { path: target, name }
+  }
+
+  /**
+   * 那一场的工作目录 (`header.cwd`); 冷会话要先唤一次。
+   * @param {string} sessionId - 会话 id。
+   * @returns {Promise<string>} 目录 (取不到回空串)。
+   */
+  async function sessionCwdOf(sessionId) {
+    const live = ctx.sessions.get(sessionId)
+    if (live !== undefined) return String(live.header?.cwd ?? '')
+    const controller = ctx.get('sessionController')
+    if (controller !== undefined && typeof controller.resolveAgent === 'function') {
+      try {
+        const resolved = await controller.resolveAgent(sessionId)
+        if (resolved !== undefined && !('error' in resolved)) {
+          return String(resolved.agent?.session?.header?.cwd ?? '')
+        }
+      } catch { /* 唤不醒就退回下面那个兜底 */ }
+    }
+    return ''
+  }
+
+  /**
+   * 把暂存区那几份搬进这一场工作区的 `lw-in/` (收下对端那一句话时跑)。
+   *
+   * 只认**本机暂存区里**的路径 (对端能写的地方就那一处): 别处的一律不搬, 那个位置留空, 调用方
+   * 会把那一行原样留着 (不假装搬过)
+   * @param {string} sessionId - 那一场。
+   * @param {string[]} staged - 暂存路径 (对端回执里的 absolute path)。
+   * @returns {Promise<{paths: string[]}>} 与入参一一对应的落地路径 (搬不成的为空串)。
+   */
+  async function adoptStagedBlobs(sessionId, staged) {
+    const cwd = await sessionCwdOf(sessionId)
+    const root = cwd === '' ? '' : resolve(cwd)
+    const inbox = resolve(peerInboxDirectory())
+    const inside = (path) => path.startsWith(`${inbox}${sep}`) || path === inbox
+    const paths = []
+    for (const raw of Array.isArray(staged) ? staged : []) {
+      const source = resolve(String(raw ?? ''))
+      if (root === '' || !inside(source)) {
+        paths.push('')
+        continue
+      }
+      const info = await stat(source).catch(() => null)
+      if (info === null || !info.isFile() || info.size > MAX_BLOB_BYTES) {
+        paths.push('')
+        continue
+      }
+      const dir = join(root, 'lw-in')
+      mkdirSync(dir, { recursive: true })
+      const name = safeFileName(basename(source))
+      const finalName = dedupeFileName(name === '' ? 'file' : name, await namesIn(dir))
+      const target = join(dir, finalName)
+      try {
+        // 先试改名 (同一卷); 跨卷 (暂存区在 DSH_HOME, 工作区可能在 /sdcard) 时改成写一份再删
+        renameSync(source, target)
+      } catch {
+        writeFileSync(target, await readFile(source))
+        await rm(source, { force: true })
+      }
+      const written = await stat(target).catch(() => null)
+      paths.push(written === null ? '' : target)
+    }
+    return { paths }
+  }
+
+  /**
+   * 读这一场里某一张图的字节 (对端来取的时候用)。
+   * @param {string} sessionId - 那一场。
+   * @param {string} attachmentId - 附件 id。
+   * @returns {Promise<{bytes: Uint8Array, name: string}>} 字节与名字。
+   */
+  async function readAttachmentBytes(sessionId, attachmentId) {
+    const store = ctx.get('attachments')
+    if (store === undefined || typeof store.readImage !== 'function') throw new Error('this host has no attachment store')
+    const live = ctx.sessions.get(sessionId)
+    if (live === undefined) throw new Error('that session is not loaded here')
+    const ref = findImageRef(live, attachmentId)
+    if (ref === null) throw new Error('that attachment is not in this session')
+    const stored = await store.readImage(ref)
+    const bytes = stored?.data
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error('that image could not be read')
+    return { bytes, name: safeFileName(String(ref.name ?? '')) || 'image.png' }
+  }
+
+  /**
+   * 读这一场工作区里的一个文件 (对端来取的时候用): 只认 `cwd` 之下的路径。
+   * @param {string} sessionId - 那一场。
+   * @param {string} raw - 路径 (对端从快照里抄来的绝对路径)。
+   * @returns {Promise<{bytes: Uint8Array, name: string}>} 字节与名字。
+   */
+  async function readWorkspaceFile(sessionId, raw) {
+    const cwd = await sessionCwdOf(sessionId)
+    if (cwd === '') throw new Error('that session has no workspace directory')
+    const root = resolve(cwd)
+    const target = resolve(String(raw ?? ''))
+    if (!(target === root || target.startsWith(`${root}${sep}`))) throw new Error('that path is outside this workspace')
+    const info = await stat(target).catch(() => null)
+    if (info === null || !info.isFile()) throw new Error('no such file in this workspace')
+    if (info.size > MAX_BLOB_BYTES) throw new Error('that file is larger than the peer can take')
+    return { bytes: await readFile(target), name: basename(target) }
+  }
+
+  /**
+   * 正文里那一段附件名单: 把本机工作区 `lw-in/` 下的那几份**先传给对端** (2026-11-22)。
+   *
+   * 只传"归这条路管"的那几行 (`<HOME>/lw-in/` 之下): 名单里别的路径 (例如主人自己写的别处文件)
+   * 原样留着不动。**有一份没传过去就整条按原样发** —— 半换半不换的话, 对端那边两截路径哪种都读不到;
+   * 同时回一句人话说明为什么, 由调用方落进那一场 (人看得见, 模型不看)
+   * @param {string} text - 要发给对端的正文。
+   * @returns {Promise<{text: string, staged: string[], notice: string}>} 改写后的正文、暂存清单与要说的那句。
+   */
+  async function carryAttachments(text) {
+    const { paths } = stripAttach(text)
+    if (paths.length === 0) return { text, staged: [], notice: '' }
+    const home = typeof process.env.HOME === 'string' && process.env.HOME !== '' ? process.env.HOME : ''
+    if (home === '') return { text, staged: [], notice: '本机的 lw-in 目录定位不到, 图片与文件没有传过去' }
+    const root = resolve(join(home, 'lw-in'))
+    const mapping = new Map()
+    const staged = []
+    /** 传不动的那几份 */
+    const failed = []
+    let legacy = false
+    for (const path of paths) {
+      const source = resolve(path)
+      if (!(source === root || source.startsWith(`${root}${sep}`))) continue
+      const info = await stat(source).catch(() => null)
+      if (info === null || !info.isFile() || info.size > MAX_BLOB_BYTES) {
+        failed.push(basename(source))
+        continue
+      }
+      let bytes
+      try {
+        bytes = await readFile(source)
+      } catch {
+        failed.push(basename(source))
+        continue
+      }
+      const answer = await peerRuntime.uploadBlob(basename(source), bytes)
+      if (answer.ok === true && typeof answer.path === 'string' && answer.path !== '') {
+        mapping.set(path, answer.path)
+        staged.push(answer.path)
+        continue
+      }
+      if (answer.legacy === true) legacy = true
+      failed.push(basename(source))
+    }
+    if (failed.length > 0) {
+      const who = failed.slice(0, 2).join(', ') + (failed.length > 2 ? ' 等' : '')
+      const why = legacy ? '这台电脑的 luwi终端 太旧, 图片与文件传不过去' : `图片或文件没传过去 (${who})`
+      return { text, staged: [], notice: `${why} —— 这一句只有文字到了` }
+    }
+    if (staged.length === 0) return { text, staged: [], notice: '' }
+    return { text: rewriteAttachPaths(text, mapping), staged, notice: '' }
+  }
+
+  /** 取回来的媒体记在哪 (与 `peer-ledger.json` 同一层: 只记 `<名字> → 本地路径`, 坏了不拖死折入) */
+  function peerMediaFile() {
+    return configHome === '' ? '' : join(configHome, 'lw', 'peer-media.json')
+  }
+
+  /** 读那份账 (读不懂 = 空账; 绝不抛) */
+  async function readMediaLedger() {
+    const file = peerMediaFile()
+    const blank = { v: 1, at: 0, items: {}, dirty: false }
+    if (file === '') return blank
+    let text
+    try {
+      text = await readFile(file, 'utf8')
+    } catch {
+      return blank
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      return blank
+    }
+    const items = parsed !== null && typeof parsed === 'object' && parsed.items !== null && typeof parsed.items === 'object' ? parsed.items : {}
+    const kept = {}
+    for (const [key, value] of Object.entries(items)) {
+      if (value === null || typeof value !== 'object') continue
+      if (typeof value.path !== 'string' || value.path === '') continue
+      kept[key] = { path: value.path, bytes: Number.isFinite(value.bytes) ? Number(value.bytes) : 0, at: Number.isFinite(value.at) ? Number(value.at) : 0 }
+    }
+    return { v: 1, at: Number.isFinite(parsed?.at) ? Number(parsed.at) : 0, items: kept, dirty: false }
+  }
+
+  /** 写那份账 (原子改名; 写不动只 warn, 不能让"取媒体"拖死折入) */
+  async function writeMediaLedger(ledger) {
+    const file = peerMediaFile()
+    if (file === '') return
+    const body = { v: 1, at: nowMs(), items: ledger.items }
+    const tmp = `${file}.tmp`
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(tmp, JSON.stringify(body), 'utf8')
+      renameSync(tmp, file)
+      ledger.at = body.at
+      ledger.dirty = false
+    } catch (error) {
+      warn(`peer: writing the media ledger failed: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * 手机这一侧: 把对端那几条带的图与文件取回来, 落在本机工作区的 `lw-in/`, 再把正文那一段名单
+   * 换成**本机的路径** (2026-11-22, 2.8.1 #50)。
+   *
+   * 为什么非换不可: 门户画图与文件名走的是 `/lw-out/in/<名字>` (`host-plugin` 那一侧服务
+   * `<HOME>/lw-in`), 而投影里的路径本来是电脑的 —— 不换成本机那一份, 屏上永远是「图没取到」
+   * @param {object[]} entries - 对端快照的条目 (会被**就地改写**)。
+   * @param {string} peerSessionId - 对端那一场。
+   * @returns {Promise<{entries: object[], changed: number, notes: string[]}>} 改写后的条目与要说的那几句。
+   */
+  async function materializeEntryMedia(entries, peerSessionId) {
+    const list = Array.isArray(entries) ? entries : []
+    const notes = []
+    let changed = 0
+    const withMedia = list.filter(entry => Array.isArray(entry?.media) && entry.media.length > 0)
+    if (withMedia.length === 0) return { entries: list, changed, notes }
+    const home = typeof process.env.HOME === 'string' && process.env.HOME !== '' ? process.env.HOME : ''
+    if (home === '') {
+      return { entries: list, changed, notes: ['本机的 lw-in 目录定位不到, 电脑那边的图片与文件没有取回来'] }
+    }
+    const root = resolve(join(home, 'lw-in'))
+    const device = String(shadowDevice.id ?? '').replace(/[^0-9A-Za-z._-]/gu, '').slice(0, 8) || 'peer'
+    const ledger = await readMediaLedger()
+    let missing = 0
+    for (let index = 0; index < list.length; index += 1) {
+      const entry = list[index]
+      if (!Array.isArray(entry?.media) || entry.media.length === 0) continue
+      const { main, paths } = stripAttach(typeof entry.text === 'string' ? entry.text : '')
+      // 正文名单里已经写过的路径 (kind:'path') 不重复追加; 剩下那些 (别的目录里的) 原样留着
+      const covered = new Set(entry.media.filter(item => item.kind === 'path').map(item => String(item.path)))
+      const keptPaths = paths.filter(path => !covered.has(path))
+      const local = []
+      let failed = 0
+      for (const item of entry.media) {
+        const ref = item.kind === 'attachment'
+          ? { attachmentId: String(item.attachmentId ?? '') }
+          : { path: String(item.path ?? '') }
+        const cacheKey = `${device}|${peerSessionId}|${Number(entry.seq) || index}|${item.kind === 'attachment' ? ref.attachmentId : ref.path}`
+        const cached = ledger.items[cacheKey]
+        if (cached !== undefined && existsSync(cached.path)) {
+          local.push(cached.path)
+          continue
+        }
+        const answer = await peerRuntime.fetchBlob(peerSessionId, ref)
+        if (answer.ok !== true || !(answer.bytes instanceof Uint8Array) || answer.bytes.length === 0) {
+          failed += 1
+          missing += 1
+          continue
+        }
+        const name = safeFileName(String(item.name ?? '')) || safeFileName(String(answer.name ?? '')) || 'file'
+        try {
+          mkdirSync(root, { recursive: true })
+          const finalName = dedupeFileName(`peer-${device}-${name}`, await namesIn(root))
+          const target = join(root, finalName)
+          writeFileSync(target, answer.bytes)
+          const info = await stat(target).catch(() => null)
+          if (info === null || info.size !== answer.bytes.length) {
+            failed += 1
+            missing += 1
+            continue
+          }
+          ledger.items[cacheKey] = { path: target, bytes: answer.bytes.length, at: nowMs() }
+          ledger.dirty = true
+          local.push(target)
+        } catch (error) {
+          warn(`peer: storing a peer attachment failed: ${messageOf(error)}`)
+          failed += 1
+          missing += 1
+        }
+      }
+      if (local.length === 0) {
+        // 一条都没取回来: 正文原样留着 (那几行照实留在那里, 不假装取到了)
+        entry.media = failed > 0 ? [] : entry.media
+        continue
+      }
+      entry.text = withAttach(main, [...keptPaths, ...local])
+      entry.media = []
+      changed += 1
+    }
+    if (ledger.dirty) await writeMediaLedger(ledger)
+    if (missing > 0) notes.push(`电脑那边的图片与文件有 ${missing} 份没取回来`)
+    return { entries: list, changed, notes }
+  }
+
+  /**
+   * 会话日志里那一张图的引用 (宿主 `readImage` 要完整引用, 只给 id 不够)。
+   * @param {object} session - 宿主 Session。
+   * @param {string} attachmentId - 附件 id。
+   * @returns {object|null} 引用; 找不到 null。
+   */
+  function findImageRef(session, attachmentId) {
+    const events = typeof session.deriveEvents === 'function' ? session.deriveEvents() : []
+    const wanted = String(attachmentId)
+    for (const event of Array.isArray(events) ? events : []) {
+      const content = event?.data?.message?.content ?? event?.data?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        const attachment = block?.attachment
+        if (attachment !== null && typeof attachment === 'object' && String(attachment.attachmentId ?? '') === wanted) {
+          return attachment
+        }
+      }
+    }
+    return null
+  }
+
+  /**
+   * 这一场是不是**手机在用**的 (只有这几场会被问答中继接管, 电脑本地那一场一个字都不动)。
+   * @param {unknown} sessionId - 会话 id。
+   * @returns {boolean} 是就 true。
+   */
+  function isPeerDriven(sessionId) {
+    return peerDriven.has(String(sessionId ?? ''))
+  }
+
+  /**
+   * 记一笔"这一场是手机驱动的": 手机发来的那一句 (`source.via === 'peer'`) 与 `deliverToAgent`
+   * 都会调它, 于是"从终端进历史挑一场旧电脑会话继续用"也认得出来。
+   * @param {unknown} sessionId - 会话 id。
+   */
+  function markPeerDriven(sessionId) {
+    const id = String(sessionId ?? '')
+    if (id === '') return
+    if (peerDriven.has(id)) return
+    peerDriven.set(id, Date.now())
+  }
+
+  /**
+   * 记下最近一笔 `ask_user_question` 的 tool/call —— `callId` 用来对上手机的回答,
+   * `seq` 决定快照里那一行排在哪 (真实 seq 才幂等; 自造的号会被后一条真条目跳过)。
+   * @param {string} sessionId - 会话 id。
+   * @param {unknown} callId - 工具调用 id。
+   * @param {unknown} seq - 事件 seq。
+   * @param {unknown} at - 事件时间。
+   * @param {Array<object>} questions - 参数里解析出来的问题。
+   */
+  function noteAskCall(sessionId, callId, seq, at, questions) {
+    const id = String(sessionId ?? '')
+    if (id === '') return
+    askCalls.set(id, {
+      callId: String(callId ?? ''),
+      seq: Number.isFinite(seq) ? Math.max(0, Number(seq)) : 0,
+      at: Number.isFinite(at) ? Number(at) : Date.now(),
+      questions: Array.isArray(questions) ? questions : [],
+    })
+  }
+
+  /**
+   * 把登记的 tool/call 配给这次请求 (同一批问题、60 秒以内)。
+   * @param {string} sessionId - 会话 id。
+   * @param {Array<object>} questions - 这次请求里的问题。
+   * @returns {{callId: string, seq: number}|null} 配上的那一笔。
+   */
+  function takeAskCall(sessionId, questions) {
+    const id = String(sessionId ?? '')
+    const found = askCalls.get(id)
+    if (found === undefined) return null
+    askCalls.delete(id)
+    if (Date.now() - found.at > 60_000) return null
+    const same = found.questions.length === questions.length
+      && found.questions.every((question, index) => String(question?.id ?? '') === String(questions[index]?.id ?? ''))
+    return same ? found : null
+  }
+
+  /**
+   * 快照里那两行 (问题 + 回执) —— 交给 `condense` 的 `extra`, 不进对话账。
+   * @param {string} sessionId - 会话 id。
+   * @returns {Array<object>} 合成条目。
+   */
+  function askExtraEntries(sessionId) {
+    if (!askRelayOn) return []
+    return askRelay.extraEntries(sessionId)
+  }
+
+  /**
+   * 手机回的那一句话是不是在答这一场的问题 (由 `receive()` 在投递**之前**问一次)。
+   *
+   * 这一笔不能进 agent inbox: 那一轮正卡在工具里, steer 进去要等工具返回才被读 —— 而工具
+   * 等的就是这句答案, 于是双方互等到超时 (这正是手机端"有没有反应"的分水岭)。
+   * @param {string} sessionId - 目标会话。
+   * @param {string} text - 对端发来的正文。
+   * @returns {{answered: string}|{ok: false, note: string}|null} 命中就是回执, 没命中 null。
+   */
+  async function answerAskFromPeer(sessionId, text) {
+    if (!askRelayOn) return null
+    return askRelay.answer(sessionId, text)
+  }
+
+  /**
+   * 给"手机驱动的那一场"附一条终端上下文 (走 pre-step, 不是改主人那句话)。
+   *
+   * **不能改正文**: `pendingKeyOf` 只比人话, 正文动一个字, 手机就会把同一句画两遍。
+   * `source.kind` 也不是 `user`, 于是 `condense` 不会把它折成投影条目 —— 手机上不多一行。
+   * @param {object} payload - pre-step 载荷。
+   * @param {() => Promise<object>} next - 下一层。
+   * @param {string} text - 附哪一句 (中继开 / 关两份, 见 `TERMINAL_BRIEF` / `TERMINAL_BRIEF_LOCAL`)。
+   * @returns {Promise<object>} 决策。
+   */
+  async function briefTerminalStep(payload, next, text) {
+    const decision = await next()
+    if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
+    if (askSpec.brief !== true) return decision
+    if (payload?.signal?.aborted === true) return decision
+    const sessionId = String(payload?.agent?.session?.id ?? '')
+    if (sessionId === '' || !isPeerDriven(sessionId)) return decision
+    const last = askBriefed.get(sessionId) ?? 0
+    if (Date.now() - last < ASK_BRIEF_AGAIN_MS) return decision
+    askBriefed.set(sessionId, Date.now())
+    return {
+      ...decision,
+      messages: [
+        ...(Array.isArray(decision.messages) ? decision.messages : []),
+        createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: PLUGIN_NAME, form: 'snapshot', sections: [{ name: PLUGIN_NAME, text }] },
+        }),
+      ],
+    }
+  }
+
+  /**
+   * 接管一次问答请求 (只在"手机驱动的那一场 + 电脑这一侧 + 通道开着"时生效)。
+   * @param {object} request - `user-questions/request` 的载荷。
+   * @param {() => Promise<object>} next - 下一层 (电脑自己的问答卡片)。
+   * @returns {Promise<{answers: Array<object>}>} 答案批次。
+   */
+  async function handleUserQuestion(request, next) {
+    const session = request?.agent?.session
+    const sessionId = String(session?.id ?? '')
+    const questions = Array.isArray(request?.questions) ? request.questions : []
+    if (!askRelayOn || sessionId === '' || questions.length === 0) return next()
+    if (!isPeerDriven(sessionId)) return next()
+    const call = takeAskCall(sessionId, questions)
+    const ask = askRelay.publish(sessionId, questions, {
+      callId: call === null ? '' : call.callId,
+      seq: call === null ? Math.max(0, Number(session?.seq ?? 0)) : call.seq,
+    })
+    // 会话摘要 1 s 缓存: 不清掉的话, 头一拍报出去的还是老 updatedAt (手机就不会重新取快照)
+    summariesCache.at = 0
+    // notify: 只让手机看得见, 由电脑那边答 (答完把那两行摘掉)
+    if (askSpec.mode === 'notify') {
+      try {
+        return await next()
+      } finally {
+        askRelay.drop(sessionId)
+        summariesCache.at = 0
+      }
+    }
+    const settled = askRelay.wait(ask, request?.signal ?? undefined)
+    if (askSpec.mode === 'auto') askRelay.settle(ask, 'auto', autoAnswers(questions))
+    return await settled
+  }
+
   const peerRuntime = createPeerRuntime({
     spec: peerSpec,
     live: liveSpec,
@@ -2635,6 +3106,8 @@ function applyInner(ctx, config = {}) {
     writeTranscript,
     deliver: deliverToAgent,
     resolveTarget: resolvePeerTarget,
+    // 2026-11-22 (终端问答): 手机回的那一句先问这里 —— 命中的那件问题就地结算, 不进 agent inbox
+    answerAsk: answerAskFromPeer,
     makeUserMessage: async (text) => createUserMessage({
       content: [{ type: 'text', text }],
       // kind 必须留 user (它决定界面把这条画成"主人自己说的"), via 才是"从对端来的"那个标记
@@ -2642,6 +3115,11 @@ function applyInner(ctx, config = {}) {
     }),
     readState: readPluginState,
     writeState: patchPluginState,
+    // 2026-11-22 (2.8.1 #50): 图片与文件那一条 —— 先收进暂存区 / 收话时搬进工作区 / 对端来取字节
+    acceptBlob: acceptPeerBlob,
+    adoptStaged: adoptStagedBlobs,
+    readAttachmentBytes,
+    readWorkspaceFile,
     // 这里返回**真实结果**: 发消息那条路要拿它判断"这一句到底推上去没有" (queue 的 ok/pushError
     // 就是这里来的)。2026-10-22 一度改成 fire-and-forget, 结果 `send()` 收到 undefined,
     // 明明推成功了也写"推送失败" —— 要止住 pull 里的自锁, 改的是 consumeInbox 那一侧不 await
@@ -2652,6 +3130,123 @@ function applyInner(ctx, config = {}) {
     warn,
     logger,
   })
+
+  // --- 2026-11-22: `adb reverse` 那条管子自己看着办 (电脑那一侧)
+  //
+  // 手机里存的是回环口 (`peer.url = http://127.0.0.1:63560/`), 而电脑每次重启 dsh 都换一个
+  // 随机端口; reverse 指旧了口, 手机上就是「电脑没连上 … (fetch failed)」, 电脑这边毫无动静。
+  // 这里做两件事, 都只在电脑 (controller=false) + Windows + 通道开着时发生:
+  //   ① 挂载那一趟**跑一次**修补脚本 (电脑重启就对应这一趟);
+  //   ② 之后每 `peer.reverseCheckSeconds` (缺省 60 s) 读一次 `adb reverse --list`, 指错了就修,
+  //      最多试三次 (1 s / 2 s 退避)。adb 掉线重连之后 reverse 会整张消失, 靠②补回来。
+  const reverseState = {
+    enabled: false,
+    devicePort: 63560,
+    pcPort: 0,
+    script: '',
+    lastAt: 0,
+    ok: true,
+    attempts: 0,
+    error: '',
+  }
+  /**
+   * 电脑这一趟实际在听的回环端口 (`webServer.port`); 拿不到回 0。
+   * @returns {number} 端口。
+   */
+  function dshPortNow() {
+    try {
+      const server = ctx.get('webServer')
+      const port = Number(server?.port)
+      return Number.isInteger(port) && port > 0 ? port : 0
+    } catch {
+      return 0
+    }
+  }
+  /**
+   * 跑一趟命令, 收 stdout。
+   * @param {string} bin - 可执行文件。
+   * @param {string[]} args - 参数。
+   * @param {number} [timeoutMs] - 上限。
+   * @returns {Promise<{ok: boolean, stdout: string, error?: string}>} 结果。
+   */
+  function runQuiet(bin, args, timeoutMs = 20000) {
+    return new Promise((resolve) => {
+      let child
+      try {
+        child = spawn(bin, args, { windowsHide: true })
+      } catch (error) {
+        resolve({ ok: false, stdout: '', error: messageOf(error) })
+        return
+      }
+      let stdout = ''
+      let stderr = ''
+      const timer = setTimeout(() => { try { child.kill() } catch { /* 已经退了 */ } }, timeoutMs)
+      child.stdout?.on('data', (chunk) => { stdout += String(chunk) })
+      child.stderr?.on('data', (chunk) => { stderr += String(chunk) })
+      child.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, stdout, error: messageOf(error) }) })
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolve(code === 0 ? { ok: true, stdout } : { ok: false, stdout, error: stderr.trim() || `exit ${code}` })
+      })
+    })
+  }
+  if (peerSpec !== null && peerSpec.controller === false && process.platform === 'win32') {
+    const reverseRaw = (merged.peer !== null && typeof merged.peer === 'object') ? merged.peer : {}
+    const enabled = reverseRaw.reverseRepair !== false
+    const script = typeof reverseRaw.reverseScript === 'string' && reverseRaw.reverseScript.trim() !== ''
+      ? reverseRaw.reverseScript.trim()
+      : 'D:\\apk\\Luwi\\tools\\lw-peer-reverse.ps1'
+    const adb = typeof reverseRaw.reverseAdb === 'string' && reverseRaw.reverseAdb.trim() !== ''
+      ? reverseRaw.reverseAdb.trim()
+      : 'D:\\apk\\Sdk\\platform-tools\\adb.exe'
+    const devicePort = Number.isInteger(reverseRaw.reverseDevicePort) && reverseRaw.reverseDevicePort > 0
+      ? reverseRaw.reverseDevicePort
+      : 63560
+    const checkSeconds = Number.isFinite(reverseRaw.reverseCheckSeconds) && reverseRaw.reverseCheckSeconds >= 10
+      ? reverseRaw.reverseCheckSeconds
+      : 60
+    // pwsh 不一定在 PATH 上 (桌面宿主由 shell-env 起子进程); 优先用 PW7 的绝对路径
+    const pwshBin = existsSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
+      ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+      : 'pwsh'
+    Object.assign(reverseState, { enabled, devicePort, script })
+    if (enabled) {
+      ctx.effect(() => {
+        let stopped = false
+        const tick = async (why) => {
+          if (stopped) return
+          const pcPort = dshPortNow()
+          reverseState.pcPort = pcPort
+          if (pcPort <= 0) return
+          const result = await repairReverse({
+            devicePort,
+            pcPort,
+            readEntries: async () => {
+              const answer = await runQuiet(adb, ['reverse', '--list'], 10000)
+              return parseReverseList(answer.stdout)
+            },
+            repair: async () => {
+              const answer = await runQuiet(pwshBin, ['-NoProfile', '-File', script, '-Port', String(pcPort)], 30000)
+              return { ok: answer.ok, error: answer.error }
+            },
+          })
+          reverseState.lastAt = Date.now()
+          reverseState.ok = result.ok
+          reverseState.attempts = result.attempts
+          reverseState.error = result.error ?? ''
+          if (!result.ok) {
+            logger.error(`peer: adb reverse ${devicePort} -> ${pcPort} is still stale after ${result.attempts} attempt(s): ${reverseState.error}`)
+          } else if (result.attempts > 0) {
+            logger.info(`peer: repaired the adb reverse ${devicePort} -> ${pcPort} (${why}, ${result.attempts} attempt(s))`)
+          }
+        }
+        // ① 电脑重启 (插件挂载) 那一趟先修一次; ② 之后按间隔自检
+        void tick('mount')
+        const timer = setInterval(() => { void tick('poll') }, checkSeconds * 1000)
+        return () => { stopped = true; clearInterval(timer) }
+      }, `${PLUGIN_NAME}.reverse-repair`)
+    }
+  }
 
   // --- Luwi 加 (G1-2): 进行中的回答 —— 一场会话跑起来之后, 把"只要回答"的那一份写进
   // <repoDir>/live/<本机id>/<sessionId>.json (退路载体; 主路是对端直接问 /peer/transcript)。
@@ -2687,11 +3282,70 @@ function applyInner(ctx, config = {}) {
     }, `${PLUGIN_NAME}.live-projections`)
   }
 
+  // --- Luwi 加 (2026-11-22 终端问答): 三条钩子, 只在"电脑这一侧 + 通道开着"时挂上
+  //
+  //   ① `session/event`  —— 记下"这一场是手机驱动的"与最近一笔 `ask_user_question` 的 tool/call
+  //      (callId 对答案, seq 决定快照里那一行排在哪)
+  //   ② `user-questions/request` (prepend) —— 手机驱动的那一场由这里接管: 问题进快照, 答案等手机
+  //      **必须 prepend**: dsh 自己的问答卡片也挂在这个 waterfall 上 (客户端 remote 监听),
+  //      谁先谁拿到请求。晚一步就只能眼看着 PC 的卡片弹出来而手机永远不知道
+  //   ③ `agent/pre-step` —— 给手机驱动的那一场附一终端提示 (不改主人那句话)。**与中继分开判**:
+  //      `ask.mode: off` 时手机照样看不见问答, 那句"自己定"的提示恰恰是最该在的时候
+  const askHooksOn = controller === false && peerSpec !== null && (askRelayOn || askSpec.brief === true)
+  if (askHooksOn) {
+    /** 提示正文按中继开没开分岔 (`off` / `notify` 时手机回不了, 别教它"回 1") */
+    const briefText = askRelayOn ? TERMINAL_BRIEF : TERMINAL_BRIEF_LOCAL
+    ctx.effect(() => {
+      const offSession = ctx.on('session/event', (session, event) => {
+        const sessionId = String(session?.id ?? '')
+        if (sessionId === '') return
+        if (event?.type === 'user/message') {
+          const source = event.data?.source
+          if (source !== null && typeof source === 'object' && source.via === 'peer') markPeerDriven(sessionId)
+          return
+        }
+        if (event?.type !== 'tool/call') return
+        const data = event.data ?? {}
+        if (data.name !== ASK_USER_QUESTION_TOOL) return
+        let questions = []
+        try {
+          const parsed = JSON.parse(String(data.arguments ?? '{}'))
+          if (Array.isArray(parsed?.questions)) questions = parsed.questions
+        } catch {
+          // 参数坏了解析不出问题清单: 照样记一笔 (答案那一侧还有请求体里的 questions)
+          questions = []
+        }
+        noteAskCall(sessionId, data.callId, event.seq, event.time, questions)
+      })
+      const offAsk = askRelayOn
+        ? ctx.on('user-questions/request', (request, next) => handleUserQuestion(request, next), { prepend: true })
+        : undefined
+      const offBrief = askSpec.brief === true
+        ? ctx.on('agent/pre-step', (payload, next) => briefTerminalStep(payload, next, briefText))
+        : undefined
+      return () => {
+        if (typeof offSession === 'function') offSession()
+        if (typeof offAsk === 'function') offAsk()
+        if (typeof offBrief === 'function') offBrief()
+        askRelay.dispose()
+        askCalls.clear()
+        peerDriven.clear()
+        askBriefed.clear()
+      }
+    }, `${PLUGIN_NAME}.ask-relay`)
+    if (askRelayOn && !liveSpec.enabled) {
+      warn('luwi-dsh-sync: ask relay is on but live.enabled is false — the phone will not see the question')
+    }
+    logger.info(`ask: relay ${askSpec.mode} (wait ${Math.round(askSpec.waitMs / 1000)}s, terminal brief ${askSpec.brief ? 'on' : 'off'})`)
+  }
+
   // --- Luwi 加 (2026-10-20): pull 之后的两笔活, 各自 fail-soft (都不许把一次成功的 pull 变成失败):
   //   ① 对端投在仓库队列里的那几句话 (G1-2 的退路队列)
   //   ② 把**别的设备**的工作区命名空间物化到影子目录 —— 手机上的 `dsh（PC）` 那一组里因此
   //     既有投影会话、也能看见 PC 那边的工作区文件 (本机工作区一个字节都不动)
   async function materializeSyncShadowsFor(context) {
+    // 2026-11-21: 控制器 (手机) 只收对话, 不把电脑那边的工作区文件搬到自己身上
+    if (controller) return { workspaces: [], brought: 0, updated: 0, trashed: 0, failed: 0, skipped: 'controller' }
     const read = await readWorkspaceCards(repoDir)
     if (read.broken > 0) warn(`luwi-dsh-sync: ${read.broken} workspace card(s) in the mirror are unreadable`)
     if (read.cards.length === 0) return { workspaces: [], brought: 0, updated: 0, trashed: 0, failed: 0 }
@@ -2776,12 +3430,41 @@ function applyInner(ctx, config = {}) {
   // cwd 写在影子里 (于是天然进组), 内容只放 user 与 assistant 文本 —— 本地写它没有任何合并后果
   const proxyRegistry = new Map()
   const shadowRegistry = new Map()
+  /**
+   * 账本健康读数 (2026-11-21): 写盘失败以前是静默的 —— 面板/doctor/`peerRefresh` 都读它。
+   * `source` = 这一次是从哪儿读回来的 (`none|storage|file|merged`), `at` = 最后一次写盘时刻
+   */
+  let ledgerState = { source: 'none', at: 0, error: '', records: 0 }
+  /** 上一次成功落盘的 payload 指纹: 内容没变就不重复写 */
+  let ledgerHash = ''
+  /**
+   * 上一次成功落盘的 `peerProxies` (2026-11-21): 同一场 (同一个 `localId`) 的游标只许前进。
+   * 重做投影那一路会先写一版"新场 + 旧快照版本", 紧随其后才是折完的那一版; 两条异步收尾的
+   * 先后不保证, 曾经把 `snapshotV` 从 2 写回 1 —— 于是下一轮又重做一次 (一场变两场)。
+   */
+  let ledgerWritten = null
+  /** storage 写的一条最多等多久 (超时按失败处理, 下一拍再试) */
+  async function withStorageTimeout(promise, ms, label) {
+    let timer = null
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms)
+        }),
+      ])
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }
   let shadowDevice = { id: '', name: '' }
   let shadowBusy = false
   /** 已经为哪一场打过"退到仓库那份去折"的那行日志 (只报一次, 不刷屏) */
   let liveFallbackNoted = ''
   /** 已经为哪一场说过"从对话账里补了历史"(一轮只打一行日志) */
   let transcriptFillerNoted = ''
+  /** 已经说过"电脑那边的图没取回来"的那几场 (只报一次, 不刷屏) */
+  const mediaNoted = new Set()
   /**
    * 排进仓库队列、还没等到回执的那几句话 (2026-10-20)。
    * 队列是"对端下次拉取才收到", 所以发出去的那一刻拿不到对端会话 id; 回执里带回来的那个 id
@@ -2809,13 +3492,57 @@ function applyInner(ctx, config = {}) {
 
   /** 读回上一次运行留下的账 (投影会话的游标 + 影子工作区的 id) */
   async function restoreProxyState() {
+    /**
+     * 读文件镜像 (`lw/peer-ledger.json`); 没有/坏了就当没有。
+     * @returns {object|null} 那一份账 (形状与 storage 里相同 + 顶层 at)。
+     */
+    function readLedgerMirror() {
+      try {
+        if (!existsSync(peerLedgerFile)) return null
+        const parsed = JSON.parse(readFileSync(peerLedgerFile, 'utf8'))
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+        return parsed
+      } catch (error) {
+        warn(`peer: reading the projection ledger mirror failed: ${messageOf(error)}`)
+        return null
+      }
+    }
     try {
-      const stored = await readPluginState()
-      for (const [key, value] of Object.entries(stored?.peerProxies ?? {})) {
+      // storage 那一份可能**整条记录都读不出来** (域 schema 不认 / 介质坏了): 那一档不能连带把
+      // 文件镜像也跳过 —— 2026-11-21 真机上就是这样, 明明镜像里有账, 每次重挂还是新开一场
+      let stored = null
+      let storageReadError = ''
+      try {
+        stored = await readPluginState()
+      } catch (error) {
+        storageReadError = messageOf(error)
+        warn(`peer: reading the projection ledger from the storage domain failed (${storageReadError}); falling back to the file mirror`)
+      }
+      const mirror = readLedgerMirror()
+      const storageAt = Number.isFinite(stored?.ledgerAt) ? Number(stored.ledgerAt) : 0
+      const mirrorAt = Number.isFinite(mirror?.at) ? Number(mirror.at) : 0
+      // 两份取新的那个当底, 另一份只补缺键 (storage 真机上出现过写不进去的一档)
+      const base = mirrorAt > storageAt ? mirror : stored
+      const extra = mirrorAt > storageAt ? stored : mirror
+      if (base === null || base === undefined) {
+        ledgerState = { ...ledgerState, source: 'none' }
+      } else {
+        ledgerState = {
+          ...ledgerState,
+          source: mirrorAt === 0 && storageAt === 0 ? 'none' : (mirrorAt > storageAt ? 'file' : 'storage'),
+          at: Math.max(storageAt, mirrorAt),
+        }
+      }
+      if (storageReadError !== '') {
+        ledgerState = { ...ledgerState, error: `read: ${storageReadError}` }
+      }
+      const proxies = { ...(extra?.peerProxies ?? {}), ...(base?.peerProxies ?? {}) }
+      for (const [key, value] of Object.entries(proxies)) {
         const localId = typeof value?.localId === 'string' ? value.localId : ''
         if (localId === '') continue
         proxyRegistry.set(key, {
           localId,
+          title: typeof value?.title === 'string' ? value.title : '',
           lastSeq: Number.isFinite(value?.lastSeq) ? Number(value.lastSeq) : 0,
           openTurn: Number.isFinite(value?.openTurn) ? Number(value.openTurn) : null,
           turnCounter: Number.isFinite(value?.turnCounter) ? Number(value.turnCounter) : 0,
@@ -2827,25 +3554,30 @@ function applyInner(ctx, config = {}) {
         })
         proxyLocalIds.add(localId)
       }
-      for (const [key, value] of Object.entries(stored?.peerShadows ?? {})) {
+      const shadows = { ...(extra?.peerShadows ?? {}), ...(base?.peerShadows ?? {}) }
+      for (const [key, value] of Object.entries(shadows)) {
         const workspaceId = typeof value?.workspaceId === 'string' ? value.workspaceId : ''
         if (workspaceId !== '') shadowRegistry.set(key, { workspaceId, dir: '', label: '' })
       }
       // 退下来的投影 (本机 id -> 对端会话 id): 归属方那条闸在重建之后还要认得它们
-      for (const [localId, peerSessionId] of Object.entries(stored?.peerRetired ?? {})) {
+      const retired = { ...(extra?.peerRetired ?? {}), ...(base?.peerRetired ?? {}) }
+      for (const [localId, peerSessionId] of Object.entries(retired)) {
         if (typeof peerSessionId === 'string' && peerSessionId !== '') retiredProxies.set(String(localId), peerSessionId)
       }
       // 「从相连时才开始同步」那一条线: 账里有就沿用 (重启不重新起算)
-      if (Number.isFinite(stored?.peerEpochAt) && Number(stored.peerEpochAt) > 0) peerEpochAt = Number(stored.peerEpochAt)
+      const epochAt = Number(base?.peerEpochAt ?? extra?.peerEpochAt)
+      if (Number.isFinite(epochAt) && epochAt > 0) peerEpochAt = epochAt
       // 自己隐过的那批本机会话 (只有它们会被"放回来")
-      for (const id of Array.isArray(stored?.peerHidden) ? stored.peerHidden : []) {
+      for (const id of [...(Array.isArray(extra?.peerHidden) ? extra.peerHidden : []), ...(Array.isArray(base?.peerHidden) ? base.peerHidden : [])]) {
         if (typeof id === 'string' && id !== '') peerHidden.add(id)
       }
       // 排进队列、还没等到回执的那几句 (重启之后照样要能绑上)
-      for (const line of Array.isArray(stored?.peerQueued) ? stored.peerQueued : []) {
+      const queued = [...(Array.isArray(extra?.peerQueued) ? extra.peerQueued : []), ...(Array.isArray(base?.peerQueued) ? base.peerQueued : [])]
+      for (const line of queued) {
         const id = typeof line?.id === 'string' ? line.id : ''
         const localId = typeof line?.localId === 'string' ? line.localId : ''
         if (id === '' || localId === '') continue
+        if (queuedLines.some(entry => entry.id === id)) continue
         queuedLines.push({
           id,
           localId,
@@ -2854,7 +3586,9 @@ function applyInner(ctx, config = {}) {
           at: Number.isFinite(line?.at) ? Number(line.at) : 0,
         })
       }
+      ledgerState = { ...ledgerState, records: proxyRegistry.size }
     } catch (error) {
+      ledgerState = { ...ledgerState, error: `restore: ${messageOf(error)}` }
       warn(`peer: restoring the projection ledger failed: ${messageOf(error)}`)
     } finally {
       peerStateDone = true
@@ -2994,7 +3728,7 @@ function applyInner(ctx, config = {}) {
       if (!current) continue
       const shadow = byName.get(baseName(snapshot?.cwd))
       if (shadow === undefined) continue
-      const record = await ensureProxySession(peerSessionId, { title: String(snapshot?.title ?? '') }, shadow)
+      const record = await ensureProjectionFor(peerSessionId, { title: String(snapshot?.title ?? '') }, shadow)
       if (record === null) continue
       proxyRegistry.set(key, record)
       created += 1
@@ -3078,10 +3812,14 @@ function applyInner(ctx, config = {}) {
       }
     }
     await persistProxyState()
+    // 2026-11-21: 先对一遍账上的投影 (归档/不见了就接管本机现存那份), 再补新的。
+    // 这条路上没有对端的会话表, 影子只按"第一组"兜 (与下面建投影时的兜法同一个)
+    const repoShadow = [...shadowRegistry.values()][0]
+    const adopted = await reconcileProjections(() => repoShadow)
     // 2026-10-23: 轮号已改成从 1 起（见 ensureProxySession），这里恢复"从现在开始"的自动补投影
     const projected = await projectLiveSessionsFromRepo()
     const folded = await foldFromRepo()
-    return { ok: true, queueOnly: true, shadows: created, projected, ...folded }
+    return { ok: true, queueOnly: true, shadows: created, adopted, projected, ...folded }
   }
 
   // 名片里报哪些工作区: 开文件同步时就是那一份源; 档 A (workspace.enabled=false) 下也不能空着 ——
@@ -3107,36 +3845,103 @@ function applyInner(ctx, config = {}) {
     return entries
   }
 
-  /** 把账写回 storage (投影游标 + 影子工作区 id + 退下来的投影 + 相连那一条线) */
+  /**
+   * 把账写回 storage **并**写一份文件镜像 (2026-11-21)
+   *
+   * 三件以前没有的:
+   *   · 整段 (含 payload 组装) 包在 try 里 —— 组装炸了也要留下一条日志, 不是把异常抛给调用方
+   *   · storage 写有超时 (4 s) —— 真机上出现过"写不进去也不报错"的一档, 挂住的那一条不能把
+   *     后面的账全堵死
+   *   · 无论 storage 成败都写 `<DSH_HOME>/lw/peer-ledger.json` (原子 rename) —— 至少这一份是新的,
+   *     重启时 `restoreProxyState` 会取两份里较新的那个
+   * @returns {Promise<{ok: boolean, at: number, error?: string}>} 落账结果 (不抛)。
+   */
   async function persistProxyState() {
-    const proxies = {}
-    for (const [key, value] of proxyRegistry) {
-      proxies[key] = {
-        localId: value.localId,
-        lastSeq: value.lastSeq,
-        openTurn: value.openTurn,
-        turnCounter: value.turnCounter,
-        pendingTexts: value.pendingTexts.slice(-5),
-        revision: value.revision,
-        running: value.running === true,
-        snapshotV: Number.isFinite(value.snapshotV) ? value.snapshotV : LIVE_SNAPSHOT_VERSION_LEGACY,
-      }
-    }
-    const shadows = {}
-    for (const [key, value] of shadowRegistry) shadows[key] = { workspaceId: value.workspaceId }
+    const at = Date.now()
+    let payload
+    let text
     try {
-      await patchPluginState({ peerProxies: proxies, peerShadows: shadows, peerRetired: retiredObject(), peerEpochAt, peerHidden: [...peerHidden], peerQueued: queuedLines })
+      const proxies = {}
+      for (const [key, value] of proxyRegistry) {
+        const prior = ledgerWritten === null ? undefined : ledgerWritten[key]
+        let lastSeq = Number(value.lastSeq) || 0
+        let snapshotV = Number.isFinite(value.snapshotV) ? value.snapshotV : LIVE_SNAPSHOT_VERSION_LEGACY
+        let turnCounter = Number(value.turnCounter) || 0
+        // 同一场 (同一个 localId) 的游标只许前进: 迟到的旧一版不能把它写回去
+        if (prior !== undefined && prior !== null && prior.localId === value.localId) {
+          lastSeq = Math.max(lastSeq, Number(prior.lastSeq) || 0)
+          snapshotV = Math.max(snapshotV, Number(prior.snapshotV) || 0)
+          turnCounter = Math.max(turnCounter, Number(prior.turnCounter) || 0)
+        }
+        proxies[key] = {
+          localId: value.localId,
+          title: typeof value.title === 'string' ? value.title : '',
+          lastSeq,
+          openTurn: value.openTurn,
+          turnCounter,
+          pendingTexts: Array.isArray(value.pendingTexts) ? value.pendingTexts.slice(-5) : [],
+          revision: value.revision,
+          running: value.running === true,
+          snapshotV,
+        }
+      }
+      const shadows = {}
+      for (const [key, value] of shadowRegistry) shadows[key] = { workspaceId: value.workspaceId }
+      payload = {
+        ledgerAt: at,
+        peerProxies: proxies,
+        peerShadows: shadows,
+        peerRetired: retiredObject(),
+        peerEpochAt,
+        peerHidden: [...peerHidden],
+        peerQueued: queuedLines,
+      }
+      ledgerState = { ...ledgerState, records: proxyRegistry.size }
+      text = JSON.stringify({ v: 1, at, deviceId: peerIdentity.deviceId, ...payload })
     } catch (error) {
-      warn(`peer: writing the projection ledger failed: ${messageOf(error)}`)
+      const message = `payload: ${messageOf(error)}`
+      ledgerState = { ...ledgerState, at, error: message }
+      logger.error(`peer: writing the projection ledger failed (${message})`)
+      return { ok: false, at, error: message }
     }
+    // 内容没变就不重复写 (轮询 3 s 一拍, 账本没必要每拍落一次)。
+    // **只有 storage 也写成功的那一版才算"写过"** —— 上一次 storage 失败时这一版还要再试
+    const hash = `${text.length}:${text.slice(0, 64)}:${text.slice(-64)}`
+    if (hash === ledgerHash && existsSync(peerLedgerFile)) {
+      return { ok: ledgerState.error === '', at: ledgerState.at, ...(ledgerState.error === '' ? {} : { error: ledgerState.error }) }
+    }
+    let mirrorError = ''
+    try {
+      mkdirSync(dirname(peerLedgerFile), { recursive: true })
+      writeFileSync(`${peerLedgerFile}.tmp`, text, 'utf8')
+      renameSync(`${peerLedgerFile}.tmp`, peerLedgerFile)
+    } catch (error) {
+      mirrorError = messageOf(error)
+      logger.error(`peer: writing the projection ledger mirror failed: ${mirrorError}`)
+    }
+    let storageError = ''
+    try {
+      await withStorageTimeout(patchPluginState(payload), LEDGER_WRITE_TIMEOUT_MS, 'writing the projection ledger')
+    } catch (error) {
+      storageError = messageOf(error)
+      logger.error(`peer: writing the projection ledger to the storage domain failed: ${storageError}`)
+    }
+    const error = storageError !== '' ? storageError : mirrorError
+    if (mirrorError === '') {
+      // 文件镜像落了: 游标按这一版算 (storage 那一侧下一拍再补)
+      ledgerWritten = payload.peerProxies
+      if (storageError === '') ledgerHash = hash
+    }
+    ledgerState = { ...ledgerState, at: mirrorError === '' ? at : ledgerState.at, error }
+    return error === '' ? { ok: true, at } : { ok: false, at, error }
   }
 
   /** 只把相连那一条线记下来 (那次写发生在别的东西都还没定下来的时候) */
   async function persistPeerSyncState() {
     try {
-      await patchPluginState({ peerEpochAt })
+      await withStorageTimeout(patchPluginState({ peerEpochAt }), LEDGER_WRITE_TIMEOUT_MS, 'writing the sync epoch')
     } catch (error) {
-      warn(`peer: writing the sync epoch failed: ${messageOf(error)}`)
+      logger.error(`peer: writing the sync epoch failed: ${messageOf(error)}`)
     }
   }
 
@@ -3273,9 +4078,15 @@ function applyInner(ctx, config = {}) {
     }
     /** 本机会话 id -> 它的 cwd (下面两个判据都要看"这个路径在本机存不存在") */
     const cwdById = new Map()
+    // 2026-11-21 终端: 扫把要放过"刚在影子工作区里开的那一场" (见下面 SHADOW_GRACE_MS)
+    const freshById = new Map()
+    const blankById = new Map()
     for (const item of listed) {
       const id = String(item?.sessionId ?? '')
-      if (id !== '') cwdById.set(id, String(item?.cwd ?? ''))
+      if (id === '') continue
+      cwdById.set(id, String(item?.cwd ?? ''))
+      freshById.set(id, Number(item?.updatedAt ?? 0))
+      blankById.set(id, item?.blank === true)
     }
     projectionsSwept = true
     let hidden = 0
@@ -3287,6 +4098,12 @@ function applyInner(ctx, config = {}) {
         // 无主的投影: 影子目录底下的本机会话, 而它已经不在追读的账上 —— 隐掉 (老版本只把记录
         // 摘掉, 行留在列表里; 2026-10-14 真机上量到 64 行)
         if (proxyLocalIds.has(id)) continue
+        // 2026-11-21 终端: **刚开的那一场别扫** —— 门户「新建」在影子工作区里立刻起一场本机会话,
+        // 而它要等第一句话转发成功才登记进 proxyLocalIds, 中间这一拍扫把一收就成了"刚开的对话
+        // 当场从历史里消失"。判据用两条便宜的: 空白场 / 两小时内动过
+        if (blankById.get(id) === true) continue
+        const touchedAt = Number(freshById.get(id) ?? 0)
+        if (touchedAt > 0 && Date.now() - touchedAt < 2 * 60 * 60 * 1000) continue
         if (await archiveLocalSession(id, '')) hidden += 1
         continue
       }
@@ -3377,8 +4194,10 @@ function applyInner(ctx, config = {}) {
         // 标题只是好看: 改不动就用兜底名 (宿主那一边索引是原样的)
       }
       const live = ctx.sessions.get(localId)
+      const title = proxyTitleOf(session?.title, peerSessionId)
       const record = {
         localId,
+        title,
         lastSeq: 0,
         openTurn: null,
         // 轮号必须从 1 起: 宿主读盘时校验 `turn/start` 的 turn === nextTurn（1,2,3…），
@@ -3403,9 +4222,10 @@ function applyInner(ctx, config = {}) {
    * @param {object} record - 投影记录。
    * @param {string} peerSessionId - 对端会话 id。
    * @param {object|undefined} shadow - 这一场归的那个影子工作区 (重做投影时要拿它开新会话)。
-   * @returns {Promise<{appended: number, rebuilt: boolean}>} 追加了几条事件 / 有没有重做一场。
+   * @param {number} [attempts] - 接管之后重试的次数 (最多一次)。
+   * @returns {Promise<{appended: number, rebuilt: boolean, missing?: boolean}>} 追加了几条事件 / 有没有重做一场 / 本机那场在不在。
    */
-  async function applyTranscript(record, peerSessionId, shadow) {
+  async function applyTranscript(record, peerSessionId, shadow, attempts = 0) {
     // 要的是**对端那一份** (peerTranscript 是往对端问; transcript 是回答对端的提问)
     let answer = await peerRuntime.peerTranscript(peerSessionId)
     if (answer.ok !== true) {
@@ -3421,6 +4241,10 @@ function applyInner(ctx, config = {}) {
       answer = fallback
     }
     const snapshot = answer.snapshot ?? {}
+    // 2026-11-21: 标题记进账本 —— 重挂之后 `reconcileProjections` 靠它找回本机那一场
+    if (typeof record.title !== 'string' || record.title === '') {
+      record.title = proxyTitleOf(snapshot.title, peerSessionId)
+    }
     const snapshotV = Number.isFinite(snapshot.v) ? Number(snapshot.v) : LIVE_SNAPSHOT_VERSION_LEGACY
     let rebuilt = false
     if (record.snapshotV === 0) record.snapshotV = snapshotV
@@ -3431,18 +4255,38 @@ function applyInner(ctx, config = {}) {
       rebuilt = await reopenProjection(record, peerSessionId, snapshot, shadow)
       record.snapshotV = snapshotV
       if (!rebuilt) warn(`peer: ${peerSessionId} is projected with the old entry version (v${snapshotV} is available)`)
+      // 2026-11-21: 换场 (或"重做不了"那个版本记号) 当场落账 —— 否则下一次重挂又拿旧 localId
+      // 来"重做", 一场变两场。**放在 snapshotV 赋值之后**: 账上这一版必须是"已经吃过 vN"
+      await persistProxyState()
     }
     // 折进来的轮次编号必须**接在本机那场会话的后面**: 界面的对话流是按 turn 归组的,
     // 而本机自己的那一轮已经用掉了 turn 1 (而且已经 turn/end)。再插一个 turn 1 进去,
     // 客户端会把它当成"已经结束的那一轮", 新回答就不画出来 (2026-10-22 实测: 会话文件里
     // 有回答, 打开着的界面一片空白, 退出重进才看得见)
-    const localSession = ctx.sessions.get(record.localId)
-    if (localSession !== undefined && localSession !== null) {
-      const usedTurn = maxTurnOf(localSession)
-      if (usedTurn > record.turnCounter) {
-        record.turnCounter = usedTurn
-        record.openTurn = null
+    //
+    // 2026-11-21: 这一段挪到**折之前** —— 本机那一场不在就先接管, 接管不成这一趟一个字节都不折。
+    // 以前是折完、把游标推过去、再发现没有会话可写 (`session === null`), 内容丢了账还往前走了
+    let localSession = await liveSessionOf(record.localId)
+    if (localSession === null) {
+      // 刚建出来的会话有时要等一拍才唤得醒 (真机 2026-11-21: 第一趟一个字节都没折, 而版本记号
+      // 已经写下, 这一场就永远停在 applied 0) —— 给一拍再试
+      if (attempts === 0) {
+        await new Promise(resolve => setTimeout(resolve, 150))
+        localSession = await liveSessionOf(record.localId)
       }
+    }
+    if (localSession === null) {
+      const title = typeof record.title === 'string' && record.title !== '' ? record.title : String(snapshot.title ?? '')
+      const pick = attempts < 1 ? pickCandidate(await projectionCandidates(peerSessionId, title, shadow)) : undefined
+      if (pick !== undefined && await adoptProjection(record, peerSessionId, title, shadow, pick)) {
+        return await applyTranscript(record, peerSessionId, shadow, attempts + 1)
+      }
+      return { appended: 0, rebuilt, missing: true }
+    }
+    const usedTurn = maxTurnOf(localSession)
+    if (usedTurn > record.turnCounter) {
+      record.turnCounter = usedTurn
+      record.openTurn = null
     }
     // 2026-10-22: 快照是个**滚动窗口** (最近 40 条)。本机投影的游标要是落在窗口之外
     // (对端离线了几轮), 窗口之前那一段既不在快照里、也不会再出现 —— 从仓库里那本只追加的
@@ -3462,6 +4306,20 @@ function applyInner(ctx, config = {}) {
         }
       }
     }
+    // 2026-11-22 (2.8.1 #50): 折之前先把对端那几条带的图与文件取回来 —— 折进投影的必须是**本机真存在**
+    // 的路径, 门户才画得出图 (它照 `lw-in/` 下的名字取字节, 见 `host-plugin` 的 `/lw-out/in/`)
+    if (peerSpec !== null && peerSpec.proxy === true) {
+      try {
+        const media = await materializeEntryMedia(entries, peerSessionId)
+        entries = media.entries
+        if (media.notes.length > 0 && !mediaNoted.has(peerSessionId)) {
+          mediaNoted.add(peerSessionId)
+          logger.info(`peer: ${peerSessionId} ${media.notes.join('; ')}`)
+        }
+      } catch (error) {
+        warn(`peer: materializing the media of ${peerSessionId} failed: ${messageOf(error)}`)
+      }
+    }
     const folded = proxyEventsFrom(entries, {
       lastSeq: record.lastSeq,
       openTurn: record.openTurn,
@@ -3473,12 +4331,12 @@ function applyInner(ctx, config = {}) {
     record.turnCounter = folded.turnCounter
     record.pendingTexts = folded.pendingTexts
     if (folded.events.length === 0) return { appended: 0, rebuilt }
-    const session = await liveSessionOf(record.localId)
-    if (session === null) return { appended: 0, rebuilt }
-    const appended = appendProxyEvents(session, folded.events)
+    const appended = appendProxyEvents(localSession, folded.events)
     if (appended < folded.events.length) {
       warn(`peer: only ${appended}/${folded.events.length} projection event(s) landed in ${record.localId}`)
     }
+    // 2026-11-21: 折进来就立刻落账 (以前只在整趟刷新末尾写一次, 中途一抛/一挂就全丢)
+    await persistProxyState()
     return { appended, rebuilt }
   }
 
@@ -3517,6 +4375,7 @@ function applyInner(ctx, config = {}) {
       retiredProxies.set(old, peerSessionId)
     }
     record.localId = fresh.localId
+    record.title = proxyTitleOf(snapshot?.title, peerSessionId)
     record.lastSeq = 0
     record.openTurn = null
     record.turnCounter = fresh.turnCounter
@@ -3563,6 +4422,355 @@ function applyInner(ctx, config = {}) {
       warn(`peer: waking ${localId} to write its projection failed: ${messageOf(error)}`)
       return null
     }
+  }
+
+  /**
+   * 这一条路径在不在 dir 底下 (只用于挑投影候选; 与 isShadowPath 那个"影子根"口径不同)。
+   * @param {string} child - 候选路径。
+   * @param {string} parent - 影子工作区目录。
+   * @returns {boolean} 在里面就 true。
+   */
+  function pathInside(child, parent) {
+    const inner = String(child ?? '')
+    const outer = String(parent ?? '')
+    if (inner === '' || outer === '') return false
+    const rel = relative(outer, inner)
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  }
+
+  /**
+   * 本机会话表 (冷会话也在里面) —— 接管判据都读它。
+   * @returns {Promise<Array<object>|null>} 条目表; 宿主没有这个口子时 null。
+   */
+  async function listLocalSessionRows() {
+    const controller = ctx.get('sessionController')
+    if (controller === undefined || typeof controller.list !== 'function') return null
+    try {
+      const listed = await controller.list({}, AbortSignal.timeout(12_000))
+      return Array.isArray(listed?.items) ? listed.items : []
+    } catch (error) {
+      warn(`peer: listing local sessions to adopt a projection failed: ${messageOf(error)}`)
+      return null
+    }
+  }
+
+  /**
+   * 本机现有、可以接管成这场对端会话投影的那些会话 (2026-11-21)
+   *
+   * 判据三条: cwd 在影子工作区底下 / 标题等于 `proxyTitleOf` / 不是别的投影记录已经占着的。
+   * 排序交给 [pickCandidate] (人正开着的那份优先, 其次 updatedAt 最新)。
+   * @param {string} peerSessionId - 对端会话 id。
+   * @param {string} title - 这一场的标题 (空串 = 不按标题筛)。
+   * @param {{dir?: string}|undefined} shadow - 影子工作区记录。
+   * @param {{keep?: string, items?: Array<object>}} [options] - `keep` = 这一份不算候选; `items` = 已经取好的会话表。
+   * @returns {Promise<Array<{id: string, title: string, updatedAt: number, loaded: boolean, archived: boolean}>>} 候选。
+   */
+  async function projectionCandidates(peerSessionId, title, shadow, options = {}) {
+    const dir = String(shadow?.dir ?? '')
+    if (dir === '') return []
+    const wanted = String(title ?? '').trim()
+    const keep = String(options.keep ?? '')
+    const taken = new Set()
+    for (const [key, value] of proxyRegistry) {
+      if (key.split('|')[1] === peerSessionId) continue
+      if (value.localId !== '') taken.add(value.localId)
+    }
+    const items = Array.isArray(options.items) ? options.items : await listLocalSessionRows()
+    if (items === null) return []
+    const archived = ownArchivedSessionIds()
+    const rows = []
+    for (const item of items) {
+      const id = String(item?.sessionId ?? '')
+      if (id === '' || id === keep || taken.has(id)) continue
+      if (!pathInside(String(item?.cwd ?? ''), dir)) continue
+      const rowTitle = String(item?.title ?? item?.projections?.values?.title ?? '')
+      if (wanted !== '' && rowTitle !== wanted) continue
+      rows.push({
+        id,
+        title: rowTitle,
+        updatedAt: Number.isFinite(item?.updatedAt) ? Number(item.updatedAt) : 0,
+        loaded: ctx.sessions.get(id) !== undefined,
+        archived: archived.has(id),
+      })
+    }
+    return rows
+  }
+
+  /**
+   * 从候选里挑一份: 人正开着的那份优先, 其次 `updatedAt` 最新。
+   * @param {Array<{id: string, updatedAt: number, loaded: boolean}>} candidates - [projectionCandidates] 的产物。
+   * @returns {object|undefined} 挑中的那份。
+   */
+  function pickCandidate(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return undefined
+    const loaded = candidates.filter((candidate) => candidate.loaded === true)
+    const pool = loaded.length > 0 ? loaded : candidates
+    return [...pool].sort((left, right) => right.updatedAt - left.updatedAt)[0]
+  }
+
+  /**
+   * 一份投影会话自己已经折到哪一条 (`peer-<seq>` 的 id 就是游标)。
+   * @param {object|null} session - Session 句柄。
+   * @returns {number} 已经折过的最大 seq (读不到就 0)。
+   */
+  function peerSeqOfSession(session) {
+    let max = 0
+    const log = Array.isArray(session?.log) ? session.log : []
+    for (const event of log) {
+      if (event === null || typeof event !== 'object') continue
+      const id = typeof event?.data?.id === 'string' ? event.data.id : ''
+      if (!id.startsWith('peer-')) continue
+      const seq = Number(id.slice('peer-'.length))
+      if (Number.isFinite(seq) && seq > max) max = seq
+    }
+    return max
+  }
+
+  /**
+   * 把一份现存的本地会话接管成这场对端会话的投影 (2026-11-21)
+   *
+   * 这是"重挂之后不许再开一场新的"那条: 账本里记的 `localId` 归档了 / 不见了时, 本机可能还有
+   * 一份同名同影子的会话 (门户口里正开着的那份也在其中)。接管时把游标对齐到它已经折过的
+   * `peer-<seq>`, 于是后面只补新的; 同名的其它副本**归档** (可撤销), 历史窗里不再两行同名。
+   * @param {object} record - 投影记录 (会被改写)。
+   * @param {string} peerSessionId - 对端会话 id。
+   * @param {string} title - 对端那一场的标题。
+   * @param {{dir?: string}|undefined} shadow - 影子工作区。
+   * @param {{id: string}} candidate - 挑中的那份。
+   * @returns {Promise<boolean>} 接管成功就 true。
+   */
+  async function adoptProjection(record, peerSessionId, title, shadow, candidate) {
+    const session = await liveSessionOf(candidate.id)
+    if (session === null) return false
+    const old = String(record.localId ?? '')
+    const ownTitle = String(title ?? '').trim() !== '' ? String(title).trim() : String(candidate.title ?? '').trim()
+    record.localId = candidate.id
+    record.title = ownTitle !== '' ? ownTitle : proxyTitleOf('', peerSessionId)
+    record.lastSeq = peerSeqOfSession(session)
+    record.openTurn = null
+    record.turnCounter = maxTurnOf(session)
+    record.pendingTexts = []
+    proxyLocalIds.add(candidate.id)
+    if (old !== '' && old !== candidate.id) {
+      proxyLocalIds.delete(old)
+      retiredProxies.set(old, peerSessionId)
+    }
+    const registry = ctx.get('workspaceRegistry')
+    // 只归档**同名**、而且**不比这一份更全**的副本: 标题空着时宁可一个都不动,
+    // 也不能把同一个工作区里别的会话收走; 更全的那一份 (peerSeq 更大) 是内容, 不能当垃圾收掉
+    const strays = ownTitle === '' ? [] : await projectionCandidates(peerSessionId, ownTitle, shadow, { keep: candidate.id })
+    const keepSeq = record.lastSeq
+    let archived = 0
+    for (const stray of strays) {
+      if (typeof registry?.archiveSession !== 'function') break
+      const straySession = await liveSessionOf(stray.id)
+      const straySeq = straySession === null ? 0 : peerSeqOfSession(straySession)
+      if (straySession === null || straySeq <= 0 || straySeq > keepSeq) continue
+      try {
+        await registry.archiveSession(stray.id)
+        retiredProxies.set(stray.id, peerSessionId)
+        proxyLocalIds.delete(stray.id)
+        archived += 1
+      } catch (error) {
+        warn(`peer: archiving the duplicate projection ${stray.id} failed: ${messageOf(error)}`)
+      }
+    }
+    logger.info(`peer: adopted ${candidate.id} as the projection of ${peerSessionId} (cursor seq ${record.lastSeq}${archived > 0 ? `, ${archived} duplicate(s) archived` : ''})`)
+    await persistProxyState()
+    return true
+  }
+
+  /**
+   * 开投影之前先找有没有现成的: 有就接管, 不再新开一场 (2026-11-21)。
+   * @param {string} peerSessionId - 对端会话 id。
+   * @param {{title?: string}} sessionMeta - 对端报的那一场。
+   * @param {{dir?: string}|undefined} shadow - 影子工作区。
+   * @returns {Promise<object|null>} 投影记录 (新开的 / 接管的)。
+   */
+  async function ensureProjectionFor(peerSessionId, sessionMeta, shadow) {
+    const title = proxyTitleOf(sessionMeta?.title, peerSessionId)
+    const candidates = await projectionCandidates(peerSessionId, title, shadow)
+    const pick = pickCandidate(candidates)
+    if (pick !== undefined) {
+      const record = {
+        localId: '',
+        title,
+        lastSeq: 0,
+        openTurn: null,
+        turnCounter: 0,
+        pendingTexts: [],
+        revision: -1,
+        running: false,
+        snapshotV: LIVE_SNAPSHOT_VERSION_LEGACY,
+      }
+      if (await adoptProjection(record, peerSessionId, title, shadow, pick)) return record
+    }
+    const created = await ensureProxySession(peerSessionId, sessionMeta, shadow)
+    if (created !== null) created.title = title
+    return created
+  }
+
+  /**
+   * 把同一场对端会话多出来的**同名投影**归档掉 (2026-11-21)
+   *
+   * 重挂之前那种"每挂一次新开一场"留下的副本还留在历史里: 账上只会指一份, 但列表里两行同名。
+   * 只收"投影长出来的"那一类 (`peer-<seq>` 事件 > 0), 人自己在这个影子里开的会话不动。
+   * @param {object} record - 投影记录 (它指向的那一份留着)。
+   * @param {string} peerSessionId - 对端会话 id。
+   * @param {string} title - 标题。
+   * @param {{dir?: string}|undefined} shadow - 影子工作区。
+   * @param {Array<object>|null} items - 会话表 (已取好的那一份)。
+   * @returns {Promise<number>} 归档了几份。
+   */
+  async function archiveProjectionDuplicates(record, peerSessionId, title, shadow, items, keepSeq = record.lastSeq) {
+    const registry = ctx.get('workspaceRegistry')
+    const ownTitle = typeof title === 'string' ? title.trim() : ''
+    if (typeof registry?.archiveSession !== 'function' || ownTitle === '') return 0
+    const keep = String(record.localId ?? '')
+    const candidates = await projectionCandidates(peerSessionId, ownTitle, shadow, { items, keep })
+    let archived = 0
+    for (const candidate of candidates) {
+      const session = await liveSessionOf(candidate.id)
+      if (session === null) continue
+      // 只认投影, 而且**不比手上这份更全**: 里面已有 `peer-<seq>` 的事件、seq 不超过 keepSeq
+      const seq = peerSeqOfSession(session)
+      if (seq <= 0 || seq > keepSeq) continue
+      try {
+        await registry.archiveSession(candidate.id)
+        retiredProxies.set(candidate.id, peerSessionId)
+        proxyLocalIds.delete(candidate.id)
+        archived += 1
+      } catch (error) {
+        warn(`peer: archiving the duplicate projection ${candidate.id} failed: ${messageOf(error)}`)
+      }
+    }
+    if (archived > 0) {
+      logger.info(`peer: archived ${archived} duplicate projection(s) of ${peerSessionId} (kept ${keep})`)
+    }
+    return archived
+  }
+
+  /**
+   * 退下来的那些副本先放回归档集 (2026-11-21): 账上那一份要是空的, 真正的内容往往在 retired 里
+   * @param {string} peerSessionId - 对端会话 id。
+   * @returns {Promise<number>} 放回来了几个。
+   */
+  async function unarchiveRetiredCopies(peerSessionId) {
+    const registry = ctx.get('workspaceRegistry')
+    if (typeof registry?.unarchiveSession !== 'function') return 0
+    let back = 0
+    for (const [localId, owner] of [...retiredProxies.entries()]) {
+      if (owner !== peerSessionId) continue
+      try {
+        await registry.unarchiveSession(localId)
+        back += 1
+      } catch {
+        // 归档集里没有它 —— 下一轮再说
+      }
+    }
+    return back
+  }
+
+  /**
+   * 同名候选里**已经有内容**、且比 `minSeq` 更全的那一份 (2026-11-21)
+   * @param {string} peerSessionId - 对端会话 id。
+   * @param {string} title - 标题。
+   * @param {{dir?: string}|undefined} shadow - 影子工作区。
+   * @param {Array<object>|null} items - 会话表。
+   * @param {number} minSeq - 手上这一份已经折到哪 (0 = 空的)。
+   * @returns {Promise<{row: object, seq: number}|undefined>} 更全的那一份。
+   */
+  async function richerCandidate(peerSessionId, title, shadow, items, minSeq) {
+    const rows = await projectionCandidates(peerSessionId, title, shadow, { items })
+    let best
+    for (const row of rows) {
+      const session = await liveSessionOf(row.id)
+      if (session === null) continue
+      const seq = peerSeqOfSession(session)
+      if (seq <= minSeq) continue
+      if (best === undefined || seq > best.seq) best = { row, seq }
+    }
+    return best
+  }
+
+  /**
+   * 重挂之后把账上的投影逐条对一遍 (2026-11-21)
+   *
+   * 账里的 `localId` 归档了 / 不见了 → 先试着放回来 (这一步不需要影子); 放不回来就按
+   * 「标题 + 影子工作区」接管本机现存的那份; 连影子都还没有就这一轮先不动它 (下一轮再看)。
+   * 账上那一条还活着但**一个字节都没折**时, 同名副本里更全的那一份接管过来 (空的那份归档);
+   * 账上那一条有内容时就只把**不比它更全**的同名副本归档 (历史窗里不再两行同名, 也不丢内容)。
+   * @param {(peerSessionId: string) => object|undefined} [shadowOf] - 对端会话 id → 影子工作区。
+   * @returns {Promise<number>} 接管了几条。
+   */
+  async function reconcileProjections(shadowOf) {
+    if (proxyRegistry.size === 0) return 0
+    let listed = await listLocalSessionRows()
+    const have = new Set((listed ?? []).map((row) => String(row?.sessionId ?? '')))
+    // 会话表读不到 / 一场都没有时**不乱删账上的条目**: 空表与"这一场真没了"在宿主那边分不开,
+    // 删错了就回到"每次重挂新开一场"的老毛病。只有拿到一份非空表且里面确实没有它, 才认为它没了
+    const listedKnown = Array.isArray(listed) && listed.length > 0
+    let adopted = 0
+    let changed = false
+    for (const [key, record] of [...proxyRegistry.entries()]) {
+      const peerSessionId = key.split('|')[1] ?? ''
+      if (peerSessionId === '') continue
+      const localId = String(record.localId ?? '')
+      const shadow = typeof shadowOf === 'function' ? shadowOf(peerSessionId) : undefined
+      const title = typeof record.title === 'string' && record.title !== '' ? record.title : ''
+      const ownSession = localId === '' ? null : await liveSessionOf(localId)
+      const ownSeq = ownSession === null ? -1 : peerSeqOfSession(ownSession)
+      // 账上那份还在 (冷会话也算): 空的才找更全的, 有内容就只收不比它全的同名副本
+      if (localId !== '' && (ownSession !== null || have.has(localId))) {
+        if (shadow === undefined) continue
+        if (ownSeq === 0) {
+          // 空的这一份多半是"重挂时新开的那一场": 真正折过的那份还在归档集里
+          if ((await unarchiveRetiredCopies(peerSessionId)) > 0) {
+            listed = await listLocalSessionRows()
+          }
+          const better = await richerCandidate(peerSessionId, title, shadow, listed, ownSeq)
+          if (better !== undefined && await adoptProjection(record, peerSessionId, title, shadow, better.row)) {
+            adopted += 1
+            changed = true
+            continue
+          }
+        }
+        if ((await archiveProjectionDuplicates(record, peerSessionId, title, shadow, listed, ownSeq)) > 0) changed = true
+        continue
+      }
+      // 账上那份不见了: 先放回来, 再看同名副本里有没有更全的
+      if (localId !== '') {
+        const registry = ctx.get('workspaceRegistry')
+        if (typeof registry?.unarchiveSession === 'function') {
+          try {
+            await registry.unarchiveSession(localId)
+          } catch {
+            // 归档集里没有它 (真的不在了) —— 往下走接管
+          }
+          if (ctx.sessions.get(localId) !== undefined || have.has(localId)) {
+            logger.info(`peer: the archived projection ${localId} of ${peerSessionId} is back`)
+            continue
+          }
+        }
+      }
+      if (shadow === undefined) continue
+      if ((await unarchiveRetiredCopies(peerSessionId)) > 0) listed = await listLocalSessionRows()
+      const richer = await richerCandidate(peerSessionId, title, shadow, listed, -1)
+      const pick = richer?.row ?? pickCandidate(await projectionCandidates(peerSessionId, title, shadow, { items: listed }))
+      if (pick !== undefined && await adoptProjection(record, peerSessionId, title, shadow, pick)) {
+        adopted += 1
+        changed = true
+        continue
+      }
+      if (localId !== '' && listedKnown) {
+        proxyLocalIds.delete(localId)
+        logger.info(`peer: ${peerSessionId} has no local projection left (${localId} is gone); a new one will be opened`)
+        proxyRegistry.delete(key)
+        changed = true
+      }
+    }
+    if (adopted > 0 || changed) await persistProxyState()
+    return adopted
   }
 
   /**
@@ -3690,6 +4898,16 @@ function applyInner(ctx, config = {}) {
       // 账上多出来的那些只从**追读的账**里摘掉 (投影会话本身与它的日志都留着: 本机没有删会话日志的口子)
       const shadowByWorkspace = new Map()
       for (const [key, value] of shadowRegistry) shadowByWorkspace.set(key.split('|').slice(1).join('|'), value)
+      // 2026-11-21: 影子目录就位之后先把账上的投影对一遍 (重挂之后接管旧的那一场, 不再新开)
+      const workspaceOfPeerSession = new Map()
+      for (const session of (Array.isArray(info.sessions) ? info.sessions : [])) {
+        const id = String(session?.id ?? '')
+        if (id !== '') workspaceOfPeerSession.set(id, String(session?.workspace ?? ''))
+      }
+      const fallbackShadow = [...shadowRegistry.values()][0]
+      const adoptedProjections = await reconcileProjections((peerSessionId) => (
+        shadowByWorkspace.get(workspaceOfPeerSession.get(peerSessionId) ?? '') ?? fallbackShadow
+      ))
       const reportedSessions = Array.isArray(info.sessions) ? info.sessions : []
       // 「从相连时才开始同步」这一条**本机也自己判一遍**: 对端那边还是旧版插件时, 它会把全部
       // 会话报过来 —— 本机按自己那一条线把"相连之前就老掉的"挡掉, 两头各自成立
@@ -3747,7 +4965,7 @@ function applyInner(ctx, config = {}) {
         const shadow = shadowByWorkspace.get(String(session?.workspace ?? '')) ?? [...shadowRegistry.values()][0]
         let record = proxyRegistry.get(key)
         if (record === undefined) {
-          record = await ensureProxySession(peerSessionId, session, shadow)
+          record = await ensureProjectionFor(peerSessionId, session, shadow)
           if (record === null) continue
           proxyRegistry.set(key, record)
           opened += 1
@@ -3759,17 +4977,19 @@ function applyInner(ctx, config = {}) {
         // 好把投影重做一场 —— 否则这场投影会一直停在"只有用户那几句话"上
         const staleEntries = peerEntryVersion > record.snapshotV
         if (!staleEntries && record.revision === revision && record.running === running) continue
-        record.revision = revision
         record.running = running
         if (fetched >= 5) continue
         fetched += 1
         const applied = await applyTranscript(record, peerSessionId, shadow)
+        // 2026-11-21: 本机那一场还没醒 (刚建 / 刚归档) 时这一趟一个字节都没折 —— 版本记号不能先写,
+        // 否则下一拍就被"没变就跳过"挡住, 这一场永远停在 applied 0 (真机上正是这个症状)
+        if (applied.missing !== true) record.revision = revision
         if (applied.rebuilt) opened += 1
       }
       await persistProxyState()
-      return { ok: true, device: shadowDevice, shadows: shadowRegistry.size, proxies: proxyRegistry.size, created, retitled, retired, droppedProxies, opened, fetched, hidden }
+      return { ok: true, device: shadowDevice, shadows: shadowRegistry.size, proxies: proxyRegistry.size, created, retitled, retired, droppedProxies, opened, fetched, hidden, adopted: adoptedProjections, ledger: { ...ledgerState } }
     } catch (error) {
-      return { ok: false, error: messageOf(error) }
+      return { ok: false, error: messageOf(error), ledger: { ...ledgerState } }
     } finally {
       shadowBusy = false
     }
@@ -3787,12 +5007,14 @@ function applyInner(ctx, config = {}) {
     const proxies = [...proxyRegistry.entries()].map(([key, value]) => ({
       peerSessionId: key.split('|')[1] ?? '',
       localId: value.localId,
+      title: typeof value.title === 'string' ? value.title : '',
       running: value.running === true,
       applied: value.lastSeq,
     }))
     // newSessions 是**版本判据** (与 G1-2 那个 peer 块同一个做法): 影工作区里新开的一场会转到对端
     // 新开一场执行 (归属方闸的第 ④ 条)。老包的面板里没有这个字段
-    return { on: shadowsOn, device: shadowDevice, root: shadowRoot, newSessions: true, shadows, proxies }
+    // 2026-11-21: `ledger` = 投影账本的健康读数 (source / at / error / records) —— 面板与 doctor 都读它
+    return { on: shadowsOn, device: shadowDevice, root: shadowRoot, newSessions: true, shadows, proxies, ledger: { ...ledgerState } }
   }
 
   if (shadowsOn) {
@@ -3881,8 +5103,17 @@ function applyInner(ctx, config = {}) {
             // 影子会话: cwd 是影子目录, basename 是 safeSegment 过的名字 (`Mobile-AI-dsh`);
             // 先问注册表要原始标题 (`Mobile-AI\dsh`), 问不到才退回 basename
             : workspaceNameForCwd(session?.header?.cwd) || basename(String(session?.header?.cwd ?? ''))
+        // 2026-11-22 (2.8.1 #50): 附件先传过去, 正文里那一段名单换成对端的暂存路径; 对端收话时
+        // 再搬进它那一场的工作区 `lw-in/`。传不动就整条按原样发 (与老对端一模一样), 并落一句人话
+        const carried = await carryAttachments(text)
+        if (carried.notice !== '') {
+          try {
+            appendProxyEvents(session, proxyNoticeEvents(carried.notice, shadowDevice.name || 'the peer'))
+          } catch { /* 通知落不下就算了: 文字那一条照常发 */ }
+        }
         const answer = await peerRuntime.send({
-          text,
+          text: carried.text,
+          staged: carried.staged,
           target: peerOwned !== ''
             ? { kind: 'session', id: peerOwned }
             : { kind: 'new', id: '', name: deliveryName },
@@ -4037,11 +5268,11 @@ function applyInner(ctx, config = {}) {
     const action = (target === TARGETS.WORKSPACE ? parts[1] : parts[0])?.toLowerCase() || 'status'
     const picked = makeTargetResolver({ sessions: engineFacade, workspace: engineFacade })(target)
     try {
-      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer')) {
+      if (action === 'help' || (action !== 'status' && action !== 'pull' && action !== 'push' && action !== 'diff' && action !== 'log' && action !== 'peers' && action !== 'doctor' && action !== 'peer' && action !== 'p2p' && action !== 'ask')) {
         return {
           kind: 'success',
           text: [
-            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | doctor | help] · /sync ws <same actions>',
+            'sync: usage — /sync [status | pull | push | diff | log | peers | peer | p2p | ask | doctor | help] · /sync ws <same actions>',
             '  status  show mirror state (default): branch, remote, ahead/behind, dirty, forks',
             '  pull    fetch + merge remote changes (keep-both; confirms first)',
             '  push    mirror + commit + push local changes (confirms first)',
@@ -4049,6 +5280,8 @@ function applyInner(ctx, config = {}) {
             '  log     last commits in the sync repository',
             '  peers   device cards seen in the mirror (names, URLs, device ids)',
             '  peer    the cross-device channel: /sync peer [state] · /sync peer live · /sync peer send <text> [session <id> | workspace <name>]',
+            '  p2p     P2P 传输: /sync p2p [状态] · /sync p2p 开|关 · /sync p2p 确认 <设备 id> · /sync p2p 吊销 <设备 id>（英文 state|on|off|confirm|revoke 也认）',
+            '  ask     终端问答: /sync ask [状态] · /sync ask 关|提示|中继|自动 — 电脑上的问答要不要传到手机、超时按自定义回答继续（英文 off|notify|relay|auto 也认）',
             '  doctor  self-check: where each dsh peer resolves from, profile extraneous packages, git spawn',
             '  ws …    the same actions against the workspace mirror (its own repository, exclude list',
             '          and file size cap; a pull updates or trashes the local files the merge changed)',
@@ -4102,6 +5335,97 @@ function applyInner(ctx, config = {}) {
           }
         }
         return { kind: 'error', text: `sync: unknown peer action ${JSON.stringify(rest[0] ?? '')} (expected state|live|send)` }
+      }
+      // Luwi 加 (2026-11-22): 面板瘦身之后, P2P 那三件 (开关 / 确认换机 / 吊销) 只剩这一条路。
+      // 读面是 `/sync p2p [状态]`; 写面与面板那两下确认走的是**同一批函数** (`applyConfigure` 的
+      // p2p 段 / `p2pConfirmPeer` / `p2pRevokePeer`), 所以从哪边改都落在同一个文件、同一张信任表里。
+      // 动作词中文为主 (`状态` / `开` / `关` / `确认` / `吊销`), 英文 (state/on/off/confirm/revoke) 留作别名
+      if (action === 'p2p') {
+        const rest = target === TARGETS.WORKSPACE ? parts.slice(2) : parts.slice(1)
+        const what = normalizeP2pAction(rest[0])
+        if (what === 'state') {
+          let status
+          try {
+            status = await p2pService.status()
+          } catch (error) {
+            return { kind: 'error', text: `sync: p2p 状态读不出来: ${messageOf(error)}` }
+          }
+          return { kind: 'success', text: renderP2pState(status) }
+        }
+        if (what === 'on' || what === 'off') {
+          const enabled = what === 'on'
+          const result = await applyConfigure(syncConfigFile, { p2p: { enabled } })
+          if (result === null || result.ok !== true) {
+            return { kind: 'error', text: `sync: p2p.enabled 没写进去: ${result?.error ?? '配置没有被写下去'}` }
+          }
+          const changed = Array.isArray(result.changed) ? result.changed.join(', ') : 'p2p.enabled'
+          logger.info(`sync: /sync p2p ${what} wrote ${changed}`)
+          // 插件是挂载时读配置的: 与面板那句同一个口径, 写完要重启 host
+          return { kind: 'success', text: `sync: P2P 已${enabled ? '打开' : '关掉'}（写进去的是 ${changed}）; 重启 host 之后生效` }
+        }
+        if (what === 'confirm') {
+          const deviceId = (rest[1] ?? '').trim()
+          if (deviceId === '') {
+            return { kind: 'error', text: 'sync: /sync p2p 确认 要带上设备 id —— /sync peers 列得出来; /sync p2p 状态 的那一行会点名哪一台在等确认' }
+          }
+          const answer = await p2pConfirmPeer(deviceId)
+          return {
+            kind: answer.ok === true ? 'success' : 'error',
+            text: answer.ok === true
+              ? `sync: 已确认换机 ${deviceId}（节点 ${String(answer.nodeId ?? '').slice(0, 8)}…）, 信任表重新认这一台`
+              : `sync: 确认 ${deviceId} 没成: ${answer.error}`,
+          }
+        }
+        if (what === 'revoke') {
+          const deviceId = (rest[1] ?? '').trim()
+          if (deviceId === '') {
+            return { kind: 'error', text: 'sync: /sync p2p 吊销 要带上设备 id —— /sync peers 列得出来' }
+          }
+          const answer = await p2pRevokePeer(deviceId)
+          return {
+            kind: answer.ok === true ? 'success' : 'error',
+            text: answer.ok === true
+              ? `sync: 已吊销 ${deviceId}（信任表从此拒它; git 同步不受影响）`
+              : `sync: 吊销 ${deviceId} 没成: ${answer.error}`,
+          }
+        }
+        return { kind: 'error', text: `sync: 不认识 p2p 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 开 | 关 | 确认 <设备 id> | 吊销 <设备 id>; 英文 state|on|off|confirm|revoke 也认）` }
+      }
+      // Luwi 加 (2026-11-22 终端问答): `/sync ask [状态|关|提示|中继|自动]`
+      //   关   = 与今天一样 (电脑上弹卡, 手机看不见)
+      //   提示 = 传过去看得见, 但要回电脑上答
+      //   中继 = 缺省: 传过去 + 手机上能答 + 超时按自定义回答继续
+      //   自动 = 不问, 直接按自定义回答继续
+      // 写面与面板/JSON 同一个文件 (`applyConfigure` 的 ask 段), 写完重启 host 生效
+      if (action === 'ask') {
+        if (controller) {
+          return { kind: 'error', text: 'sync: 问答中继只在电脑那一侧成立（手机这一侧没有要接管的问答卡片）' }
+        }
+        const rest = target === TARGETS.WORKSPACE ? parts.slice(2) : parts.slice(1)
+        const what = normalizeAskAction(rest[0])
+        if (what === 'state') {
+          return {
+            kind: 'success',
+            text: renderAskState(askSpec, {
+              pending: askRelayOn ? askRelay.openCount() : 0,
+              answered: askRelay.counters.answered + askRelay.counters.auto,
+              expired: askRelay.counters.expired,
+              lastSessionId: askRelay.last.sessionId,
+            }),
+          }
+        }
+        if (what === 'off' || what === 'notify' || what === 'relay' || what === 'auto') {
+          const result = await applyConfigure(syncConfigFile, { ask: { mode: what } })
+          if (result === null || result.ok !== true) {
+            return { kind: 'error', text: `sync: ask.mode 没写进去: ${result?.error ?? '配置没有被写下去'}` }
+          }
+          logger.info(`sync: /sync ask ${what} wrote ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}`)
+          return {
+            kind: 'success',
+            text: `sync: 问答已切成 ${what}（写进去的是 ${Array.isArray(result.changed) ? result.changed.join(', ') : 'ask.mode'}）; 重启 host 之后生效`,
+          }
+        }
+        return { kind: 'error', text: `sync: 不认识 ask 的这个动作 ${JSON.stringify(rest[0] ?? '')}（可用: 状态 | 关 | 提示 | 中继 | 自动; 英文 state|off|notify|relay|auto 也认）` }
       }
       if (action === 'status') {
         const status = await active.status()
@@ -4190,7 +5514,7 @@ function applyInner(ctx, config = {}) {
   async function collectDoctor() {
     const selfDir = fileURLToPath(new URL('.', import.meta.url))
     const profileModulesDir = resolve(selfDir, '..')
-    return runDoctor({
+    const report = await runDoctor({
       selfDir,
       profileModulesDir,
       readText: path => readFile(path, 'utf8'),
@@ -4224,10 +5548,37 @@ function applyInner(ctx, config = {}) {
         runner: mountState.runner,
         version: PLUGIN_VERSION,
         disabledReason: mountState.disabledReason,
+        // 2026-11-21 晚: 路由条数 —— "插件 active 但一条路由都没注册"这一档以前查不出来
+        routes: { ...routeState },
+        reportFile: mountReportFile,
       },
       // Luwi 加 (P2P T4): 读数走调度器 (path / rtt / 计数 / cooling / lastError / gc)
       p2p: await p2pService.status(),
     })
+    // 2026-11-21: 投影账本的读数也进 doctor —— 写盘失败以前是静默的, 这一行是它唯一的出口
+    const ledgerLine = `投影账本: ${ledgerState.source} · ${ledgerState.records} 场 · ${ledgerState.at > 0 ? new Date(ledgerState.at).toISOString() : '还没写过'}`
+    report.notes.push(ledgerLine)
+    if (ledgerState.error !== '') report.warnings.push(`投影账本写盘失败: ${ledgerState.error}`)
+    // 2026-11-22: adb reverse 那条管子 (只在电脑那一侧有意义)
+    if (reverseState.enabled) {
+      const reverseLine = reverseState.lastAt === 0
+        ? `对端口子: 还没自检过 (tcp:${reverseState.devicePort} -> tcp:${reverseState.pcPort || '?'})`
+        : `对端口子: tcp:${reverseState.devicePort} -> tcp:${reverseState.pcPort} · ${reverseState.ok ? '在' : '断了'}${reverseState.attempts > 0 ? ` · 修过 ${reverseState.attempts} 次` : ''}${reverseState.error === '' ? '' : ` · ${reverseState.error}`}`
+      report.notes.push(reverseLine)
+      if (!reverseState.ok) report.warnings.push(reverseLine)
+    }
+    // 2026-11-21 晚: 面板 / 对端路由各注册了几条 —— "active 但 0 条"要在这里就能看见
+    const routeLine = `路由: 面板 ${routeState.panel} 条 · 对端 ${routeState.peer} 条${routeState.error === '' ? '' : ` · ${routeState.error}`}`
+    report.notes.push(routeLine)
+    if (routeState.panel === 0 || routeState.error !== '') report.warnings.push(routeLine)
+    // 2026-11-22 (终端问答): 中继装没装上、此刻在等几件
+    if (!controller) {
+      const waiting = askRelayOn ? askRelay.openCount() : 0
+      report.notes.push(`问答: ${askSpec.mode} · 等 ${Math.round(askSpec.waitMs / 1000)}s · 终端提示 ${askSpec.brief ? '开' : '关'} · 此刻在等 ${waiting}`)
+      if (askSpec.mode !== 'off' && !askRelayOn) report.warnings.push('问答中继没装上: 对端通道关着 (peer.enabled / peer.token)')
+      if (askRelayOn && !liveSpec.enabled) report.warnings.push('问答中继开着但 live.enabled 是关的: 手机上不会出现那一行问题')
+    }
+    return report
   }
 
   // --- Luwi 加 (G1 面板): 官方侧边栏那块「同步」操作面板的宿主半。
@@ -4249,7 +5600,7 @@ function applyInner(ctx, config = {}) {
    */
   async function configureFromPanel(request) {
     const patch = {}
-    for (const key of ['remote', 'remoteToken', 'branch', 'publicUrl', 'autoPullOnStart', 'autoPushOnTurnEnd', 'pullIntervalMinutes', 'on', 'workspace', 'sessions']) {
+    for (const key of ['remote', 'remoteToken', 'branch', 'publicUrl', 'autoPullOnStart', 'autoPushOnTurnEnd', 'pullIntervalMinutes', 'on', 'workspace', 'sessions', 'role', 'p2p']) {
       if (request[key] !== undefined) patch[key] = request[key]
     }
     const current = await readSyncTree(syncConfigFile)
@@ -4268,6 +5619,9 @@ function applyInner(ctx, config = {}) {
       const deviceName = typeof current.deviceName === 'string' && current.deviceName.trim() !== '' ? current.deviceName.trim() : resolved.deviceName
       patch.pairing = { v: 1, id: randomUUID(), at: Date.now(), from: deviceName }
     }
+    // 2026-11-21 终端: 只要有仓库地址, 这一台就是**被管的电脑** —— 角色显式落盘, 而且不限于
+    // "重写 pairing"那一支 (老电脑只改令牌/分支/开关时也得补上, 否则它只能靠 peer.url 为空回退)
+    if (nextRemote !== '' && patch.role === undefined) patch.role = 'pc'
     // 2026-10-20: 保存仓库 (pairing) 这一下就把 PC 这一侧也设成"该自动的自动" —— 与手机扫码
     // 写进去的那一组同值, 否则 PC 只会在手动点推送时才动
     if (request.pairing === true || request.repair === true) {
@@ -4293,8 +5647,8 @@ function applyInner(ctx, config = {}) {
    * 这一条应答里出现; 要文本得显式点"复制配对文本")。
    *
    * 2026-10-25: **不再要求先登录** —— 旧口径是"登录过才能出码" (过期放行), 主人当天改成
-   * "配对与登录无关": 手机上扫码只写仓库/分支/对端这几项, 谁都不需要账号。登录只剩一件事 ——
-   * 给 P2P 那条收费闸提供到期读数 (见 licensePlanGate), 它不在这条路上
+   * "配对与登录无关": 手机上扫码只写仓库/分支/对端这几项, 谁都不需要账号。
+   * 2026-11-21: 登录/权益那一套整条下线, 这条路上从来没有它的判断 (将来也不加)
    * @returns {Promise<{ok: boolean, payload?: string, svg?: string, summary?: object, error?: string}>} 结果。
    */
   async function buildPairing() {
@@ -4496,10 +5850,6 @@ function applyInner(ctx, config = {}) {
     }
   }
 
-  // Luwi 加 (2026-11-05): 终端面板的命令通道 —— 读的是 App 交给整个宿主进程的那两个环境变量,
-  // 所以这里不需要新配置项, 也不碰 App 侧的协议常量
-  const termChannel = createTermChannel()
-
   const panel = createPanel({
     // Luwi 改 (2026-10-20): 一个仓库一根镜像 (会话 + 工作区同一次 commit); 老客户端的
     // target=workspace 会落到这一根上 (panel-routes 里折过来)
@@ -4516,17 +5866,12 @@ function applyInner(ctx, config = {}) {
         mirrorDir: MIRROR_DIR,
       },
     ],
-    // Luwi 加 (2026-11-05): 终端面板的命令通道。宿主不是 Luwi 起的 (没有那两个环境变量) 时
-    // createTermChannel().run() 会如实回 ok:false, 面板显示"没有沙盒可跑", 不假装跑过
-    runTerm: (command, timeoutMs) => termChannel.run(command, timeoutMs),
-    // Luwi 加 (2026-11-06): 终端入口的置灰状态与 Ctrl-C 中断 (2.8.0 #32 ③④)
-    termStatus: () => termChannel.status(),
-    termInterrupt: () => termChannel.interrupt(),
+    // 2026-11-21: 终端面板那三条口 (runTerm / termStatus / termInterrupt) 随沙盒终端下线
     readMetaFor,
     readPeers: () => readPeerCards(repoDir),
     // Luwi 加 (G1-2): 快照多一块 peer (通道开关 / 对端地址与可达性 / 队列与计数 / 令牌只出打码),
     // 外加影子工作区与投影会话那一份读数 —— 面板那张卡的「影子工作区」那一行读的就是它
-    readPeer: async () => ({ ...(await peerRuntime.status()), workspace: await peerProxyView() }),
+    readPeer: async () => ({ ...(await peerRuntime.status()), workspace: await peerProxyView(), reverse: { ...reverseState } }),
     // Luwi 加 (P2P T6): P2P 传输读数 (三档文案与信任/SAS 在面板那张卡里)
     readP2p: () => p2pService.status(),
     // Luwi 加 (P2P T6): 信任表动作 (确认换机 / 吊销) —— 面板卡上那两颗按钮走这里
@@ -4537,16 +5882,8 @@ function applyInner(ctx, config = {}) {
     // Luwi 修 (2026-11-23): 配置面每次快照重读文件 (审计 P1 第 9/11 条); 面板先等它刷新，
     // 卡片上的 remote 与 info.config 用的都是这一次读到的树
     readConfig: readConfigForPanel,
-    // Luwi 修 (2026-11-23, 审计 P0 第 1 条): 面板那几条会改东西的路由要有门槛 ——
-    // 本机 (回环) 放行, 别的设备要带对端共享令牌 (手机端走这条)
-    peerSpec: () => peerRuntime.spec,
     buildPairing,
-    // Luwi 加 (2026-10-23): 账号登录 (只给 P2P 收费闸供到期) 与权益刷新/退出
-    readLicense: () => readLicenseStatus(),
-    loginStart: licenseLoginStart,
-    loginPoll: licenseLoginPoll,
-    logout: licenseLogout,
-    refreshLicense: licenseRefresh,
+    // 2026-11-21: 账号那四条口 (readLicense / loginStart / loginPoll / logout / refreshLicense) 整条下线
     // Luwi 加 (2026-10-15): 面板的写配置口 (宿主半见 lib/panel-routes.mjs 的 CONFIGURE)
     configure: configureFromPanel,
     // Luwi 加 (2026-10-20): 清理仓库会话 (面板那颗按钮 / 手机的同一块面板都走这一口)
@@ -4589,20 +5926,81 @@ function applyInner(ctx, config = {}) {
     },
     logger,
   })
+  // 2026-11-21 晚: 挂载自检 —— 真机上出现过"插件是 active, 但路由一条都没注册, 侧边栏也
+  // 跟着不见"而没有任何一行日志的情况。这一份写盘, 面板 / doctor / 事后排查都读它
+  const mountReportFile = join(dirname(sessionRoot), 'lw', 'plugin-mount.json')
+  const routeState = { panel: 0, peer: 0, error: '' }
+  /**
+   * 写一份挂载自检 (`$DSH_HOME/lw/plugin-mount.json`)。
+   * @param {object} [extra] - 追加字段 (注册回调里补 `routes`)。
+   * @returns {void}
+   */
+  function writeMountReport(extra = {}) {
+    try {
+      mkdirSync(dirname(mountReportFile), { recursive: true })
+      const body = {
+        v: 1,
+        at: Date.now(),
+        version: PLUGIN_VERSION,
+        mounted: mountState.mounted === true,
+        disabledReason: mountState.disabledReason ?? '',
+        runner,
+        seats: resolved.panelSeats,
+        panelOps: resolved.panelOps === true,
+        routes: { ...routeState, ...(extra.routes ?? {}) },
+        peer: { enabled: peerRuntime.enabled, listen: peerSpec?.listen === true, proxy: peerSpec?.proxy === true, mode: peerSpec?.mode ?? '' },
+        p2p: { enabled: resolved.p2p?.enabled === true },
+      }
+      writeFileSync(`${mountReportFile}.tmp`, JSON.stringify(body, null, 1), 'utf8')
+      renameSync(`${mountReportFile}.tmp`, mountReportFile)
+    } catch (error) {
+      logger.error(`luwi-dsh-sync: writing the mount report failed: ${messageOf(error)}`)
+    }
+  }
+  /**
+   * 拿到 webServer 就跑 `cb` (先直取, 再等注入)。
+   * 两条都拿不到时**响亮**记一行 —— 以前这里是 `return`, 路由没注册也没人知道
+   * @param {string} label - 用途 (面板 / 对端)。
+   * @param {(server: object) => void} cb - 拿到服务之后做的事。
+   * @returns {void}
+   */
+  function withWebServer(label, cb) {
+    const direct = ctx.get('webServer')
+    if (direct !== undefined && direct !== null && typeof direct.register === 'function') {
+      cb(direct)
+      return
+    }
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['webServer'], (webCtx) => {
+        if (webCtx.webServer === undefined || typeof webCtx.webServer.register !== 'function') {
+          routeState.error = `no webServer service for the ${label} routes`
+          logger.error(`luwi-dsh-sync: ${routeState.error}`)
+          writeMountReport()
+          return
+        }
+        cb(webCtx.webServer)
+      })
+      return
+    }
+    routeState.error = `no webServer service for the ${label} routes`
+    logger.error(`luwi-dsh-sync: ${routeState.error}`)
+  }
   if (resolved.panelSeats !== 'off') {
-    ctx.inject(['webServer'], (webCtx) => {
-      if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
-      webCtx.effect(() => {
+    withWebServer('panel', (server) => {
+      ctx.effect(() => {
         const offs = []
         try {
-          for (const route of panel.routes()) offs.push(webCtx.webServer.register(route))
+          for (const route of panel.routes()) offs.push(server.register(route))
         } catch (error) {
           // 路由撞车 / 形态不符: 摘掉已经装上的, 面板退回"通道没开"那一屏, 绝不抛
-          warn(`panel routes not registered: ${messageOf(error)}`)
+          routeState.error = `panel routes not registered: ${messageOf(error)}`
+          logger.error(`luwi-dsh-sync: ${routeState.error}`)
           for (const off of offs) { try { off() } catch { /* 已经摘掉 */ } }
           return undefined
         }
-        logger.info(`panel channel on: ${PANEL_PREFIX}/panel (seats=${resolved.panelSeats}, ops=${resolved.panelOps === true ? 'rw' : 'ro'})`)
+        routeState.panel = offs.length
+        writeMountReport()
+        logger.info(`panel channel on: ${PANEL_PREFIX}/panel (${offs.length} routes, seats=${resolved.panelSeats}, ops=${resolved.panelOps === true ? 'rw' : 'ro'})`)
         return () => {
           panel.dispose()
           for (const off of offs) { try { off() } catch { /* 已经摘掉 */ } }
@@ -4611,22 +6009,24 @@ function applyInner(ctx, config = {}) {
     })
   }
 
-  // --- Luwi 加 (G1-2 对端): 对端那四条路由 (peer/info · peer/transcript · peer/send · send)。
+  // --- Luwi 加 (G1-2 对端): 对端那几条路由 (peer/info · peer/transcript · peer/send · peer-live)。
   // 与面板同一个 webServer 面, 但**不受 panelSeats 管**: 通道是同步语义, 面板只是人的界面;
   // 令牌空 (spec 为 null) 时 peerRuntime.routes() 回空表, 一条都不注册
   if (peerRuntime.enabled) {
-    ctx.inject(['webServer'], (webCtx) => {
-      if (!webCtx.webServer || typeof webCtx.webServer.register !== 'function') return
-      webCtx.effect(() => {
+    withWebServer('peer', (server) => {
+      ctx.effect(() => {
         const offs = []
         try {
-          for (const route of peerRuntime.routes()) offs.push(webCtx.webServer.register(route))
+          for (const route of peerRuntime.routes()) offs.push(server.register(route))
         } catch (error) {
-          warn(`peer routes not registered: ${messageOf(error)}`)
+          routeState.error = `peer routes not registered: ${messageOf(error)}`
+          logger.error(`luwi-dsh-sync: ${routeState.error}`)
           for (const off of offs) { try { off() } catch { /* 已经摘掉 */ } }
           return undefined
         }
-        logger.info(`peer channel on: ${PANEL_PREFIX}/peer/* (listen=${peerSpec.listen}, proxy=${peerSpec.proxy}, url=${peerSpec.url === '' ? 'from the card' : 'configured'})`)
+        routeState.peer = offs.length
+        writeMountReport()
+        logger.info(`peer channel on: ${PANEL_PREFIX}/peer/* (${offs.length} routes, listen=${peerSpec.listen}, proxy=${peerSpec.proxy}, url=${peerSpec.url === '' ? 'from the card' : 'configured'})`)
         return () => {
           for (const off of offs) { try { off() } catch { /* 已经摘掉 */ } }
         }
@@ -4654,6 +6054,8 @@ function applyInner(ctx, config = {}) {
 
   // --- 自动模式（全部 effect：事件/定时随插件卸载自动撤销）。
   // 挂载时自动拉取（配置即授权；失败只记日志，绝不阻断启动）。
+  mountState.routes = routeState
+  writeMountReport()
   if (resolved.autoPullOnStart) {
     ctx.effect(() => {
       void pullSync().then(result => {

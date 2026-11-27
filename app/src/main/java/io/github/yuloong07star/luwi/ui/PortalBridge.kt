@@ -1,21 +1,34 @@
 package io.github.yuloong07star.luwi.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.yuloong07star.luwi.host.DshHost
+import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.tool.ExploreSchedule
+import io.github.yuloong07star.luwi.tool.ExploreTask
+import io.github.yuloong07star.luwi.tool.IconTheme
 import io.github.yuloong07star.luwi.tool.LwIn
 import io.github.yuloong07star.luwi.tool.OutFile
+import io.github.yuloong07star.luwi.tool.OutPaths
 import io.github.yuloong07star.luwi.tool.OutWatch
 import io.github.yuloong07star.luwi.tool.PortalFace
+import io.github.yuloong07star.luwi.tool.QuietHours
 import io.github.yuloong07star.luwi.tool.RouterChecks
 import io.github.yuloong07star.luwi.tool.RouterTick
 import io.github.yuloong07star.luwi.tool.SimSetting
+import io.github.yuloong07star.luwi.tool.SpeakSettings
 import io.github.yuloong07star.luwi.voice.VoiceInbox
 import io.github.yuloong07star.luwi.workspace.Workspace
 import org.json.JSONArray
@@ -23,10 +36,24 @@ import org.json.JSONObject
 import java.io.File
 
 /**
+ * 选择器交回来的那一份读不动时的说法 (2.8.1 #13)
+ *
+ * 两处用同一句: [PortalBridge.stashPicked] 被拒的那一条, 与 `HostScreen` 里整趟读挂了时兜底的那一条 ——
+ * 屏上要说的永远是同一句人话
+ */
+internal const val PICKED_UNREADABLE = "这一份读不动"
+
+/** 这一次选择器是给门户那个 `+` 挑的 (普通附件: 宿主读、宿主落进 `lw-in`) */
+internal const val PICK_MODE_FILE = "file"
+
+/** 这一次选择器是给表情包面板那格「加一张」挑的 (还是老路: WebView 把 Uri 交给页面 `change`) */
+internal const val PICK_MODE_STICKER = "sticker"
+
+/**
  * 门户开着没有, 以及"让页面收起 / 打开"的那条 JS 入口
  *
  * 两侧共用这一份: 页面在挂载与收起时报 `portalVisible`, 菜单 (右上那颗 Tune) 读 `open` 决定显示
- * "回到 dsh"还是"回到对话层", 点了就走 `run` 那一条 `evaluateJavascript`
+ * "回到后台"还是"回到前台", 点了就走 `run` 那一条 `evaluateJavascript`
  *
  * **界面上不放这两颗按钮** (2026-11-07 主人: "和返回 dsh 这些都加到 luwi 菜单里, 不放界面上"),
  * 所以这两个动作只有菜单一个入口
@@ -75,7 +102,7 @@ internal object PortalState {
 }
 
 /**
- * 门户那一层要的那几件事: 读判断层与工作结构, 写"球的那一场"的账, 敲一下钟
+ * 门户那一层要的那几件事: 读判断层与工作结构, 写"球的那一场"的账, 唤醒一下
  *
  * **为什么在 app 这一侧**: `$DSH_HOME/lw` 下那几份 json 与 `$DSH_HOME/voice` 都在 app 沙盒里, 浏览器
  * 里的 JS 一个字节都碰不到 (WebView 拿到的是 host 发出来的那几个 http 响应), 而宿主插件那一侧只给
@@ -87,10 +114,10 @@ internal object PortalState {
  *
  * 1. **只读判断层, 不重算**: 该不该开口、为什么不说, 全是宿主 `judgeRouter` 判完落在 `router.json`
  *    的 `last` 上; 这里原样搬给页面, 于是界面上那句 `why` 与宿主真的判过的那一次逐字一致
- * 2. **动作只走已有入口**: 敲钟 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时敲的是同一行),
+ * 2. **动作只走已有入口**: 唤醒 = 往收件箱投一行 `source:"router"` (与 `RouterTick` 定时唤醒投的是同一行),
  *    开探索 = 投一行 `source:"explore"`, 开关 = `RouterTick.setEnabled` —— 不新增第二条判断链路
  * 3. **写账与宿主同格式**: `voice/session.json` 是 `{id, at, origin, cwd}`, 宿主 `voiceCurrentSession()`
- *    只在 `cwd` 落在 `dsh-ball` 底下时认它 ([VOICE_SESSION_MS] 那 10 分钟也在那边), 所以这里写的是
+ *    只在 `cwd` 落在浮标那条工作区 (`Luwi`) 底下时认它 ([VOICE_SESSION_MS] 那 30 分钟也在那边), 所以这里写的是
  *    同一个形状、同一个 cwd
  */
 internal class PortalBridge(private val context: Context) {
@@ -106,13 +133,26 @@ internal class PortalBridge(private val context: Context) {
 
     // ── 读 ────────────────────────────────────────────────────────────────────
 
+    /**
+     * 账号那三件事的结果 (2026-11-14)
+     *
+     * 页面上 `__LUWI_PORTAL__.account(...)` 干完一件就调它一次, 一段 JSON: `{action, ok, ...}`。
+     * 只落状态 ([PortalAccount]), 一个字节不写盘 —— 登录结果由宿主自己持久化
+     * @param payload 结果本体
+     * @return 空串 (这座桥的模式是"一个方法交回一段 JSON", 这里没有要交回的东西)
+     */
+    @JavascriptInterface
+    fun lwAccountResult(payload: String): String {
+        PortalAccount.adopt(payload)
+        return ""
+    }
+
     /** 判断层与工作结构的一次快照 (页面照着画, 不做合并判断) */
     @JavascriptInterface
     fun portalStatus(): String {
         val router = readJson(lwFile("router.json")) ?: JSONObject()
         val sim = readJson(lwFile("sim.json")) ?: JSONObject()
         val explore = readJson(lwFile("explore.json")) ?: JSONObject()
-        val schedule = readJson(lwFile("explore-schedule.json")) ?: JSONObject()
 
         val rules = JSONObject()
         val hostRules = router.optJSONObject("rules")
@@ -133,23 +173,14 @@ internal class PortalBridge(private val context: Context) {
             }
         }
 
-        val wake = sim.optJSONObject("wake")
-        // 静默窗口有两处来源: `sim.json` 的 `wake` 段 (设置 → 活动 → 更多设置) 优先, 没写就回落到
-        // `automations/settings.json` 的 `quiet` —— 与宿主 `readRouterInputs` 的那一段同一条规则
-        val automationSettings = readJson(homeFile("automations/settings.json"))
-        val automationQuiet = automationSettings?.optJSONObject("quiet")
+        // 静默窗口只有一份 (2026-11-20): `automations/settings.json` 的 `quiet` 段 —— 与设置页
+        // 那三行、到点主动场、判断层读的是同一个接口 (QuietHours)。`sim.json` 的 `wake.quiet*`
+        // 已经退役 (老值由 [QuietHours.migrateLegacy] 搬走)
+        val quietPlan = QuietHours.read(context)
         val quiet = JSONObject().apply {
-            val simFrom = wake?.optString("quietFrom").orEmpty()
-            val simTo = wake?.optString("quietTo").orEmpty()
-            if (simFrom.isNotEmpty() || simTo.isNotEmpty()) {
-                put("enabled", wake?.optBoolean("quietEnabled") ?: true)
-                put("from", simFrom)
-                put("to", simTo)
-            } else {
-                put("enabled", automationQuiet?.optBoolean("enabled") ?: false)
-                put("from", automationQuiet?.optString("window").orEmpty())
-                put("to", "")
-            }
+            put("enabled", quietPlan.enabled)
+            put("from", quietPlan.from)
+            put("to", quietPlan.to)
         }
 
         val body = JSONObject().apply {
@@ -161,13 +192,30 @@ internal class PortalBridge(private val context: Context) {
                 put("lastSpokenAt", router.optLong("lastSpokenAt", 0L))
                 put("checks", router.optJSONArray("checks") ?: JSONArray())
                 put("tick", JSONObject().apply {
+                    // **只有一个来源** (2026-11-20): `router.json` 的 `tick.enabled`。`sim.json` 的
+                    // `wake.mode` 那一格已经从界面与数据层删掉, 于是这一行不再需要 bySim 来解释"开着是
+                    // 哪一侧来的" —— 开着就是它开着
                     put("enabled", RouterTick.enabled(context))
                 })
             })
+            // 探索那几行读数 (2.8.1 #12): 以前读的是 `explore.json` 里**从来没有**的三个键
+            // (`nextTask` / `lastSummaryAt` / `schedule.time`), 于是面板永远写着「还没有排 / — / —」,
+            // 换一场 / 换一版都不动 —— 那三样各有各的落点: 任务卡 `lw/explore-card.md`、摘要
+            // `lw/explore/<yyyyMMdd-HHmm>.md`、预算 `explore-schedule.json` (读法只有
+            // [ExploreSchedule.plan] 一份, 别在这里再解一遍 JSON)
+            //
+            // **2026-11-21 二改**: 排期撤了, `schedule` / `enabled` / `nextAt` 三个读数一并删掉 ——
+            // 页面再画「探索时刻 03:00 (每天)」就是在骗人; 换成 `steps` (判断层每场开场真的读它)
+            val plan = ExploreSchedule.plan(context)
+            val card = ExploreTask.read(context)
+            val lastFinish = explore.optJSONObject("lastFinish")
             put("explore", JSONObject().apply {
-                put("nextTask", explore.optString("nextTask").orEmpty())
-                put("lastSummaryAt", explore.optLong("lastSummaryAt", 0L))
-                put("schedule", schedule.optString("time").orEmpty())
+                put("nextTask", if (card.isEmpty()) "" else ExploreTask.summary(context))
+                put("cardChars", card.length)
+                put("lastSummaryAt", lastSummaryAt(lastFinish?.optLong("at", 0L) ?: 0L))
+                put("steps", plan.steps)
+                // 现在这一场在不在跑 (面板那一行, 与 `portalExplore` 的 `running` 同一个判据)
+                put("running", ExploreTask.running(context) != null)
             })
             // 「正在做」那一行: 与球上那三个字**同一份** `lw/ball-phase.json` (方案 §3.4 末段: 复用,
             // 不要另造)。门户只在流末尾画一句"正在做…", 长 turn 才不像卡死
@@ -175,6 +223,32 @@ internal class PortalBridge(private val context: Context) {
                 val turns = readJson(lwFile("ball-phase.json"))?.optJSONArray("turns") ?: JSONArray()
                 put("thinking", turns.length() > 0)
                 put("count", turns.length())
+            })
+            // 主动场 (2026-11-12 #38): 到点自己开的那一场 (宿主单写者, `lw/proactive.json` 的 `run`)
+            //
+            // 门户靠这两个读数把那一场**接进当前对话**: 它是固定新开的, 但主人要的是"那句出现在
+            // 门户首屏的当前对话里, 不是只落在那一场的历史对话里" —— 于是页面拿 `session` 去
+            // `portalOut` 取那一场的 jsonl, 当成时间线上的几行插进来 (不换场)。只读, 一个字节不写;
+            // `startedAt` 是"这一场是不是新的"的唯一判据
+            put("proactive", JSONObject().apply {
+                val state = readJson(lwFile("proactive.json"))
+                val run = state?.optJSONObject("run")
+                put("session", run?.optString("session").orEmpty())
+                put("startedAt", run?.optLong("startedAt", 0L) ?: 0L)
+                // 最近那几场 (2.8.1 #8): 连点「唤醒一下」时, 中间那一场会被下一场从 `run` 覆盖掉 ——
+                // 页面照这一串把还没收过的逐场补进来, 于是"连点三次三条都在" (宿主最多记 8 条)
+                val recent = state?.optJSONArray("recent") ?: JSONArray()
+                put("recent", JSONArray().apply {
+                    for (index in 0 until recent.length()) {
+                        val one = recent.optJSONObject(index) ?: continue
+                        val id = one.optString("session").orEmpty()
+                        if (id.isEmpty()) continue
+                        put(JSONObject().apply {
+                            put("session", id)
+                            put("startedAt", one.optLong("startedAt", 0L))
+                        })
+                    }
+                })
             })
         }
         return body.toString()
@@ -184,7 +258,7 @@ internal class PortalBridge(private val context: Context) {
      * 球那一场: 账本原文 + 它还算不算数 + 还剩多久
      *
      * `usable` 的判法是宿主 `voiceCurrentSession()` 的同一条: id 在、没超 [VOICE_SESSION_MS]、
-     * cwd 落在 `dsh-ball` 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
+     * cwd 落在浮标那条工作区 (`Luwi`) 底下 —— 判定放在页面那一侧做也行, 但两处算一次更省事, 页面按这个字段显示
      */
     @JavascriptInterface
     fun portalSession(): String {
@@ -212,6 +286,27 @@ internal class PortalBridge(private val context: Context) {
         }.toString()
     }
 
+    /**
+     * 「Luwi」工作区那个目录 (2.8.0 #37): 门户在没有工作区时靠它把目录备好
+     *
+     * 为什么不让 dsh 自己去建: 它那条首启缺省工作区落在 `<系统 Documents>/deepseek-harness/default-workspace`,
+     * 安卓上 `system Documents directory is unavailable` 必失败, 于是首启停在空态。工作区目录本来就由
+     * 应用三档解析 (见 `Workspace.resolve`), 这里只是把同一份事实交给门户: 目录在不在, 以及要不要建
+     *
+     * @param make 目录不在时建它 (`mkdirs`); 2026-11-13 起门户自动落位那一趟自己传 true, 不再由人点
+     * @returns `{path, exists}` —— `path` 是绝对路径, `exists` 是建完之后它真的是个目录
+     */
+    @JavascriptInterface
+    fun portalWorkspace(make: Boolean): String {
+        val directory = channelWorkspace()
+        var exists = directory.isDirectory
+        if (!exists && make) exists = directory.mkdirs() || directory.isDirectory
+        return JSONObject().apply {
+            put("path", directory.absolutePath)
+            put("exists", exists)
+        }.toString()
+    }
+
     /** 门户开着还是收起了: 菜单那一项靠它换方向 */
     @JavascriptInterface
     fun portalVisible(on: Boolean) {
@@ -230,6 +325,70 @@ internal class PortalBridge(private val context: Context) {
     fun portalIme(): String = JSONObject().put("px", PortalState.imePx).toString()
 
     /**
+     * 页面报"这张图没发出去" (落实表 #35, 2026-11-12; 四行诊断 2.8.1 #1)
+     *
+     * 两件事: 把原因写进 logcat, 再把**同一份四行诊断**回给页面 —— 机型读 `Build`, Android 读
+     * `Build.VERSION`, WebView 读 [WebCompat.info] (与开屏那行 `webview …` 同一份读数), 第四行是这一
+     * 次那张图多大 (`未选择` = 人把选择器退出来了 / 压根没选), **四行只在这一处拼**: 同一份既进 logcat
+     * 又回存到那条气泡上, 那颗「复制诊断」复制的就是它, 于是剪贴板与 logcat 逐字一致
+     *
+     * @param payload `{reason, image}` 的 JSON —— reason 是页面那三选一的说法, image 是这一张图的大小
+     * @return `{ok:true, diag:"…"}`; diag 是四行, 行间 `\n`
+     */
+    @JavascriptInterface
+    fun portalImageFail(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull() ?: JSONObject()
+        val text = body.optString("reason").trim().ifEmpty { UNKNOWN_FAIL }
+        Log.w(LOOK_TAG, "image send failed: $text")
+        val diag = diagLines(body.optString("image"))
+        for (line in diag) Log.i(LOOK_TAG, line)
+        return JSONObject().put("ok", true).put("diag", diag.joinToString("\n")).toString()
+    }
+
+    /**
+     * 四行诊断 (2026-11-15, 2.8.1 #1): 机型 / Android / WebView / 图片
+     *
+     * 只在这一处拼 —— [portalImageFail] 与 [portalCopyDiag] 各读一次就会漂, 而判据要的是"粘贴与
+     * logcat 同刻逐字一致"
+     * @param picture 这一张图多大 (`未选择` = 没选); 空串按 `未选择` 说
+     */
+    private fun diagLines(picture: String): List<String> {
+        val info = runCatching { WebCompat.info(context.applicationContext) }.getOrNull()
+        // 读不到版本就照实说 "unknown": 那一行是给人拿去对账的, 空着比写错更糟
+        val label = info?.label.orEmpty().ifEmpty { UNKNOWN_FAIL }
+        val size = picture.trim().ifEmpty { UNKNOWN_PICTURE }
+        return listOf(
+            "机型: ${Build.MANUFACTURER} ${Build.MODEL}",
+            "Android: ${Build.VERSION.RELEASE} (sdk ${Build.VERSION.SDK_INT})",
+            "WebView: $label (major ${info?.major ?: 0})",
+            "图片: $size",
+        )
+    }
+
+    /**
+     * 「复制诊断」(2026-11-15, 2.8.1 #1): 把气泡上那四行原样放进系统剪贴板
+     *
+     * 剪贴板写在 app 这一侧 (与 [portalCopyPath] 同一条): WebView 里的 `navigator.clipboard` 要有焦点、
+     * 要算用户手势, 而系统剪贴板一定成, **四行不是这里拼的** —— 页面交回来的就是失败那一刻那一份,
+     * 所以粘贴出来的字与 logcat 逐字相同, 复制这一下再落一遍同四行: "同刻"指的就是这一下
+     *
+     * @param diag 四行, 行间 `\n`
+     * @return `{ok:true, lines:4}`; 不是四行 / 剪贴板不在时 `{ok:false, error:"…"}`
+     */
+    @JavascriptInterface
+    fun portalCopyDiag(diag: String): String {
+        val lines = diag.split("\n").filter { it.isNotEmpty() }
+        if (lines.size != DIAG_LINES) return refused("这份诊断不是 $DIAG_LINES 行")
+        val manager = context.getSystemService(ClipboardManager::class.java)
+            ?: return refused("系统的剪贴板不在")
+        runCatching {
+            manager.setPrimaryClip(ClipData.newPlainText(CLIP_DIAG_LABEL, diag))
+        }.getOrElse { return refused("剪贴板写不进去") }
+        for (line in lines) Log.i(LOOK_TAG, line)
+        return JSONObject().put("ok", true).put("lines", lines.size).toString()
+    }
+
+    /**
      * 这一层的脸: 背景图与背景的不透明度 (2026-11-08 主人)
      *
      * **图只能从这座桥过去**: WebView 里的页面是 http 那一片, 够不到 app 沙盒里的文件, 而宿主又不给
@@ -245,12 +404,17 @@ internal class PortalBridge(private val context: Context) {
         val wall = if (wantWall) PortalFace.dataUrl(context).orEmpty() else ""
         // 头像与背景同一条规矩: 读数随时给, 图只在 wantWall 那一次搬 (2026-11-10 加的两样)
         val avatar = if (wantWall) PortalFace.avatarDataUrl(context).orEmpty() else ""
+        // 缺省那张脸是"当前那套图标" (2026-11-22): 页面里内嵌的 MARK_PNG 只是最后兜底, 主人换了图标
+        // 之后头栏与空态要跟着换 —— 与头像同一条闸, 不搬图时只给 `markVer`
+        val iconSet = IconTheme.current(context)
+        val mark = if (wantWall) IconTheme.markDataUrl(context).orEmpty() else ""
         // 一行读数: 背景为什么没上屏时, 这一行能分清"没配"与"配了但没搬过去"
         Log.i(
             LOOK_TAG,
             "portalLook alpha=${face.alpha} ver=${face.wall.ifEmpty { "-" }} wantWall=$wantWall" +
                 " wall=${wall.length} name=${face.name.ifEmpty { "-" }}" +
-                " avatarVer=${face.avatar.ifEmpty { "-" }} avatar=${avatar.length}",
+                " avatarVer=${face.avatar.ifEmpty { "-" }} avatar=${avatar.length}" +
+                " markVer=${iconSet.id} mark=${mark.length}",
         )
         return JSONObject().apply {
             put("alpha", face.alpha)
@@ -259,6 +423,8 @@ internal class PortalBridge(private val context: Context) {
             put("name", face.name)
             put("avatar", avatar)
             put("avatarVer", face.avatar)
+            put("mark", mark)
+            put("markVer", iconSet.id)
         }.toString()
     }
 
@@ -290,8 +456,12 @@ internal class PortalBridge(private val context: Context) {
     /**
      * 把这一场记成"球的那一场"
      *
-     * 门户里发的第一句之后调一次: 于是球接下来 10 分钟内说的话接的也是这一场, 两边看到同一个流
-     * (宿主的 `voiceSessionBump` 只对球自己那一句记账, 门户这一侧没有别的路能写这本账)
+     * **门户里每发一句都调一次** (2026-11-20 主人: "每一次门户发送都 portalBind 续一次"): 于是球接下来
+     * 30 分钟内说的话接的也是这一场, 两边看到同一个流; 只在第一句写的话, 门户里聊久了回浮标就换场了
+     * (宿主的 `voiceSessionBump` 只认球自己那一句与回复框接着回的那一句, 门户这一侧没有别的路能写这本账)
+     *
+     * `origin` 仍写 `"ball"`: 这本账的身份是"浮标那一场", 写者是谁不进契约 (宿主只按 `cwd` 与新
+     * 鲜度判它, 见 `voiceCurrentSession`)
      */
     @JavascriptInterface
     fun portalBind(id: String): String {
@@ -313,42 +483,272 @@ internal class PortalBridge(private val context: Context) {
         return portalSession()
     }
 
-    /** 敲一下钟: 与 `RouterTick` 定时投的那一行同源, 判断与开口都在宿主那一侧 */
+    /**
+     * 唤醒一下: 投一行 `source:"wake"`, 开口全在宿主那一侧 (2.8.1 #8)
+     *
+     * **为什么不再投 `router`** (2026-11-15 主人: "点击唤醒一下时, 必须主动说话"): 那个来源是闹钟
+     * 那一拍用的, 进了宿主的 `judgeRouter` 就要过静默时段 / 冷却 / 沉睡前等待, 再落到"没什么值得
+     * 说的" —— 人当面戳了一下, 屏上却一个字都没有, 正是这次要修的那件事。换成 `wake` 之后宿主
+     * 一道闸都不看 (见 `routerWakeNow`), 并且先落一句由判断层挑出来的话题 (2.8.1 #31), 于是点完
+     * 3 s 内必有一颗气泡
+     *
+     * **回执要够用** (2026-11-15 主人: 「唤醒一下」点不动): 投出去只是第一步, 宿主在不在跑决定了
+     * 这一句什么时候被看见 —— 所以回 `host`:
+     *
+     * - `running`: 她这一拍就开一场, 那一句马上落进 `lw/out`
+     * - `starting`: 宿主还没起来, 这一行已经在收件箱里, 起好了就会被消费 (异步拉起, 不等)
+     *
+     * **不在这里同步等宿主**: `ExploreSchedule.wakeHost` 会睡到就绪 (最长几十秒), 而这座桥跑在
+     * WebView 的 JavaBridge 线程上 —— 同步等就是把页面按死在那儿, 表现比"没反应"更糟
+     */
     @JavascriptInterface
     fun portalTick(): String {
-        val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_ROUTER) }.getOrNull()
-        RouterTick.ensure(context)
+        val seq = runCatching { VoiceInbox.append(context, TICK_TEXT, source = VoiceInbox.SOURCE_WAKE) }.getOrNull()
+        runCatching { RouterTick.ensure(context) }
+        val running = DshHost.status is HostStatus.Running
+        if (!running) {
+            // 后台拉起来: 那一行留在收件箱里, 宿主一起来就消费 (与 RouterTick.fire 同一条路)
+            runCatching {
+                Thread({ runCatching { ExploreSchedule.wakeHost(context) } }, "lw-portal-wake").start()
+            }
+        }
+        Log.i(LOOK_TAG, "portal wake: queued #${seq ?: 0L} host=${if (running) "running" else "starting"}")
         return JSONObject().apply {
             put("queued", seq != null)
             put("seq", seq ?: 0L)
+            put("host", if (running) "running" else "starting")
         }.toString()
     }
 
-    /** 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长敲一次) */
+    /**
+     * 开关那一份: 写回 `router.json` 的 `tick.enabled` (缺省关, 打开后 25-55 分钟不定长唤醒一次)
+     *
+     * **2026-11-20**: 只写这一处。`sim.json` 的 `wake.mode` 已删 (那一格曾经是 `RouterTick.enabled()`
+     * 的第二个来源, 于是"关掉唤醒"只写前者时按钮看着点不动) —— 现在这一个开关就是全部
+     */
     @JavascriptInterface
     fun portalTickEnabled(on: Boolean): String {
-        RouterTick.setEnabled(context, on)
+        val written = RouterTick.setEnabled(context, on)
+        Log.i(LOOK_TAG, "portal tick switch -> $on written=$written")
         return portalStatus()
     }
 
-    /** 一条检测项处理掉了: 从 `router.json` 的 `checks` 里摘掉 (与设置页那一栏写的是同一份) */
+    /**
+     * 页面动作行最右那颗「设置」: 只翻一个开关并报一句 focus (2026-11-13)
+     *
+     * 参数本身仍归 app 这一侧读写 —— 与面板上那几行读数同一条边界, 页面一个字节不写盘。认不出来的
+     * 词归到第一组 (`top`), 于是页面不用处理失败分支; 关窗之后由页面自己 `refresh()` 收最新的读数
+     */
     @JavascriptInterface
+    fun portalActivitySettings(focus: String): String {
+        val word = when (focus.trim()) {
+            "explore", "proactive", "router", "top" -> focus.trim()
+            else -> "top"
+        }
+        PortalAsk.ask(word)
+        return JSONObject().apply {
+            put("ok", true)
+            put("focus", word)
+        }.toString()
+    }
+
+    /** 一条检测项处理掉了: 从 `router.json` 的 `checks` 里摘掉 (与设置页那一栏写的是同一份) */    @JavascriptInterface
     fun portalCheckDone(id: String): String {
         val wanted = id.trim()
         if (wanted.isNotEmpty()) RouterChecks.drop(context, wanted)
         return portalStatus()
     }
 
-    /** 开始这一趟探索: 投一行 `source:"explore"`, 正文就是 `explore.json` 排好的那个 nextTask */
+    /**
+     * 门户「⋯」抽屉要的那一份菜单 (2026-11-14 主人: "把 luwi 设置浮标菜单内容都塞到 ··· 即可")
+     *
+     * 回执是一段 JSON 数组, 每一项 `{id, title, summary, on, enabled, children?}` —— 页面只画它收到的
+     * 东西, 开关态与当前屏名都由 [PortalMenu] 现算, 于是抽屉里那几行与 dsh 里看到的是同一件事
+     */
+    @JavascriptInterface
+    fun portalMenu(): String = PortalMenu.json(context)
+
+    /**
+     * 抽屉里点了一行: 执行并回一份最新清单
+     *
+     * 回执可能还差一拍 (执行走主线程), 页面收到后 120 ms 再拉一次 `portalMenu()` 就对上了
+     */
+    @JavascriptInterface
+    fun portalMenuPick(id: String): String = PortalMenu.pick(context, id.trim())
+
+    /**
+     * 终端那一页要的读数 (2026-11-21, 落实表 #48)
+     *
+     * 一份 JSON: `{paired, pairedId, pcName, syncOn, terminalReady, shadowRoot, host}` —— 页面据此
+     * 决定画终端还是弹「扫码配对 / 返回」, 并按 `shadowRoot` 挑出电脑那几场会话。**没有 `peerUrl`**:
+     * 那是电脑的地址, 可能带凭据, 页面一个字节都拿不到
+     * **口令不在这份里** (页面一个字节都拿不到)
+     */
+    @JavascriptInterface
+    fun portalTerminal(): String = PortalTerminal.status(context)
+
+    /**
+     * 页面回报"我现在在终端里 / 出来了"
+     *
+     * 只镜像到 [PortalTerminal.open]: 原生据它铺黑底、收起虚拟屏小窗。**不反向驱动页面** ——
+     * 页面自己才是终端开没开的那一个说话人 (重载 / 返回键 / 配对重启后都以它为准)
+     */
+    @JavascriptInterface
+    fun portalTerminalVisible(open: Boolean): String {
+        PortalTerminal.report(open)
+        return ""
+    }
+
+    /**
+     * 终端那个弹窗里点「扫码配对」: 相机权限与扫码窗只有界面层办得到, 于是落一个掷标
+     * (见 [PortalAsk.Target.PAIR], 由 `HostScreen` 消费)
+     */
+    @JavascriptInterface
+    fun portalTerminalPair(): String {
+        PortalAsk.ask(PortalAsk.Target.PAIR)
+        return ""
+    }
+
+    /**
+     * 终端那个弹窗里点「去给 PC 装 luwi终端」(2026-11-22, 主人: "在没有配对时扫码配对下加一个")
+     *
+     * 打开系统浏览器只有界面层办得到 (页面里跳外链会把门户自己顶掉), 于是同样只落一个掷标,
+     * 由 `HostScreen` 消费后 `openPage` (见 [PortalAsk.Target.PC_INSTALL])
+     */
+    @JavascriptInterface
+    fun portalTerminalInstall(): String {
+        PortalAsk.ask(PortalAsk.Target.PC_INSTALL)
+        return ""
+    }
+
+    /** 前台「开发」面板顶上那几行读数 (工具链 / 当前项目 / 上一句结论) */
+    @JavascriptInterface
+    fun portalDev(): String = PortalDev.status(context)
+
+    /** 前台「开发」面板里点了一行: 重活丢线程池, 当场回一句 */
+    @JavascriptInterface
+    fun portalDevPick(id: String): String = PortalDev.pick(context, id.trim())
+
+    /**
+     * 开始这一趟探索: 投一行 `source:"explore"`, 正文就是那张任务卡 (`lw/explore-card.md`)
+     *
+     * 2.8.1 #12: 这一行原来读 `explore.json` 的 `nextTask` —— 宿主从来不写那个键, 于是点「开始这一趟」
+     * 投的永远是兜底那句 `接着上一趟看看`, 与面板上写着的那张卡不是同一件事。卡只有一张, 判断层那条路
+     * 读的也是它 (宿主 `readExploreTask` 是同一个正文), 这里改读同一份
+     *
+     * 已经在跑的那一场不再投 (宿主 `startExplore` 里那道 "已经有活着的就拒" 的同一个判据): 投进去只会被
+     * 它拒掉, 而页面上那句 toast 要说的正是"已经有一场在跑", 所以这里先把 `running` 报回去
+     */
     @JavascriptInterface
     fun portalExplore(): String {
-        val explore = readJson(lwFile("explore.json")) ?: JSONObject()
-        val task = explore.optString("nextTask").orEmpty().trim().ifEmpty { DEFAULT_EXPLORE_TEXT }
-        val seq = runCatching { VoiceInbox.append(context, task, source = VoiceInbox.SOURCE_EXPLORE) }.getOrNull()
+        val card = ExploreTask.read(context)
+        val task = card.ifEmpty { DEFAULT_EXPLORE_TEXT }
+        if (ExploreTask.running(context) != null) {
+            return JSONObject().apply {
+                put("queued", false)
+                put("running", true)
+                put("seq", 0L)
+                put("task", "")
+            }.toString()
+        }
+        val seq = runCatching {
+            VoiceInbox.append(
+                context,
+                task,
+                source = VoiceInbox.SOURCE_EXPLORE,
+                // 与判断层那条同一个预算 (2026-11-21): 手动这一下不传步数就落宿主的 60 缺省, 两条路会不一致
+                steps = ExploreSchedule.plan(context).steps,
+            )
+        }.getOrNull()
         return JSONObject().apply {
             put("queued", seq != null)
+            put("running", false)
             put("seq", seq ?: 0L)
             put("task", task)
+        }.toString()
+    }
+
+    /**
+     * 门户那颗「按住 说话」(2026-11-20 主人: "长按输入框使用语音输入")
+     *
+     * 四个动作挤在一条方法上 (桥上"一个方法一段 JSON"的规矩):
+     *
+     * - `status`: 麦克风给没给 / 语音走哪一档 / 那一档现在能不能出字, 页面据此决定要不要先要素权限、
+     *   以及输入卡那行小字写什么
+     * - `ask`: 请宿主弹系统的麦克风授权窗 (页面自己弹不出来 —— 桥拿的是 applicationContext) ——
+     *   落一个掷标由 [HostScreen] 消费
+     * - `transcribe`: **只答应不干活**: 当场回 `{ok:true, id}`, 认完之后由 [PortalVoice] 经
+     *   `window.__LUWI_PORTAL__.voice({ok, id, text})` 回推。**不能同步等** —— 桥回调在 WebView 的
+     *   JavaBridge 线程上, 一句话要认几秒, 同步等就是整页卡住
+     * - `cancel`: 作废在途那一趟 (退出语音态 / 又按了一次)
+     *
+     * @param payload `{op:"status"|"ask"|"transcribe"|"cancel", id?, data?, language?}`
+     * @return 一段 JSON (status 的读数 / 答应或拒绝那一句)
+     */
+    @JavascriptInterface
+    fun portalVoice(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        return when (val op = body.optString("op", "").trim()) {
+            "status" -> PortalVoice.status(context).toString()
+            "ask" -> {
+                PortalAsk.ask(PortalAsk.Target.MIC)
+                JSONObject().put("ok", true).toString()
+            }
+            "cancel" -> {
+                PortalVoice.cancel()
+                JSONObject().put("ok", true).toString()
+            }
+            "transcribe" -> PortalVoice.transcribe(
+                context = context,
+                id = body.optInt("id", 0),
+                data = body.optString("data", ""),
+                language = body.optString("language", "auto"),
+            ) { answer -> pushVoice(answer) }.toString()
+            else -> JSONObject().put("ok", false).put("error", "op has to be status, ask, transcribe or cancel, not \"$op\"").toString()
+        }
+    }
+
+    /** 转写那一路的回推: 必须在主线程 `evaluateJavascript` (WebView 只认那一条) */
+    private fun pushVoice(answer: JSONObject) {
+        val script = "window.__LUWI_PORTAL__ && window.__LUWI_PORTAL__.voice(" + answer.toString() + ")"
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            PortalState.run?.invoke(script)
+            return
+        }
+        Handler(Looper.getMainLooper()).post { PortalState.run?.invoke(script) }
+    }
+
+    /**
+     * 门户头栏那颗喇叭 = **语音输出（自动朗读）开关** (2026-11-20 主人)
+     *
+     * 它翻的就是 设置 → 说话 → 「朗读回答」那一格 (`SpeakSettings.readAloud`): 一处状态两处界面,
+     * 页面上不做第二份开关。宿主每轮念之前都会问一次 `speak op=status` (`host-plugin` 的
+     * `lwSpeakLine` / `startReadAloud`), 所以这里**不用重启 host**, 下一轮就按新值走
+     *
+     * 两个动作:
+     * - `status` → `{ok, readAloud, engine}`: 页面据此换喇叭的两副图标 (关 = 带斜杠, 开 = 带声波)
+     * - `toggle` → 翻一次并回新的那一份 (页面拿回执直接画, 不必再问一趟)
+     *
+     * @param payload `{op:"status"|"toggle"}`
+     * @return 一段 JSON (新状态)
+     */
+    @JavascriptInterface
+    fun portalSpeak(payload: String): String {
+        val body = runCatching { JSONObject(payload) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "传上来的不是一段 JSON").toString()
+        val op = body.optString("op", "").trim()
+        if (op == "toggle") {
+            runCatching { SpeakSettings.setReadAloud(context, !SpeakSettings.readAloud) }
+                .onFailure { Log.w(LOOK_TAG, "the read-aloud switch could not be written: ${it.message}") }
+        } else if (op != "status") {
+            return JSONObject().put("ok", false)
+                .put("error", "op has to be status or toggle, not \"$op\"").toString()
+        }
+        return JSONObject().apply {
+            put("ok", true)
+            put("readAloud", SpeakSettings.readAloud)
+            put("engine", SpeakSettings.engine.name.lowercase())
         }.toString()
     }
 
@@ -389,6 +789,123 @@ internal class PortalBridge(private val context: Context) {
             put("bytes", pick.bytes)
             put("name", pick.name)
         }.toString()
+    }
+
+    /**
+     * 这一次选择器是给谁挑的 (`file` / `sticker`), 页面点之前先报一次 (见 [portalPickMode])
+     *
+     * 只认一次: [takePickMode] 取走就复位, 于是"页面忘了报"与"不是页面发起的那一档"都按普通附件走
+     */
+    @Volatile
+    private var pickMode: String = PICK_MODE_FILE
+
+    /**
+     * 这一次选择器是给谁挑的 (2.8.1 #13)
+     *
+     * 门户有两处 `<input type=file>`: `+` (普通附件) 与表情包面板那格「加一张」。前者 2.8.1 #13 起由
+     * 宿主读、宿主落 (`<工作区>/lw-in/`, 见 [stashPicked]); 后者仍走老路 —— 页面拿 Uri 读成 base64 交
+     * [portalStickerAdd], 落的是 `lw/stickers`。两条路的区别只有页面知道, 所以点之前先报一次
+     *
+     * @param mode `file` / `sticker`; 别的说法一律按 `file`
+     * @return `{ok:true, mode:"…"}`
+     */
+    @JavascriptInterface
+    fun portalPickMode(mode: String): String {
+        pickMode = if (mode.trim() == PICK_MODE_STICKER) PICK_MODE_STICKER else PICK_MODE_FILE
+        return JSONObject().put("ok", true).put("mode", pickMode).toString()
+    }
+
+    /** 取走这一次的模式 (只认一次; 取完复位成 `file`) */
+    fun takePickMode(): String {
+        val was = pickMode
+        pickMode = PICK_MODE_FILE
+        return was
+    }
+
+    /**
+     * 选择器交回来的那几份由**宿主自己读、自己落** (2.8.1 #13)
+     *
+     * 为什么不交给页面读: `<input type=file>` 给页面的是一串 `content://` Uri, 而 WebView 的渲染器
+     * 不是每一次都读得动它们 —— 相册那种 Uri 到手就是空的 (`FileReader` 的 `onerror` / 空 buffer),
+     * 页面上于是"点了确定什么都没有" (issue #53), 宿主本来就拿着这几个 Uri (选择器的结果先到
+     * [HostScreen] 那个回调), `contentResolver` 又是 app 自己的授权, 所以这一趟改成**宿主读、宿主落**,
+     * 页面只管把那几行画出来 (见页面侧 `picked`)
+     *
+     * 落盘仍是 [LwIn.put] 那一份实现 (basename / 白名单 / 12 MB / 同名顺延 / 写完读回): 一次选几份就落
+     * 几份, **同一份不会落两遍** —— 交回页面之后页面不再自己存一次, 这条由 `HostScreen` 那个回调保证
+     * (它答给 WebView 的是"没选", 所以 `change` 不会再来一次)
+     *
+     * @param uris 选择器交回来的那几个
+     * @return `{ok, files:[{name, path, bytes, image, mediaType}], rejected:[{name, reason}]}`;
+     *   `ok` 只表示"至少落成一份", 被拒的每一份都带一句人话
+     */
+    fun stashPicked(uris: List<Uri>): String {
+        val root = Workspace.resolve(context).directory
+        val files = JSONArray()
+        val rejected = JSONArray()
+        for (uri in uris) {
+            val name = displayNameOf(uri)
+            // 读不动时要带一句真原因 (2026-11-19 真机: 拖放那份 `content://` 的授权松手就失效) ——
+            // 只留一句"这一份读不动"看不出是哪一档: 没权限、空流、还是 provider 自己抛的
+            var why = ""
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.onFailure { why = "${it.javaClass.simpleName}: ${it.message.orEmpty()}" }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) {
+                val said = if (why.isEmpty()) PICKED_UNREADABLE else "$PICKED_UNREADABLE ($why)"
+                rejected.put(JSONObject().put("name", name).put("reason", said))
+                Log.w(LOOK_TAG, "picked $name: $said")
+                continue
+            }
+            val result = LwIn.put(root, name, bytes)
+            val pick = result.pick
+            if (pick == null) {
+                rejected.put(JSONObject().put("name", name).put("reason", result.error))
+                Log.w(LOOK_TAG, "picked $name rejected: ${result.error}")
+                continue
+            }
+            files.put(JSONObject().apply {
+                put("name", pick.name)
+                put("path", pick.path)
+                put("bytes", pick.bytes)
+                put("image", pick.image)
+                put("mediaType", runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty())
+            })
+            // 一行读数: 真机上"选中的那份到底落没落、落在哪"就认这一行 (与页面那行 attach 对得上)
+            Log.i(LOOK_TAG, "picked ${pick.name} ${pick.bytes}B -> ${pick.path}")
+        }
+        return JSONObject().apply {
+            put("ok", files.length() > 0)
+            put("files", files)
+            put("rejected", rejected)
+        }.toString()
+    }
+
+    /**
+     * 选择器给的名字 (`DISPLAY_NAME`); 拿不到就拿 uri 最后那一段
+     *
+     * **没有扩展名的要按 MIME 补一个** (2.8.1 #13): 有的机器给的是流水号 (`1000026655`), 而 [LwIn.put]
+     * 的白名单按扩展名认 —— 不补就是"选得中、存不进", 页面上只留一行看不懂的红字
+     */
+    private fun displayNameOf(uri: Uri): String {
+        val shown = runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        }.getOrNull()?.use { cursor ->
+            if (!cursor.moveToFirst()) {
+                null
+            } else {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            }
+        }
+        val name = shown?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "file" }
+        // 有扩展名就原样交出去 (认不认由 LwIn 说, 它会回一句"不收这种文件: <名字>")
+        if (LwIn.extensionOf(name).isNotEmpty()) return name
+        val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty()
+        val ext = runCatching { MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) }
+            .getOrNull().orEmpty()
+        return if (ext.isEmpty()) name else "$name.$ext"
     }
 
     /**
@@ -478,30 +995,62 @@ internal class PortalBridge(private val context: Context) {
      */
     @JavascriptInterface
     fun portalAbsPath(rel: String): String {
-        fun fail(reason: String): String = JSONObject().apply {
-            put("ok", false)
-            put("error", reason)
-        }.toString()
-        val clean = rel.trim()
-        if (clean.isEmpty()) return fail("没有路径")
-        if (clean.contains("..") || clean.contains('\\') || clean.contains('\u0000')) {
-            return fail("这不是一条相对路径")
-        }
-        val file = when {
-            clean.startsWith("assets/") -> File(File(home(), "lw/out"), clean)
-            clean.startsWith("in/") -> File(
-                LwIn.dir(Workspace.resolve(context).directory),
-                clean.removePrefix("in/"),
-            )
-            else -> return fail("只认 assets/ 与 in/ 两段")
-        }
-        if (!file.isFile || file.length() <= 0L) return fail("这一份不在了")
+        val (file, why) = outTarget(rel)
+        if (file == null) return refused(why)
         return JSONObject().apply {
             put("ok", true)
             put("path", file.absolutePath)
             put("name", file.name)
             put("bytes", file.length())
         }.toString()
+    }
+
+    /**
+     * 把这一份的绝对路径放进系统剪贴板 (落实表 #41, 2026-11-13: "可选复制路径")
+     *
+     * 路径与 [portalAbsPath] 同一条拼法 (认 `assets/` 与 `in/` 两段, 挡 `..`); 复制这边放在 app
+     * 侧, 因为 WebView 里的 `navigator.clipboard` 要有焦点、要算用户手势 —— 长按菜单点下来那一下
+     * 不是每次都算数, 而系统剪贴板一定成
+     */
+    @JavascriptInterface
+    fun portalCopyPath(rel: String): String {
+        val (file, why) = outTarget(rel)
+        if (file == null) return refused(why)
+        val manager = context.getSystemService(ClipboardManager::class.java)
+            ?: return refused("系统的剪贴板不在")
+        runCatching {
+            manager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, file.absolutePath))
+        }.getOrElse { return refused("剪贴板写不进去") }
+        Log.i(LOOK_TAG, "copied path of ${file.name} (${file.length()} bytes)")
+        return JSONObject().apply {
+            put("ok", true)
+            put("path", file.absolutePath)
+            put("name", file.name)
+        }.toString()
+    }
+
+    /** 一句"不成立"的回话 (页面照原话给 `showNote`) */
+    private fun refused(reason: String?): String = JSONObject().apply {
+        put("ok", false)
+        put("error", reason ?: "这一份打不开")
+    }.toString()
+
+    /**
+     * 行里那条相对路径 -> 一个真在的文件 (或者一句为什么不成)
+     *
+     * 认哪两段、挡 `..` 那一层在 [OutPaths] (没有设备也能量); 这里只补上"落在哪个根下"与
+     * "它还在不在"
+     */
+    private fun outTarget(rel: String): Pair<File?, String?> {
+        val lookup = OutPaths.lookup(rel)
+        if (lookup is OutPaths.Lookup.Rejected) return null to lookup.reason
+        val found = lookup as OutPaths.Lookup.Found
+        val file = when (found.root) {
+            OutPaths.ASSETS -> File(File(home(), "lw/out"), OutPaths.ASSETS + found.leaf)
+            else -> File(LwIn.dir(Workspace.resolve(context).directory), found.leaf)
+        }
+        if (!file.isFile || file.length() <= 0L) return null to "这一份不在了"
+        return file to null
     }
 
     /** 表情认的那几种 (与宿主 `lw_sticker op=list` 那张正则同一个集合) */
@@ -534,30 +1083,67 @@ internal class PortalBridge(private val context: Context) {
 
     private fun lwFile(name: String): File = homeFile("lw/$name")
 
-    /** 球那一场所在的工作区 (`dsh-ball`), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
+    /** 球那一场所在的工作区 (`Luwi`, 2026-11-20 起与探索那条同一个目录), 与宿主 `ballWorkspace()` 拼的是同一个名字 */
     private fun ballWorkspace(): File = File(Workspace.resolve(context).directory, BALL_WORKSPACE)
+
+    /** 「Luwi」那条通道工作区 (探索 / 主动场那条, 与宿主 `EXPLORE_WORKSPACE_NAME` 同一个名字) */
+    private fun channelWorkspace(): File = File(Workspace.resolve(context).directory, CHANNEL_WORKSPACE)
 
     private fun readJson(file: File): JSONObject? = runCatching {
         if (!file.isFile) null else JSONObject(file.readText())
     }.getOrNull()
 
+    /**
+     * 上一次留下摘要是哪一刻 (2.8.1 #12)
+     *
+     * 摘要在 `$DSH_HOME/lw/explore/<yyyyMMdd-HHmm>.md` (宿主 `exploreSummaryName`, 按那一场开始那一刻
+     * 起名), 文件名里那个时刻是**开始**时间而不是落盘时间 —— 面板那一行问的是"上次摘要是什么时候",
+     * 所以认目录里最新那份的 mtime; 一份都没有时退宿主记在 `explore.json` 的 `lastFinish.at`
+     */
+    private fun lastSummaryAt(fallback: Long): Long {
+        val newest = runCatching {
+            lwFile("explore").listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".md") }
+                ?.maxOfOrNull { it.lastModified() } ?: 0L
+        }.getOrDefault(0L)
+        return if (newest > 0L) newest else fallback
+    }
+
     private companion object {
         /** 工作区名: 宿主那一侧是 `BALL_WORKSPACE_NAME`, 判据脚本会比对这两个量 */
-        const val BALL_WORKSPACE = "dsh-ball"
+        const val BALL_WORKSPACE = "Luwi"
 
-        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (10 分钟) */
-        const val VOICE_SESSION_MS = 10 * 60 * 1000L
+        /** 「Luwi」那条通道工作区: 宿主那一侧是 `EXPLORE_WORKSPACE_NAME`, 两处同一个字面量 */
+        const val CHANNEL_WORKSPACE = "Luwi"
+
+        /** 球那场账的有效期, 与宿主 `VOICE_SESSION_MS` 逐字相同 (2026-11-20 起 30 分钟) */
+        const val VOICE_SESSION_MS = 30 * 60 * 1000L
 
         /** 会话 id 的长度上限 (与 [WakeBridge] 那一处同一个数) */
         const val SESSION_ID_MAX = 128
 
-        /** 敲钟那一行的正文: 宿主只看 source, 正文只是给人看的读数 */
+        /** 唤醒那一行的正文: 宿主只看 source, 正文只是给人看的读数 */
         const val TICK_TEXT = "tick"
 
-        /** 探索那一行没有 nextTask 时的兜底正文 (空正文会被收件箱拒掉) */
+        /** 任务卡是空的时候「开始这一趟」投的兜底正文 (空正文会被收件箱拒掉) */
         const val DEFAULT_EXPLORE_TEXT = "接着上一趟看看"
 
         /** 那一张脸的日志 tag (与 HostScreen 的 WEB_TAG 同一族) */
         const val LOOK_TAG = "DshWebView"
+
+        /** [portalImageFail] 收到一句空原因时的兜底 (页面不会给空串, 但这行日志不能是空的) */
+        const val UNKNOWN_FAIL = "unknown"
+
+        /** 第四行「图片」没有可说的 (人把选择器退出来了 / 压根没选) —— 判据认的就是这四个字 */
+        const val UNKNOWN_PICTURE = "未选择"
+
+        /** 四行诊断的行数 (机型 / Android / WebView / 图片): 少一行就不许进剪贴板 */
+        const val DIAG_LINES = 4
+
+        /** 复制路径那一下剪贴板上的说明 (Android 13 起系统会在左下角给一眼预览) */
+        const val CLIP_LABEL = "Luwi path"
+
+        /** 「复制诊断」那一下剪贴板上的说明 (2.8.1 #1) */
+        const val CLIP_DIAG_LABEL = "Luwi diag"
     }
 }

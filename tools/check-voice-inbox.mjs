@@ -35,7 +35,8 @@ const api = new Function(
     ' voiceCurrentSession, voiceSessionBump, voiceSessionReset, voiceTargetCandidates,' +
     ' voiceAfterFailure, withTimeout, VOICE_DELIVER_TRIES, pickInterruptTarget,' +
     ' chooseVoicePreset, describePresetFailure, ballWorkspace, voiceLedgerUsable, voicePathUnder,' +
-    ' voicePathNorm, voiceLedgerSnapshot }',
+    ' voicePathNorm, voiceLedgerSnapshot, voiceLedgerId, voiceLastBallSession, refersBack,' +
+    ' VOICE_SESSION_MS, VOICE_REFER_BACK_MS }',
 )(readFile, mkdir, realpath, stat, writeFile, join, dirname)
 
 const home = mkdtempSync(join(tmpdir(), 'lw-inbox-'))
@@ -129,62 +130,98 @@ check('点名那两句还是一句一行', pointed.map((item) => item.text), ['�
 // 10. "当前对话"那一笔账 (批次 5: 每次发送完成后, 那个时间窗内那一场就是可复用的当前对话)
 //
 // 四条判据: 投出去之后记得住 / 记的是**落盘**的那一份 (宿主重启还认得) / 窗内那一场还在
-// / 过了窗就当没有 (**2026-10-07 主人把 1 小时改成 20 分钟, 2026-10-11 又缩到 10 分钟**,
-// 见 VOICE_SESSION_MS —— 这里两边取 9 / 11 分钟, 贴着那 10 分钟的两侧)
+// / 过了窗就当没有 (**2026-10-07 主人把 1 小时改成 20 分钟, 2026-10-11 又缩到 10 分钟,
+// 2026-11-20 放到 30 分钟**, 见 VOICE_SESSION_MS —— 这里两边取 29 / 31 分钟, 贴着那 30 分钟的两侧)
 async function sessionOf(text) {
   await bumpBall(text)
   return api.voiceCurrentSession()
 }
 check('投过之后记得住那一场', await sessionOf('184099533039071249'), '184099533039071249')
+check('窗口就是 30 分钟', api.VOICE_SESSION_MS, 30 * 60 * 1000)
 const sessionFile = join(dirname(inbox), 'session.json')
 const stored = JSON.parse(await readFile(sessionFile, 'utf8'))
 check('id 按字符串落盘 (64 位不进整数)', typeof stored.id, 'string')
 check('落盘的是同一个 id', stored.id, '184099533039071249')
-// 差一点到点: 9 分钟前那一刻仍然算当前对话 (账上带着 origin 与 cwd —— 缺 cwd 的老账另有判据,
+// 差一点到点: 29 分钟前那一刻仍然算当前对话 (账上带着 origin 与 cwd —— 缺 cwd 的老账另有判据,
 // 见第 14 节)
 const stillFresh = JSON.parse(await readFile(sessionFile, 'utf8'))
 await writeFile(
   sessionFile,
-  `${JSON.stringify({ ...stillFresh, at: Date.now() - 9 * 60 * 1000 })}\n`,
+  `${JSON.stringify({ ...stillFresh, at: Date.now() - 29 * 60 * 1000 })}\n`,
 )
 api.voiceSessionReset()
-check('9 分钟前那一场还算当前对话', await api.voiceCurrentSession(), '184099533039071249')
+check('29 分钟前那一场还算当前对话', await api.voiceCurrentSession(), '184099533039071249')
 // 过点: 直接改文件里那个时刻, 再把内存那一笔账清掉重读一次 —— 那与"宿主重启之后读到一份旧账"
 // 是同一条路
 const hourAgo = JSON.parse(await readFile(sessionFile, 'utf8'))
-await writeFile(sessionFile, `${JSON.stringify({ ...hourAgo, at: Date.now() - 11 * 60 * 1000 })}\n`)
+await writeFile(sessionFile, `${JSON.stringify({ ...hourAgo, at: Date.now() - 31 * 60 * 1000 })}\n`)
 api.voiceSessionReset()
-check('过了 10 分钟就不算当前对话', await api.voiceCurrentSession(), null)
+check('过了 30 分钟就不算当前对话', await api.voiceCurrentSession(), null)
 
 // 11. 目标会话的候选清单 ([voiceTargetCandidates], 2026-10-15 起): **浮标只投自己那一场**
 //
-// 判据 (主人 2026-10-06 的口径, 2026-10-07 的 20 分钟, 2026-10-11 的 10 分钟): 10 分钟内那一场被复用 /
-// 没有就交一张空清单让调用方开新的一场。**"正在界面里用的那一场"与"最近动过的那个"都不在清单里** ——
-// 那正是这句话落进 `/sdcard/DSH` 那场会话的原因 (它一被挑中, "浮标的对话都在 dsh-ball 里"就不成立了)
+// 判据 (主人 2026-10-06 的口径, 2026-10-07 的 20 分钟, 2026-10-11 的 10 分钟, 2026-11-20 的 30 分钟):
+// 窗口内那一场被复用 / 没有就交一张空清单让调用方开新的一场。**"正在界面里用的那一场"与"最近动过的
+// 那个"都不在清单里** —— 那正是这句话落进 `/sdcard/DSH` 那场会话的原因 (它一被挑中, "浮标的对话都在
+// 浮标那条工作区里"就不成立了)
 check('没有当前对话时, 候选清单是空的 (等于"开一场新的")', await api.voiceTargetCandidates(''), [])
 await bumpBall('bbb')
-check('10 分钟内那一场浮标对话被复用', await api.voiceTargetCandidates(''), [
-  { sessionId: 'bbb', why: 'the ball conversation, reused' },
+check('30 分钟内那一场浮标对话被复用', await api.voiceTargetCandidates(''), [
+  { sessionId: 'bbb', reused: true, why: 'the ball conversation, reused' },
 ])
 // 11b. **回复框点名的那一场 (`to`)** 排在第一位 (2026-10-06 那条例外: "有回复框时, 框里进的输入走
 // 发出回复那个窗口")。它还在不在、是不是根会话, 由投递那一步的 `resolveAgent` 说了算
 check(
-  '回复框点名的排在第一位, 10 分钟那一场跟在后面',
+  '回复框点名的排在第一位, 窗口内那一场跟在后面',
   (await api.voiceTargetCandidates('aaa')).map((item) => item.sessionId),
   ['aaa', 'bbb'],
 )
 check('点名与那一场是同一场时只出现一次', await api.voiceTargetCandidates('bbb'), [
   { sessionId: 'bbb', why: 'the reply box asked for its own conversation' },
 ])
-// 过点: 把落盘那一刻改成 21 分钟前, 清掉内存那一笔账再读 (与宿主重启读到一份旧账是同一条路)
+// 过点: 把落盘那一刻改成 31 分钟前, 清掉内存那一笔账再读 (与宿主重启读到一份旧账是同一条路)
 const hourUp = JSON.parse(await readFile(sessionFile, 'utf8'))
 await writeFile(
   sessionFile,
-  `${JSON.stringify({ id: hourUp.id, at: Date.now() - 21 * 60 * 1000, origin: 'ball', cwd: ballDir })}\n`,
+  `${JSON.stringify({ id: hourUp.id, at: Date.now() - 31 * 60 * 1000, origin: 'ball', cwd: ballDir })}\n`,
 )
 api.voiceSessionReset()
-check('过了 10 分钟就只剩点名那一条', (await api.voiceTargetCandidates('aaa')).map((item) => item.sessionId), ['aaa'])
-check('过了 10 分钟又没有点名: 空清单 (开新的)', await api.voiceTargetCandidates(''), [])
+check('过了 30 分钟就只剩点名那一条', (await api.voiceTargetCandidates('aaa')).map((item) => item.sessionId), ['aaa'])
+check('过了 30 分钟又没有点名: 空清单 (开新的)', await api.voiceTargetCandidates(''), [])
+
+// 11c. **指着上一句说的那一类话接着上一场** (2026-11-20 主人: "在浮标发送有带『这个』之类的词时…
+// 应该回复上一次会话, 而不是重新开新会话")
+//
+// 窗口已经过了 (上面那条 31 分钟的账), 只要这一句里有 `这个` / `刚才` / `改成` 这种指代, 那一场就
+// 重新进候选清单。上限一天 ([VOICE_REFER_BACK_MS]): 隔天的"这个"已经没有指代对象
+check('指代那几个词认得出', [
+  api.refersBack('这个你看下'), api.refersBack('刚才那张'), api.refersBack('把它改成蓝色'),
+  api.refersBack('接着弄'), api.refersBack('继续'),
+], [true, true, true, true, true])
+check('不是指代的话不认 (命令表那套是整句相等, 这里是子串)', [
+  api.refersBack('这样行不行'), api.refersBack('今天天气'), api.refersBack('   '), api.refersBack(null),
+], [false, false, false, false])
+check(
+  '31 分钟的账 + `这个`: 那一场又回到候选清单 (排最后)',
+  await api.voiceTargetCandidates('', '这个你看下'),
+  [{ sessionId: 'bbb', reused: true, why: 'the line points back at what came before, so the ball conversation was kept' }],
+)
+check(
+  '31 分钟的账 + 点名 + `这个`: 点名在前, 指代那一场在后',
+  (await api.voiceTargetCandidates('aaa', '这个你看下')).map((item) => item.sessionId),
+  ['aaa', 'bbb'],
+)
+check('31 分钟的账 + 普通话: 还是空清单', await api.voiceTargetCandidates('', '今天天气'), [])
+// 一天之外: 指代也不接
+const ancient = JSON.parse(await readFile(sessionFile, 'utf8'))
+await writeFile(
+  sessionFile,
+  `${JSON.stringify({ ...ancient, at: Date.now() - 25 * 60 * 60 * 1000 })}\n`,
+)
+api.voiceSessionReset()
+check('25 小时前那一场 + `这个`: 不接 (上限一天)', await api.voiceTargetCandidates('', '这个你看下'), [])
+check('账本不判新鲜 (读数用得上)', await api.voiceLedgerId(), 'bbb')
+check('指代那一档的上限是一天', api.VOICE_REFER_BACK_MS, 24 * 60 * 60 * 1000)
 
 // 12. "两种没有"收成同一个 (2026-10-06 真机上那次"键盘输入谈不了话"的根因)
 //
@@ -363,12 +400,20 @@ check('球自己那一句投完, 那一场就是当前对话', await api.voiceCu
 check('账上记着是谁写的', (await api.voiceLedgerSnapshot()).origin, 'ball')
 check('而且它可用', (await api.voiceLedgerSnapshot()).usable, true)
 
-/* 15. 写账那一处的闸 (静态): 只有球那一句改账, 而自动指令与点名投递都不改 ───── */
+/* 15. 写账那一处的闸 (静态): 球那一句一定改账; 回复框接着回的那一句要改; 别的 GUI 场与自动指令不改 ─ */
 const sourceText = source
-check('写账挂在 `origin === \'ball\'` 那一条上', [
-  /if \(origin === 'ball'\) \{\n\s+await voiceSessionBump\(sessionId, \{ origin, cwd: outcome\.cwd \?\? workspace\?\.path \?\? '' \}\)/u
-    .test(sourceText),
+check('球那一句一定写账', [
+  /const keepsLedger = origin === 'ball'/u.test(sourceText),
 ], [true])
+check('回复框那一句按"投给谁 / 落在哪"判 (2026-11-20): 账本指着的那一场或浮标工作区底下才写', [
+  /\(origin === 'replyBox' && \(String\(sessionId\) === pointed \|\| inBall\)\)/u.test(sourceText),
+  /const pointed = await voiceLedgerId\(\)/u.test(sourceText),
+], [true, true])
+check('写账只有一处, 而且挂在 `keepsLedger` 上 (不许再退回无条件写)', [
+  /if \(keepsLedger\) \{\n\s+await voiceSessionBump\(sessionId, \{ origin, cwd: outcome\.cwd \?\? workspace\?\.path \?\? '' \}\)/u
+    .test(sourceText),
+  (sourceText.match(/voiceSessionBump\(/gu) ?? []).length,
+], [true, 2])
 check('自动指令与回复框各自有 origin, 不再是"投成功就写"', [
   /const origin = automated \? 'automation' : asked !== '' \? 'replyBox' : 'ball'/u.test(sourceText),
 ], [true])

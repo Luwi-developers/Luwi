@@ -16,6 +16,7 @@ import io.github.yuloong07star.luwi.tool.LwAutomation
 import io.github.yuloong07star.luwi.tool.LwCalendar
 import io.github.yuloong07star.luwi.tool.LwEvents
 import io.github.yuloong07star.luwi.tool.LwFiles
+import io.github.yuloong07star.luwi.tool.LwForge
 import io.github.yuloong07star.luwi.tool.LwGallery
 import io.github.yuloong07star.luwi.tool.LwKeepAwake
 import io.github.yuloong07star.luwi.tool.LwLinux
@@ -37,6 +38,7 @@ import io.github.yuloong07star.luwi.tool.LwWakeWord
 import io.github.yuloong07star.luwi.tool.text
 import io.github.yuloong07star.luwi.util.PermissionCatalog
 import io.github.yuloong07star.luwi.workspace.Workspace
+import kotlin.math.roundToInt
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -963,20 +965,27 @@ object PrivilegedBridge {
             if (bitmap == null) {
                 buildJsonObject {
                     put("displayId", screen.displayId)
+                    // 引擎名与成功那条路一样: 读屏恒本地, 取帧失败也不换成别的路
+                    put("engine", LwOcr.ENGINE)
                     put("lines", buildJsonArray {})
                     put("error", VirtualScreen.lastError ?: "capture failed")
                 }
             } else {
                 try {
                     val minScore = request["minScore"]?.jsonPrimitive?.floatOrNull ?: Float.NaN
-                    val outcome = if (minScore.isNaN()) {
-                        if (maxLines > 0) {
-                            LwOcr.recognize(bitmap, maxLines, captureMs = captureMs)
-                        } else {
-                            LwOcr.recognize(bitmap, captureMs = captureMs)
-                        }
-                    } else {
-                        LwOcr.recognize(bitmap, maxLines.coerceAtLeast(1), minScore, captureMs)
+                    // 回退开关 (2.8.1 #3): 带 `minScore` 或 `route=legacy` 就整条退回 2.8.0 那根单阈值,
+                    // 不带就走分档路由。**不用重装 APK** —— 这是出事时把它接回去的那颗开关
+                    val legacy = request["route"]?.jsonPrimitive?.contentOrNull?.equals("legacy", true) == true
+                    val outcome = when {
+                        legacy || !minScore.isNaN() -> LwOcr.recognize(
+                            bitmap,
+                            maxLines.coerceAtLeast(1),
+                            if (minScore.isNaN()) OcrRoute.LEGACY_MIN_SCORE else minScore,
+                            captureMs,
+                            OcrRoute.Mode.LEGACY,
+                        )
+                        maxLines > 0 -> LwOcr.recognize(bitmap, maxLines, captureMs = captureMs)
+                        else -> LwOcr.recognize(bitmap, captureMs = captureMs)
                     }
                     // 调试图只在明确要的时候写: 350ms 一次的读屏轮询里每次都画一张全屏 PNG 太贵
                     val debug = request["debug"]?.jsonPrimitive?.booleanOrNull == true
@@ -994,6 +1003,8 @@ object PrivilegedBridge {
                         put("width", bitmap.width)
                         put("height", bitmap.height)
                         put("backend", outcome.backend)
+                        // 顶层那一格说清这次是谁算的: 读屏这条路恒为 local (云端档 2.x 不存在)
+                        put("engine", LwOcr.ENGINE)
                         put("captureMs", captureMs)
                         put("detMs", outcome.detMs)
                         put("recMs", outcome.recMs)
@@ -1004,6 +1015,8 @@ object PrivilegedBridge {
                         put("recTotalMs", outcome.recTotalMs)
                         put("detInput", outcome.detInput)
                         put("recInput", outcome.recInput)
+                        put("scene", outcome.scene)
+                        put("route", outcome.route)
                         if (paths != null) {
                             put("debugImage", paths.first.absolutePath)
                             put("debugText", paths.second.absolutePath)
@@ -1013,7 +1026,8 @@ object PrivilegedBridge {
                             for (line in outcome.lines) {
                                 add(buildJsonObject {
                                     put("text", line.text)
-                                    put("score", line.score.toDouble())
+                                    // 两位数就够读了: 小数点后六位既不帮判断, 也让答案更难扫
+                                    put("score", (line.score * 100f).roundToInt() / 100f)
                                     put("box", buildJsonArray {
                                         add(line.left)
                                         add(line.top)
@@ -1075,6 +1089,12 @@ object PrivilegedBridge {
         // p 图那条链的最后一站 (2.5.0 批次 9): 把成图放进相册, 顺手打开。写的是 MediaStore,
         // 所以"所有文件访问权限"有没有给都不影响这一条
         "gallery" -> appContext { LwGallery.dispatch(it, request) }
+        // 2.8.1 B2: 主人自己装的那几个工具, 登记在 `$DSH_HOME/lw/external-apps.json` 里
+        // 与 `apps` 的分工: 那一条列全机, 这一条只认登记过的 id, 于是模型既不必猜包名也不必读 label
+        "external" -> appContext { ExternalApps.dispatch(it, request) }
+        // 手机应用工坊 (2.8.1): 项目 / 元信息 / 图标 / 工具链 / 构建 / 装机 / 开发屏
+        // 项目目录在会话工作区里 (`<workspace>/app-projects/<slug>`), 所以模型用普通文件工具改代码
+        "forge" -> appContext { LwForge.dispatch(it, request) }
         "takePhoto" -> appContext { LwPhoto.dispatch(it, request) }
         // 通知栏那一侧: 读的是系统绑在本进程里的监听服务, 与无障碍同一条路
         "notifications" -> appContext { LwNotifications.dispatch(it, request) }
