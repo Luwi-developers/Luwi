@@ -6224,6 +6224,9 @@ window.__ModuleLoader__.load({
       function stopRecording(cancelled) {
         if (voiceState !== 'recording') return
         var elapsed = Date.now() - voiceStartedAt
+        // 排查用: 条「闪一下就退」时看这一行 —— elapsed 太小 = 短按被当成松手; cancelled = 上滑或指针被系统收走
+        console.log('[luwi-portal] stop cancelled=' + (cancelled === true) + ' elapsed=' + elapsed
+          + ' chunks=' + ((voiceChunks || []).length) + ' rate=' + voiceSourceRate)
         voiceHeld = false
         if (voiceTimer !== null) clearTimeout(voiceTimer)
         voiceTimer = null
@@ -9111,8 +9114,33 @@ window.__ModuleLoader__.load({
          * 不关的话, 按住再往上划会被 Chromium 判成页面滚动, 于是先来一发 `pointercancel` ——
          * 长按的计时器被撤掉、上滑取消那一路也永远走不到。收手时立刻还原, 免得影响正常的选区与滚动
          */
+        // **系统的长按选择/复制菜单会抢走这一趟手势** (2026-11-27 主人: "长按只闪了一下就退出"):
+        // 空草稿长按本该进录音, 但 WebView 的原生长按 (文本选择手柄 + 复制菜单) 约 500 ms 就介入,
+        // 一介入就派发 pointercancel → onRecRelease → stopRecording → 条"闪一下"就落回去。
+        // 空输入框本来没有可选的字, 所以这一趟手势里把选择与上下文菜单一起挡掉, 收手立刻还原
+        var blockNativeLongPress = function (event) {
+          if (event && event.cancelable) event.preventDefault()
+        }
+        var lockTextSelection = function () {
+          if (!els.input) return
+          els.input.style.userSelect = 'none'
+          els.input.style.webkitUserSelect = 'none'
+          els.input.style.webkitTouchCallout = 'none'
+          document.addEventListener('selectstart', blockNativeLongPress, true)
+          document.addEventListener('contextmenu', blockNativeLongPress, true)
+        }
+        var unlockTextSelection = function () {
+          if (els.input) {
+            els.input.style.userSelect = ''
+            els.input.style.webkitUserSelect = ''
+            els.input.style.webkitTouchCallout = ''
+          }
+          document.removeEventListener('selectstart', blockNativeLongPress, true)
+          document.removeEventListener('contextmenu', blockNativeLongPress, true)
+        }
         var releaseTouchAction = function () {
           if (els.input) els.input.style.touchAction = ''
+          unlockTextSelection()
         }
         var cancelPress = function () {
           if (pressTimer === null) return
@@ -9126,6 +9154,7 @@ window.__ModuleLoader__.load({
           cancelPress()
           // 起手那一点记下来: 上滑取消按它算, 而"手指抖一下"不算取消了长按
           if (els.input) els.input.style.touchAction = 'none'
+          lockTextSelection()
           var y = Number(event && event.clientY)
           recStartY = isFinite(y) ? y : 0
           pressStartX = Number(event && event.clientX) || 0
@@ -10086,6 +10115,8 @@ window.__ModuleLoader__.load({
     return module.exports
   },
 })
+
+
 
 
 
