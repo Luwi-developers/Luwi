@@ -1286,6 +1286,21 @@
     <string name="dev_console_log">Build log</string>
     <string name="dev_console_current">Current project</string>
     <string name="dev_console_build">Last build</string>
+    <!-- 2.8.1 #F11: 开发屏的状态卡 —— 六档徽标 + 按档换的主钮 (徽标是字, 不只靠颜色) -->
+    <string name="dev_state_empty">No project</string>
+    <string name="dev_state_idle">Not built yet</string>
+    <string name="dev_state_building">Building</string>
+    <string name="dev_state_success">Build ok</string>
+    <string name="dev_state_failed">Build failed</string>
+    <string name="dev_state_no_access">No file access</string>
+    <string name="dev_state_stalled">interrupted (progress stopped)</string>
+    <string name="dev_state_step">step %1$d/%2$d</string>
+    <string name="dev_state_step_none">step -/-</string>
+    <string name="dev_state_reason_none">Nothing to report yet</string>
+    <string name="dev_action_open_settings">Open Settings → Development</string>
+    <string name="dev_action_open_settings_sent">Asked Luwi to open Settings → Development</string>
+    <string name="dev_action_grant">Grant file access</string>
+    <string name="dev_action_log">See the log</string>
     <string name="settings_dev_new_title">New app</string>
     <string name="settings_dev_new_summary">Create a project and open the dev console on a virtual screen</string>
     <string name="dev_panel_title">Development</string>
