@@ -21,6 +21,10 @@ import org.json.JSONObject
  * 一条链只有三跳: **页面自己录** (`getUserMedia` + `ScriptProcessor`, 封成 16 kHz 单声道 PCM16
  * wav, base64 过桥) → **这里落一份临时 wav** → `LwSpeech.dispatch(op=transcribe)` 出字 → 回推页面。
  *
+ * 2026-11-27 (2.8.1 #F10) 多了一条**增量**的那一跳: 页面每 `VOICE_CHUNK_MS` 把这一段新增的 PCM
+ * 封一小块走 `op=voice-chunk` 送来, 这里认完只把文字回推, 页面追加到波形行下面那层实时文字上 ——
+ * 于是"边说边出字", 而松手时那一次整段转写仍然是草稿的权威来源.
+ *
  * 三条分寸:
  *
  * 1. **引擎不在这里选**: `LwSpeech.engine(context)` 读 `lw/voice-source.json` —— 引导里选了
@@ -35,11 +39,21 @@ internal object PortalVoice {
 
     private const val TAG = "LwPortalVoice"
 
-    /** 一次最多认多久: 与 `client.js` 的 `VOICE_MAX_MS` 同一个数 (判据钉住) */
-    const val MAX_SECONDS = 60
+    /** 一次最多按住多久: 与 `client.js` 的 `VOICE_MAX_MS` 同一个数 (判据钉住) */
+    const val MAX_SECONDS = 300
 
-    /** 60 s × 16 kHz × 2 B = 1.92 MB; 再宽一点就到这道闸 (与官方 8 MiB 那条无关, 这是 UI 的上限) */
-    const val MAX_BYTES = 2 * 1024 * 1024
+    /** 300 s × 16 kHz × 2 B = 9.6 MB; 再宽一点就到这道闸 (与官方 8 MiB 那条无关, 这是 UI 的上限) */
+    const val MAX_BYTES = 12 * 1024 * 1024
+
+    /**
+     * 流式那一块的节拍: 与 `client.js` 的 `VOICE_CHUNK_MS` 同一个数 (判据钉住)
+     *
+     * 0 = 关掉流式 —— 页面一整段都不送块, 松手时照旧走整段转写; 这一侧只当读数用
+     */
+    const val VOICE_CHUNK_MS = 1500
+
+    /** 一块最多多大: 1.5 s 的 16 kHz PCM16 约 48 KB, 这条路再宽也不该过 1 MB */
+    const val CHUNK_BYTES = 1024 * 1024
 
     /** wav 头那一截: 44 字节 (RIFF + fmt + data) */
     const val WAV_HEADER_BYTES = 44
@@ -122,7 +136,7 @@ internal object PortalVoice {
      */
     fun transcribe(context: Context, id: Int, data: String, language: String, done: (JSONObject) -> Unit): JSONObject {
         val bytes = decode(data) ?: return refusal(id, "录音解不开")
-        if (bytes.size > MAX_BYTES) return refusal(id, "这一段太长了, 60 秒以内再说")
+        if (bytes.size > MAX_BYTES) return refusal(id, "这一段太长了, 分几段说")
         if (!isWav(bytes)) return refusal(id, "这一段不是 wav")
         val token = generation.incrementAndGet()
         val engine = LwSpeech.engine(context)
@@ -160,6 +174,99 @@ internal object PortalVoice {
         }
         return JSONObject().put("ok", true).put("id", id)
     }
+
+    /**
+     * 收**一小块** (增量) 录音, 认完把文字回推页面 —— 实时文字层那一趟 (2.8.1 #F10)
+     *
+     * 与 [transcribe] 走同一条单线程 executor, 于是块与块之间天然有序 (页面按 `seq` 追加), 但
+     * **不抬 `generation`**: 抬了的话在途的下一块一回来就成"过时", 整段实时层会缺字. 作废仍只有
+     * 三处 —— 开新一趟 ([transcribe] 那条整段路) / [cancel] / 页面退出语音态.
+     *
+     * 一段最长 `VOICE_SEGMENT_MS` (60 s) 那道滚段边界**不在这里**: 页面到点把这一段封成
+     * `final` 一块送来, 文字回来自己落草稿并接着录 —— 这里只在 `MAX_BYTES` 这道总闸上拒绝.
+     *
+     * @param id 页面给的这一趟编号 (回推时原样带回)
+     * @param seq 这一趟里块的序号 (原生日志 `chunk=N` 就是它, 页面按它去重)
+     * @param data base64 的 16 kHz 单声道 PCM16 wav 片段
+     * @param fin 这一块是不是这一段的末块 (滚段 / 松手那两块)
+     * @param done 回推那一步 (`PortalBridge` 里落到 `window.__LUWI_PORTAL__.voice`)
+     * @returns 当场答应页面那一段 (`{ok:true, id, seq}`) 或一句拒绝
+     */
+    fun voiceChunk(
+        context: Context,
+        id: Int,
+        seq: Int,
+        data: String,
+        language: String,
+        fin: Boolean,
+        done: (JSONObject) -> Unit,
+    ): JSONObject {
+        val bytes = decode(data) ?: return chunkRefusal(id, seq, fin, "录音解不开")
+        if (bytes.size > CHUNK_BYTES) return chunkRefusal(id, seq, fin, "这一块太长了")
+        if (!isWav(bytes)) return chunkRefusal(id, seq, fin, "这一段不是 wav")
+        val token = generation.get()
+        val engine = LwSpeech.engine(context)
+        val target = File(wavDirectory(context).apply { mkdirs() }, chunkName(id, seq))
+        worker.execute {
+            try {
+                target.writeBytes(bytes)
+                val answer = LwSpeech.dispatch(
+                    context,
+                    buildJsonObject {
+                        put("op", "transcribe")
+                        put("wav", target.absolutePath)
+                        put("engine", engine)
+                        put("language", language)
+                    },
+                )
+                // 这一趟已经被作废 (取消 / 又开了新的一趟): 这一块一个字都不许回写
+                if (token != generation.get()) {
+                    Log.i(TAG, "dropped a stale chunk (#" + id + "/" + seq + ")")
+                    return@execute
+                }
+                val body = runCatching { JSONObject(answer.toString()) }.getOrDefault(JSONObject())
+                // 真机读数认这一行: `LwPortalVoice: chunk=N take=M bytes=…`
+                Log.i(TAG, "chunk=" + seq + " take=" + id + " bytes=" + bytes.size + if (fin) " final" else "")
+                done(JSONObject().apply {
+                    put("ok", true)
+                    put("id", id)
+                    put("kind", "chunk")
+                    put("seq", seq)
+                    put("final", fin)
+                    put("text", body.optString("text", ""))
+                    put("engine", body.optString("engine", engine))
+                })
+            } catch (error: Throwable) {
+                Log.w(TAG, "chunk #" + id + "/" + seq + " failed: " + (error.message ?: error.toString()))
+                if (token == generation.get()) {
+                    done(refusal(id, failureOf(error)).apply {
+                        put("kind", "chunk")
+                        put("seq", seq)
+                        put("final", fin)
+                    })
+                }
+            } finally {
+                runCatching { target.delete() }
+            }
+        }
+        return JSONObject().put("ok", true).put("id", id).put("seq", seq)
+    }
+
+    /** 那一块的文件名; 纯函数 (与 [wavName] 同一个落点, 判据对得上) */
+    fun chunkName(id: Int, seq: Int): String = "chunk-" + id + "-" + seq + ".wav"
+
+    /**
+     * 流式那一块的拒绝也要带 `kind` / `seq` / `final`
+     *
+     * 页面按 `kind` 分流: 少这几个字段的话, 一句"这一块太长了"会被当成整段转写的结果 ——
+     * 录音当场被收摊, 人就看着面板消失
+     */
+    fun chunkRefusal(id: Int, seq: Int, fin: Boolean, reason: String): JSONObject =
+        refusal(id, reason).apply {
+            put("kind", "chunk")
+            put("seq", seq)
+            put("final", fin)
+        }
 
     /** 作废在途那一趟: 退出语音态 / 又按了一次时调 */
     fun cancel() {

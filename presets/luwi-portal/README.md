@@ -83,8 +83,8 @@ nextTask + router 的 checks) 摆在同一屏上
   有字时长按仍归浏览器的选中 / 粘贴
 - **长按说话那条录音条** (`#lwp-rec`, 照官方截图 + wavesurfer 那套读法): 压住输入卡那一块再高出半截 ——
   左右/底各 12px, **高度 = 输入卡实测高 × 1.5** (`REC_PANEL_MAX 210` 封顶), 圆角 28。
-  第一行左「红点呼吸 + **「松手转写，上滑取消」**」右「计时胶囊 `0:03 / 1:00`」, 第二行是走带波形。
-  **边缘是渐变**: 条子的上沿 `-webkit-mask-image` 22px 淡出 (与页面之间没有硬接缝), 波形左右两端各 9% 淡出;
+  第一行左「红点呼吸 + **「松手转写，上滑取消」**」右「计时胶囊 `0:03 / 5:00`」, 第二行是走带波形,
+  第三行是**实时文字层**。**边缘是渐变**: 条子的上沿 `-webkit-mask-image` 22px 淡出 (与页面之间没有硬接缝), 波形左右两端各 9% 淡出;
   mask 会裁掉外投影, 所以材质只留上沿 1 px 内高光 + 顶部径向柔光 + 3.5% 噪点。
   波形是**真波形**, 不是一排等高柱子: 每 40 ms 折一列 (`REC_SAMPLE_MS`, 窗口 80 列), 峰值 → 保持 (0.995 衰减)
   → 归一化 (`ratio ** 0.6`, 低于 0.02 当静音) → 快起 0.6 / 慢落 0.12; 几何在 `recWaveRects` (走带右对齐 /
@@ -94,10 +94,16 @@ nextTask + router 的 checks) 摆在同一屏上
   **上滑过 56 px** 进「松开取消」态 (条下沉 + 退成中性灰 + 出现向下箭头 + 提示换字), 松手丢弃并说一句
   「已取消」; 松手默认转写 (条上换「正在转写…」+ 三个跳动点), 文字接进草稿 (有字时前留一个空格, 光标到末尾)。
   条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
-  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉。录音在页面
-  (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16), **上限 60 s**、
+  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉 (只有波形行与那颗显隐钮自己收事件)。
+  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面两行 (`aria-live="polite"`), 每 `VOICE_CHUNK_MS`
+  (1500 ms) 把这一段**新增的** PCM 封一小块走桥的 `op=voice-chunk`, 回来的字只追加到这一层 —— 边说边出字;
+  波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler, **只切这一层**, 录音 / 计时 / 波形一动不动。
+  同一个节拍宿主也留一份 (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**, 回到"松手整段转写"。
+  录音在页面 (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16),
+  **上限 300 s**、**一段 60 s 到点滚段** (先把已识别的落进草稿, 再接着录下一段, 连说 90 s 也不丢前面的),
   短于 0.5 s 当误触; 转写在应用 (`ui/PortalVoice.kt` → `LwSpeech.dispatch`, 引擎跟 `lw/voice-source.json`),
-  桥是 `portalVoice` (status / ask / transcribe / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推。没权限 /
+  桥是 `portalVoice` (status / ask / transcribe / voice-chunk / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推
+  (流式那一块带 `kind:"chunk"` / `seq` / `final`, 回来先比 `generation`)。没权限 /
   缺模型 / 没登录 / 太短各有一句人话, 不许静默
 - **顶栏那颗喇叭 = 语音输出（自动朗读）开关**: 翻的是 设置 → 说话 → 「朗读回答」那一格
   (`SpeakSettings.readAloud`, 一处状态两处界面, 桥是 `portalSpeak`), 两副图标——**关 = 喇叭 + 斜杠 /
