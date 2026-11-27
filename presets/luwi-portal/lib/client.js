@@ -325,6 +325,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把草稿尾巴上那一句换成新的 (纯函数, 判据真跑)
+     *
+     * 迟到的整段结果回来时, 兜底已经把实时层那句落进草稿了 —— 这里**替换**那一句而不是再追加一句;
+     * 草稿不以 `tail` 收尾 (人已经发出去 / 改过它) 就原样返回, 一个字都不动
+     * @param current 草稿现在的内容
+     * @param tail 兜底落进去的那一句 (要替换掉的原文)
+     * @param next 整段转写回来的那一句 (替换用的新文字)
+     */
+    function replaceDraftTail(current, tail, next) {
+      var text = typeof current === 'string' ? current : ''
+      var old = typeof tail === 'string' ? tail : ''
+      var fresh = typeof next === 'string' ? next.trim() : ''
+      if (old === '' || fresh === '') return text
+      if (text.length < old.length || text.slice(text.length - old.length) !== old) return text
+      return text.slice(0, text.length - old.length) + fresh
+    }
+
+    /**
      * 实时层新的一行 (纯函数, 判据真跑): 只把新认出来的那几个字接在后面
      *
      * 中文不加空格 (整段拼起来就是那句话); 两截的接缝上**都是英文数字**时才补一格 ——
@@ -5425,6 +5443,14 @@ window.__ModuleLoader__.load({
        * 撞在一起时, 同一句会进草稿两遍 (2026-11-27 审查 B1)
        */
       var voiceLanded = false
+      /**
+       * 兜底已经把某一趟的一句话落进草稿: 这里记下**哪一趟**与**那句原文**
+       *
+       * 迟到的整段结果带着那一趟的号回来时, 拿它把草稿尾巴上那一句**替换**掉 (不许追加第二句);
+       * 人已经发出去 / 改过那句时 `replaceDraftTail` 会原样返回 —— 一个字都不动
+       */
+      var voiceSettledTake = -1
+      var voiceFallbackText = ''
       /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
       var pressTimer = null
       /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
@@ -5484,6 +5510,8 @@ window.__ModuleLoader__.load({
         voiceLiveText = ''
         voiceStreamOff = false
         voiceLanded = false
+        voiceSettledTake = -1
+        voiceFallbackText = ''
         fitRecPanel()
         if (els.rec) {
           els.rec.setAttribute('data-on', 'on')
@@ -5741,7 +5769,10 @@ window.__ModuleLoader__.load({
           var said = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
           voiceLanded = said !== ''
-          // 这一趟到此为止: 迟到的整段结果不许再往草稿里写一遍
+          // 号作废 (迟到的整段走不到普通那条分支), 但**把号与那句原文留下**:
+          // 它回来时是替换草稿尾巴上那一句, 不是再追加一句
+          voiceSettledTake = said !== '' ? take : -1
+          voiceFallbackText = said
           voiceId += 1
           hideRecPanel()
           if (said !== '') {
@@ -5901,9 +5932,12 @@ window.__ModuleLoader__.load({
         recStartY = 0
         voiceHeld = true
         // **按下去就作废上一趟** (2026-11-27 审查 ⑨): 上一趟的整段结果若在这个 press 窗口里回来,
-        // 它会带着旧号, 一进 `voiceAnswer` 就被丢掉 —— 不许插进这一趟的草稿、把新面板关掉
+        // 它会带着旧号, 一进 `voiceAnswer` 就被丢掉 —— 不许插进这一趟的草稿、把新面板关掉;
+        // 上一趟的"迟到替换"也一并收摊 (草稿尾巴从这一刻起归这一趟)
         voiceId += 1
         voiceLanded = false
+        voiceSettledTake = -1
+        voiceFallbackText = ''
         if (voiceWatch !== null) {
           clearTimeout(voiceWatch)
           voiceWatch = null
@@ -6244,6 +6278,11 @@ window.__ModuleLoader__.load({
         }
         // 整段转写的结果只可能出现在"已经松手"之后: 还在录的时候来的一律当陈旧回推
         if (voiceState === 'recording') return
+        // 兜底已经落过草稿的那一趟: 迟到的整段回来是**替换**草稿尾巴上那一句, 不是再追加一句
+        if (payload.ok === true && typeof payload.id === 'number' && payload.id === voiceSettledTake) {
+          settleVoiceReplacement(String(payload.text === undefined || payload.text === null ? '' : payload.text))
+          return
+        }
         if (typeof payload.id === 'number' && payload.id !== voiceId) return
         // 这一趟的结果已经落过草稿 (看门狗兜底 / 同步被拒那条路): 迟到的整段不许再写一遍 (审查 B1)
         if (voiceLanded) return
@@ -6282,6 +6321,34 @@ window.__ModuleLoader__.load({
         if (els.input) {
           try { els.input.focus() } catch (_noFocus) { /* 页还没上屏时 focus 会抛, 忽略 */ }
         }
+      }
+
+      /**
+       * 迟到的整段替换兜底那一句 (2026-11-27 窄单第 1 条)
+       *
+       * 草稿尾巴上还是兜底那句原文时才替换 (见 `replaceDraftTail`); 人已经发出去 / 改过它,
+       * 一个字都不动 —— 新开的那份草稿里更不许凭空多出一句
+       * @param final 迟到的整段转写结果
+       */
+      function settleVoiceReplacement(final) {
+        var tail = voiceFallbackText
+        voiceSettledTake = -1
+        voiceFallbackText = ''
+        voiceLanded = false
+        if (!els.input || tail === '') return
+        var current = String(els.input.value || '')
+        var next = replaceDraftTail(current, tail, final)
+        if (next === current) return
+        els.input.value = next
+        try {
+          els.input.dispatchEvent(new Event('input', { bubbles: true }))
+        } catch (_noEvent) {
+          // 事件派不出去的那台机器: 两道都当场补上 (门与高度)
+          updateSendGate()
+          autoSizeInput()
+        }
+        try { els.input.setSelectionRange(next.length, next.length) } catch (_noSelection) { /* 老 WebView */ }
+        updateSendGate()
       }
 
       /**
