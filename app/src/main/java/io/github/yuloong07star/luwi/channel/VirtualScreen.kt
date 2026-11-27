@@ -132,18 +132,26 @@ object VirtualScreen {
      */
     private val closed = LinkedHashMap<Int, ClosedScreen>()
 
-    /** Where a picture of the screen is left, which only the app's own directories can be */
-    @Volatile
-    private var pictures: File? = null
-
     /**
-     * OCR 那条路取的裸像素
+     * 截图/读屏的**暂存目录** (`screencap` 往这里写, 这边读)
      *
-     * 与模型看的那张 PNG 不是一个文件: OCR 要的是像素不是文件, 走 raw 能省掉 `screencap` 的 PNG
-     * 编码与这边的解码 (k40 上实测一次省三百毫秒以上); 换一个名字只是让两件事并发时互不覆盖
+     * 以前这里是两个固定的文件, 每次截图都复写同一份 —— 而 `screenshot()` 与 `capture()` 跑在
+     * cachedThreadPool 的请求线程上, 两个并发请求 (agent 同时发 `lw_screenshot` 与 `lw_ocr`, 或者
+     * 两个会话各拍一张) 就同时在删、写、读同一个路径: 拿回来的可能是上一张、别人那张, 或者上下半
+     * 张不同帧的撕裂画面 (审计 P0 第 4 条)。现在每次截图自己起一个随机名字的文件, 真正要独占的
+     * 只有"截一张 + 立刻读走"那一段, 见 [captureLock]
      */
     @Volatile
-    private var picturesRaw: File? = null
+    private var stagingDirectory: File? = null
+
+    /**
+     * 主屏那一条串行闸: `screencap` 写暂存文件与这边读走它必须连在一起
+     *
+     * 不同请求各用各的文件之后, 唯一还会互相干扰的是"这一帧是不是我要的那一帧" (尺寸核对在
+     * [captureSettled] 里), 所以那一段仍然一把锁串起来; 两把锁按 displayId 分不必了 —— 主屏是唯一
+     * 走 `screencap` 的那条路, 而它一次只该有一张在途
+     */
+    private val captureLock = Any()
 
     /** The app, kept for the one thing here that needs to name a directory of its own */
     @Volatile
@@ -184,8 +192,31 @@ object VirtualScreen {
         application = context.applicationContext
         val scratch = File(SHELL_SCRATCH)
         val directory = if (scratch.isDirectory) scratch else context.applicationContext.cacheDir
-        pictures = File(directory, "$PICTURE_PREFIX${UUID.randomUUID()}$PICTURE_SUFFIX")
-        picturesRaw = File(directory, "$PICTURE_PREFIX${UUID.randomUUID()}$RAW_SUFFIX")
+        // 只是目录: 每一次截图自己起一个随机名字的文件 (见 [stagedOf])
+        stagingDirectory = directory
+        sweepStaged(directory)
+    }
+
+    /**
+     * 清掉上一次留下的暂存件
+     *
+     * 现在的写法是每次截图 `finally` 里删自己那一份, 但删不掉的路径一直存在: 进程被杀、写盘半截、
+     * 老版本留下的文件 (那些是固定名字, 永远不会被新代码碰到)。`/data/local/tmp` 对整机可见,
+     * 一张截图留在那儿就是**一块屏幕留在那儿**, 随机名字只挡猜不挡列举
+     *
+     * 于是每次启动扫一遍: 只认自己那个前缀, 只删一小时以前的 (正在跑的那一次不会有一小时)
+     */
+    private fun sweepStaged(directory: File) {
+        val cutoff = System.currentTimeMillis() - STALE_STAGE_MS
+        val stale = runCatching {
+            directory.listFiles { file ->
+                file.isFile && file.name.startsWith(PICTURE_PREFIX) && file.lastModified() < cutoff
+            }.orEmpty()
+        }.getOrDefault(emptyArray())
+        if (stale.isEmpty()) return
+        var gone = 0
+        for (file in stale) if (runCatching { file.delete() }.getOrDefault(false)) gone += 1
+        Log.i(TAG, "swept $gone/${stale.size} stale screenshot files from ${directory.absolutePath}")
     }
 
     /**
@@ -642,16 +673,28 @@ object VirtualScreen {
         val picture = File(screens(), "screen-${screen.displayId}$suffix.png")
         return try {
             if (screen.displayId == MAIN_DISPLAY) {
-                val staging = pictures ?: run {
+                val stage = stagedOf(PICTURE_SUFFIX) ?: run {
                     lastError = "no directory to write a picture into"
                     return null
                 }
-                val stale = captureSettled(screen, staging)
-                if (stale != null) {
-                    lastError = stale
-                    return null
+                try {
+                    // 截一张 + 立刻拷走: 这两步之间不能插进另一张截图 (见 [captureLock])
+                    val stale = synchronized(captureLock) {
+                        val problem = captureSettled(screen, stage)
+                        if (problem != null) {
+                            problem
+                        } else {
+                            stage.copyTo(picture, overwrite = true)
+                            null
+                        }
+                    }
+                    if (stale != null) {
+                        lastError = stale
+                        return null
+                    }
+                } finally {
+                    stage.delete()
                 }
-                staging.copyTo(picture, overwrite = true)
             } else {
                 val frame = frames[screen.displayId]?.latest() ?: run {
                     lastError = NOTHING_DRAWN
@@ -750,6 +793,17 @@ object VirtualScreen {
      *
      * @returns why the picture never matched, or null once one did
      */
+    /**
+     * 这一次截图自己的暂存文件 (随机名字, 用完就删)
+     *
+     * 名字里带随机段还有第二个理由 (与 [initialize] 里那句一样): `/data/local/tmp` 对整机可读,
+     * 猜不到名字的截图才不会被别的进程捡走
+     */
+    private fun stagedOf(suffix: String): File? {
+        val directory = stagingDirectory ?: return null
+        return File(directory, "$PICTURE_PREFIX${UUID.randomUUID()}$suffix")
+    }
+
     private fun captureSettled(screen: ScreenState, staging: File, png: Boolean = true): String? {
         var last = "nothing"
         repeat(CAPTURE_ATTEMPTS) { attempt ->
@@ -885,21 +939,30 @@ object VirtualScreen {
     fun capture(screen: ScreenState): Bitmap? {
         return try {
             if (screen.displayId == MAIN_DISPLAY) {
-                val staging = picturesRaw ?: run {
+                val stage = stagedOf(RAW_SUFFIX) ?: run {
                     lastError = "no directory to write a picture into"
                     return null
                 }
-                val stale = captureSettled(screen, staging, png = false)
-                if (stale != null) {
-                    lastError = stale
-                    return null
+                val bitmap = try {
+                    // 与 [screenshot] 同一把闸: 读走这一帧之前不许别的截图盖文件
+                    synchronized(captureLock) {
+                        val stale = captureSettled(screen, stage, png = false)
+                        if (stale != null) {
+                            lastError = stale
+                            return null
+                        }
+                        // raw 读不出来时再按 PNG 解一遍: 万一那头还是老版本, 只认 `-p`, 写回来的仍是 PNG
+                        rawFrame(stage) ?: BitmapFactory.decodeFile(stage.absolutePath)
+                    }
+                } finally {
+                    stage.delete()
                 }
-                // raw 读不出来时再按 PNG 解一遍: 万一那头还是老版本, 只认 `-p`, 写回来的仍是 PNG
-                rawFrame(staging) ?: BitmapFactory.decodeFile(staging.absolutePath)
-            } else {
-                frames[screen.displayId]?.latest()
-            }.also { bitmap ->
                 lastError = if (bitmap == null) NOTHING_DRAWN else null
+                bitmap
+            } else {
+                frames[screen.displayId]?.latest().also { bitmap ->
+                    lastError = if (bitmap == null) NOTHING_DRAWN else null
+                }
             }
         } catch (problem: Throwable) {
             report("capture", problem)
@@ -945,6 +1008,9 @@ object VirtualScreen {
 
     /** 裸像素那份暂存文件的后缀: 内容不是 PNG, 名字也不该叫 PNG */
     private const val RAW_SUFFIX = ".raw"
+
+    /** 暂存件放多久算"上次留下的" (见 [sweepStaged]: 正在跑的那一次不会有一小时) */
+    private const val STALE_STAGE_MS = 60L * 60L * 1000L
 
     /** Where in the workspace pictures are kept, which the model can read and the user can open */
     private const val SCREENSHOTS = "screenshots"

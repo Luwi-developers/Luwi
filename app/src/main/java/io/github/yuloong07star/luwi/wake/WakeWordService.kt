@@ -581,22 +581,34 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
             Log.i(TAG, "video-mode residency is now $wanted")
             return START_STICKY
         }
-        val directory = intent?.getStringExtra(EXTRA_MODEL_DIR)
-        val keywords = intent?.getStringExtra(EXTRA_KEYWORDS_FILE)
-        if (directory.isNullOrEmpty() || keywords.isNullOrEmpty()) {
-            fail("the model directory and the keywords file both have to be handed over")
-            return START_NOT_STICKY
+        // **系统按 START_STICKY 把服务重新拉起来时 intent 是 null**, 原始 extras 不会跟着回来。
+        // 旧版在这里直接 fail() + START_NOT_STICKY —— 于是"被系统回收过一次"之后唤醒词就再也不醒了,
+        // 而界面上只剩一句"the model directory and the keywords file both have to be handed over"
+        // (审计 P0 第 2 条)。模型与词表都在 filesDir 下, 本来就不依赖那一次 intent: 缺哪一项就按本机
+        // 的缺省位置重建, 只有连缺省位置都凑不齐 (模型没下过) 才真的停
+        val namedDirectory = intent?.getStringExtra(EXTRA_MODEL_DIR)
+        val namedKeywords = intent?.getStringExtra(EXTRA_KEYWORDS_FILE)
+        val directory = if (namedDirectory.isNullOrEmpty()) LwWakeWord.directory(this) else File(namedDirectory)
+        val keywords = if (namedKeywords.isNullOrEmpty()) LwWakeWord.keywordsFileFor(directory) else File(namedKeywords)
+        if (intent == null) {
+            // 重启那条路不带参数: 把"上次为什么停下"的旧错误清掉, 免得设置页一直挂着它
+            WakeWordState.lastError = ""
+            Log.i(TAG, "restarted by the system: re-arming from ${directory.absolutePath}")
         }
-        modelDirectory = File(directory)
-        keywordsFile = File(keywords)
+        modelDirectory = directory
+        keywordsFile = keywords
         // 四个数各有缺省 (见 [WakeTuning]), 而通道那条 op=start 仍可以逐个点名覆盖 —— 真机回调要用
-        threshold = intent.getDoubleExtra(EXTRA_THRESHOLD, WakeTuning.KEYWORDS_THRESHOLD.toDouble()).toFloat()
-        score = intent.getDoubleExtra(EXTRA_SCORE, WakeTuning.KEYWORDS_SCORE.toDouble()).toFloat()
-        maxActivePaths = intent.getIntExtra(EXTRA_MAX_ACTIVE_PATHS, WakeTuning.MAX_ACTIVE_PATHS)
-        trailingBlanks = intent.getIntExtra(EXTRA_TRAILING_BLANKS, WakeTuning.NUM_TRAILING_BLANKS)
-        onWake = intent.getStringExtra(EXTRA_ON_WAKE) ?: WAKE_TO_APP
-        vibrateMs = intent.getIntExtra(EXTRA_VIBRATE_MS, DEFAULT_VIBRATE_MS)
-        onHit = intent.getStringExtra(EXTRA_ON_HIT) ?: LwWakeWord.onHit(this)
+        threshold = (intent?.getDoubleExtra(EXTRA_THRESHOLD, WakeTuning.KEYWORDS_THRESHOLD.toDouble())
+            ?: WakeTuning.KEYWORDS_THRESHOLD.toDouble()).toFloat()
+        score = (intent?.getDoubleExtra(EXTRA_SCORE, WakeTuning.KEYWORDS_SCORE.toDouble())
+            ?: WakeTuning.KEYWORDS_SCORE.toDouble()).toFloat()
+        maxActivePaths = intent?.getIntExtra(EXTRA_MAX_ACTIVE_PATHS, WakeTuning.MAX_ACTIVE_PATHS)
+            ?: WakeTuning.MAX_ACTIVE_PATHS
+        trailingBlanks = intent?.getIntExtra(EXTRA_TRAILING_BLANKS, WakeTuning.NUM_TRAILING_BLANKS)
+            ?: WakeTuning.NUM_TRAILING_BLANKS
+        onWake = intent?.getStringExtra(EXTRA_ON_WAKE) ?: WAKE_TO_APP
+        vibrateMs = intent?.getIntExtra(EXTRA_VIBRATE_MS, DEFAULT_VIBRATE_MS) ?: DEFAULT_VIBRATE_MS
+        onHit = intent?.getStringExtra(EXTRA_ON_HIT) ?: LwWakeWord.onHit(this)
         // 视频模式那个记号: 服务起来时读一次, 它是"这一路要不要留着"的唯一来源
         voiceResidency = residentWanted()
         refreshVideoTarget()
@@ -1199,6 +1211,20 @@ class WakeWordService : Service() {    private var spotter: KeywordSpotter? = nu
     private fun onCaptureError(reason: String) {
         VoiceState.lastError = reason
         Log.w(TAG, reason)
+        // 采集线程自己判死的 (读失败 / 连续空帧): 这一路已经收不到音频了, 状态与球上那句都得跟着收 ——
+        // 旧版只记一行错误, `listening` 仍是 true, 球上一直写着"正在听"却一个采样都进不来
+        val dead = capture
+        if (dead?.stoppedByError != true) return
+        capture = null
+        listening = false
+        WakeWordState.listening = false
+        WakeWordState.voiceActive = false
+        // 放麦克风与改界面都挪到另一条线程: 这条消息是采集线程自己发出来的, 在它上面 stop() 会去
+        // join 自己 (白等 WORKER_JOIN_MS), 而 announce 也不该压着采集线程
+        Thread({
+            runCatching { dead.stop() }
+            runCatching { announce(listeningText()) }
+        }, "lw-audio-release").start()
     }
 
     private val preheating = AtomicBoolean(false)

@@ -69,7 +69,7 @@ function makePanel(opts = {}) {
   const workspaceEngine = opts.workspaceEngine === undefined ? null : opts.workspaceEngine
   const deps = {
     mirrors: [
-      { target: 'sessions', label: '会话', engine, repoDir: opts.repoDir ?? '', remote: opts.remote ?? '', mirrorDir: 'sessions' },
+      { target: 'sessions', label: '会话', engine, repoDir: opts.repoDir ?? '', remote: opts.remote ?? '', mirrorDir: 'sessions', readRemote: opts.readRemote },
       { target: 'workspace', label: '工作区', engine: workspaceEngine, repoDir: '', remote: '', mirrorDir: 'workspace' },
     ],
     readMetaFor: () => async () => ({
@@ -79,6 +79,8 @@ function makePanel(opts = {}) {
       lastError: opts.lastError,
     }),
     readPeers: opts.readPeers ?? (async () => ({ cards: [{ deviceId: 'p1', name: 'PC', url: '', updatedAt: '' }], broken: 0 })),
+    // Luwi 修 (2026-11-23, 审计 P1 第 9 条): 配置面每趟重读文件, 这两口由面板往宿主半传
+    readConfig: opts.readConfig,
     readP2p: opts.readP2p,
     p2pConfirm: opts.p2pConfirm,
     p2pRevoke: opts.p2pRevoke,
@@ -486,3 +488,32 @@ test('账号那一组 op 与 license 块整条下线: 发过来就是未知 op, 
   assert.equal(snapshot.v, 5)
 })
 
+// ── 配置面取即时值 (2026-11-23, 审计 P1 第 9 条) ─────────────────────────────
+
+test('snapshot: 配置面每趟重读文件, 卡片 remote 也取即时值', async () => {
+  let reads = 0
+  const { panel } = makePanel({
+    // info.config 是 host 启动那一刻的 (remote 空 = 未配置), 文件里其实已经填好了
+    readConfig: async () => {
+      reads += 1
+      return { repoDir: '', branch: 'main', deviceName: 'PC', backend: 'git', remoteState: 'set', hasRemoteToken: true }
+    },
+    readRemote: () => 'https://github.com/octo/sessions.git',
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(reads, 1)
+  assert.equal(snap.config.remoteState, 'set')
+  assert.equal(snap.config.hasRemoteToken, true)
+  assert.equal(snap.mirrors[0].remote.state, 'set')
+})
+
+test('snapshot: 重读失败时退回挂载快照, 整块不报错', async () => {
+  const { panel } = makePanel({
+    readConfig: async () => {
+      throw new Error('disk gone')
+    },
+  })
+  const snap = await panel.snapshot({ withStatus: false })
+  assert.equal(snap.config.remoteState, 'unset')
+  assert.equal(snap.v, 5)
+})

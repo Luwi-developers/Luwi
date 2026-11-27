@@ -39,6 +39,16 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
     /** 采集线程现在在跑没有 (与麦克风是否真的打开是两件事, 但正常时同进同退) */
     val isRunning: Boolean get() = running
 
+    /**
+     * 这一路是"开起来之后被读失败/连续空帧判死"的, 不是正常 [stop] 或开麦失败
+     *
+     * 调用方靠它区分"麦克风起不来" (起服务那一下的硬失败) 与"跑着跑着哑了" (这一路已经没有音频,
+     * 界面上不该再写着"正在听")。置位在 [stopBecause], [start] 与 [stop] 都把它清掉
+     */
+    @Volatile
+    var stoppedByError: Boolean = false
+        private set
+
     fun add(sink: Sink) {
         sinks += sink
     }
@@ -55,6 +65,7 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
      */
     fun start(): Boolean {
         if (running) return true
+        stoppedByError = false
         val device = try {
             open()
         } catch (error: Throwable) {
@@ -80,6 +91,7 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
     fun stop() {
         if (!running && recorder == null) return
         running = false
+        stoppedByError = false
         worker?.let { runCatching { it.join(WORKER_JOIN_MS) } }
         worker = null
         recorder?.let { device ->
@@ -91,14 +103,39 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
 
     private fun loop(device: AudioRecord) {
         val buffer = ShortArray(FRAME_SAMPLES)
+        var emptyReads = 0
         while (running) {
             val read = try {
                 device.read(buffer, 0, buffer.size)
             } catch (error: Throwable) {
-                onError("reading the microphone failed: ${error.message ?: error}")
+                stopBecause("reading the microphone failed: ${error.message ?: error}")
                 return
             }
-            if (read <= 0) continue
+            // 负数是错误码 (ERROR_INVALID_OPERATION / ERROR_DEAD_OBJECT / …): 旧版只是 `continue`,
+            // 于是麦克风被别的应用抢走、设备被拔掉、录音被系统收回之后这里会**永久空转** —— 采集
+            // 线程占着 CPU 一帧都读不到, 而界面上还写着"正在听" (审计 P0 第 3 条)
+            if (read < 0) {
+                stopBecause("reading the microphone failed: read returned $read")
+                return
+            }
+            // 0 是"这一帧还没有数据", 本身正常 (设备切换、被降噪占用时连着来几帧), 但不能裸 continue:
+            // 让一小会儿再读, 连着太多次就按这一路废掉处理
+            if (read == 0) {
+                emptyReads += 1
+                if (emptyReads >= MAX_EMPTY_READS) {
+                    stopBecause("the microphone handed over $emptyReads empty frames in a row; the capture has been stopped")
+                    return
+                }
+                try {
+                    Thread.sleep(EMPTY_READ_PAUSE_MS)
+                } catch (interrupted: InterruptedException) {
+                    // stop() 把线程叫醒: 这不是错误, 正常收工
+                    Thread.currentThread().interrupt()
+                    return
+                }
+                continue
+            }
+            emptyReads = 0
             val samples = FloatArray(read) { buffer[it] / 32768.0f }
             for (sink in sinks) {
                 // 一个消费者炸了不能把采集带走: 另一个消费者还在听, 而"唤醒词还能用"比"VAD 出错"
@@ -110,6 +147,18 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
                 }
             }
         }
+    }
+
+    /**
+     * 采集线程自己判死: 先把 [running] 放下来 (循环不再转), 再报给外面
+     *
+     * 顺序不能反 —— 调用方拿到这条消息时会去看 [isRunning] / [stoppedByError], 早报一毫秒就会读到
+     * "还活着"。麦克风那一半照旧由 [stop] 放掉 (它在别的线程上, 这里只标记)
+     */
+    private fun stopBecause(reason: String) {
+        running = false
+        stoppedByError = true
+        onError(reason)
     }
 
     private fun open(): AudioRecord {
@@ -141,6 +190,12 @@ internal class AudioCapture(private val onError: (String) -> Unit) {
         const val FRAME_SAMPLES = SAMPLE_RATE / 10
 
         private const val WORKER_JOIN_MS = 2000L
+
+        /** 读到 0 之后让一小会儿, 别在 while 里裸转 */
+        private const val EMPTY_READ_PAUSE_MS = 20L
+
+        /** 连续这么多次读到 0 (约 1 秒) 就把这一路判死 */
+        private const val MAX_EMPTY_READS = 50
         private const val TAG = "LwVoice"
     }
 }

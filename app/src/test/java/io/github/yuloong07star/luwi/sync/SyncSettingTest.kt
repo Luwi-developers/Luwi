@@ -88,6 +88,32 @@ class SyncSettingTest {
     /* ── 写: 保留未知键 ─────────────────────────────────────── */
 
     @Test
+    fun `写盘遇到读不懂的文件先挪开, 原文件一个字节都不覆盖`() {
+        val root = dir()
+        val target = file(root)
+        val original = "{ not json 但这是我手工写的半个"
+        target.writeText(original)
+        val complaint = SyncSetting.setTextIn(target, SyncSetting.FIELD_SESSION_REMOTE, "git://new/sessions.git")
+        assertNotNull("读不懂要回一句人话, 不能静默当成空树写回去", complaint)
+        assertTrue(complaint!!.contains("bak-broken"))
+        assertFalse("一个字节都不许覆盖", target.exists())
+        val parked = root.listFiles()?.firstOrNull { it.name.startsWith("${SyncSetting.FILE}.bak-broken-") }
+        assertNotNull("那份读不懂的要留着, 别删", parked)
+        assertEquals(original, parked!!.readText())
+    }
+
+    @Test
+    fun `写盘留下的是整份 JSON, 中途的临时文件不留`() {
+        val root = dir()
+        val target = file(root)
+        target.writeText("""{"remote":"git://old/x.git"}""")
+        assertNull(SyncSetting.setTextIn(target, SyncSetting.FIELD_SESSION_REMOTE, "git://new/x.git"))
+        val leftovers = root.listFiles()?.filter { it.name.endsWith(".tmp") } ?: emptyList()
+        assertTrue("临时文件要自己收走: $leftovers", leftovers.isEmpty())
+        assertEquals("git://new/x.git", SyncSetting.snapshotOf(target).sessionRemote)
+    }
+
+    @Test
     fun `写一个键不吃掉别的键`() {
         val root = dir()
         val target = file(root)
@@ -205,6 +231,28 @@ class SyncSettingTest {
         assertFalse(shown.contains("0123456789abcdef"))
         assertTrue(shown.contains("••••cdef"))
         assertTrue(shown.contains("\"token\""))
+    }
+
+    @Test
+    fun `地址里拼着的令牌也要打码`() {
+        val root = dir()
+        val target = file(root)
+        val withToken = "https://x-access-token:ghp_0123456789abcdef@github.com/owner/repo.git"
+        assertNull(SyncSetting.setTextIn(target, SyncSetting.FIELD_SESSION_REMOTE, withToken))
+        val shown = SyncSetting.prettyOf(target)
+        assertFalse(shown.contains("ghp_0123456789abcdef"))
+        assertTrue(shown.contains("••••cdef@github.com/owner/repo.git"))
+        assertEquals(
+            "https://x-access-token:••••cdef@github.com/owner/repo.git",
+            SyncSetting.maskedRemote(withToken),
+        )
+    }
+
+    @Test
+    fun `不打码的地址原样留着`() {
+        assertEquals("https://github.com/owner/repo.git", SyncSetting.maskedRemote("https://github.com/owner/repo.git"))
+        assertEquals("/srv/git/repo.git", SyncSetting.maskedRemote("/srv/git/repo.git"))
+        assertEquals("", SyncSetting.maskedRemote(""))
     }
 
     @Test

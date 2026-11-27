@@ -296,7 +296,9 @@ export function createPanel(deps) {
     } catch (thrown) {
       error = error ?? messageOf(thrown)
     }
-    const remote = describeRemote(mirror.remote)
+    // Luwi 修 (2026-11-23, 审计 P1 第 9 条): 卡片上的仓库地址也取即时值 (挂载快照里的 remote
+    // 是 host 启动那一刻的, 面板填完地址不重启就永远显示"未配置")
+    const remote = describeRemote(typeof mirror.readRemote === 'function' ? mirror.readRemote() : mirror.remote)
     const ts = now()
     return {
       target: mirror.target,
@@ -326,6 +328,16 @@ export function createPanel(deps) {
    * @returns {Promise<object>} 快照 JSON。
    */
   async function snapshot(opts = {}) {
+    // Luwi 修 (2026-11-23, 审计 P1 第 9 条): 配置面每趟重读文件, 不再回放 host 启动时的快照
+    // (旧行为: 面板里保存了地址, 下一次打开还写着"未配置", 必须重启桌面端才认)
+    let config = deps.info.config
+    if (typeof deps.readConfig === 'function') {
+      try {
+        config = await deps.readConfig()
+      } catch {
+        config = deps.info.config
+      }
+    }
     const withStatus = opts.withStatus !== false
     const ts = now()
     const mirrors = []
@@ -378,7 +390,7 @@ export function createPanel(deps) {
         runner: deps.info.runner ?? '',
         disabledReason: deps.info.disabledReason ?? undefined,
       },
-      config: deps.info.config,
+      config,
       mirrors,
       peers,
       ...(peer === null ? {} : { peer }),

@@ -118,3 +118,63 @@ test('sync_push still fails closed without an answerer (而不是抛 ReferenceEr
   assert.equal(value.ok, false)
   assert.match(String(value.error), /confirmation|answerer/iu)
 })
+
+// ---------------------------------------------------------------------------
+// 输出 schema 必须**声明**工具真的会交回去的每一个键
+//
+// 症状 (2026-11-23 Android 真机): 手机上 sync_status / sync_pull / sync_push 每次必炸
+//   `tool "sync_status" returned invalid output: "value.sources[1].budget.files" is not a
+//    declared property (additionalProperties: false)`
+// 根因: schema 写的是 additionalProperties:false, 而引擎实发的键比它声明的多 ——
+//   预算那层实发 {files, bytes, over}, schema 只写了 {maxFiles, maxBytes};
+//   pull 实发 via/purged/skipped/failed, push 实发 via, 全都没声明。
+//   Android 恒走 api.github.com 那条路, 于是每调必报; 桌面端偶尔走 git 路才漏过去。
+// 这条测试锁住"实发键 ⊆ 声明键", 再加键就得同时改 schema。
+// ---------------------------------------------------------------------------
+
+/** schema 里某条路径上的 properties 名集合 (找不到就空集)。 */
+function declaredKeys(schema, path = []) {
+  let node = schema
+  for (const step of path) {
+    node = node?.properties?.[step]
+    if (node === undefined) return new Set()
+  }
+  return new Set(Object.keys(node?.properties ?? {}))
+}
+
+test('预算那一层的 schema 声明了引擎实发的 files / bytes / over', () => {
+  const status = makeSyncStatusTool(
+    () => ({ ok: true, scope: 'sessions', engine: { status: async () => ({}) }, label: '' }),
+    async () => ({}),
+    undefined,
+  )
+  const statusResult = status.output.schema.properties.sources.items
+  const statusBudget = new Set(Object.keys(statusResult.properties.budget.properties))
+  for (const key of ['files', 'bytes', 'over']) assert.ok(statusBudget.has(key), `status.budget 缺 ${key}`)
+
+  const push = makeSyncPushTool({
+    resolveTarget: () => ({ ok: true, engine: { push: async () => ({ ok: true }) }, label: '' }),
+    ctx: { get: () => undefined },
+    confirmVia: 'auto',
+    eventGate: () => ({ append: false }),
+    logger: { warn() {} },
+  })
+  const pushBudget = new Set(Object.keys(push.output.schema.properties.sources.items.properties.budget.properties))
+  for (const key of ['files', 'bytes', 'over']) assert.ok(pushBudget.has(key), `push.budget 缺 ${key}`)
+})
+
+test('sync_pull / sync_push 的 schema 声明了 via (pull 另加 purged / skipped / failed)', () => {
+  const deps = () => ({
+    resolveTarget: () => ({ ok: true, engine: { pull: async () => ({ ok: true }), push: async () => ({ ok: true }) }, label: '' }),
+    ctx: { get: () => undefined },
+    confirmVia: 'auto',
+    eventGate: () => ({ append: false }),
+    logger: { warn() {} },
+  })
+  const pullKeys = declaredKeys(makeSyncPullTool(deps()).output.schema)
+  for (const key of ['via', 'purged', 'skipped', 'failed']) assert.ok(pullKeys.has(key), `sync_pull 缺 ${key}`)
+  const pushKeys = declaredKeys(makeSyncPushTool(deps()).output.schema)
+  assert.ok(pushKeys.has('via'), 'sync_push 缺 via')
+  // 严格模式要留着 —— 放宽 additionalProperties 不是这次的修法
+  assert.equal(makeSyncPullTool(deps()).output.schema.additionalProperties, false)
+})
