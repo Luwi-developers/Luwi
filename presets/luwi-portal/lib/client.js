@@ -102,23 +102,26 @@ window.__ModuleLoader__.load({
     /** 按住输入框多久算"我要说话" (再短就是点了一下, 留给光标) */
     var VOICE_LONG_PRESS_MS = 450
     /**
-     * 一次最多按住 300 s (2.8.1 #F10): 与宿主 `PortalVoice.MAX_SECONDS` 同一个数 (判据钉住)
+     * 一次最多按住 120 s (2.8.1 #F10): 与宿主 `PortalVoice.MAX_SECONDS`、上游 `LwDeepseekAsr.MAX_SECONDS`
+     * 同一个数 (判据钉住)
      *
-     * 原来是 60 s 到点整段作废; 现在 60 s 那一道只是**滚段** (见 `VOICE_SEGMENT_MS`), 硬上限抬到 5 分钟
+     * 旧版 60 s 到点整段作废; 现在**没有那一道边界** —— 一次整段 ≤ 120 s 由整段转写一把认完
+     * (云端那侧自己按 60 s 切开并在接缝上挑低 RMS 点), 所以"连说 90 s"天然不丢前面的话,
+     * 也不再有"到点先落草稿"这种中间档
      */
-    var VOICE_MAX_MS = 300 * 1000
+    var VOICE_MAX_MS = 120 * 1000
     /**
      * 实时文字层的节拍 (2.8.1 #F10): 每 1500 ms 把这一段**新增的** PCM 切片送一块去认
      *
      * 与宿主 `PortalVoice.VOICE_CHUNK_MS` 同一个数 (判据钉住); **0 = 关掉流式**, 回到"松手整段转写"
      */
     var VOICE_CHUNK_MS = 1500
-    /**
-     * 一段最多 60 s: 到点**不丢**前面说的话 —— 先把已识别的落进草稿, 再接着录下一段
-     *
-     * 旧版到点就整段作废 (屏上回一句"再短点说"), 连说 90 s 的人只剩最后半分钟
-     */
-    var VOICE_SEGMENT_MS = 60 * 1000
+    /** 一块最多带 3 s 的声音: 页面被切后台时采样照走而节拍停, 回来时别把半分钟封成一坨过桥 */
+    var VOICE_CHUNK_SLICE_MS = 3000
+    /** 同时最多几块在途 (`seq - seen`): 一块认不完就不再往下压, 免得上游排队排到松手之后 */
+    var VOICE_CHUNK_INFLIGHT_MAX = 2
+    /** 连着几块认不出来就关掉流式 (实时层停在那儿, 松手那条整段转写照旧) */
+    var VOICE_CHUNK_FAIL_MAX = 3
     /** 短于 0.5 s 当作误触: 不送转写, 只说一句"太短了" */
     var VOICE_MIN_MS = 500
     /** 转写等太久的那道闸 (原生没回推时把"正在识别…"收回 idle, 免得永远停在那儿) */
@@ -254,6 +257,18 @@ window.__ModuleLoader__.load({
      * 录音时波形行下面多一行"边说边出字": 每 `VOICE_CHUNK_MS` 把这一段新增的声音送去认一块,
      * 回来的字只追加到那一层. 三件事各抽成一个纯函数 —— 什么时候该送 / 怎么接字 / 松手写什么
      */
+
+    /**
+     * 秒 → `m:ss` (纯函数, 判据真跑): 90 s 是 `1:30`, 不是 `0:90`
+     * @param total 已经说了多少秒
+     */
+    function clockOf(total) {
+      var value = typeof total === 'number' && isFinite(total) ? Math.floor(total) : 0
+      if (value < 0) value = 0
+      var minutes = Math.floor(value / 60)
+      var seconds = value % 60
+      return String(minutes) + ':' + (seconds < 10 ? '0' : '') + String(seconds)
+    }
 
     /**
      * 这一拍该不该送一块去流式识别 (纯函数, 判据真跑)
@@ -1411,11 +1426,16 @@ window.__ModuleLoader__.load({
       'text-shadow:0 1px 0 rgba(0,0,0,.14);transition:opacity .16s ease}',
       '#lwp-voice-live:empty{display:none}',
       '#lwp-rec[data-live="off"] #lwp-voice-live{display:none}',
-      // 波形那一行自带一颗 24px 显隐钮; 行与钮自己**收事件** (面板其余部分仍不吃事件, 抬手照旧落输入框)
+      // 波形那一行自带一颗 24px 显隐钮; 行与钮只在**条子升起来**时收事件 —— 收起态整条只是
+      // opacity:0 (仍占位置), 那时候还收事件就是一条隐形命中区横在输入卡顶上 (点不进输入框)
       '.lwp-rec-wave-row{display:flex;align-items:stretch;gap:8px;flex:1;min-height:24px;pointer-events:none}',
       '.lwp-rec-live-btn{display:grid;place-items:center;flex:none;align-self:center;width:24px;height:24px;',
       'padding:0;border:0;border-radius:999px;background:rgba(255,255,255,.16);color:rgba(255,255,255,.96);',
-      'pointer-events:auto;cursor:pointer;transition:opacity .16s ease,background .16s ease}',
+      'pointer-events:none;cursor:pointer;transition:opacity .16s ease,background .16s ease}',
+      // **只有条子升起来才收事件**: 收起态只是 opacity:0 (还占着位置), 那时候也收事件就是一条
+      // 隐形命中区横在输入卡顶上 —— 点不进输入框, 长按也开不了录音 (2026-11-27 审查 ①)
+      '#lwp-rec[data-on="on"] .lwp-rec-wave-row,#lwp-rec[data-on="on"] .lwp-rec-wave,',
+      '#lwp-rec[data-on="on"] .lwp-rec-live-btn{pointer-events:auto}',
       '@media (hover:hover){.lwp-rec-live-btn:hover{background:rgba(255,255,255,.26)}}',
       '#lwp-rec[data-live="off"] .lwp-rec-live-btn{opacity:.6}',
       // 转写中: 波形那一行让位给三个点, 实时文字**留着** —— 松手那一刻屏上与草稿里是同一句, 人看得见
@@ -1435,7 +1455,7 @@ window.__ModuleLoader__.load({
       'transition:opacity .18s ease,transform .18s cubic-bezier(.23,1,.32,1)}',
       '#lwp-rec[data-cancel="on"] .lwp-rec-arrow{opacity:1;transform:translateY(0)}',
       // 波形: 走带 (新的从右边进); **左右两端各自 9% 淡出** —— 条子进出声都不硬切
-      '.lwp-rec-wave{display:block;width:100%;flex:1;min-height:0;height:100%;pointer-events:auto;',
+      '.lwp-rec-wave{display:block;width:100%;flex:1;min-height:0;height:100%;pointer-events:none;',
       '-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
       'mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0,#000 9%,#000 91%,rgba(0,0,0,0) 100%);',
       'transition:opacity .18s ease;opacity:1}',
@@ -5336,25 +5356,26 @@ window.__ModuleLoader__.load({
       var voiceProcessor = null
       var voiceChunks = null
       var voiceSourceRate = 0
-      /** 这一趟已经送去流式识别的块数 (数 `voiceChunks` 的条目, 每块只认一次) / 上一块送出的时刻 */
+      /** 这一趟已经送去流式识别的采样块数 (数 `voiceChunks` 的条目, 每块只认一次) / 上一块送出的时刻 */
       var voiceChunkCursor = 0
       var voiceChunkAt = 0
-      /** 这一趟**送出去过**几块: 送过的块会从 `voiceChunks` 里剪掉, 所以不能拿 cursor 判"走没走流式" */
-      var voiceChunkSent = 0
-      /** 送出去的块号: 原生日志里那个 `chunk=N` 就是它, 整场连说不重数 */
+      /** 送出去的块号: 原生日志里那个 `chunk=N` 就是它. **发成功之后才加**, 被拒的那一块不算 */
       var voiceChunkSeq = 0
-      /** 最高一块已经接住的块号 (回推乱序时后到的那块丢掉, 实时层不会写重) */
+      /** 最高一块已经有回执的块号 (乱序 / 重发的那块丢掉; 也是背压那笔账的另一半) */
       var voiceChunkSeen = 0
-      /** 流式这一趟攒出来的文字 = 实时层那一份 (松手时与末段拼成草稿, 两处逐字同源) */
+      /** 连着几块没认出来 (到 `VOICE_CHUNK_FAIL_MAX` 就关掉流式) */
+      var voiceChunkFails = 0
+      /**
+       * 实时层攒出来的文字 = **只做展示**
+       *
+       * 草稿以松手那次**整段转写**为准 (卡片口径): 这一份只在整段那条腿彻底失败时才兜底,
+       * 而且兜底时要明说"这是实时层那句", 不许假装是整段的结果
+       */
       var voiceLiveText = ''
       /** 实时文字层现在露着没有 (点波形 / 那颗 24px 钮翻的就是它, 录音本身一动不动) */
       var voiceLiveOn = true
       /** 宿主不认 `op=voice-chunk` 时置真: 这一趟退回"松手整段转写", 不再每 1.5 s 问一次 */
       var voiceStreamOff = false
-      /** 这一段的起始时刻 (满 `VOICE_SEGMENT_MS` 就滚下一段) */
-      var voiceSegmentAt = 0
-      /** 末段那一块回来之后往哪儿落: `segment` = 滚下一段 / `release` = 落草稿收尾 */
-      var voiceCommit = ''
       /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
       var pressTimer = null
       /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
@@ -5403,13 +5424,11 @@ window.__ModuleLoader__.load({
         recGradient = null
         voiceChunkCursor = 0
         voiceChunkAt = 0
-        voiceChunkSent = 0
         voiceChunkSeq = 0
         voiceChunkSeen = 0
+        voiceChunkFails = 0
         voiceLiveText = ''
         voiceStreamOff = false
-        voiceSegmentAt = 0
-        voiceCommit = ''
         fitRecPanel()
         if (els.rec) {
           els.rec.setAttribute('data-on', 'on')
@@ -5447,7 +5466,12 @@ window.__ModuleLoader__.load({
         console.log('[luwi-portal] rec bar ' + wanted + 'px (card ' + Math.round(cardHeight) + 'px)')
       }
 
-      /** 帧循环: 只在真的在录的时候跑 (由 `startRecording` 的 `begin()` 拉起来) */
+      /**
+       * 帧循环: 只在真的在录的时候跑 (由 `startRecording` 的 `begin()` 拉起来)
+       *
+       * 只画波形与计时: **送块不挂在这里** —— WebView 切后台 rAF 会停, 而采样照走
+       * (`voiceTicker` 那 200 ms 一拍才是送块的那条腿, 见 [pumpVoiceChunk])
+       */
       function startRecPump() {
         if (recFrame !== 0) return
         var pump = function () {
@@ -5456,8 +5480,6 @@ window.__ModuleLoader__.load({
           sampleRecColumn(false)
           paintRecWave()
           paintRecTime()
-          pumpVoiceChunk()
-          pumpVoiceSegment()
           recFrame = requestAnimationFrame(pump)
         }
         recFrame = requestAnimationFrame(pump)
@@ -5526,128 +5548,116 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** 这一趟走不走流式: 节拍开着, 宿主也认那一块, 而且真的已经送出去过 */
-      function voiceStreaming() {
-        return VOICE_CHUNK_MS > 0 && voiceStreamOff !== true && voiceChunkSent > 0
-      }
-
       /**
        * 到点就把这一段**新增的** PCM 送一块去认 (实时层那一趟)
        *
-       * 送 `voiceChunkCursor` 之后那几块: 每块只认一次, 不把前面的声音重复认一遍;
-       * 回来的字只追加到实时层, **草稿在这一步一个字都不动**
+       * 三道闸, 顺序不能换:
+       *
+       * 1. **节拍开着没有** (`VOICE_CHUNK_MS > 0`) —— 0 那档一块都不送, 也不剪采样
+       * 2. **在途太深没有** (`seq - seen >= VOICE_CHUNK_INFLIGHT_MAX`) —— 一块认不完就不往下压,
+       *    否则单线程 executor 排队排到松手之后, 实时层永远追不上说的话
+       * 3. **节拍到点没有** (`voiceChunkDue`) —— 上一块之后满 1500 ms 才发
+       *
+       * 这一条腿挂在 `voiceTicker` 的 200 ms 一拍上 (不挂 rAF): 切后台时 rAF 会停而采样照走
        */
       function pumpVoiceChunk() {
         if (voiceState !== 'recording') return
-        if (voiceStreamOff) return
         if (!(VOICE_CHUNK_MS > 0)) return
+        if (voiceStreamOff) return
         if (voiceChunks === null) return
         if (voiceChunks.length <= voiceChunkCursor) return
+        if (voiceChunkSeq - voiceChunkSeen >= VOICE_CHUNK_INFLIGHT_MAX) return
         if (!voiceChunkDue(voiceChunkAt, Date.now(), VOICE_CHUNK_MS)) return
-        sendVoiceChunk(false)
+        sendVoiceChunk()
       }
 
       /**
-       * 送一块去流式识别
-       * @param fin true = 这一段到此为止 (滚段那一块 / 松手那一块)
-       * @returns 真的送出去了没有 (没有新声音时 false)
+       * 送一块去流式识别 (只喂实时层, **不动草稿**)
+       *
+       * 一块最多带 `VOICE_CHUNK_SLICE_MS` 的声音: 页面被切后台时采样一直在走, 回来之后
+       * 按 3 s 一段慢慢追, 不会把半分钟封成一个几十 MB 的 base64 过桥
+       * @returns 真的送出去了没有 (没有新声音 / 宿主忙着时 false)
        */
-      function sendVoiceChunk(fin) {
+      function sendVoiceChunk() {
         var chunks = voiceChunks
         if (chunks === null) return false
-        var slice = chunks.slice(voiceChunkCursor)
-        if (slice.length === 0) return false
-        var wav = wavOf(slice, voiceSourceRate)
+        var rate = voiceSourceRate > 0 ? voiceSourceRate : 48000
+        var want = Math.max(1, Math.round(rate * VOICE_CHUNK_SLICE_MS / 1000))
+        var count = 0
+        var samples = 0
+        while (voiceChunkCursor + count < chunks.length && samples < want) {
+          samples += chunks[voiceChunkCursor + count].length
+          count += 1
+        }
+        if (count === 0) return false
+        var slice = chunks.slice(voiceChunkCursor, voiceChunkCursor + count)
+        var wav = wavOf(slice, rate)
         if (wav.byteLength <= 44) return false
-        voiceChunkCursor = chunks.length
-        voiceChunkAt = Date.now()
-        voiceChunkSeq += 1
-        if (fin === true) voiceCommit = voiceState === 'recording' ? 'segment' : 'release'
+        var seq = voiceChunkSeq + 1
         var answer = call('portalVoice', JSON.stringify({
           op: 'voice-chunk',
           id: voiceId,
-          seq: voiceChunkSeq,
-          final: fin === true,
+          seq: seq,
           data: base64Of(wav),
           language: 'auto',
         }))
-        if (answer === null || answer.ok !== true) {
-          // 这一版宿主还不认这一块: 关掉流式, 松手时退回整段转写 (别每 1.5 s 空问一次)。
-          // **这一趟的采样一块都不剪** —— 整段那条路还要用它们
-          voiceStreamOff = true
+        if (answer !== null && answer.ok === true) {
+          // **发成功之后才推进**: 被拒的那一块不算号, 采样也不剪 —— 草稿那条整段转写要用全部声音
+          voiceChunkSeq = seq
+          voiceChunkCursor += count
+          voiceChunkAt = Date.now()
+          return true
+        }
+        if (answer !== null && answer.code === 'busy') {
+          // 宿主还在认上一块: 这一拍不送, 下一拍再试 (不算失败, 也不关流式)
           return false
         }
-        voiceChunkSent += 1
-        // 送出去的那几块不必再留着: 流式只认新增的那一截. 长按 5 分钟因此也不会把
-        // 整段 48 kHz 的采样 (几百 MB) 全攒在内存里
-        chunks.splice(0, voiceChunkCursor)
-        voiceChunkCursor = 0
-        return true
-      }
-
-      /** 一段到点了 (60 s): 先把已识别的落进草稿, 再接着录下一段 */
-      function pumpVoiceSegment() {
-        if (voiceState !== 'recording') return
-        if (!(VOICE_SEGMENT_MS > 0)) return
-        if (voiceSegmentAt <= 0) return
-        if (Date.now() - voiceSegmentAt < VOICE_SEGMENT_MS) return
-        commitVoiceSegment()
+        // 这一版宿主还不认这一块: 关掉流式, 松手时照旧整段转写
+        voiceStreamOff = true
+        return false
       }
 
       /**
-       * 滚段 (2.8.1 #F10): 旧版到点整段作废, 现在把这一段剩下的声音送去认, 文字回来落草稿
+       * 流式那一块回来的文字 (2.8.1 #F10) —— **只追加到实时层**
        *
-       * **录音不停** —— 面板、计时、波形一帧都不重来, 人只管接着往下说
+       * 失败块自带 `ok:false` / `failed:true` (与"认出空串"分得开): 那一块的字一个都不许混进实时层,
+       * 连着 `VOICE_CHUNK_FAIL_MAX` 块就关掉流式; 草稿不归这条路管, 松手那次整段转写才是准尺
+       * @param payload `{kind:'chunk', id, seq, ok, failed?, text}`
        */
-      function commitVoiceSegment() {
-        voiceSegmentAt = Date.now()
-        if (sendVoiceChunk(true)) return
-        // 这一段后面没有再出声: 实时层已有的那份照样落草稿, 再接着录
-        commitVoiceLive()
-      }
-
-      /** 把实时层已经攒出来的那份写进草稿, 实时层清空接着录下一段 */
-      function commitVoiceLive() {
-        var said = voiceDraftText(voiceLiveText, '')
-        voiceCommit = ''
-        voiceLiveText = ''
-        if (said === '') return
-        insertDraft(said)
-        paintRecLive('')
-      }
-
-      /**
-       * 流式那条路的收尾 (松手那一块回来 / 等不到回音): 实时层那份落草稿
-       *
-       * 草稿与实时层是**同一份文字**: 屏上最后一行与框里的字不会差一个字
-       */
-      function finishVoiceRecording() {
-        var said = voiceDraftText(voiceLiveText, '')
-        voiceCommit = ''
-        voiceState = 'idle'
-        if (els.rec) els.rec.setAttribute('data-busy', 'off')
-        hideRecPanel()
-        if (said === '') {
-          toast('没有识别到内容', true)
+      function voiceChunkAnswer(payload) {
+        var seq = Number(payload.seq)
+        if (isFinite(seq) && seq > 0) {
+          if (seq <= voiceChunkSeen) return
+          // 先记账再分流: 背压那笔账 (`seq - seen`) 靠它往前走, 失败块也得让位给下一块
+          voiceChunkSeen = seq
+        }
+        if (payload.ok !== true || payload.failed === true) {
+          voiceChunkFails += 1
+          if (voiceChunkFails >= VOICE_CHUNK_FAIL_MAX) voiceStreamOff = true
           return
         }
-        insertDraft(said)
-        if (els.input) {
-          try { els.input.focus() } catch (_noFocus) { /* 页还没上屏时 focus 会抛, 忽略 */ }
-        }
+        var said = String(payload.text === undefined || payload.text === null ? '' : payload.text)
+        paintRecLive(voiceLiveJoin(voiceLiveText, said))
       }
 
-      /** 转写等太久的闸: 45 s 没回推就收摊, 实时层已有的那份先落草稿 */
-      function armVoiceWatch() {
+      /**
+       * 转写等太久的闸 (45 s): 只认**这一趟** (`take`), 跨趟残留一个字节都不许写
+       *
+       * 兜底那份是实时层拼出来的, 不是整段的结果 —— 落进草稿时要明说, 不许静默当成整段
+       * @param take 开这一趟时的 `voiceId`
+       */
+      function armVoiceWatch(take) {
         if (voiceWatch !== null) clearTimeout(voiceWatch)
         voiceWatch = setTimeout(function () {
           voiceWatch = null
+          if (take !== voiceId) return
           if (voiceState !== 'working') return
           var said = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
           hideRecPanel()
           if (said !== '') {
             insertDraft(said)
+            toast('整段还没回来: 先把实时层那句放进草稿', false)
             return
           }
           toast('这一句还没回来: 再按一次试试', true)
@@ -5664,11 +5674,9 @@ window.__ModuleLoader__.load({
         recLastSample = 0
         voiceChunkCursor = 0
         voiceChunkAt = 0
-        voiceChunkSent = 0
         voiceChunkSeen = 0
+        voiceChunkFails = 0
         voiceLiveText = ''
-        voiceCommit = ''
-        voiceSegmentAt = 0
         if (recFrame !== 0) {
           try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
           recFrame = 0
@@ -5709,15 +5717,16 @@ window.__ModuleLoader__.load({
       }
 
       /** 右下角那一行 `0:03 / 1:00` */
+      /**
+       * 计时胶囊那一行 `0:03 / 2:00`
+       *
+       * 秒数全走 `clockOf`: 上一版是 `'0:' + seconds` 硬拼, 说到一分半就写 `0:90` (审查遗留清单里那一条)
+       */
       function paintRecTime() {
         if (!els.recTime) return
         var seconds = voiceStartedAt === 0 ? 0 : Math.floor((Date.now() - voiceStartedAt) / 1000)
-        if (seconds < 0) seconds = 0
         var whole = Math.floor(VOICE_MAX_MS / 1000)
-        var mm = String(Math.floor(whole / 60))
-        var ss = whole % 60
-        els.recTime.textContent = '0:' + (seconds < 10 ? '0' : '') + String(seconds)
-          + ' / ' + mm + ':' + (ss < 10 ? '0' : '') + String(ss)
+        els.recTime.textContent = clockOf(seconds) + ' / ' + clockOf(whole)
       }
 
       /**
@@ -5986,15 +5995,18 @@ window.__ModuleLoader__.load({
           // 不接到目的地就收不到回调 (Chromium 的老规矩); 那头没有被写, 所以不出声
           voiceProcessor.connect(voiceContext.destination)
           voiceStartedAt = Date.now()
-          voiceSegmentAt = voiceStartedAt
           voiceChunkCursor = 0
           // 节拍从**开录这一刻**算: 第一块在 1.5 s 头上送 (不留一拍 85 ms 的空块去问模型)
           voiceChunkAt = voiceStartedAt
-          voiceChunkSent = 0
+          voiceChunkSeq = 0
           voiceChunkSeen = 0
+          voiceChunkFails = 0
           voiceLiveText = ''
-          voiceCommit = ''
-          // 这一趟的编号在**开录这一刻**发 (2.8.1 #F10): 块与末段都拿它认人, 中途不再换号,
+          voiceStreamOff = false
+          // 上一趟的看门狗不许跨趟动手 (2026-11-27 审查 ⑨): 先收掉, 再发这一趟的号
+          if (voiceWatch !== null) clearTimeout(voiceWatch)
+          voiceWatch = null
+          // 这一趟的编号在**开录这一刻**发 (2.8.1 #F10): 块与整段都拿它认人, 中途不再换号,
           // 否则松手那一拍会把还没回来的块全判成"过期", 实时层那份文字就断在半截
           voiceId += 1
           voiceState = 'recording'
@@ -6002,8 +6014,9 @@ window.__ModuleLoader__.load({
           startRecPump()
           if (voiceTimer !== null) clearTimeout(voiceTimer)
           voiceTimer = setTimeout(function () { voiceTimer = null; stopRecording(false) }, VOICE_MAX_MS)
+          // 这一拍既画计时也送块: rAF 在后台会停, 采样不会 —— 送块那条腿挂在这里 (审查 ⑩)
           if (voiceTicker !== null) clearInterval(voiceTicker)
-          voiceTicker = setInterval(paintRecTime, 200)
+          voiceTicker = setInterval(function () { paintRecTime(); pumpVoiceChunk() }, 200)
         }
         if (voiceStream !== null) {
           begin(voiceStream)
@@ -6021,11 +6034,11 @@ window.__ModuleLoader__.load({
       /**
        * 松手: 收尾并送转写
        *
-       * 两条路 (2.8.1 #F10):
+       * **草稿只认这一次整段转写** (2.8.1 #F10 的口径: 实时层只做展示) —— 流式开没开、
+       * 送过几块, 走到这里都一样: 把这一趟的全部采样封成一段送去认. 于是
        *
-       * 1. **流式**已经送过块 —— 最后一截也送一块 (`final`), 它的文字回来与实时层拼成草稿,
-       *    屏上那一层与框里的字因此是同一份
-       * 2. 一块都没送过 (`VOICE_CHUNK_MS = 0` / 这一趟太短 / 宿主不认那一块) —— 照旧整段转写
+       * - 分块那头认不完 / 被拒 / 认串了, 都不影响草稿
+       * - `VOICE_CHUNK_MS = 0` 那档与"从没开过流式"是同一条路, 没有第二套兜底
        * @param cancelled true = 上滑取消了 (这一趟丢掉)
        */
       function stopRecording(cancelled) {
@@ -6034,6 +6047,8 @@ window.__ModuleLoader__.load({
         voiceHeld = false
         if (voiceTimer !== null) clearTimeout(voiceTimer)
         voiceTimer = null
+        if (voiceTicker !== null) clearInterval(voiceTicker)
+        voiceTicker = null
         voiceStartedAt = 0
         voiceState = 'idle'
         if (cancelled) {
@@ -6050,27 +6065,6 @@ window.__ModuleLoader__.load({
           toast('太短了, 再说一句', false)
           return
         }
-        // 末段那一块要在放掉采集**之前**封 (wav 从 `voiceChunks` 里出)
-        if (voiceStreaming()) {
-          var sent = sendVoiceChunk(true)
-          releaseVoiceCapture()
-          voiceState = 'working'
-          clearRecWave()
-          setRecHint(REC_HINT_BUSY)
-          if (els.rec) els.rec.setAttribute('data-busy', 'on')
-          if (sent) {
-            armVoiceWatch()
-            return
-          }
-          // 末段没有新声音: 上一块已经回来了就当场收尾, 还在路上就等它 (`voiceChunkAnswer` 收)
-          voiceCommit = 'release'
-          if (voiceChunkSeen >= voiceChunkSeq) {
-            finishVoiceRecording()
-            return
-          }
-          armVoiceWatch()
-          return
-        }
         var chunks = voiceChunks || []
         var rate = voiceSourceRate
         releaseVoiceCapture()
@@ -6080,6 +6074,7 @@ window.__ModuleLoader__.load({
           toast('没有录到声音', true)
           return
         }
+        var take = voiceId
         voiceState = 'working'
         // 转写这一段：面板留着但换成「正在转写…」+ 三个点，波形擦掉 —— 不然松手后屏上什么都没有
         clearRecWave()
@@ -6087,7 +6082,7 @@ window.__ModuleLoader__.load({
         if (els.rec) els.rec.setAttribute('data-busy', 'on')
         var answer = call('portalVoice', JSON.stringify({
           op: 'transcribe',
-          id: voiceId,
+          id: take,
           data: base64Of(wav),
           language: 'auto',
         }))
@@ -6098,7 +6093,7 @@ window.__ModuleLoader__.load({
           return
         }
         // 原生那边在别的线程认, 认完经 `__LUWI_PORTAL__.voice({id, ok, text})` 回推
-        armVoiceWatch()
+        armVoiceWatch(take)
       }
 
       /** 把认出来的那一句接进草稿 (有字就空一格, 光标停在末尾) */
@@ -6147,12 +6142,13 @@ window.__ModuleLoader__.load({
         if (voiceWatch !== null) clearTimeout(voiceWatch)
         voiceWatch = null
         if (payload.ok !== true) {
-          // 整段这条腿断了也不许把说过的话丢掉: 实时层那份先落草稿
+          // 整段这条腿断了也不许把说过的话丢掉: 实时层那份先兜底 —— 但要**明说**它只是实时层那句
           var kept = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
           hideRecPanel()
           if (kept !== '') {
             insertDraft(kept)
+            toast('整段没认出来: 先把实时层那句放进草稿', true)
             return
           }
           toast(payload.error ? String(payload.error) : '这一句没认出来', true)
@@ -6160,6 +6156,7 @@ window.__ModuleLoader__.load({
         }
         var final = String(payload.text === undefined || payload.text === null ? '' : payload.text)
         var said = voiceDraftText(voiceLiveText, final)
+        var partial = final.trim() === ''
         voiceState = 'idle'
         if (els.rec) els.rec.setAttribute('data-busy', 'off')
         if (said !== '') paintRecLive(said)
@@ -6169,41 +6166,10 @@ window.__ModuleLoader__.load({
           return
         }
         insertDraft(said)
+        if (partial) toast('整段只认出空串: 先把实时层那句放进草稿', false)
         if (els.input) {
           try { els.input.focus() } catch (_noFocus) { /* 页还没上屏时 focus 会抛, 忽略 */ }
         }
-      }
-
-      /**
-       * 流式那一块回来的文字 (2.8.1 #F10)
-       *
-       * 三档:
-       *
-       * 1. 普通一块 —— 只追加到实时层, 草稿一个字不动
-       * 2. 滚段那一块 (`final`, 还在录) —— 拼起来落草稿, 实时层清空接着录
-       * 3. 松手那一块 —— 拼起来落草稿并收尾 (与实时层同一份文字)
-       * @param payload `{kind:'chunk', id, seq, final, text}`
-       */
-      function voiceChunkAnswer(payload) {
-        var seq = Number(payload.seq)
-        if (isFinite(seq) && seq > 0) {
-          // 乱序 / 重发的那一块丢掉: 实时层不会把同一句写两遍
-          if (seq <= voiceChunkSeen) return
-          voiceChunkSeen = seq
-        }
-        var said = String(payload.text === undefined || payload.text === null ? '' : payload.text)
-        paintRecLive(voiceLiveJoin(voiceLiveText, said))
-        var fin = payload.final === true
-        if (voiceState === 'recording') {
-          // 还在录: 普通块只追加, **只有这一段封口那一块**落草稿 (滚段)
-          if (!fin) return
-          commitVoiceLive()
-          return
-        }
-        // 松手之后: 松手那一块 (或它之前最后一块) 回来才收尾; 更早的块只并进实时层
-        if (voiceCommit !== 'release') return
-        if (isFinite(seq) && seq > 0 && seq < voiceChunkSeq) return
-        finishVoiceRecording()
       }
 
       /**

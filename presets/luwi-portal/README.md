@@ -94,16 +94,21 @@ nextTask + router 的 checks) 摆在同一屏上
   **上滑过 56 px** 进「松开取消」态 (条下沉 + 退成中性灰 + 出现向下箭头 + 提示换字), 松手丢弃并说一句
   「已取消」; 松手默认转写 (条上换「正在转写…」+ 三个跳动点), 文字接进草稿 (有字时前留一个空格, 光标到末尾)。
   条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
-  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉 (只有波形行与那颗显隐钮自己收事件)。
-  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面两行 (`aria-live="polite"`), 每 `VOICE_CHUNK_MS`
-  (1500 ms) 把这一段**新增的** PCM 封一小块走桥的 `op=voice-chunk`, 回来的字只追加到这一层 —— 边说边出字;
-  波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler, **只切这一层**, 录音 / 计时 / 波形一动不动。
-  同一个节拍宿主也留一份 (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**, 回到"松手整段转写"。
+  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉 (只有**条子升起来时**的波形行与那颗显隐钮自己收事件,
+  `[data-on="off"]` 那档一个事件都不收, 否则收起态会在输入卡顶上留一条隐形命中区)。
+  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面两行 (`aria-live="polite"`, 36px 封顶后自己往上滚),
+  每 `VOICE_CHUNK_MS` (1500 ms) 把这一段**新增的** PCM 封一小块 (≤ 3 s) 走桥的 `op=voice-chunk`, 回来的字
+  只追加到这一层 —— **这一层只做展示**: 草稿永远来自松手那次整段转写 (`op=transcribe`), 分块认串了 / 认不完
+  都不影响框里的字, 兜底落实时层那份时会明说一句。波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler,
+  **只切这一层** (显隐靠 `data-live` 记号 + CSS), 录音 / 计时 / 波形一动不动。同一个节拍宿主也留一份
+  (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**: 一块都不送、采样一块都不剪, 松手照旧整段转写。
+  背压两侧都有: 在途超过 2 块页面这一拍不送, 宿主在途超过 3 块回 `busy`; 块回来先比 `generation`,
+  失败块带 `failed` 标记 (与"认出空串"分得开)。
   录音在页面 (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16),
-  **上限 300 s**、**一段 60 s 到点滚段** (先把已识别的落进草稿, 再接着录下一段, 连说 90 s 也不丢前面的),
+  **上限 120 s** (与宿主 `MAX_SECONDS`、上游 `LwDeepseekAsr` 同一个数, 云端那侧自己按 60 s 切开),
   短于 0.5 s 当误触; 转写在应用 (`ui/PortalVoice.kt` → `LwSpeech.dispatch`, 引擎跟 `lw/voice-source.json`),
   桥是 `portalVoice` (status / ask / transcribe / voice-chunk / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推
-  (流式那一块带 `kind:"chunk"` / `seq` / `final`, 回来先比 `generation`)。没权限 /
+  (流式那一块带 `kind:"chunk"` / `seq`, 失败带 `failed`; 整段那条带 `kind` 缺省 + `text`)。没权限 /
   缺模型 / 没登录 / 太短各有一句人话, 不许静默
 - **顶栏那颗喇叭 = 语音输出（自动朗读）开关**: 翻的是 设置 → 说话 → 「朗读回答」那一格
   (`SpeakSettings.readAloud`, 一处状态两处界面, 桥是 `portalSpeak`), 两副图标——**关 = 喇叭 + 斜杠 /
