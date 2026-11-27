@@ -1285,6 +1285,20 @@
     <string name="dev_console_log">构建日志</string>
     <string name="dev_console_current">当前项目</string>
     <string name="dev_console_build">上次构建</string>
+    <!-- 2.8.1 #F11: 开发屏的状态卡 —— 六档徽标 + 按档换的主钮 (徽标是字, 不只靠颜色) -->
+    <string name="dev_state_empty">没有项目</string>
+    <string name="dev_state_idle">还没构建</string>
+    <string name="dev_state_building">正在构建</string>
+    <string name="dev_state_success">构建成功</string>
+    <string name="dev_state_failed">构建失败</string>
+    <string name="dev_state_no_access">没有文件权限</string>
+    <string name="dev_state_step">step %1$d/%2$d</string>
+    <string name="dev_state_step_none">step -/-</string>
+    <string name="dev_state_reason_none">还没有可报的原因</string>
+    <string name="dev_action_open_settings">打开 设置 → 开发</string>
+    <string name="dev_action_open_settings_sent">已请 Luwi 打开 设置 → 开发</string>
+    <string name="dev_action_grant">授予文件访问</string>
+    <string name="dev_action_log">看日志</string>
     <string name="settings_dev_new_title">新建应用</string>
     <string name="settings_dev_new_summary">建一个项目，并把开发台拉到虚拟屏上</string>
     <string name="dev_panel_title">开发</string>

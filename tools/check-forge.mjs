@@ -96,5 +96,95 @@ for (const dir of ['app']) {
 }
 check('仓库里没有 .aidl', aidl, [])
 
+/* ── 四、开发屏的三块 (2.8.1 #F11) ─────────────────────────────────── */
+
+/**
+ * 开发屏从「一个 `key: value` 大文本 + 一颗刷新钮」改成三块: 项目卡 / 状态卡 / 动作行
+ *
+ * 这一节只认静态能核对的东西: 六档徽标的键在中英两份都齐、`stateOf` 是纯函数 (没有
+ * findViewById / getString / File)、`render()` 不再整段写 `body.text`、进度条读的是档位给的数。
+ * 真机那三张图 (空态 / 构建中 / 构建失败) 由编排侧截图, 这里的第 3 条只是把徽标原话钉住
+ */
+const dev = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/DevConsoleActivity.kt')
+const stringsEn = await read('app/src/main/res/values/strings.xml')
+const stringsZh = await read('app/src/main/res/values-zh/strings.xml')
+
+const DEV_STATES = [
+  'dev_state_empty', 'dev_state_idle', 'dev_state_building',
+  'dev_state_success', 'dev_state_failed', 'dev_state_no_access',
+]
+const STATE_KEY = /<string name="(dev_(?:state|action)_[a-z_]+)"/g
+const stateKeys = (xml) => [...xml.matchAll(STATE_KEY)].map((m) => m[1])
+const stateText = (xml, key) => (xml.match(new RegExp(`<string name="${key}">([^<]*)</string>`)) || [, ''])[1]
+
+check(
+  '开发屏六档徽标键在中英两份都在',
+  [stringsEn, stringsZh].reduce((sum, xml) => sum + DEV_STATES.filter((key) => xml.includes(`name="${key}"`)).length, 0),
+  DEV_STATES.length * 2,
+)
+check('中英两份的状态键与顺序一致', stateKeys(stringsZh), stateKeys(stringsEn))
+check(
+  '三张图那三档的中文原话',
+  ['dev_state_empty', 'dev_state_building', 'dev_state_failed'].map((key) => stateText(stringsZh, key)),
+  ['没有项目', '正在构建', '构建失败'],
+)
+check(
+  '状态卡的进度条读的是档位给的数',
+  /import android\.widget\.ProgressBar/.test(dev)
+    && /progressBarStyleHorizontal/.test(dev)
+    && /stepBar\.max = state\.total/.test(dev)
+    && /stepBar\.progress = state\.step/.test(dev),
+  true,
+)
+check(
+  'render() 不再整段写 body.text',
+  /body\.text = lines\.joinToString/.test(dev) || /lateinit var body: TextView/.test(dev),
+  false,
+)
+check(
+  '空态那颗钮能按且落到 设置 → 开发',
+  /DevPhase\.EMPTY, R\.string\.dev_state_empty, R\.string\.dev_action_open_settings\)/.test(dev)
+    && /private fun openSettings\(\)/.test(dev)
+    && /PortalAsk\.ask\(PortalAsk\.Target\.SETTINGS\)/.test(dev)
+    && /primary\.setOnClickListener/.test(dev),
+  true,
+)
+check(
+  'step x/y 读数的格式与用法',
+  [
+    stateText(stringsEn, 'dev_state_step'),
+    stateText(stringsZh, 'dev_state_step'),
+    /getString\(R\.string\.dev_state_step, state\.step, state\.total\)/.test(dev),
+  ],
+  ['step %1$d/%2$d', 'step %1$d/%2$d', true],
+)
+
+/** 取一个函数体 (从签名后第一个 `{` 起按大括号配平), 静态判"这一段里没有别的东西"用 */
+function bodyOf(source, signature) {
+  const start = source.indexOf(signature)
+  if (start < 0) return ''
+  let depth = 0
+  for (let i = source.indexOf('{', start); i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1
+    if (source[i] !== '}') continue
+    depth -= 1
+    if (depth === 0) return source.slice(source.indexOf('{', start), i + 1)
+  }
+  return ''
+}
+
+const stateBody = bodyOf(dev, 'fun stateOf(')
+check(
+  'stateOf 是纯函数 (不碰 View / Context / 文件)',
+  [stateBody.length > 0, /findViewById|getString\(|\bFile\(|ForgeConsole|\bcontext\b/.test(stateBody)],
+  [true, false],
+)
+check(
+  '六档都由 stateOf 产出',
+  ['EMPTY', 'NO_ACCESS', 'IDLE', 'BUILDING', 'SUCCESS', 'FAILED']
+    .filter((phase) => stateBody.includes(`DevPhase.${phase}`)).length,
+  6,
+)
+
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}: ${checks - failures}/${checks}`)
 process.exit(failures === 0 ? 0 : 1)
