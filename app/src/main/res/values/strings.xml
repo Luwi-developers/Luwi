@@ -1293,6 +1293,7 @@
     <string name="dev_state_success">Build ok</string>
     <string name="dev_state_failed">Build failed</string>
     <string name="dev_state_no_access">No file access</string>
+    <string name="dev_state_stalled">interrupted (progress stopped)</string>
     <string name="dev_state_step">step %1$d/%2$d</string>
     <string name="dev_state_step_none">step -/-</string>
     <string name="dev_state_reason_none">Nothing to report yet</string>

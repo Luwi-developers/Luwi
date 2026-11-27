@@ -176,6 +176,8 @@ class DevConsoleActivity : Activity() {
             progressAt = dir?.let { File(it, PROGRESS_FILE).lastModified() } ?: 0L,
             build = buildRead(build),
             buildAt = dir?.let { File(it, BUILD_FILE).lastModified() } ?: 0L,
+            now = System.currentTimeMillis(),
+            stalled = getString(R.string.dev_state_stalled),
             hasProject = current != null,
             hasAccess = access,
         )
@@ -388,6 +390,7 @@ internal fun stepOf(line: String): StepRead? {
  *
  * 1. `last-build` 是新的那一笔且 `ok:false` -> 失败 (中途失败时 progress 停在 2/5 也不会被当成还在跑)
  * 2. `progress` 比 `last-build` 新 -> 构建中 (**末步也算**: 最后一步跑完才会写 last-build)
+ * 2.5 但那一份 progress 已经 `STALE_MS` 没再动 (构建被杀, 不会再有人写 last-build) -> 上次构建中断
  * 3. 其余按那笔结论: 没有记录 -> 还没构建, `ok` -> 成功, 不 ok -> 失败
  *
  * 这条判据成立的前提在写者那一侧: `LwForgeBuild` 收尾是**先**写 progress 的「构建完成」再写
@@ -401,6 +404,8 @@ internal fun stateOf(
     progressAt: Long,
     build: BuildRead?,
     buildAt: Long,
+    now: Long,
+    stalled: String,
     hasProject: Boolean,
     hasAccess: Boolean,
 ): DevState {
@@ -422,6 +427,18 @@ internal fun stateOf(
         )
     }
     if (step != null && progressAt > buildAt) {
+        // 被杀掉的构建不会再写 last-build: progress 停在半路, 只按"还在跑"判就是永远动着 ——
+        // 过了 STALE_MS 降成中断 (同一档的三元组, 原因那行说清是"上次构建中断")
+        if (now - progressAt > STALE_MS) {
+            return DevState(
+                DevPhase.FAILED,
+                R.string.dev_state_failed,
+                R.string.dev_action_log,
+                step.index,
+                step.total,
+                stalled,
+            )
+        }
         return DevState(
             DevPhase.BUILDING,
             R.string.dev_state_building,
@@ -454,6 +471,9 @@ internal fun stateOf(
 
 /** `progress.json` 第一段那个 `x/y` */
 private val STEP_HEAD = Regex("^(\\d+)\\s*/\\s*(\\d+)$")
+
+/** 构建被杀之后 progress 不会再动: 超过这么久还没人写 last-build, 那一笔就当"中断"而不是"还在跑" */
+private const val STALE_MS = 10 * 60 * 1000L
 
 /** `last-build.json` 的键 (那一份是唯一写者) */
 private const val KEY_VERDICT = "结论"

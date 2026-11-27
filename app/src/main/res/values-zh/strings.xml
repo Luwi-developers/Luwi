@@ -1292,6 +1292,7 @@
     <string name="dev_state_success">构建成功</string>
     <string name="dev_state_failed">构建失败</string>
     <string name="dev_state_no_access">没有文件权限</string>
+    <string name="dev_state_stalled">中断了 (进度不会再动)</string>
     <string name="dev_state_step">step %1$d/%2$d</string>
     <string name="dev_state_step_none">step -/-</string>
     <string name="dev_state_reason_none">还没有可报的原因</string>
