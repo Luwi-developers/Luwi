@@ -35,8 +35,9 @@ import java.util.zip.ZipOutputStream
  * 每个 argv[0] 必须是 `/data/local/tmp/lwforge/toolchain/` 下的可执行件 —— argv 由应用侧的
  * `forge/ForgePlan.kt` 这个纯函数产出, 模型碰不到命令行, 而这一侧不因为它自称来自应用就放行
  *
- * 进度只认文件: 每一步之前写 `.lwforge/progress.json`, 每步的尾巴追加进 `build.log`, 末尾写
- * `last-build.json` —— 开发台与 Luwi 都读这三个文件, 没有第二条通道
+ * 进度只认文件: 每一步之前写 `.lwforge/progress.json`, 每步的尾巴追加进 `build.log`, 收尾时**先**写
+ * progress 的「构建完成」那一行、**再**写 `last-build.json` —— 开发台按这两份的 mtime 定档, last-build
+ * 必须是新的那一份 (次序倒了就是"构建成功后永远正在构建"); 开发台与 Luwi 都读这三个文件, 没有第二条通道
  */
 internal object LwForgeBuild {
 
@@ -205,15 +206,8 @@ internal object LwForgeBuild {
             apk = to
         }
         val sha = runCatching { LwForgeExec.sha256(apk) }.getOrDefault("")
-        writeLastBuild(
-            forge,
-            ok = true,
-            apk = apk.absolutePath,
-            bytes = apk.length(),
-            sha = sha,
-            label = plan.optString("label"),
-            error = "",
-        )
+        // **这两行的次序不能倒**: 开发台按这两份文件的 mtime 定档, 只有 last-build 比 progress 新才算
+        // "这一笔已经了结"; 先写 last-build 会把最新的 progress 留在后面, 开发台于是永远停在"正在构建"
         writeProgress(
             forge,
             JSONObject()
@@ -224,6 +218,15 @@ internal object LwForgeBuild {
                 .put("text", "构建完成")
                 .put("ok", true)
                 .toString(),
+        )
+        writeLastBuild(
+            forge,
+            ok = true,
+            apk = apk.absolutePath,
+            bytes = apk.length(),
+            sha = sha,
+            label = plan.optString("label"),
+            error = "",
         )
         val spent = (System.currentTimeMillis() - started) / 1000
         logLine(log, "== ok ${apk.name} ${apk.length() / 1024} KB ${spent}s ==")

@@ -41,7 +41,8 @@ import java.io.File
  * 进度与日志按文件读, 一秒一眼 (只有在前台才轮): 构建在特权进程里跑, 每一步写 `.lwforge/progress.json`
  * 与 `build.log`, 这里跟着刷就是那个「看进度」的意思
  *
- * 三块卡片钉同一个**固定高** ([CARD_HEIGHT_DP]): 换档时整页不许上下跳, 徽标也不只靠颜色区分
+ * 三块卡片钉同一个**下限高** ([CARD_HEIGHT_DP], 外层 `wrap_content`): 内容到不了那条线时三块一样高,
+ * 到了就跟着字长 —— 不写死高度, 换字号也不会把 step 读数裁到卡外; 徽标也不只靠颜色区分
  * (判据 `tools/check-forge.mjs` 第四节)
  *
  * **没有桌面图标**: 它由 `lw_forge op=screen` 用 `am start` 拉到那块虚拟屏上, 主人平时看不到它单独出现
@@ -127,10 +128,10 @@ class DevConsoleActivity : Activity() {
         }
 
         root.addView(title, block(0))
-        // 三块固定高: 换档只改字, 高度逐像素不变 (空态 / 无权限那两张图也一样)
-        root.addView(projectCard, block(padding, dp(CARD_HEIGHT_DP)))
-        root.addView(statusCard, block(dp(10), dp(CARD_HEIGHT_DP)))
-        root.addView(actionRow, block(dp(10), dp(CARD_HEIGHT_DP)))
+        // 三块都是 wrap_content + 同一条下限高: 换档只改字; 字号放大时跟着长, 不裁 step 读数
+        root.addView(projectCard, block(padding))
+        root.addView(statusCard, block(dp(10)))
+        root.addView(actionRow, block(dp(10)))
         root.addView(logTitle, block(padding))
         root.addView(log, block(0))
         scroller = ScrollView(this).apply {
@@ -262,10 +263,11 @@ class DevConsoleActivity : Activity() {
     private fun block(top: Int, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height).apply { topMargin = top }
 
-    /** 一块卡: 同一档圆角 (高度由外面那三处固定高定死, 这里不碰) */
+    /** 一块卡: 同一档圆角 + 同一条下限高 (高度由内容定, 到不了 [CARD_HEIGHT_DP] 就补齐) */
     private fun card(crossGravity: Int = Gravity.CENTER_VERTICAL): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = crossGravity
+        minimumHeight = dp(CARD_HEIGHT_DP)
         setPadding(dp(14), dp(10), dp(14), dp(10))
         background = cardBackground()
     }
@@ -305,7 +307,7 @@ class DevConsoleActivity : Activity() {
     }
 
     private companion object {
-        /** 三块卡片的固定高 (dp); 三张图里卡片高度逐像素相同 */
+        /** 三块卡片的下限高 (dp); 内容没到这条线时三张图里卡片高度逐像素相同, 到了就跟着内容长 */
         const val CARD_HEIGHT_DP = 104
 
         /** 工坊写的两份读数 (键与 `ForgeConsole` 逐字相同, 这里只取它们的时间) */
@@ -385,9 +387,11 @@ internal fun stepOf(line: String): StepRead? {
  * 谁新谁旧才定档, 不靠"进度条到没到头":
  *
  * 1. `last-build` 是新的那一笔且 `ok:false` -> 失败 (中途失败时 progress 停在 2/5 也不会被当成还在跑)
- * 2. `progress` 比 `last-build` 新 -> 构建中 (**末步也算**: 最后一步跑完才会写 last-build;
- *    上一轮留下的老 progress 因为时间早, 也不会再把人钉在"构建中")
+ * 2. `progress` 比 `last-build` 新 -> 构建中 (**末步也算**: 最后一步跑完才会写 last-build)
  * 3. 其余按那笔结论: 没有记录 -> 还没构建, `ok` -> 成功, 不 ok -> 失败
+ *
+ * 这条判据成立的前提在写者那一侧: `LwForgeBuild` 收尾是**先**写 progress 的「构建完成」再写
+ * last-build, 于是成功后 last-build 一定是新的那一份; 次序倒了就是"构建成功后永远正在构建"
  *
  * 是纯函数才摆得进判据: 这一段里没有 findViewById / getString / File / ForgeConsole
  * (`check-forge` 第四节)
