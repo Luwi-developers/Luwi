@@ -1452,7 +1452,7 @@ window.__ModuleLoader__.load({
       // **不吃事件** (`pointer-events:none`): 手指还压在原来的输入框上, 抬手与上滑都得照旧落在它那一侧。
       // 材质: 蓝渐变 + 顶部径向柔光 + 上沿 1px 内高光 + 3.5% 噪点; **上沿 22px 用 mask 淡出** ——
       // 与页面之间没有硬接缝 (真渐变), 代价是外投影一起被裁掉, 所以只留内高光
-      '#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;box-sizing:border-box;',
+      '#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:20;box-sizing:border-box;',
       'height:148px;padding:16px 18px 14px;display:flex;flex-direction:column;gap:10px;',
       'pointer-events:none;overflow:hidden;border-radius:28px;',
       'background:linear-gradient(180deg,#5b7cff 0%,#3f6bff 54%,#2f5cff 100%);',
@@ -1478,11 +1478,11 @@ window.__ModuleLoader__.load({
       // 实时文字层 (2.8.1 #F10; 2026-11-27 主人: "语音输入出现的字应当显示在上方")
       // **浮在录音条上方的一层**, 不再挤在贴底那条里: `position:fixed` 自己定位, 与录音条的高度无关,
       // `--lwp-live-bottom` 由 [showRecPanel] 按录音条实测顶边写进来 (条高随输入卡变, 写死会叠在一起)
-      '#lwp-voice-live{position:fixed;left:12px;right:12px;bottom:var(--lwp-live-bottom,140px);z-index:9;',
-      'max-height:132px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;',
-      'padding:10px 14px;border-radius:18px;background:rgba(22,24,28,.84);',
+      '#lwp-voice-live{position:relative;order:-1;flex:none;width:100%;',
+      'max-height:72px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;',
+      'padding:2px 2px 4px;background:transparent;',
       'backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);',
-      'box-shadow:0 10px 28px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.08);',
+      'text-shadow:0 1px 2px rgba(0,0,0,.28);',
       'font-size:15px;line-height:21px;letter-spacing:.01em;color:rgba(255,255,255,.97);',
       'transition:opacity .16s ease}',
       '#lwp-voice-live:empty{display:none}',
@@ -5533,6 +5533,9 @@ window.__ModuleLoader__.load({
         applyRecLive()
         clearRecLive()
         if (root) root.setAttribute('data-rec', 'on')
+        // 排查用: 条到底有没有被点亮 (真机「长按没反应」时先看这一行)
+        console.log('[luwi-portal] rec panel on=' + (els.rec ? els.rec.getAttribute('data-on') : 'none')
+          + ' live=' + (els.rec ? els.rec.getAttribute('data-live') : 'none'))
         setRecHint(REC_HINT)
         paintRecTime()
         paintRecWave()
@@ -5558,9 +5561,7 @@ window.__ModuleLoader__.load({
         els.rec.style.height = String(wanted) + 'px'
         // 实时文字层浮在条**上方** (2026-11-27 主人: "语音输入出现的字应当显示在上方"):
         // 条自己贴底 12px, 高度 `wanted`, 再留 8px 间隙就是浮层的底边
-        if (root && root.style && typeof root.style.setProperty === 'function') {
-          root.style.setProperty('--lwp-live-bottom', String(wanted + 12 + 8) + 'px')
-        }
+
         recGradient = null
         // 一行读数: 卡多高、条多高 (真机验收要的就是这个比例, 也方便日后查"条怎么又高了")
         console.log('[luwi-portal] rec bar ' + wanted + 'px (card ' + Math.round(cardHeight) + 'px)')
@@ -10085,6 +10086,8 @@ window.__ModuleLoader__.load({
     return module.exports
   },
 })
+
+
 
 
 

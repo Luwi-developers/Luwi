@@ -2802,7 +2802,7 @@ expect('client.js', client, "els.recText.setAttribute('aria-live', 'polite')")
 expect('client.js', client, "var REC_HINT = '松手转写，上滑取消'")
 expect('client.js', client, "var REC_HINT_CANCEL = '松开取消'")
 // 位置: 与 `#lwp-dock` 的 `0 12px 12px` 对齐, 正好压住输入卡那一块
-expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;")
+expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:20;")
 expect('client.js', client, 'pointer-events:none')
 expect('client.js', client, 'function paintRecWave')
 // 高度: 量输入卡 × 1.5 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
@@ -4047,7 +4047,7 @@ expect('client.js', client, "els.recLive = h('div', 'lwp-rec-live')")
 expect('client.js', client, "els.recLive.id = 'lwp-voice-live'")
 expect('client.js', client, "els.recLive.setAttribute('aria-live', 'polite')")
 expect('client.js', client, "els.recLive.setAttribute('role', 'log')")
-expect('client.js', client, "'#lwp-voice-live{position:fixed;left:12px;right:12px;bottom:var(--lwp-live-bottom,140px);z-index:9;'")
+expect('client.js', client, "'#lwp-voice-live{position:relative;order:-1;flex:none;width:100%;'")
 expect('client.js', client, 'font-size:15px;line-height:21px;letter-spacing:.01em;color:rgba(255,255,255,.97);')
 expectOrder('实时层挂在波形行下面', client, 'els.rec.appendChild(els.recWaveRow)', 'els.rec.appendChild(els.recLive)')
 expect('client.js', client, 'function paintRecLive')
@@ -4057,11 +4057,11 @@ expect('client.js', client, "var REC_LIVE_NOTE = '实时文字 · 以松手后�
 expect('client.js', client, 'els.recLiveNote = h(\'div\', \'lwp-rec-live-note\', REC_LIVE_NOTE)')
 expect('client.js', client, "'.lwp-rec-live-note{flex:none;font-size:10.5px;line-height:14px;letter-spacing:.02em;'")
 // 两行封顶 = 2 × 18px 行高: 再多也不许把录音条撑高 (只往上滚)
-if (client.includes("'#lwp-voice-live{position:fixed;")
-  && client.includes('max-height:132px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;')) {
-  notes.push('ok   实时层浮在录音条上方 (position:fixed, 132px 封顶, 只往上滚)')
+if (client.includes("'#lwp-voice-live{position:relative;order:-1;")
+  && client.includes('max-height:72px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;')) {
+  notes.push('ok   实时层排在录音条最上方 (order:-1, 72px 封顶, 只往上滚)')
 } else {
-  failures.push('client.js: 实时层不再是浮在录音条上方的那一层 (position:fixed + 132px 上限)')
+  failures.push('client.js: 实时层不再排在录音条最上方 (order:-1 + 72px 上限)')
 }
 // 显隐真机制: 记号 (applyRecLive 写 data-live) + CSS 只认它 + 钮只调 applyRecLive —— 三处少一处就红
 const applyLiveSource = sliceFunction('applyRecLive')
@@ -4472,6 +4472,8 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(`\ncheck-luwi-portal: 全部通过 (${String(notes.length)} 条)`)
+
+
 
 
 
