@@ -7,6 +7,7 @@ import androidx.core.content.ContextCompat
 import io.github.yuloong07star.luwi.channel.LwModes
 import io.github.yuloong07star.luwi.host.DshHost
 import io.github.yuloong07star.luwi.host.HostStatus
+import io.github.yuloong07star.luwi.host.HostUrl
 import io.github.yuloong07star.luwi.overlay.BalanceFile
 import io.github.yuloong07star.luwi.overlay.BallBox
 import io.github.yuloong07star.luwi.overlay.BallMinutes
@@ -64,7 +65,7 @@ internal object LwOverlay {
         return buildJsonObject {
             put("shown", true)
             put("expanded", expand)
-            put("url", (DshHost.status as? HostStatus.Running)?.url ?: "")
+            put("url", HostUrl.masked((DshHost.status as? HostStatus.Running)?.url ?: ""))
             put("x", OverlayState.x)
             put("y", OverlayState.y)
             put(
@@ -387,13 +388,13 @@ internal object LwOverlay {
             // 余额那份文件多旧 (ms): 「看余额」那一档的对账读数 (宿主一直没刷时它就是一直变大)
             put("balanceAgeMs", BalanceFile.snapshot(context)?.let { System.currentTimeMillis() - it.at } ?: -1L)
             put("mode", LwModes.active(context))
-            put("url", OverlayState.url ?: "")
+            put("url", HostUrl.masked(OverlayState.url ?: ""))
             put("page", OverlayState.lastError ?: "")
             put("said", OverlayState.lastHint ?: "")
             put(
                 "host",
                 when (host) {
-                    is HostStatus.Running -> host.url
+                    is HostStatus.Running -> HostUrl.masked(host.url)
                     is HostStatus.Installing -> "installing ${host.done}/${host.total}"
                     is HostStatus.Failed -> "failed: ${host.reason}"
                     HostStatus.Idle -> "idle"

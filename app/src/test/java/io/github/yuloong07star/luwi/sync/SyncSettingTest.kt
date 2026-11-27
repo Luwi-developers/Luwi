@@ -230,6 +230,28 @@ class SyncSettingTest {
     }
 
     @Test
+    fun `地址里拼着的令牌也要打码`() {
+        val root = dir()
+        val target = file(root)
+        val withToken = "https://x-access-token:ghp_0123456789abcdef@github.com/owner/repo.git"
+        assertNull(SyncSetting.setTextIn(target, SyncSetting.FIELD_SESSION_REMOTE, withToken))
+        val shown = SyncSetting.prettyOf(target)
+        assertFalse(shown.contains("ghp_0123456789abcdef"))
+        assertTrue(shown.contains("••••cdef@github.com/owner/repo.git"))
+        assertEquals(
+            "https://x-access-token:••••cdef@github.com/owner/repo.git",
+            SyncSetting.maskedRemote(withToken),
+        )
+    }
+
+    @Test
+    fun `不打码的地址原样留着`() {
+        assertEquals("https://github.com/owner/repo.git", SyncSetting.maskedRemote("https://github.com/owner/repo.git"))
+        assertEquals("/srv/git/repo.git", SyncSetting.maskedRemote("/srv/git/repo.git"))
+        assertEquals("", SyncSetting.maskedRemote(""))
+    }
+
+    @Test
     fun `还没有配置时看当前配置说的是路径`() {
         val shown = SyncSetting.prettyOf(file(dir()))
         assertTrue(shown.contains(SyncSetting.FILE))

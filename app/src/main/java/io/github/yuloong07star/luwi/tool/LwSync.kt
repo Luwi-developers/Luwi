@@ -39,19 +39,19 @@ internal object LwSync {
         val snapshot = SyncSetting.snapshotOf(file)
         return buildList {
             add("sync: ${if (snapshot.syncOn) "on" else "off"}")
-            add("  remote: ${snapshot.sessionRemote.ifBlank { "(unset)" }}")
+            add("  remote: ${SyncSetting.maskedRemote(snapshot.sessionRemote).ifBlank { "(unset)" }}")
             add("  branch: ${snapshot.branch.ifBlank { "main" }}")
             add("  autoPullOnStart: ${snapshot.autoPull}")
             add("  autoPushOnTurnEnd: ${snapshot.autoPush}")
             add("  pullIntervalMinutes: ${snapshot.pullInterval}")
-            add("  workspace: ${if (snapshot.workspaceOn) "on ${snapshot.workspaceRemote}" else "off"}")
+            add("  workspace: ${if (snapshot.workspaceOn) "on ${SyncSetting.maskedRemote(snapshot.workspaceRemote)}" else "off"}")
             add(
                 "  peer: ${if (snapshot.peerOn) "on" else "off"} (token ${SyncSetting.maskedToken(snapshot.peerToken)}," +
                     " url ${snapshot.peerUrl.ifBlank { "from the peer card" }})",
             )
             add("  file: ${file.absolutePath}${if (snapshot.fileExists) "" else " (not written yet)"}")
             if (!snapshot.syncOn) {
-                val resumable = snapshot.resumableRemote
+                val resumable = SyncSetting.maskedRemote(snapshot.resumableRemote)
                 add(
                     if (resumable.isBlank()) {
                         "  note: sync is off. Set the git remote first: op=set remote=<url>"

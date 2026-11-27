@@ -194,6 +194,29 @@ object VirtualScreen {
         val directory = if (scratch.isDirectory) scratch else context.applicationContext.cacheDir
         // 只是目录: 每一次截图自己起一个随机名字的文件 (见 [stagedOf])
         stagingDirectory = directory
+        sweepStaged(directory)
+    }
+
+    /**
+     * 清掉上一次留下的暂存件
+     *
+     * 现在的写法是每次截图 `finally` 里删自己那一份, 但删不掉的路径一直存在: 进程被杀、写盘半截、
+     * 老版本留下的文件 (那些是固定名字, 永远不会被新代码碰到)。`/data/local/tmp` 对整机可见,
+     * 一张截图留在那儿就是**一块屏幕留在那儿**, 随机名字只挡猜不挡列举
+     *
+     * 于是每次启动扫一遍: 只认自己那个前缀, 只删一小时以前的 (正在跑的那一次不会有一小时)
+     */
+    private fun sweepStaged(directory: File) {
+        val cutoff = System.currentTimeMillis() - STALE_STAGE_MS
+        val stale = runCatching {
+            directory.listFiles { file ->
+                file.isFile && file.name.startsWith(PICTURE_PREFIX) && file.lastModified() < cutoff
+            }.orEmpty()
+        }.getOrDefault(emptyArray())
+        if (stale.isEmpty()) return
+        var gone = 0
+        for (file in stale) if (runCatching { file.delete() }.getOrDefault(false)) gone += 1
+        Log.i(TAG, "swept $gone/${stale.size} stale screenshot files from ${directory.absolutePath}")
     }
 
     /**
@@ -985,6 +1008,9 @@ object VirtualScreen {
 
     /** 裸像素那份暂存文件的后缀: 内容不是 PNG, 名字也不该叫 PNG */
     private const val RAW_SUFFIX = ".raw"
+
+    /** 暂存件放多久算"上次留下的" (见 [sweepStaged]: 正在跑的那一次不会有一小时) */
+    private const val STALE_STAGE_MS = 60L * 60L * 1000L
 
     /** Where in the workspace pictures are kept, which the model can read and the user can open */
     private const val SCREENSHOTS = "screenshots"

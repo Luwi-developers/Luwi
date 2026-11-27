@@ -224,6 +224,24 @@ internal object SyncSetting {
         else -> "••••" + value.takeLast(4)
     }
 
+    /**
+     * 仓库地址里那份凭据的显示形态
+     *
+     * 配对码把令牌**拼进地址** (`https://x-access-token:<PAT>@github.com/...`), 于是同一个令牌有
+     * 两个住处: 明文的那一格 (remoteToken) 与地址里的 `user:password@`。只遮前者等于没遮 ——
+     * 模型读一眼 `op=status` 就把它抄走了。所以凡是把地址往外递的地方 (工具的 status 行、配置原文)
+     * 都过这里: 只盖密码那一段, 主机与路径一个字不动, 看的人仍然认得出这是哪个仓库
+     */
+    fun maskedRemote(value: String): String = REMOTE_CREDENTIALS.replace(value) { match ->
+        match.groupValues[1] + match.groupValues[2] + ":" + maskedToken(match.groupValues[3]) + "@"
+    }
+
+    /** `scheme://user:password@` 里的 password 那一段 */
+    private val REMOTE_CREDENTIALS = Regex(
+        "([a-z][a-z0-9+.-]*://)([^/@\\s:]+):([^/@\\s]+)@",
+        RegexOption.IGNORE_CASE,
+    )
+
     // --- 纯文件那一半 (单测直接吃它) -------------------------------------------
 
     /** 读一份配置的取值 (纯读: 文件不在或读不懂时全按缺省, 不动文件; 写盘那几条路径另有 broken 保护) */
@@ -503,11 +521,20 @@ internal object SyncSetting {
     private fun number(root: Map<String, JsonElement>, key: String): Int? =
         (root[key] as? JsonPrimitive)?.intOrNull
 
-    /** 把配置里出现的令牌换成打码形态 (那一页是给人看的, 截图里也不该带真令牌) */
+    /**
+     * 把配置里出现的令牌换成打码形态 (那一页是给人看的, 截图里也不该带真令牌)
+     *
+     * 三处都盖: 明文令牌 (`token`)、地址里拼着的凭据 (`remote` / `savedRemote` / `url`)。旧版只盖
+     * 第一处, 于是"配对码把 PAT 拼进地址"这条路径上, 令牌在配置原文里照样是明文
+     */
     private fun maskTokensIn(text: String): String =
-        text.replace(Regex("\"$PEER_TOKEN_KEY\"\\s*:\\s*\"([^\"]*)\"")) { match ->
-            "\"$PEER_TOKEN_KEY\": \"${maskedToken(match.groupValues[1])}\""
-        }
+        text
+            .replace(Regex("\"$PEER_TOKEN_KEY\"\\s*:\\s*\"([^\"]*)\"")) { match ->
+                "\"$PEER_TOKEN_KEY\": \"${maskedToken(match.groupValues[1])}\""
+            }
+            .replace(Regex("\"($SESSION_REMOTE_KEY|$SAVED_REMOTE_KEY|$PEER_URL_KEY)\"\\s*:\\s*\"([^\"]*)\"")) { match ->
+                "\"${match.groupValues[1]}\": \"${maskedRemote(match.groupValues[2])}\""
+            }
 
     /** 把纯文件那一半的结果接到界面上 (存完重画那一段) */
     private fun finish(problem: String?): String? {
