@@ -186,44 +186,29 @@ window.__ModuleLoader__.load({
      * @returns 44 字节头 + 采样的 WAV 字节 (没有采样时只有头)
      */
     function wavOf(chunks, rate) {
-      var parts = []
-      var total = 0
+      // 只在**输出**那一份上花钱 (2026-11-27 审查: 松手那一拍峰值 64 MB 是低端机的重载点):
+      // 上一版先拼一份全长 Float32 (120 s ≈ 23 MB) 再建降采样那一份 (7.7 MB), 两坨中间体一起挂着
       var list = Array.isArray(chunks) ? chunks : []
+      var starts = []
+      var total = 0
       for (var i = 0; i < list.length; i += 1) {
         var chunk = list[i]
         if (!chunk || typeof chunk.length !== 'number' || chunk.length === 0) continue
-        parts.push(chunk)
+        starts.push({ at: total, buf: chunk, len: chunk.length })
         total += chunk.length
-      }
-      var samples = new Float32Array(total)
-      var at = 0
-      for (var j = 0; j < parts.length; j += 1) {
-        samples.set(parts[j], at)
-        at += parts[j].length
       }
       var source = Number(rate)
       if (!(source > 0)) source = 16000
-      var out = samples
-      if (source !== 16000 && samples.length > 1) {
-        var length = Math.max(1, Math.floor(samples.length * 16000 / source))
-        out = new Float32Array(length)
-        var step = source / 16000
-        for (var k = 0; k < length; k += 1) {
-          var pos = k * step
-          var base = Math.floor(pos)
-          var frac = pos - base
-          var first = base < samples.length ? samples[base] : 0
-          var second = base + 1 < samples.length ? samples[base + 1] : first
-          out[k] = first + (second - first) * frac
-        }
-      }
-      var bytes = new Uint8Array(44 + out.length * 2)
+      // 采样数: 16 kHz 那一档一进一出, 其余按比例缩 (只有 1 个样本时不缩, 与旧版同一处边界)
+      var count = total
+      if (source !== 16000 && total > 1) count = Math.max(1, Math.floor(total * 16000 / source))
+      var bytes = new Uint8Array(44 + count * 2)
       var view = new DataView(bytes.buffer)
       var ascii = function (offset, text) {
         for (var n = 0; n < text.length; n += 1) bytes[offset + n] = text.charCodeAt(n)
       }
       ascii(0, 'RIFF')
-      view.setUint32(4, 36 + out.length * 2, true)
+      view.setUint32(4, 36 + count * 2, true)
       ascii(8, 'WAVE')
       ascii(12, 'fmt ')
       view.setUint32(16, 16, true)
@@ -234,10 +219,38 @@ window.__ModuleLoader__.load({
       view.setUint16(32, 2, true)
       view.setUint16(34, 16, true)
       ascii(36, 'data')
-      view.setUint32(40, out.length * 2, true)
-      for (var m = 0; m < out.length; m += 1) {
-        var clamped = out[m] > 1 ? 1 : (out[m] < -1 ? -1 : out[m])
-        view.setInt16(44 + m * 2, Math.round(clamped * 32767), true)
+      view.setUint32(40, count * 2, true)
+      var write = function (index, value) {
+        var clamped = value > 1 ? 1 : (value < -1 ? -1 : value)
+        view.setInt16(44 + index * 2, Math.round(clamped * 32767), true)
+      }
+      if (source === 16000) {
+        // 原样: 逐块直接写进目标字节, 一个中间数组都不建
+        var index = 0
+        for (var a = 0; a < starts.length; a += 1) {
+          var entry = starts[a]
+          for (var b = 0; b < entry.len; b += 1) {
+            write(index, entry.buf[b])
+            index += 1
+          }
+        }
+      } else {
+        // 降采样: 线性插值, 游标只往右走 (base 单调), 于是这一趟是 O(n)
+        var step = source / 16000
+        var cursor = 0
+        for (var k = 0; k < count; k += 1) {
+          var pos = k * step
+          var base = Math.floor(pos)
+          var frac = pos - base
+          while (cursor < starts.length - 1 && base >= starts[cursor].at + starts[cursor].len) cursor += 1
+          var here = starts[cursor]
+          var off = base - here.at
+          var first = off >= 0 && off < here.len ? here.buf[off] : 0
+          var second = first
+          if (off + 1 < here.len) second = here.buf[off + 1]
+          else if (cursor + 1 < starts.length) second = starts[cursor + 1].buf[0]
+          write(k, first + (second - first) * frac)
+        }
       }
       return bytes
     }
@@ -285,6 +298,30 @@ window.__ModuleLoader__.load({
       var stamp = typeof now === 'number' && isFinite(now) ? now : 0
       if (at <= 0) return true
       return stamp - at >= span
+    }
+
+    /**
+     * 这一块该切到哪儿 (纯函数, 判据真跑)
+     *
+     * 从 `cursor` 往后数, 数到"再数就超过 `want` 个样本"为止; 一块都不取时 `count = 0`
+     * (没有新声音 / 已经送到末尾). 送块那一路**必须**靠它推进 cursor —— 推进量是 0 的话
+     * 同一段声音会被每 1.5 s 反复送一遍
+     * @param lengths 每块样本数 (从旧到新)
+     * @param cursor 已经送到的位置 (块下标)
+     * @param want 这一块最多取多少样本 (0 = 不限)
+     */
+    function chunkCut(lengths, cursor, want) {
+      var list = Array.isArray(lengths) ? lengths : []
+      var from = typeof cursor === 'number' && isFinite(cursor) && cursor > 0 ? Math.floor(cursor) : 0
+      var cap = typeof want === 'number' && isFinite(want) && want > 0 ? Math.floor(want) : 0
+      var count = 0
+      var samples = 0
+      while (from + count < list.length && (cap === 0 || samples < cap)) {
+        var one = Number(list[from + count])
+        samples += isFinite(one) && one > 0 ? one : 0
+        count += 1
+      }
+      return { count: count, samples: samples }
     }
 
     /**
@@ -1425,6 +1462,11 @@ window.__ModuleLoader__.load({
       'font-size:12.5px;line-height:18px;letter-spacing:.01em;color:rgba(255,255,255,.96);',
       'text-shadow:0 1px 0 rgba(0,0,0,.14);transition:opacity .16s ease}',
       '#lwp-voice-live:empty{display:none}',
+      // 一行小字: 这一层是预览, 以松手后的整段为准 (不说的话人会以为是最终结果)
+      '.lwp-rec-live-note{flex:none;font-size:10.5px;line-height:14px;letter-spacing:.02em;',
+      'color:rgba(255,255,255,.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#lwp-rec[data-live="off"] .lwp-rec-live-note{display:none}',
+      '#lwp-voice-live .lwp-live-part{display:inline}',
       '#lwp-rec[data-live="off"] #lwp-voice-live{display:none}',
       // 波形那一行自带一颗 24px 显隐钮; 行与钮只在**条子升起来**时收事件 —— 收起态整条只是
       // opacity:0 (仍占位置), 那时候还收事件就是一条隐形命中区横在输入卡顶上 (点不进输入框)
@@ -5376,6 +5418,13 @@ window.__ModuleLoader__.load({
       var voiceLiveOn = true
       /** 宿主不认 `op=voice-chunk` 时置真: 这一趟退回"松手整段转写", 不再每 1.5 s 问一次 */
       var voiceStreamOff = false
+      /**
+       * 这一趟的结果已经落过草稿 (整段 / 失败兜底 / 看门狗兜底任一条)
+       *
+       * 落了之后`voiceAnswer` 那条整段分支一个字都不许再写 —— 45 s 看门狗与迟到的整段
+       * 撞在一起时, 同一句会进草稿两遍 (2026-11-27 审查 B1)
+       */
+      var voiceLanded = false
       /** 长按输入框那颗计时器 (450 ms 还没抬手就是"要说话") */
       var pressTimer = null
       /** 起手那一点 (px): 手指挪过 12 px 才当"这不是长按", 真机上按住不动也会有几像素抖动 */
@@ -5405,6 +5454,11 @@ window.__ModuleLoader__.load({
       var REC_HINT = '松手转写，上滑取消'
       var REC_HINT_CANCEL = '松开取消'
       var REC_HINT_BUSY = '正在转写…'
+      /**
+       * 实时层上面那行小字 (2026-11-27 审查 ⑪): 分块是**预览**, 3 s 那一刀也不带重叠 ——
+       * 不写这一句, 人会逐字比对, 然后以为松手之后丢了字
+       */
+      var REC_LIVE_NOTE = '实时文字 · 以松手后的整段为准'
       /** 上滑多少像素算取消 */
       var REC_CANCEL_PX = 56
       /** 录音条的高度 = 输入卡实测高 × 这个倍数 (主人 2026-11-20: "比输入框高1.5倍即可") */
@@ -5429,6 +5483,7 @@ window.__ModuleLoader__.load({
         voiceChunkFails = 0
         voiceLiveText = ''
         voiceStreamOff = false
+        voiceLanded = false
         fitRecPanel()
         if (els.rec) {
           els.rec.setAttribute('data-on', 'on')
@@ -5436,7 +5491,7 @@ window.__ModuleLoader__.load({
           els.rec.setAttribute('data-busy', 'off')
         }
         applyRecLive()
-        paintRecLive('')
+        clearRecLive()
         if (root) root.setAttribute('data-rec', 'on')
         setRecHint(REC_HINT)
         paintRecTime()
@@ -5530,22 +5585,55 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 实时层那一行字 (2.8.1 #F10)
+       * 实时层清空 (新一趟 / 面板收起 / 兜底落草稿之后)
+       */
+      function clearRecLive() {
+        voiceLiveText = ''
+        if (!els.recLive) return
+        els.recLive.textContent = ''
+        els.recLive.setAttribute('data-long', 'off')
+      }
+
+      /** 两行封顶之后跟着最新那一行走: 屏上永远是刚说出口的那几个字 */
+      function stickRecLive() {
+        if (!els.recLive || typeof els.recLive.scrollHeight !== 'number') return
+        var box = els.recLive.clientHeight || 0
+        var long = box > 0 && els.recLive.scrollHeight > box + 1
+        els.recLive.setAttribute('data-long', long ? 'on' : 'off')
+        if (long) els.recLive.scrollTop = els.recLive.scrollHeight
+      }
+
+      /**
+       * 逐块追加一个字格 (`appendChild`) —— 读屏只念**新加的那几个字**
        *
-       * 只追加 (拼字在 `voiceLiveJoin`); 两行封顶之后跟着最新那一行走 —— 屏上永远是刚说出口的那几个字
-       * @param text 这一次要显示的全量文字 (空串 = 清空)
+       * 上一版每 1.5 s 把整天攒下来的整段 `textContent` 重写一遍, 读屏用户听到的是同一句话
+       * 反复重播 (2026-11-27 审查 ⑩); `role="log"` + 一格一句才只念增量
+       * @param part 这一块刚认出来的那几个字
+       */
+      function appendRecLive(part) {
+        var text = typeof part === 'string' ? part.replace(/\s+$/u, '').replace(/^\s+/u, '') : ''
+        if (text === '') return
+        var joined = voiceLiveJoin(voiceLiveText, text)
+        if (joined === voiceLiveText) return
+        voiceLiveText = joined
+        if (!els.recLive) return
+        els.recLive.appendChild(h('span', 'lwp-live-part', text))
+        stickRecLive()
+      }
+
+      /**
+       * 实时层换成**一整句** (整段那份到手 / 兜底): 不再是逐格追加, 先清空再放一格
+       * @param text 要显示的全量文字 (空串 = 清空)
        */
       function paintRecLive(text) {
-        if (!els.recLive) return
         var said = typeof text === 'string' ? text : voiceLiveText
         voiceLiveText = said
-        if (els.recLive.textContent !== said) els.recLive.textContent = said
-        if (typeof els.recLive.scrollHeight === 'number') {
-          var box = els.recLive.clientHeight || 0
-          var long = box > 0 && els.recLive.scrollHeight > box + 1
-          els.recLive.setAttribute('data-long', long ? 'on' : 'off')
-          if (long) els.recLive.scrollTop = els.recLive.scrollHeight
+        if (!els.recLive) return
+        if (els.recLive.textContent !== said) {
+          els.recLive.textContent = ''
+          if (said !== '') els.recLive.appendChild(h('span', 'lwp-live-part', said))
         }
+        stickRecLive()
       }
 
       /**
@@ -5583,14 +5671,11 @@ window.__ModuleLoader__.load({
         if (chunks === null) return false
         var rate = voiceSourceRate > 0 ? voiceSourceRate : 48000
         var want = Math.max(1, Math.round(rate * VOICE_CHUNK_SLICE_MS / 1000))
-        var count = 0
-        var samples = 0
-        while (voiceChunkCursor + count < chunks.length && samples < want) {
-          samples += chunks[voiceChunkCursor + count].length
-          count += 1
-        }
-        if (count === 0) return false
-        var slice = chunks.slice(voiceChunkCursor, voiceChunkCursor + count)
+        var lengths = []
+        for (var i = 0; i < chunks.length; i += 1) lengths.push(chunks[i].length)
+        var cut = chunkCut(lengths, voiceChunkCursor, want)
+        if (cut.count === 0) return false
+        var slice = chunks.slice(voiceChunkCursor, voiceChunkCursor + cut.count)
         var wav = wavOf(slice, rate)
         if (wav.byteLength <= 44) return false
         var seq = voiceChunkSeq + 1
@@ -5604,12 +5689,12 @@ window.__ModuleLoader__.load({
         if (answer !== null && answer.ok === true) {
           // **发成功之后才推进**: 被拒的那一块不算号, 采样也不剪 —— 草稿那条整段转写要用全部声音
           voiceChunkSeq = seq
-          voiceChunkCursor += count
+          voiceChunkCursor += cut.count
           voiceChunkAt = Date.now()
           return true
         }
         if (answer !== null && answer.code === 'busy') {
-          // 宿主还在认上一块: 这一拍不送, 下一拍再试 (不算失败, 也不关流式)
+          // 宿主还在认上一块: 这一拍不送, 下一拍再试 —— **不算失败** (不由它把流式关掉)
           return false
         }
         // 这一版宿主还不认这一块: 关掉流式, 松手时照旧整段转写
@@ -5620,8 +5705,8 @@ window.__ModuleLoader__.load({
       /**
        * 流式那一块回来的文字 (2.8.1 #F10) —— **只追加到实时层**
        *
-       * 失败块自带 `ok:false` / `failed:true` (与"认出空串"分得开): 那一块的字一个都不许混进实时层,
-       * 连着 `VOICE_CHUNK_FAIL_MAX` 块就关掉流式; 草稿不归这条路管, 松手那次整段转写才是准尺
+       * 失败块自带 `ok:false` / `failed:true` (与"认出空串"分得开): 那一块的字一个都不许混进实时层;
+       * **连着** `VOICE_CHUNK_FAIL_MAX` 块认不出来才关流式 (成功一块就把连败清零)
        * @param payload `{kind:'chunk', id, seq, ok, failed?, text}`
        */
       function voiceChunkAnswer(payload) {
@@ -5636,14 +5721,15 @@ window.__ModuleLoader__.load({
           if (voiceChunkFails >= VOICE_CHUNK_FAIL_MAX) voiceStreamOff = true
           return
         }
-        var said = String(payload.text === undefined || payload.text === null ? '' : payload.text)
-        paintRecLive(voiceLiveJoin(voiceLiveText, said))
+        voiceChunkFails = 0
+        appendRecLive(String(payload.text === undefined || payload.text === null ? '' : payload.text))
       }
 
       /**
        * 转写等太久的闸 (45 s): 只认**这一趟** (`take`), 跨趟残留一个字节都不许写
        *
-       * 兜底那份是实时层拼出来的, 不是整段的结果 —— 落进草稿时要明说, 不许静默当成整段
+       * 兜底那一支落完草稿就**作废这一趟** (`voiceId += 1` + `voiceLanded`): 迟到的整段结果带着旧号,
+       * 到了 `voiceAnswer` 就被丢掉 —— 否则同一句会进草稿两遍 (2026-11-27 审查 B1)
        * @param take 开这一趟时的 `voiceId`
        */
       function armVoiceWatch(take) {
@@ -5654,6 +5740,9 @@ window.__ModuleLoader__.load({
           if (voiceState !== 'working') return
           var said = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
+          voiceLanded = said !== ''
+          // 这一趟到此为止: 迟到的整段结果不许再往草稿里写一遍
+          voiceId += 1
           hideRecPanel()
           if (said !== '') {
             insertDraft(said)
@@ -5677,6 +5766,7 @@ window.__ModuleLoader__.load({
         voiceChunkSeen = 0
         voiceChunkFails = 0
         voiceLiveText = ''
+        voiceLanded = false
         if (recFrame !== 0) {
           try { cancelAnimationFrame(recFrame) } catch (_noFrame) { /* 老 WebView */ }
           recFrame = 0
@@ -5686,10 +5776,7 @@ window.__ModuleLoader__.load({
           els.rec.setAttribute('data-cancel', 'off')
           els.rec.setAttribute('data-busy', 'off')
         }
-        if (els.recLive) {
-          els.recLive.textContent = ''
-          els.recLive.setAttribute('data-long', 'off')
-        }
+        clearRecLive()
         if (root) root.setAttribute('data-rec', 'off')
         // 长按那一下关掉过的 `touch-action` 要还回去 (选区与滚动靠它)
         if (els.input) els.input.style.touchAction = ''
@@ -5813,6 +5900,14 @@ window.__ModuleLoader__.load({
         closeFileMenu()
         recStartY = 0
         voiceHeld = true
+        // **按下去就作废上一趟** (2026-11-27 审查 ⑨): 上一趟的整段结果若在这个 press 窗口里回来,
+        // 它会带着旧号, 一进 `voiceAnswer` 就被丢掉 —— 不许插进这一趟的草稿、把新面板关掉
+        voiceId += 1
+        voiceLanded = false
+        if (voiceWatch !== null) {
+          clearTimeout(voiceWatch)
+          voiceWatch = null
+        }
         showRecPanel()
         window.addEventListener('pointermove', onRecMove, { passive: true })
         // 手指那一路要 `touchmove` 再挡一次: `pointerdown` 里改 `touch-action` 对**这一趟手势**
@@ -6003,12 +6098,11 @@ window.__ModuleLoader__.load({
           voiceChunkFails = 0
           voiceLiveText = ''
           voiceStreamOff = false
-          // 上一趟的看门狗不许跨趟动手 (2026-11-27 审查 ⑨): 先收掉, 再发这一趟的号
+          voiceLanded = false
+          // 上一趟的看门狗不许跨趟动手: 先收掉 (号已经在 `beginHoldRecording` 按下去那一刻抬过,
+          // 这一趟从头到尾就用那一个)
           if (voiceWatch !== null) clearTimeout(voiceWatch)
           voiceWatch = null
-          // 这一趟的编号在**开录这一刻**发 (2.8.1 #F10): 块与整段都拿它认人, 中途不再换号,
-          // 否则松手那一拍会把还没回来的块全判成"过期", 实时层那份文字就断在半截
-          voiceId += 1
           voiceState = 'recording'
           // 帧循环从**这一刻**才开始: 上面那句之前 `voiceState` 还是 `press`, 早起的帧会立刻退出
           startRecPump()
@@ -6069,6 +6163,8 @@ window.__ModuleLoader__.load({
         var rate = voiceSourceRate
         releaseVoiceCapture()
         var wav = wavOf(chunks, rate)
+        // 采样封完就松手: 3.84 MB 的 wav 已经够用, 那 23 MB 的 Float32 不必陪着 base64 一起活着
+        chunks = null
         if (wav.byteLength <= 44) {
           hideRecPanel()
           toast('没有录到声音', true)
@@ -6087,9 +6183,19 @@ window.__ModuleLoader__.load({
           language: 'auto',
         }))
         if (answer === null || answer.ok !== true) {
+          // 同步被拒也要把刚认出来的字接住, 并把宿主那句原因说出来 (2026-11-27 审查 ⑤)
+          var why = answer && answer.error ? String(answer.error) : ''
+          var held = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
+          voiceId += 1
+          voiceLanded = held !== ''
           hideRecPanel()
-          toast('这一版宿主还不支持语音输入', true)
+          if (held !== '') {
+            insertDraft(held)
+            toast(why !== '' ? '这一段没收下(' + why + '): 先把实时层那句放进草稿' : '这一段没收下: 先把实时层那句放进草稿', true)
+            return
+          }
+          toast(why !== '' ? '这一段没收下: ' + why : '这一版宿主还不支持语音输入', true)
           return
         }
         // 原生那边在别的线程认, 认完经 `__LUWI_PORTAL__.voice({id, ok, text})` 回推
@@ -6139,12 +6245,17 @@ window.__ModuleLoader__.load({
         // 整段转写的结果只可能出现在"已经松手"之后: 还在录的时候来的一律当陈旧回推
         if (voiceState === 'recording') return
         if (typeof payload.id === 'number' && payload.id !== voiceId) return
+        // 这一趟的结果已经落过草稿 (看门狗兜底 / 同步被拒那条路): 迟到的整段不许再写一遍 (审查 B1)
+        if (voiceLanded) return
         if (voiceWatch !== null) clearTimeout(voiceWatch)
         voiceWatch = null
         if (payload.ok !== true) {
           // 整段这条腿断了也不许把说过的话丢掉: 实时层那份先兜底 —— 但要**明说**它只是实时层那句
           var kept = voiceDraftText(voiceLiveText, '')
           voiceState = 'idle'
+          // 作废这一趟: 后面就算再来一份整段结果也不许动草稿
+          voiceId += 1
+          voiceLanded = kept !== ''
           hideRecPanel()
           if (kept !== '') {
             insertDraft(kept)
@@ -6158,6 +6269,7 @@ window.__ModuleLoader__.load({
         var said = voiceDraftText(voiceLiveText, final)
         var partial = final.trim() === ''
         voiceState = 'idle'
+        voiceLanded = said !== ''
         if (els.rec) els.rec.setAttribute('data-busy', 'off')
         if (said !== '') paintRecLive(said)
         hideRecPanel()
@@ -8754,9 +8866,14 @@ window.__ModuleLoader__.load({
         els.recLiveBtn.innerHTML = LIVE_ON_ICON
         els.recWaveRow.appendChild(els.recLiveBtn)
         els.rec.appendChild(els.recWaveRow)
-        // 实时文字层: `aria-live` 让读屏跟着念, 两行封顶之后自己往上滚
+        // 实时文字层: `role="log"` + `aria-live` 只念**新加的那一格** (整段重写会让读屏反复重播),
+        // 两行封顶之后自己往上滚; 上面一行小字说明它只是预览 (审查 ⑩⑪)
+        els.recLiveNote = h('div', 'lwp-rec-live-note', REC_LIVE_NOTE)
+        els.recLiveNote.setAttribute('aria-hidden', 'true')
+        els.rec.appendChild(els.recLiveNote)
         els.recLive = h('div', 'lwp-rec-live')
         els.recLive.id = 'lwp-voice-live'
+        els.recLive.setAttribute('role', 'log')
         els.recLive.setAttribute('aria-live', 'polite')
         els.recLive.setAttribute('data-long', 'off')
         els.rec.appendChild(els.recLive)

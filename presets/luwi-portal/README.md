@@ -96,14 +96,18 @@ nextTask + router 的 checks) 摆在同一屏上
   条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
   —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉 (只有**条子升起来时**的波形行与那颗显隐钮自己收事件,
   `[data-on="off"]` 那档一个事件都不收, 否则收起态会在输入卡顶上留一条隐形命中区)。
-  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面两行 (`aria-live="polite"`, 36px 封顶后自己往上滚),
-  每 `VOICE_CHUNK_MS` (1500 ms) 把这一段**新增的** PCM 封一小块 (≤ 3 s) 走桥的 `op=voice-chunk`, 回来的字
-  只追加到这一层 —— **这一层只做展示**: 草稿永远来自松手那次整段转写 (`op=transcribe`), 分块认串了 / 认不完
-  都不影响框里的字, 兜底落实时层那份时会明说一句。波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler,
-  **只切这一层** (显隐靠 `data-live` 记号 + CSS), 录音 / 计时 / 波形一动不动。同一个节拍宿主也留一份
-  (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**: 一块都不送、采样一块都不剪, 松手照旧整段转写。
-  背压两侧都有: 在途超过 2 块页面这一拍不送, 宿主在途超过 3 块回 `busy`; 块回来先比 `generation`,
-  失败块带 `failed` 标记 (与"认出空串"分得开)。
+  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面一行小字「实时文字 · 以松手后的整段为准」+ 两行正文
+  (`role="log"` + `aria-live="polite"`, 36px 封顶后自己往上滚)。每 `VOICE_CHUNK_MS` (1500 ms) 把这一段
+  **新增的** PCM 封一小块 (≤ 3 s) 走桥的 `op=voice-chunk`, 回来的字**逐格追加** (`appendRecLive`) —— 读屏
+  只念新加的那几个字, 不是每 1.5 s 把整段重念一遍。**这一层只做展示**: 草稿永远来自松手那次整段转写
+  (`op=transcribe`), 分块认串了 / 认不完 / 3 s 那一刀切在字上也都不影响框里的字; 真是兜底用实时层那份时
+  会明说一句, 而且**落完就作废这一趟** (`voiceLanded` + 抬号), 45 s 看门狗与迟到的整段不会把同一句写两遍。
+  波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler, **只切这一层** (显隐靠 `data-live` 记号 + CSS),
+  录音 / 计时 / 波形一动不动; 条子收起时 `pointer-events` 全是 `none` (只有 `data-on="on"` 那一行才 `auto`),
+  免得隐形命中区压在输入卡顶上。同一个节拍宿主也留一份 (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**:
+  一块都不送、采样一块都不剪, 松手照旧整段转写。背压两侧都有且都钉了取值: 在途超过 **2** 块页面这一拍不送
+  (`VOICE_CHUNK_INFLIGHT_MAX`), 宿主在途超过 **3** 块回 `code:"busy"` (`MAX_PENDING_CHUNKS`, busy 不记失败);
+  块回来先比 `generation`, 失败块带 `failed` 标记 (与"认出空串"分得开), 连着 3 块认不出来才关流式。
   录音在页面 (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16),
   **上限 120 s** (与宿主 `MAX_SECONDS`、上游 `LwDeepseekAsr` 同一个数, 云端那侧自己按 60 s 切开),
   短于 0.5 s 当误触; 转写在应用 (`ui/PortalVoice.kt` → `LwSpeech.dispatch`, 引擎跟 `lw/voice-source.json`),

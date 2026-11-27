@@ -31,8 +31,8 @@ class PortalVoiceTest {
         assertEquals(1500, PortalVoice.VOICE_CHUNK_MS)
         // 一块 1.5 s 的 PCM16 约 48 KB, 上限 1 MB 够宽 (超了只可能是页面封错了头)
         assertTrue(1500 * 16000 / 1000 * 2 < PortalVoice.CHUNK_BYTES)
-        // 在途上限: 认得比送得快才追得上, 这个数不该是 0 (0 就永远 busy)
-        assertTrue(PortalVoice.MAX_PENDING_CHUNKS >= 2)
+        // 在途上限: 认得比送得快才追得上; **取值**要钉住 (审查 B4: 只写 >= 2 的话改成 99 也全绿)
+        assertEquals(3, PortalVoice.MAX_PENDING_CHUNKS)
     }
 
     /* ── 文件名 ───────────────────────────────────────────────────────────── */
