@@ -1475,10 +1475,16 @@ window.__ModuleLoader__.load({
       '#lwp-rec-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;',
       'height:20px}',
       '#lwp-rec[data-busy="on"] .lwp-rec-wave{opacity:0;height:0;flex:none}',
-      // 实时文字层 (2.8.1 #F10): 波形那一行下面两行, 读屏靠 `aria-live`; 两行封顶之后自己往上滚
-      '#lwp-voice-live{flex:none;max-height:36px;overflow-y:auto;overscroll-behavior:contain;',
-      'font-size:12.5px;line-height:18px;letter-spacing:.01em;color:rgba(255,255,255,.96);',
-      'text-shadow:0 1px 0 rgba(0,0,0,.14);transition:opacity .16s ease}',
+      // 实时文字层 (2.8.1 #F10; 2026-11-27 主人: "语音输入出现的字应当显示在上方")
+      // **浮在录音条上方的一层**, 不再挤在贴底那条里: `position:fixed` 自己定位, 与录音条的高度无关,
+      // `--lwp-live-bottom` 由 [showRecPanel] 按录音条实测顶边写进来 (条高随输入卡变, 写死会叠在一起)
+      '#lwp-voice-live{position:fixed;left:12px;right:12px;bottom:var(--lwp-live-bottom,140px);z-index:9;',
+      'max-height:132px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;',
+      'padding:10px 14px;border-radius:18px;background:rgba(22,24,28,.84);',
+      'backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);',
+      'box-shadow:0 10px 28px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.08);',
+      'font-size:15px;line-height:21px;letter-spacing:.01em;color:rgba(255,255,255,.97);',
+      'transition:opacity .16s ease}',
       '#lwp-voice-live:empty{display:none}',
       // 一行小字: 这一层是预览, 以松手后的整段为准 (不说的话人会以为是最终结果)
       '.lwp-rec-live-note{flex:none;font-size:10.5px;line-height:14px;letter-spacing:.02em;',
@@ -5550,6 +5556,11 @@ window.__ModuleLoader__.load({
         if (wanted > REC_PANEL_MAX) wanted = REC_PANEL_MAX
         if (wanted < REC_PANEL_MIN) wanted = REC_PANEL_MIN
         els.rec.style.height = String(wanted) + 'px'
+        // 实时文字层浮在条**上方** (2026-11-27 主人: "语音输入出现的字应当显示在上方"):
+        // 条自己贴底 12px, 高度 `wanted`, 再留 8px 间隙就是浮层的底边
+        if (root && root.style && typeof root.style.setProperty === 'function') {
+          root.style.setProperty('--lwp-live-bottom', String(wanted + 12 + 8) + 'px')
+        }
         recGradient = null
         // 一行读数: 卡多高、条多高 (真机验收要的就是这个比例, 也方便日后查"条怎么又高了")
         console.log('[luwi-portal] rec bar ' + wanted + 'px (card ' + Math.round(cardHeight) + 'px)')
@@ -6301,6 +6312,21 @@ window.__ModuleLoader__.load({
        * 一次之后, 旧的那趟不该再动草稿)
        * @param payload `{kind?, id?, seq?, final?, ok, text?, error?, engine?, mic?}`
        */
+      /**
+       * 陈旧回推收尾: 这一趟已经不作数了, 但 `voiceState` 还停在 `working`
+       *
+       * 停在 working 的后果不是"卡一下": `beginHoldRecording` / `startRecording` 的入口闸
+       * (`voiceState === 'working'` 直接 return) 会把后面每一次长按都挡掉 —— 真机上就是
+       * 「语音输入用一次就不能再用」。所以任何一个不落草稿的早退分支, 只要这一趟是 working,
+       * 都要把它收回 idle 并把面板落下去 (2026-11-27 主人报的 bug)
+       */
+      function releaseWorkingIfStale() {
+        if (voiceState !== 'working') return
+        voiceState = 'idle'
+        if (els.rec) els.rec.setAttribute('data-busy', 'off')
+        hideRecPanel()
+      }
+
       function voiceAnswer(payload) {
         if (!payload || typeof payload !== 'object') return
         if (payload.kind === 'permission') {
@@ -6329,9 +6355,17 @@ window.__ModuleLoader__.load({
           settleVoiceReplacement(String(payload.text === undefined || payload.text === null ? '' : payload.text))
           return
         }
-        if (typeof payload.id === 'number' && payload.id !== voiceId) return
+        if (typeof payload.id === 'number' && payload.id !== voiceId) {
+          // 陈旧回推: **这一趟的 working 状态必须收掉** —— 否则 voiceState 停在 working,
+          // 下一次长按会被 startRecording 的闸 (6091) 直接挡掉, 表现就是「用一次就不能再用」
+          releaseWorkingIfStale()
+          return
+        }
         // 这一趟的结果已经落过草稿 (看门狗兜底 / 同步被拒那条路): 迟到的整段不许再写一遍 (审查 B1)
-        if (voiceLanded) return
+        if (voiceLanded) {
+          releaseWorkingIfStale()
+          return
+        }
         if (voiceWatch !== null) clearTimeout(voiceWatch)
         voiceWatch = null
         if (payload.ok !== true) {

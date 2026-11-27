@@ -4047,8 +4047,8 @@ expect('client.js', client, "els.recLive = h('div', 'lwp-rec-live')")
 expect('client.js', client, "els.recLive.id = 'lwp-voice-live'")
 expect('client.js', client, "els.recLive.setAttribute('aria-live', 'polite')")
 expect('client.js', client, "els.recLive.setAttribute('role', 'log')")
-expect('client.js', client, "'#lwp-voice-live{flex:none;max-height:36px;overflow-y:auto;overscroll-behavior:contain;'")
-expect('client.js', client, 'font-size:12.5px;line-height:18px;letter-spacing:.01em;color:rgba(255,255,255,.96);')
+expect('client.js', client, "'#lwp-voice-live{position:fixed;left:12px;right:12px;bottom:var(--lwp-live-bottom,140px);z-index:9;'")
+expect('client.js', client, 'font-size:15px;line-height:21px;letter-spacing:.01em;color:rgba(255,255,255,.97);')
 expectOrder('实时层挂在波形行下面', client, 'els.rec.appendChild(els.recWaveRow)', 'els.rec.appendChild(els.recLive)')
 expect('client.js', client, 'function paintRecLive')
 expect('client.js', client, 'els.recLive.scrollTop = els.recLive.scrollHeight')
@@ -4057,10 +4057,11 @@ expect('client.js', client, "var REC_LIVE_NOTE = '实时文字 · 以松手后�
 expect('client.js', client, 'els.recLiveNote = h(\'div\', \'lwp-rec-live-note\', REC_LIVE_NOTE)')
 expect('client.js', client, "'.lwp-rec-live-note{flex:none;font-size:10.5px;line-height:14px;letter-spacing:.02em;'")
 // 两行封顶 = 2 × 18px 行高: 再多也不许把录音条撑高 (只往上滚)
-if (grab(client, /'#lwp-voice-live\{flex:none;max-height:(\d+)px/u) === '36') {
-  notes.push('ok   实时层两行封顶 (36px = 2 × 18px), 更旧的往上滚')
+if (client.includes("'#lwp-voice-live{position:fixed;")
+  && client.includes('max-height:132px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;')) {
+  notes.push('ok   实时层浮在录音条上方 (position:fixed, 132px 封顶, 只往上滚)')
 } else {
-  failures.push('client.js: 实时层没有两行封顶 (max-height 与行高对不上)')
+  failures.push('client.js: 实时层不再是浮在录音条上方的那一层 (position:fixed + 132px 上限)')
 }
 // 显隐真机制: 记号 (applyRecLive 写 data-live) + CSS 只认它 + 钮只调 applyRecLive —— 三处少一处就红
 const applyLiveSource = sliceFunction('applyRecLive')
@@ -4434,7 +4435,7 @@ const bumpAt = watchSource.indexOf('voiceId += 1')
 const landedAt = watchSource.indexOf('voiceLanded =')
 const hideAt = watchSource.indexOf('hideRecPanel()')
 if (bumpAt < 0 || landedAt < 0 || hideAt < 0 || bumpAt > hideAt || landedAt > hideAt
-  || !answerSource.includes('if (voiceLanded) return')) {
+  || !answerSource.includes('if (voiceLanded)')) {
   failures.push('client.js: 兜底那一支没有作废这一趟 —— 迟到的整段会在草稿里把同一句写两遍')
 } else {
   notes.push('ok   兜底落草稿即作废这一趟 (抬号 + voiceLanded), 迟到的整段一个字都不写')
@@ -4471,5 +4472,7 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(`\ncheck-luwi-portal: 全部通过 (${String(notes.length)} 条)`)
+
+
 
 
