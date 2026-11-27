@@ -13,6 +13,7 @@ import android.text.TextUtils
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -40,7 +41,7 @@ import java.io.File
  * 进度与日志按文件读, 一秒一眼 (只有在前台才轮): 构建在特权进程里跑, 每一步写 `.lwforge/progress.json`
  * 与 `build.log`, 这里跟着刷就是那个「看进度」的意思
  *
- * 三块卡片钉同一個下限高 ([CARD_HEIGHT_DP]): 换档时整页不许上下跳, 徽标也不只靠颜色区分
+ * 三块卡片钉同一个**固定高** ([CARD_HEIGHT_DP]): 换档时整页不许上下跳, 徽标也不只靠颜色区分
  * (判据 `tools/check-forge.mjs` 第四节)
  *
  * **没有桌面图标**: 它由 `lw_forge op=screen` 用 `am start` 拉到那块虚拟屏上, 主人平时看不到它单独出现
@@ -64,8 +65,8 @@ class DevConsoleActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var scroller: ScrollView
 
-    /** 上一档那一行 (`<档> <步>/<总>`); 只为了不每秒重复落日志 */
-    private var lastLine: String? = null
+    /** 上一拍的签名 (档 / 步 / 原因 / 项目 / 权限); 一秒一眼那趟只比它, 一样就一个字都不改 */
+    private var lastSignature: String? = null
 
     private val poll = object : Runnable {
         override fun run() {
@@ -126,9 +127,10 @@ class DevConsoleActivity : Activity() {
         }
 
         root.addView(title, block(0))
-        root.addView(projectCard, block(padding))
-        root.addView(statusCard, block(dp(10)))
-        root.addView(actionRow, block(dp(10)))
+        // 三块固定高: 换档只改字, 高度逐像素不变 (空态 / 无权限那两张图也一样)
+        root.addView(projectCard, block(padding, dp(CARD_HEIGHT_DP)))
+        root.addView(statusCard, block(dp(10), dp(CARD_HEIGHT_DP)))
+        root.addView(actionRow, block(dp(10), dp(CARD_HEIGHT_DP)))
         root.addView(logTitle, block(padding))
         root.addView(log, block(0))
         scroller = ScrollView(this).apply {
@@ -167,26 +169,59 @@ class DevConsoleActivity : Activity() {
         val dir = current?.let { File(it.path) }
         val progress = dir?.let { ForgeConsole.progress(it) }.orEmpty()
         val build = dir?.let { ForgeConsole.lastBuild(it) }.orEmpty()
-        bind(current, stateOf(progress, buildRead(build), hasProject = current != null, hasAccess = access))
-        log.text = dir?.let { ForgeConsole.logTail(it, 80) }.orEmpty()
+        // 两份文件谁新谁旧才是"这一档"的判据: progress 新 = 又跑起来了, last-build 新 = 那一笔已经了结
+        val state = stateOf(
+            progress = progress,
+            progressAt = dir?.let { File(it, PROGRESS_FILE).lastModified() } ?: 0L,
+            build = buildRead(build),
+            buildAt = dir?.let { File(it, BUILD_FILE).lastModified() } ?: 0L,
+            hasProject = current != null,
+            hasAccess = access,
+        )
+        bind(current, state)
+        // 日志尾巴同理: 行没变就不重设, 一秒一眼那趟不白排版
+        val tail = dir?.let { ForgeConsole.logTail(it, 80) }.orEmpty()
+        if (tail != log.text.toString()) log.text = tail
     }
 
-    /** 一档画一次: 徽标 / 进度 / 读数 / 原因 / 主钮 */
+    /** 一档画一次: 徽标 / 进度 / 读数 / 原因 / 主钮 (签名没变的那一秒不动一个字节) */
     private fun bind(current: ForgeConsole.Project?, state: DevState) {
-        // 换档或换步才落一行日志: 真机截图之外还留一条能 grep 的读数 (`adb logcat -s LwDev`)
-        val line = "${state.phase.id} ${state.step}/${state.total}"
-        if (line != lastLine) {
-            lastLine = line
-            Log.i(TAG, "state $line")
+        val noAccess = state.phase == DevPhase.NO_ACCESS
+        val nameLine = when {
+            current != null -> getString(R.string.dev_console_current) + " · " + current.name
+            noAccess -> getString(R.string.dev_state_no_access)
+            else -> getString(R.string.dev_state_empty)
         }
+        // 无权限这一档不许画成"没有项目": 那时项目可能就在盘上, 只是读不到
+        val metaText = when {
+            current != null -> metaLine(current)
+            noAccess -> getString(R.string.dev_console_no_access)
+            else -> getString(R.string.dev_console_empty)
+        }
+        val detail = state.reason.ifBlank { getString(R.string.dev_state_reason_none) }
+        val reasonLine = when (state.phase) {
+            DevPhase.SUCCESS, DevPhase.FAILED -> getString(R.string.dev_console_build) + " · " + detail
+            else -> detail
+        }
+        val signature = listOf(
+            state.phase.id,
+            state.step.toString(),
+            state.total.toString(),
+            reasonLine,
+            nameLine,
+            metaText,
+        ).joinToString("|")
+        if (signature == lastSignature) return
+        lastSignature = signature
+        Log.i(TAG, "state ${state.phase.id} ${state.step}/${state.total}")
 
         title.text = current?.name ?: getString(R.string.dev_console_title)
-        projectName.text = current
-            ?.let { getString(R.string.dev_console_current) + " · " + it.name }
-            ?: getString(R.string.dev_state_empty)
-        projectMeta.text = current?.let { metaLine(it) } ?: getString(R.string.dev_console_empty)
+        projectName.text = nameLine
+        projectMeta.text = metaText
 
         badge.text = getString(state.badge)
+        // 进度条只在构建中上屏; 其余档 INVISIBLE (留着那一格, 三块卡片才不会换高)
+        stepBar.visibility = if (state.phase == DevPhase.BUILDING) View.VISIBLE else View.INVISIBLE
         stepBar.max = state.total.coerceAtLeast(1)
         stepBar.progress = state.step.coerceIn(0, stepBar.max)
         stepLabel.text = if (state.total > 0) {
@@ -194,11 +229,7 @@ class DevConsoleActivity : Activity() {
         } else {
             getString(R.string.dev_state_step_none)
         }
-        val detail = state.reason.ifBlank { getString(R.string.dev_state_reason_none) }
-        reason.text = when (state.phase) {
-            DevPhase.SUCCESS, DevPhase.FAILED -> getString(R.string.dev_console_build) + " · " + detail
-            else -> detail
-        }
+        reason.text = reasonLine
 
         primary.text = getString(state.action)
         primary.setOnClickListener { onAction(state.phase) }
@@ -231,11 +262,10 @@ class DevConsoleActivity : Activity() {
     private fun block(top: Int, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height).apply { topMargin = top }
 
-    /** 一块卡: 同一档圆角 + 同一档下限高 */
+    /** 一块卡: 同一档圆角 (高度由外面那三处固定高定死, 这里不碰) */
     private fun card(crossGravity: Int = Gravity.CENTER_VERTICAL): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = crossGravity
-        minimumHeight = dp(CARD_HEIGHT_DP)
         setPadding(dp(14), dp(10), dp(14), dp(10))
         background = cardBackground()
     }
@@ -275,8 +305,12 @@ class DevConsoleActivity : Activity() {
     }
 
     private companion object {
-        /** 三块卡片的下限高 (dp); 内容都在这条线以下, 于是三张图里卡片高度逐像素相同 */
+        /** 三块卡片的固定高 (dp); 三张图里卡片高度逐像素相同 */
         const val CARD_HEIGHT_DP = 104
+
+        /** 工坊写的两份读数 (键与 `ForgeConsole` 逐字相同, 这里只取它们的时间) */
+        const val PROGRESS_FILE = ".lwforge/progress.json"
+        const val BUILD_FILE = ".lwforge/last-build.json"
 
         /** 换档那一行日志的 tag (`adb logcat -s LwDev`) */
         const val TAG = "LwDev"
@@ -346,14 +380,23 @@ internal fun stepOf(line: String): StepRead? {
 }
 
 /**
- * 纯函数: 两份文件读数 + 两个前提 -> 一档状态
+ * 纯函数: 两份文件的读数与时间 + 两个前提 -> 一档状态
  *
- * 是纯函数才摆得进判据: 这一段里没有 findViewById / getString / File / ForgeConsole,
- * 只认传进来的值与字符串资源 id (`check-forge` 第四节第 7 条)
+ * 谁新谁旧才定档, 不靠"进度条到没到头":
+ *
+ * 1. `last-build` 是新的那一笔且 `ok:false` -> 失败 (中途失败时 progress 停在 2/5 也不会被当成还在跑)
+ * 2. `progress` 比 `last-build` 新 -> 构建中 (**末步也算**: 最后一步跑完才会写 last-build;
+ *    上一轮留下的老 progress 因为时间早, 也不会再把人钉在"构建中")
+ * 3. 其余按那笔结论: 没有记录 -> 还没构建, `ok` -> 成功, 不 ok -> 失败
+ *
+ * 是纯函数才摆得进判据: 这一段里没有 findViewById / getString / File / ForgeConsole
+ * (`check-forge` 第四节)
  */
 internal fun stateOf(
     progress: String,
+    progressAt: Long,
     build: BuildRead?,
+    buildAt: Long,
     hasProject: Boolean,
     hasAccess: Boolean,
 ): DevState {
@@ -364,7 +407,17 @@ internal fun stateOf(
         return DevState(DevPhase.EMPTY, R.string.dev_state_empty, R.string.dev_action_open_settings)
     }
     val step = stepOf(progress)
-    if (step != null && step.index < step.total) {
+    if (build != null && !build.ok && buildAt >= progressAt) {
+        return DevState(
+            DevPhase.FAILED,
+            R.string.dev_state_failed,
+            R.string.dev_action_log,
+            step?.index ?: 0,
+            step?.total ?: 0,
+            build.detail,
+        )
+    }
+    if (step != null && progressAt > buildAt) {
         return DevState(
             DevPhase.BUILDING,
             R.string.dev_state_building,

@@ -101,9 +101,10 @@ check('仓库里没有 .aidl', aidl, [])
 /**
  * 开发屏从「一个 `key: value` 大文本 + 一颗刷新钮」改成三块: 项目卡 / 状态卡 / 动作行
  *
- * 这一节只认静态能核对的东西: 六档徽标的键在中英两份都齐、`stateOf` 是纯函数 (没有
- * findViewById / getString / File)、`render()` 不再整段写 `body.text`、进度条读的是档位给的数。
- * 真机那三张图 (空态 / 构建中 / 构建失败) 由编排侧截图, 这里的第 3 条只是把徽标原话钉住
+ * 这一节只认能真的判死的东西 —— 每一条都把行为钉在源码的某个形状上, 不做"出现过这个词"那种假绿:
+ * 档↔徽标是一一对应的六对、进度条取的是档位给的数且只在构建中上屏、三块卡片是**固定高**、
+ * 一秒一眼那趟先比签名、`stateOf` 按 last-build / progress 的**新旧**定档 (失败优先、末步仍在跑)。
+ * 真机那三张图 (空态 / 构建中 / 构建失败) 由编排侧截图, 这里的原话断言只是把徽标钉住
  */
 const dev = await read('app/src/main/java/io/github/yuloong07star/luwi/ui/DevConsoleActivity.kt')
 const stringsEn = await read('app/src/main/res/values/strings.xml')
@@ -116,30 +117,56 @@ const DEV_STATES = [
 const STATE_KEY = /<string name="(dev_(?:state|action)_[a-z_]+)"/g
 const stateKeys = (xml) => [...xml.matchAll(STATE_KEY)].map((m) => m[1])
 const stateText = (xml, key) => (xml.match(new RegExp(`<string name="${key}">([^<]*)</string>`)) || [, ''])[1]
+const count = (haystack, needle) => haystack.split(needle).length - 1
 
 check(
-  '开发屏六档徽标键在中英两份都在',
-  [stringsEn, stringsZh].reduce((sum, xml) => sum + DEV_STATES.filter((key) => xml.includes(`name="${key}"`)).length, 0),
-  DEV_STATES.length * 2,
+  '六档徽标键中英两份都在, 两份键与顺序一致',
+  [
+    [stringsEn, stringsZh].reduce((sum, xml) => sum + DEV_STATES.filter((key) => xml.includes(`name="${key}"`)).length, 0),
+    JSON.stringify(stateKeys(stringsZh)) === JSON.stringify(stateKeys(stringsEn)),
+  ],
+  [DEV_STATES.length * 2, true],
 )
-check('中英两份的状态键与顺序一致', stateKeys(stringsZh), stateKeys(stringsEn))
 check(
   '三张图那三档的中文原话',
   ['dev_state_empty', 'dev_state_building', 'dev_state_failed'].map((key) => stateText(stringsZh, key)),
   ['没有项目', '正在构建', '构建失败'],
 )
+// 档 ↔ 徽标必须一一对应: 少一对就是某档画成别人的字 (失败与无权限长一样那种)
+const PHASE_BADGE = [...dev.matchAll(/DevState\(\s*DevPhase\.(\w+),\s*R\.string\.(dev_state_\w+)/g)]
+  .map((m) => `${m[1]}=${m[2]}`)
+  .filter((pair, index, all) => all.indexOf(pair) === index)
+  .sort()
 check(
-  '状态卡的进度条读的是档位给的数',
-  /import android\.widget\.ProgressBar/.test(dev)
-    && /progressBarStyleHorizontal/.test(dev)
-    && /stepBar\.max = state\.total/.test(dev)
-    && /stepBar\.progress = state\.step/.test(dev),
-  true,
+  '档 ↔ 徽标一一对应 (六对)',
+  PHASE_BADGE,
+  [
+    'BUILDING=dev_state_building', 'EMPTY=dev_state_empty', 'FAILED=dev_state_failed',
+    'IDLE=dev_state_idle', 'NO_ACCESS=dev_state_no_access', 'SUCCESS=dev_state_success',
+  ],
 )
 check(
-  'render() 不再整段写 body.text',
-  /body\.text = lines\.joinToString/.test(dev) || /lateinit var body: TextView/.test(dev),
-  false,
+  '进度条取档位给的数, 且只在构建中上屏',
+  [
+    /import android\.widget\.ProgressBar/.test(dev),
+    /stepBar\.max = state\.total/.test(dev) && /stepBar\.progress = state\.step/.test(dev),
+    /stepBar\.visibility = if \(state\.phase == DevPhase\.BUILDING\) View\.VISIBLE else View\.INVISIBLE/.test(dev),
+  ],
+  [true, true, true],
+)
+// 等高只钉下限不算: 内容一变高还是会跳, 所以三块卡片是固定高 (且不再用 minimumHeight)
+check(
+  '三块卡片固定等高 (下限高不算)',
+  [count(dev, 'dp(CARD_HEIGHT_DP)'), /minimumHeight/.test(dev)],
+  [3, false],
+)
+check(
+  'render() 不再整段写 body.text, 一秒一眼先比签名',
+  [
+    !/body\.text = lines\.joinToString/.test(dev) && !/lateinit var body: TextView/.test(dev),
+    /if \(signature == lastSignature\) return/.test(dev),
+  ],
+  [true, true],
 )
 check(
   '空态那颗钮能按且落到 设置 → 开发',
@@ -148,15 +175,6 @@ check(
     && /PortalAsk\.ask\(PortalAsk\.Target\.SETTINGS\)/.test(dev)
     && /primary\.setOnClickListener/.test(dev),
   true,
-)
-check(
-  'step x/y 读数的格式与用法',
-  [
-    stateText(stringsEn, 'dev_state_step'),
-    stateText(stringsZh, 'dev_state_step'),
-    /getString\(R\.string\.dev_state_step, state\.step, state\.total\)/.test(dev),
-  ],
-  ['step %1$d/%2$d', 'step %1$d/%2$d', true],
 )
 
 /** 取一个函数体 (从签名后第一个 `{` 起按大括号配平), 静态判"这一段里没有别的东西"用 */
@@ -175,15 +193,27 @@ function bodyOf(source, signature) {
 
 const stateBody = bodyOf(dev, 'fun stateOf(')
 check(
-  'stateOf 是纯函数 (不碰 View / Context / 文件)',
-  [stateBody.length > 0, /findViewById|getString\(|\bFile\(|ForgeConsole|\bcontext\b/.test(stateBody)],
-  [true, false],
+  'stateOf 是纯函数, 且按 ok/at 定档 (失败优先 / progress 更新才算在跑 / 末步仍算在跑)',
+  [
+    stateBody.length > 0
+      && !/findViewById|getString\(|\bFile\(|ForgeConsole|\bcontext\b/.test(stateBody),
+    /build != null && !build\.ok && buildAt >= progressAt/.test(stateBody),
+    /step != null && progressAt > buildAt/.test(stateBody),
+    !/step\.index < step\.total/.test(stateBody),
+  ],
+  [true, true, true, true],
 )
+// 读数取的是 progress.json 里的总步数, 不是写死的数: 工坊那五步加上 badging / verify 一共 8 步
 check(
-  '六档都由 stateOf 产出',
-  ['EMPTY', 'NO_ACCESS', 'IDLE', 'BUILDING', 'SUCCESS', 'FAILED']
-    .filter((phase) => stateBody.includes(`DevPhase.${phase}`)).length,
-  6,
+  'step 读数取 progress.json 的总步数 (工坊 8 步, 不写死)',
+  [
+    stateText(stringsEn, 'dev_state_step'),
+    stateText(stringsZh, 'dev_state_step'),
+    /getString\(R\.string\.dev_state_step, state\.step, state\.total\)/.test(dev),
+    ['compile', 'link', 'javac', 'dex', 'merge', 'sign', 'badging', 'verify']
+      .filter((id) => plan.includes(`"${id}"`)).length,
+  ],
+  ['step %1$d/%2$d', 'step %1$d/%2$d', true, 8],
 )
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}: ${checks - failures}/${checks}`)
