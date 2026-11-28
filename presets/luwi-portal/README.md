@@ -83,8 +83,8 @@ nextTask + router 的 checks) 摆在同一屏上
   有字时长按仍归浏览器的选中 / 粘贴
 - **长按说话那条录音条** (`#lwp-rec`, 照官方截图 + wavesurfer 那套读法): 压住输入卡那一块再高出半截 ——
   左右/底各 12px, **高度 = 输入卡实测高 × 1.5** (`REC_PANEL_MAX 210` 封顶), 圆角 28。
-  第一行左「红点呼吸 + **「松手转写，上滑取消」**」右「计时胶囊 `0:03 / 1:00`」, 第二行是走带波形。
-  **边缘是渐变**: 条子的上沿 `-webkit-mask-image` 22px 淡出 (与页面之间没有硬接缝), 波形左右两端各 9% 淡出;
+  第一行左「红点呼吸 + **「松手转写，上滑取消」**」右「计时胶囊 `0:03 / 5:00`」, 第二行是走带波形,
+  第三行是**实时文字层**。**边缘是渐变**: 条子的上沿 `-webkit-mask-image` 22px 淡出 (与页面之间没有硬接缝), 波形左右两端各 9% 淡出;
   mask 会裁掉外投影, 所以材质只留上沿 1 px 内高光 + 顶部径向柔光 + 3.5% 噪点。
   波形是**真波形**, 不是一排等高柱子: 每 40 ms 折一列 (`REC_SAMPLE_MS`, 窗口 80 列), 峰值 → 保持 (0.995 衰减)
   → 归一化 (`ratio ** 0.6`, 低于 0.02 当静音) → 快起 0.6 / 慢落 0.12; 几何在 `recWaveRects` (走带右对齐 /
@@ -94,10 +94,25 @@ nextTask + router 的 checks) 摆在同一屏上
   **上滑过 56 px** 进「松开取消」态 (条下沉 + 退成中性灰 + 出现向下箭头 + 提示换字), 松手丢弃并说一句
   「已取消」; 松手默认转写 (条上换「正在转写…」+ 三个跳动点), 文字接进草稿 (有字时前留一个空格, 光标到末尾)。
   条 `pointer-events:none`, 抬手/上滑挂在 `window` 上
-  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉。录音在页面
-  (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16), **上限 60 s**、
+  —— 手指还压在输入框上, 换 DOM 会把抬手事件吞掉 (只有**条子升起来时**的波形行与那颗显隐钮自己收事件,
+  `[data-on="off"]` 那档一个事件都不收, 否则收起态会在输入卡顶上留一条隐形命中区)。
+  **实时文字层**(2.8.1 #F10, `#lwp-voice-live`): 波形行下面一行小字「实时文字 · 以松手后的整段为准」+ 两行正文
+  (`role="log"` + `aria-live="polite"`, 36px 封顶后自己往上滚)。每 `VOICE_CHUNK_MS` (1500 ms) 把这一段
+  **新增的** PCM 封一小块 (≤ 3 s) 走桥的 `op=voice-chunk`, 回来的字**逐格追加** (`appendRecLive`) —— 读屏
+  只念新加的那几个字, 不是每 1.5 s 把整段重念一遍。**这一层只做展示**: 草稿永远来自松手那次整段转写
+  (`op=transcribe`), 分块认串了 / 认不完 / 3 s 那一刀切在字上也都不影响框里的字; 真是兜底用实时层那份时
+  会明说一句, 而且**落完就作废这一趟** (`voiceLanded` + 抬号), 45 s 看门狗与迟到的整段不会把同一句写两遍。
+  波形行右侧那颗 **24px 钮**与**点波形本身**是同一个 handler, **只切这一层** (显隐靠 `data-live` 记号 + CSS),
+  录音 / 计时 / 波形一动不动; 条子收起时 `pointer-events` 全是 `none` (只有 `data-on="on"` 那一行才 `auto`),
+  免得隐形命中区压在输入卡顶上。同一个节拍宿主也留一份 (`PortalVoice.VOICE_CHUNK_MS`), **0 = 关掉流式**:
+  一块都不送、采样一块都不剪, 松手照旧整段转写。背压两侧都有且都钉了取值: 在途超过 **2** 块页面这一拍不送
+  (`VOICE_CHUNK_INFLIGHT_MAX`), 宿主在途超过 **3** 块回 `code:"busy"` (`MAX_PENDING_CHUNKS`, busy 不记失败);
+  块回来先比 `generation`, 失败块带 `failed` 标记 (与"认出空串"分得开), 连着 3 块认不出来才关流式。
+  录音在页面 (`getUserMedia` + `AudioContext` + `ScriptProcessor`, `wavOf()` 封 16 kHz 单声道 PCM16),
+  **上限 120 s** (与宿主 `MAX_SECONDS`、上游 `LwDeepseekAsr` 同一个数, 云端那侧自己按 60 s 切开),
   短于 0.5 s 当误触; 转写在应用 (`ui/PortalVoice.kt` → `LwSpeech.dispatch`, 引擎跟 `lw/voice-source.json`),
-  桥是 `portalVoice` (status / ask / transcribe / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推。没权限 /
+  桥是 `portalVoice` (status / ask / transcribe / voice-chunk / cancel), 结果经 `__LUWI_PORTAL__.voice` 回推
+  (流式那一块带 `kind:"chunk"` / `seq`, 失败带 `failed`; 整段那条带 `kind` 缺省 + `text`)。没权限 /
   缺模型 / 没登录 / 太短各有一句人话, 不许静默
 - **顶栏那颗喇叭 = 语音输出（自动朗读）开关**: 翻的是 设置 → 说话 → 「朗读回答」那一格
   (`SpeakSettings.readAloud`, 一处状态两处界面, 桥是 `portalSpeak`), 两副图标——**关 = 喇叭 + 斜杠 /

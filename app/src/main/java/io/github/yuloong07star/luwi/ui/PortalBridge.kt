@@ -680,9 +680,11 @@ internal class PortalBridge(private val context: Context) {
      * - `transcribe`: **只答应不干活**: 当场回 `{ok:true, id}`, 认完之后由 [PortalVoice] 经
      *   `window.__LUWI_PORTAL__.voice({ok, id, text})` 回推。**不能同步等** —— 桥回调在 WebView 的
      *   JavaBridge 线程上, 一句话要认几秒, 同步等就是整页卡住
+     * - `voice-chunk` (2.8.1 #F10): 流式那一小块, 同样只答应不干活; 回推带 `kind:"chunk"` 与
+     *   `seq`, 页面据此只追加到实时文字层 (失败块另带 `failed`, 在途太深回 `code:"busy"`)
      * - `cancel`: 作废在途那一趟 (退出语音态 / 又按了一次)
      *
-     * @param payload `{op:"status"|"ask"|"transcribe"|"cancel", id?, data?, language?}`
+     * @param payload `{op:"status"|"ask"|"transcribe"|"voice-chunk"|"cancel", id?, seq?, data?, language?}`
      * @return 一段 JSON (status 的读数 / 答应或拒绝那一句)
      */
     @JavascriptInterface
@@ -705,7 +707,16 @@ internal class PortalBridge(private val context: Context) {
                 data = body.optString("data", ""),
                 language = body.optString("language", "auto"),
             ) { answer -> pushVoice(answer) }.toString()
-            else -> JSONObject().put("ok", false).put("error", "op has to be status, ask, transcribe or cancel, not \"$op\"").toString()
+            "voice-chunk" -> PortalVoice.voiceChunk(
+                context = context,
+                id = body.optInt("id", 0),
+                seq = body.optInt("seq", 0),
+                data = body.optString("data", ""),
+                language = body.optString("language", "auto"),
+            ) { answer -> pushVoice(answer) }.toString()
+            else -> JSONObject().put("ok", false)
+                .put("error", "op has to be status, ask, transcribe, voice-chunk or cancel, not \"$op\"")
+                .toString()
         }
     }
 

@@ -1914,6 +1914,17 @@ expect('client.js', client, "call('portalMenuPick', item.id)")
 expect('client.js', client, 'function portalRow')
 expect('client.js', client, 'function renderScreenDrawer')
 expect('client.js', client, "drawer === 'screen'")
+// **屏清单的签名必须带上 title 与 enabled** (#F10 判据单点名的那一条, 与 F6 同一条线):
+// 签名只拼 id / on 的话, 原生把某一行**改名**或**置灰** (`enabled:false`) 时签名不变 → 抽屉不重画,
+// 屏上停着一份旧清单 (点了没反应 / 灰着的行还亮着). 函数还没并进来时**明确记一句**, 不当作绿
+const panelSignatureSource = sliceFunction('screenPanelSignature')
+if (panelSignatureSource === '') {
+  notes.push('ok   本工位还没有 F6 的 screenPanelSignature (F6 合入后这一条自动盯 title / enabled)')
+} else if (panelSignatureSource.includes('title') && panelSignatureSource.includes('enabled')) {
+  notes.push('ok   screenPanelSignature 同时拼了 title 与 enabled (改名 / 置灰都会换签名)')
+} else {
+  failures.push('client.js: screenPanelSignature 漏了 title 或 enabled —— 那一行改名 / 置灰时抽屉不会重画')
+}
 expect('client.js', client, "drawerRow('判断'")
 expect('client.js', client, "drawerRow('探索'")
 // 2026-11-17 主人: 探索下面多一行「开发」, 点进去是原生开发面板
@@ -2791,7 +2802,7 @@ expect('client.js', client, "els.recText.setAttribute('aria-live', 'polite')")
 expect('client.js', client, "var REC_HINT = '松手转写，上滑取消'")
 expect('client.js', client, "var REC_HINT_CANCEL = '松开取消'")
 // 位置: 与 `#lwp-dock` 的 `0 12px 12px` 对齐, 正好压住输入卡那一块
-expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:7;")
+expect('client.js', client, "'#lwp-rec{position:absolute;left:12px;right:12px;bottom:12px;z-index:20;")
 expect('client.js', client, 'pointer-events:none')
 expect('client.js', client, 'function paintRecWave')
 // 高度: 量输入卡 × 1.5 (2026-11-20 主人: "高度改成比输入框高1.5倍即可")
@@ -4013,6 +4024,444 @@ if (inputHeightWrites === 1) {
   failures.push(`client.js: 写输入框高度的地方有 ${String(inputHeightWrites)} 处 (应该只有 autoSizeInput)`)
 }
 
+// ── 三十一、录音态的实时文字层与波形行显隐开关 (2.8.1 #F10, 第三轮) ──────────────
+//
+// 主人这条要的是"边说边出字": 录音时**波形行下面多一行实时文字** (`aria-live="polite"`, 两行封顶之后
+// 单行滚动), 波形行本身兼作这颗文字层的显隐开关; 「60 秒一到整段作废」那条路要消失, 录到 90 秒也不丢
+// 前面说的话.
+//
+// 第二轮按轮内审查 12 条重写; 第三轮再按 12 条把**兜底生命周期**与**阈值取值**钉进判据
+// (第二轮只钉了符号名: 阈值改 99 / 同义 CSS 规则都能蒙混过关):
+//
+// ① 实时层节点 + `aria-live` + `role=log` 逐格追加 (整段重写会让读屏反复重播) + 显隐真机制
+// ② 显隐钮只切层不动录音, **且命中小录条三兄弟的 auto 行数恰好 1 行、必须带 data-on="on"**
+// ③ `VOICE_CHUNK_MS = 0` 一块都不送: 闸在送块之前 + 切块纯函数真跑 (cursor 严格前进、不越界)
+// ④ 块回来先比 `generation`; 失败块与空串分得开; **两侧背压阈值都钉取值** (页面 2 / 宿主 3);
+//    busy 不记失败、成功清零连败、连败上限钉 3
+// ⑤ 两处上限同值, 且不越过上游 (120 s / 8 MiB), 节拍同值 (1500 ms)
+// ⑥ 超长分支不再回旧拒绝; 草稿只认整段转写, **兜底与迟到的整段不许双写** (voiceLanded + 抬号),
+//    同步被拒也要把实时层那句接住并说出原因
+
+// ① 实时层: 节点 / 无障碍 / 两行封顶 / 挂在录音条里波形行下面 / 显隐的真机制 / 逐格追加 / 预览小字
+expect('client.js', client, "els.recLive = h('div', 'lwp-rec-live')")
+expect('client.js', client, "els.recLive.id = 'lwp-voice-live'")
+expect('client.js', client, "els.recLive.setAttribute('aria-live', 'polite')")
+expect('client.js', client, "els.recLive.setAttribute('role', 'log')")
+expect('client.js', client, "'#lwp-voice-live{position:relative;order:-1;flex:none;width:100%;'")
+expect('client.js', client, 'font-size:15px;line-height:21px;letter-spacing:.01em;color:rgba(255,255,255,.97);')
+expectOrder('实时层挂在波形行下面', client, 'els.rec.appendChild(els.recWaveRow)', 'els.rec.appendChild(els.recLive)')
+expect('client.js', client, 'function paintRecLive')
+expect('client.js', client, 'els.recLive.scrollTop = els.recLive.scrollHeight')
+// 预览那一行小字 (审查 ⑪): 3 s 硬切不带重叠, 不写这句人会逐字比对, 以为丢字
+expect('client.js', client, "var REC_LIVE_NOTE = '实时文字 · 以松手后的整段为准'")
+expect('client.js', client, 'els.recLiveNote = h(\'div\', \'lwp-rec-live-note\', REC_LIVE_NOTE)')
+expect('client.js', client, "'.lwp-rec-live-note{flex:none;font-size:10.5px;line-height:14px;letter-spacing:.02em;'")
+// 两行封顶 = 2 × 18px 行高: 再多也不许把录音条撑高 (只往上滚)
+if (client.includes("'#lwp-voice-live{position:relative;order:-1;")
+  && client.includes('max-height:72px;overflow-y:auto;overscroll-behavior:contain;pointer-events:none;')) {
+  notes.push('ok   实时层排在录音条最上方 (order:-1, 72px 封顶, 只往上滚)')
+} else {
+  failures.push('client.js: 实时层不再排在录音条最上方 (order:-1 + 72px 上限)')
+}
+// 显隐真机制: 记号 (applyRecLive 写 data-live) + CSS 只认它 + 钮只调 applyRecLive —— 三处少一处就红
+const applyLiveSource = sliceFunction('applyRecLive')
+const recLiveToggle = sliceFunction('toggleRecLive')
+if (applyLiveSource === '' || recLiveToggle === '') {
+  failures.push('client.js: 抽不出 applyRecLive / toggleRecLive (显隐机制那一段)')
+} else if (!applyLiveSource.includes("setAttribute('data-live', voiceLiveOn ? 'on' : 'off')")
+  || !client.includes("'#lwp-rec[data-live=\"off\"] #lwp-voice-live{display:none}'")
+  || !recLiveToggle.includes('applyRecLive()')) {
+  failures.push('client.js: 显隐机制链断了 —— data-live 记号 / CSS 藏层的规则 / 钮调 applyRecLive 少一处')
+} else {
+  notes.push('ok   显隐真机制: applyRecLive 写 data-live, CSS 按它藏这一层, 钮只调 applyRecLive')
+}
+// 逐格追加 (审查 ⑩): 每块一格 span, 读屏只念新加的那几个字; 整段那份才整句重画
+const appendLiveSource = sliceFunction('appendRecLive')
+const chunkAnswerSource = sliceFunction('voiceChunkAnswer')
+if (appendLiveSource === '' || chunkAnswerSource === '') {
+  failures.push('client.js: 抽不出 appendRecLive / voiceChunkAnswer (实时层的两条写路)')
+} else if (!appendLiveSource.includes("appendChild(h('span', 'lwp-live-part'")
+  || !appendLiveSource.includes('voiceLiveJoin(voiceLiveText, text)')
+  || !chunkAnswerSource.includes('appendRecLive(')
+  || chunkAnswerSource.includes('paintRecLive(')) {
+  failures.push('client.js: 实时层不是逐格追加 —— 每 1.5 s 整段重写会让读屏反复念同一句')
+} else {
+  notes.push('ok   实时层逐格追加 (role=log 只念增量, 整段那份才整句重画)')
+}
+// 转写中波形让位给三个点, 但实时文字**留着**: 松手那一刻屏上还看得见那句话
+if (client.includes("'#lwp-rec[data-busy=\"on\"] .lwp-rec-wave-row{display:none}'")
+  && !client.includes('#lwp-rec[data-busy="on"] #lwp-voice-live{display:none}')) {
+  notes.push('ok   转写中实时层仍留着 (波形那一行让位, 文字不闪掉)')
+} else {
+  failures.push('client.js: 转写中把实时层藏了 —— 松手那一刻屏上就看不到那句话了')
+}
+
+// ② 显隐钮: 波形行右侧一颗 24px, 点波形本身也是同一件事; **只切那一层, 录音一动不动**
+const recLiveWire = sliceFunction('wireRecLiveToggle')
+if (recLiveWire === '') {
+  failures.push('client.js: 抽不出 wireRecLiveToggle (显隐开关的接线)')
+} else if (/stopRecording|releaseVoiceCapture|voiceState\s*=|voiceStream\s*=/u.test(recLiveToggle)) {
+  failures.push('client.js: 显隐钮碰到了录音态 —— 它只许切那一层文字, 不许停录 / 释放采集')
+} else {
+  notes.push('ok   显隐钮只切文字层 (toggleRecLive 不碰录音 / 不释放采集 / 不改 voiceState)')
+}
+expect('client.js', client, "els.recLiveBtn = h('button', 'lwp-rec-live-btn')")
+if (client.includes("'.lwp-rec-live-btn{display:grid;place-items:center;flex:none;align-self:center;width:24px;height:24px;'")) {
+  notes.push('ok   显隐钮是 24px 的圆钮 (贴波形行右侧)')
+} else {
+  failures.push('client.js: 显隐钮的尺寸不是 24px')
+}
+expectOrder('波形行与那颗钮共用一个 handler', recLiveWire, 'var onTapLive = function', "els.recWave.addEventListener('pointerup', onTapLive)")
+expect('client.js', client, "els.recWave.addEventListener('pointerup', onTapLive)")
+expect('client.js', client, "els.recLiveBtn.addEventListener('click', onTapLive)")
+expectOrder('那颗钮的 handler 里真的切了层', recLiveWire, 'var onTapLive = function', 'toggleRecLive()')
+// **收起态不许收事件** (审查 ①): 条子收起只是 opacity:0, 命中区还在输入卡顶上就点不进输入框 ——
+// 钮与波形默认 `pointer-events:none`, 只有 `[data-on="on"]` (条子升起来) 才 auto.
+// 第三轮补反向断言 (审查 B2): 光查"有没有那两条 auto 行"挡不住有人在别处补一条同义规则
+// (specificity 更高、pointer-events 又是继承属性, 收起态命中区原样回来)
+// **#F10 判据单第四轮: 不数行, 数规则.** 数行有两处躲得过 —— 同义规则写在**同一行**上行数不变;
+// 就算抽成规则, 往那条规则的选择器表里**加一条不带闸的选择器**也是全绿 (选择器表命中任意一条就生效).
+// 所以从 client.js 里抽出所有 CSS 规则, 要求: 命中小录条三兄弟且声明 `pointer-events:auto` 的规则
+// **恰好 1 条**, 而且它的**每一条**选择器都从 `#lwp-rec[data-on="on"]` 起头
+const waveRule = grab(client, /'\.lwp-rec-wave\{([^']*)'/u) ?? ''
+const waveRowRule = grab(client, /'\.lwp-rec-wave-row\{([^']*)'/u) ?? ''
+const liveBtnRule = /'\.lwp-rec-live-btn\{[\s\S]{0,240}?pointer-events:none/u.test(client)
+// 规则抽法: 先把 CSS 数组那些 `',\n      '` 的拼接缝抹平 (数组是 join('') 进去的), 再去掉注释,
+// 剩下的 `选择器{声明}` 就是真规则
+const flatCss = client
+  .replace(/\/\*[\s\S]*?\*\//gu, '')
+  .replace(/^\s*\/\/.*$/gmu, '')
+  .replace(/',\s*\n\s*'/gu, '')
+const cssRules = []
+{
+  const rulePattern = /([^{}]*)\{([^{}]*)\}/gu
+  for (;;) {
+    const one = rulePattern.exec(flatCss)
+    if (one === null) break
+    cssRules.push({ selector: one[1], body: one[2] })
+  }
+}
+const REC_HIT_CLASSES = ['.lwp-rec-wave-row', '.lwp-rec-wave', '.lwp-rec-live-btn']
+const autoRules = cssRules.filter((rule) => /pointer-events\s*:\s*auto/u.test(rule.body)
+  && REC_HIT_CLASSES.some((one) => rule.selector.includes(one)))
+const autoParts = autoRules.length === 1
+  ? autoRules[0].selector.split(',').map((one) => one.trim()).filter((one) => one !== '')
+  : []
+const autoGated = autoParts.length > 0 && autoParts.every((one) => one.startsWith('#lwp-rec[data-on="on"]'))
+const autoCovers = autoRules.length === 1 && REC_HIT_CLASSES.every((one) => autoRules[0].selector.includes(one))
+if (waveRule.includes('pointer-events:none') && liveBtnRule && waveRowRule.includes('pointer-events:none')
+  && autoRules.length === 1 && autoGated && autoCovers) {
+  notes.push(`ok   收起态不收事件: 三兄弟默认 none, 命中它们的 pointer-events:auto 规则恰好 1 条`
+    + ` (${String(autoParts.length)} 条选择器, 每条都带 data-on="on" 的闸)`)
+} else {
+  const why = autoRules.length !== 1
+    ? `命中三兄弟的 auto 规则有 ${String(autoRules.length)} 条`
+    : `那 1 条的选择器表里 ${autoGated ? '漏了' : '混进了不带闸的'}选择器: ${JSON.stringify(autoParts.join(' , '))}`
+  failures.push(`client.js: 收起态命中区挡不住 —— ${why}`
+    + ' (必须恰好 1 条规则, 且每条选择器都从 #lwp-rec[data-on="on"] 起头)')
+}
+
+// ③ `VOICE_CHUNK_MS = 0` 一块都不送 (回到整段转写): 节拍那条纯函数真跑 + 闸的次序与位置
+const dueSource = sliceFunction('voiceChunkDue')
+const pumpChunkSource = sliceFunction('pumpVoiceChunk')
+const sendChunkSource = sliceFunction('sendVoiceChunk')
+const joinSource = sliceFunction('voiceLiveJoin')
+const draftTextSource = sliceFunction('voiceDraftText')
+if (dueSource === '' || pumpChunkSource === '' || sendChunkSource === '' || joinSource === '' || draftTextSource === '') {
+  failures.push('client.js: 抽不出 voiceChunkDue / pumpVoiceChunk / sendVoiceChunk / voiceLiveJoin / voiceDraftText')
+} else {
+  const due = new Function(`${dueSource}\nreturn voiceChunkDue`)()
+  const dueCases = [
+    ['关掉流式 (0) → 一块都不送', due(0, 9e9, 0), false],
+    ['节拍没到 → 不送', due(1000, 2400, 1500), false],
+    ['节拍到了 → 送', due(1000, 2500, 1500), true],
+    ['这一趟还没送过 → 立刻送第一块', due(0, 5000, 1500), true],
+  ]
+  const wrongDue = dueCases.filter((one) => one[1] !== one[2]).map((one) => one[0])
+  if (wrongDue.length === 0) {
+    notes.push('ok   voiceChunkDue: 节拍 1500 ms 到点才送, VOICE_CHUNK_MS=0 时一块都不送')
+  } else {
+    failures.push(`voiceChunkDue: ${wrongDue.join(' / ')}`)
+  }
+  // 次序: 0 档的闸 → 背压 → 节拍 → 送块. 少一道或放错位置就等于没闸
+  expectOrder('0 档的闸在送块之前', pumpChunkSource, 'if (!(VOICE_CHUNK_MS > 0)) return', 'sendVoiceChunk()')
+  expectOrder('节拍闸也在送块之前', pumpChunkSource, 'if (!voiceChunkDue(', 'sendVoiceChunk()')
+  expectOrder('背压在节拍之前', pumpChunkSource, 'VOICE_CHUNK_INFLIGHT_MAX) return', 'if (!voiceChunkDue(')
+  // 采样一块都不剪: 剪了的话整段兜底就只剩尾巴 (审查 ⑥)
+  if (/chunks\.splice\(/u.test(client) || /voiceChunks\.splice\(/u.test(client)) {
+    failures.push('client.js: 还在剪采样 —— 整段那条路只剩尾巴, 前面几十秒的字会一起丢')
+  } else {
+    notes.push('ok   采样一块都不剪 (整段兜底拿得到从头到尾的声音)')
+  }
+  // 送块那条腿挂在 200 ms 的 ticker 上, 不只挂 rAF (切后台 rAF 会停而采样照走)
+  if (client.includes('voiceTicker = setInterval(function () { paintRecTime(); pumpVoiceChunk() }, 200)')) {
+    notes.push('ok   送块挂在 voiceTicker 的 200 ms 一拍上 (rAF 停了也照送)')
+  } else {
+    failures.push('client.js: 送块只挂 rAF —— 切后台就不出字了')
+  }
+  // 一块最多 3 s: 后台回来别把半分钟封成一个几十 MB 的 base64
+  if ((Number(grab(client, /var VOICE_CHUNK_SLICE_MS = (\d+)/u)) || 0) === 3000
+    && sendChunkSource.includes('VOICE_CHUNK_SLICE_MS / 1000')) {
+    notes.push('ok   一块最多 3 s 的声音 (切片有上限, 后台回来按 3 s 一段追)')
+  } else {
+    failures.push('client.js: 送块没有切片上限 (后台回来会封一坨过桥)')
+  }
+  // 切块那条纯函数真跑 (审查 ⑫): cursor 必须**严格前进**且不超过已采到的样本 ——
+  // 把推进量改成 `+= 0` 时同一段会被每 1.5 s 反复送, 只有真跑才拦得住
+  const cutSource = sliceFunction('chunkCut')
+  if (cutSource === '') {
+    failures.push('client.js: 抽不出 chunkCut (切块与 cursor 推进那条纯函数)')
+  } else {
+    const chunkCut = new Function(`${cutSource}\nreturn chunkCut`)()
+    const lengths = [4096, 4096, 4096, 4096]
+    const first = chunkCut(lengths, 0, 6000)
+    const rest = chunkCut(lengths, first.count, 6000)
+    const over = chunkCut(lengths, lengths.length, 6000)
+    const atEnd = first.count > 0 && first.count <= lengths.length
+      && rest.count === lengths.length - first.count
+      && over.count === 0 && over.samples === 0
+      && chunkCut([], 0, 6000).count === 0
+    if (atEnd && sendChunkSource.includes('chunkCut(lengths, voiceChunkCursor, want)')
+      && sendChunkSource.includes('voiceChunkCursor += cut.count')) {
+      notes.push(`ok   chunkCut: 每次推进 ${String(first.count)} 块 (${String(first.samples)} 样本), 到末尾回 0; 送块只用它推进 cursor`)
+    } else {
+      failures.push('client.js: 切块 / cursor 推进不对 (同一段会被反复送, 或者越界)')
+    }
+  }
+  // **cursor 那一行右值必须真的往前推** (#F10 判据单): `includes()` 挡不住
+  // `voiceChunkCursor += cut.count * 0` —— 字面一模一样, 同一段每 1.5 s 被重送一遍
+  const cursorRhs = (grab(sendChunkSource, /voiceChunkCursor \+= ([^;\n]+)/u) ?? '').trim()
+  const cursorStill = cursorRhs === ''
+    || /^0+(?:\.0+)?$/u.test(cursorRhs)
+    || /\*\s*0(?:\.0+)?$/u.test(cursorRhs)
+  if (!cursorStill) {
+    notes.push(`ok   cursor 每次送块都往前推 (${cursorRhs}), 同一段不会被反复送`)
+  } else {
+    failures.push(`client.js: 送块之后的 cursor 推进量是 ${JSON.stringify(cursorRhs)} —— 没有前进, 同一段会被每 1.5 s 重送`)
+  }
+  const join = new Function(`${joinSource}\nreturn voiceLiveJoin`)()
+  const joinCases = [
+    ['第一块', join('', '你好'), '你好'],
+    ['接着接', join('你好', '世界'), '你好世界'],
+    ['空块不动已有的字', join('你好', '  '), '你好'],
+    ['两边都有空白就收掉', join('你好 ', ' 世界'), '你好世界'],
+    ['英文两个词之间补一格', join('hello', 'world'), 'hello world'],
+  ]
+  const wrongJoin = joinCases.filter((one) => one[1] !== one[2]).map((one) => one[0])
+  if (wrongJoin.length === 0) {
+    notes.push('ok   voiceLiveJoin: 只往后接字, 空块不写, 空白收掉')
+  } else {
+    failures.push(`voiceLiveJoin: ${wrongJoin.join(' / ')}`)
+  }
+  const draftText = new Function(`${draftTextSource}\nreturn voiceDraftText`)()
+  if (draftText('先说的那几个字', '整段那一句') === '整段那一句'
+    && draftText('先说的那几个字', '  ') === '先说的那几个字'
+    && draftText('', '') === '') {
+    notes.push('ok   voiceDraftText: 整段那份最准, 它空了才退回实时层那份')
+  } else {
+    failures.push('voiceDraftText: 草稿取哪一份不对')
+  }
+}
+
+// ④ 块的几条硬约束: 认 generation / 不抬 generation / 失败块分得开 / 两侧都有背压
+const chunkFn = /fun voiceChunk\([\s\S]*?\n    \}\n/u.exec(portalVoice)?.[0] ?? ''
+if (chunkFn === '') {
+  failures.push('PortalVoice.kt: 抽不出 fun voiceChunk (流式那一块)')
+} else {
+  if (!chunkFn.includes('val token = generation.get()') || !chunkFn.includes('token != generation.get()')) {
+    failures.push('PortalVoice.kt: voiceChunk 没有比 generation —— 取消之后旧块还会回写实时层')
+  } else {
+    notes.push('ok   PortalVoice.kt: 块回来先比 generation, 对不上就丢')
+  }
+  if (chunkFn.includes('incrementAndGet')) {
+    failures.push('PortalVoice.kt: voiceChunk 抬了 generation —— 在途的下一块全成"过时", 实时层会缺字')
+  } else {
+    notes.push('ok   PortalVoice.kt: 块不抬 generation (抬只有 transcribe / cancel 两处)')
+  }
+  expectOrder('先比 generation 再回推', chunkFn, 'token != generation.get()', 'done(')
+  if (chunkFn.includes('"chunk=" + seq')) {
+    notes.push('ok   PortalVoice.kt: 每块落一行 Log.i chunk=N (真机读数认它, 90 s 应到 N ≥ 40)')
+  } else {
+    failures.push('PortalVoice.kt: 块没有落 chunk=N 那行日志')
+  }
+  // 宿主侧的背压: 在途的块判重 (同一块重发只认一次), 太深就回 busy —— 页面据此这一拍不送
+  if (chunkFn.includes('pendingChunks') && chunkFn.includes('"busy"') && chunkFn.includes('MAX_PENDING_CHUNKS')) {
+    notes.push('ok   PortalVoice.kt: 块有 pending 判重, 太深回 busy (不往单线程队列里继续压)')
+  } else {
+    failures.push('PortalVoice.kt: 块没有 pending 判重 / busy 回执 —— 一串块会排队排到松手之后')
+  }
+  // **阈值要钉取值** (审查 B4): 只查符号名的话 3 改成 99 也全绿, 那道闸等于不存在
+  // #F10 判据单: 换成**读常量那一行**再取值 —— 全文正则会连注释里举的例子一起抓, 注释写 `= 3`、
+  // 代码写 `= 99` 时那种抓法照样绿
+  const hostPendingLine = (portalVoice.split('\n').find((line) => /const val MAX_PENDING_CHUNKS\b/u.test(line)) ?? '').trim()
+  const jsInflightLine = (client.split('\n').find((line) => /var VOICE_CHUNK_INFLIGHT_MAX\s*=/u.test(line)) ?? '').trim()
+  const hostPending = Number(grab(hostPendingLine, /const val MAX_PENDING_CHUNKS\s*(?::\s*Int)?\s*=\s*(\d+);?$/u))
+  const jsInflight = Number(grab(jsInflightLine, /var VOICE_CHUNK_INFLIGHT_MAX\s*=\s*(\d+);?$/u))
+  if (hostPending === 3 && jsInflight === 2 && jsInflight < hostPending) {
+    notes.push('ok   背压阈值钉住取值: 页面在途 2 / 宿主在途 3 (页面先停, 宿主那一侧才有余量)')
+  } else {
+    failures.push(`背压阈值不对: 页面=${String(jsInflight)} 宿主=${String(hostPending)}`
+      + ` (应当 2 / 3, 且页面 < 宿主; 读的是 ${JSON.stringify(jsInflightLine)} / ${JSON.stringify(hostPendingLine)})`)
+  }
+  // **调用点必须用这个常量** (#F10 判据单): 常量对了但闸上写死 `>= 2`, 改常量等于没改
+  const inflightAtCallSite = /voiceChunkSeq\s*-\s*voiceChunkSeen\s*>=\s*VOICE_CHUNK_INFLIGHT_MAX/u.test(pumpChunkSource)
+  const inflightLiteral = /voiceChunkSeq\s*-\s*voiceChunkSeen\s*>=\s*\d/u.test(pumpChunkSource)
+  if (inflightAtCallSite && !inflightLiteral) {
+    notes.push('ok   背压那道闸读的是 VOICE_CHUNK_INFLIGHT_MAX 这个常量 (不是写死的数字)')
+  } else {
+    failures.push('client.js: 背压的调用点用了字面量 (或者压根没有这道闸) —— 改 VOICE_CHUNK_INFLIGHT_MAX 等于没改')
+  }
+  // 宿主那条单测: **取值**要用 assertEquals 钉着; `assertTrue(x >= 2)` 那种改成 99 也全绿
+  const voiceTest = read('app/src/test/java/io/github/yuloong07star/luwi/ui/PortalVoiceTest.kt')
+  const pendingPinned = /assertEquals\(\s*3\s*,\s*PortalVoice\.MAX_PENDING_CHUNKS\s*\)/u.test(voiceTest)
+  const pendingLoose = /MAX_PENDING_CHUNKS\s*>=\s*\d/u.test(voiceTest)
+  if (pendingPinned && !pendingLoose) {
+    notes.push('ok   PortalVoiceTest 用 assertEquals 钉住 MAX_PENDING_CHUNKS 的取值 (不是 >= 2 那种)')
+  } else {
+    failures.push('PortalVoiceTest.kt: MAX_PENDING_CHUNKS 没有用 assertEquals 钉取值 —— 改成 99 也全绿')
+  }
+  // 失败块带 `failed`: 与"认出空串"不再同形 (审查 ⑤)
+  if (chunkFn.includes('put("failed", true)')) {
+    notes.push('ok   PortalVoice.kt: 失败块带 failed 标记 (与空串分得开)')
+  } else {
+    failures.push('PortalVoice.kt: 失败块没带 failed 标记 —— 页面分不清"认失败"与"没说话"')
+  }
+}
+// 页面对这几格回执的处理: busy 只跳过一拍, failed 只记一笔, 都不许关流式之外乱写
+if (pumpChunkSource === '' || sendChunkSource === '' || sliceFunction('voiceChunkAnswer') === '') {
+  failures.push('client.js: 抽不出 pumpVoiceChunk / sendVoiceChunk / voiceChunkAnswer')
+} else {
+  const chunkAnswerSource = sliceFunction('voiceChunkAnswer')
+  if (sendChunkSource.includes("answer.code === 'busy'")) {
+    notes.push('ok   client.js: 宿主回 busy 时这一拍不送, 也不算失败')
+  } else {
+    failures.push('client.js: 没认宿主的 busy 回执 —— 忙时会被当成"宿主不支持"而关掉流式')
+  }
+  // busy 支**不许记失败** (审查 ⑦): 宿主稍慢就连着三次 busy, 记了失败就把流式关了
+  // (只截 busy 那一支: 后面那段"宿主不认这一块"本来就该关流式)
+  const busyAt = sendChunkSource.indexOf("answer.code === 'busy'")
+  const busyEnd = busyAt < 0 ? -1 : sendChunkSource.indexOf('\n        }', busyAt)
+  const busySlice = busyAt < 0 || busyEnd < 0 ? '' : sendChunkSource.slice(busyAt, busyEnd)
+  if (busySlice !== '' && busySlice.includes('return false')
+    && !busySlice.includes('voiceChunkFails') && !busySlice.includes('voiceStreamOff')) {
+    notes.push('ok   busy 支只跳过一拍: 不记失败, 也不关流式')
+  } else {
+    failures.push('client.js: busy 支记了失败 / 关了流式 —— 宿主慢一点实时层就没了')
+  }
+  // busy 支**一个字都不许给连败记账** (#F10 判据单点名的那一下): 宿主稍慢就连着三次 busy,
+  // 记了失败就把流式关了 —— 这里单独认 `voiceChunkFails +=` 这个形态, 别只靠上面那条复合条件
+  const busyBumpsFails = /voiceChunkFails\s*\+=/u.test(busySlice)
+  if (busySlice !== '' && !busyBumpsFails) {
+    notes.push('ok   busy 支没有 `voiceChunkFails +=` (宿主慢不折成连败)')
+  } else {
+    failures.push('client.js: busy 支给连败记账了 —— 宿主慢一点就把流式关掉')
+  }
+  // 连败那条: 阈值钉 3、比较式是 >=、成功一块要清零 (审查 ⑧: 注释写"连着", 实际是累计)
+  // #F10: 取值改成读常量那一行 (全文正则抓不到"注释里 3 / 代码里 99"这种)
+  const failMaxLine = (client.split('\n').find((line) => /var VOICE_CHUNK_FAIL_MAX\s*=/u.test(line)) ?? '').trim()
+  const failMax = Number(grab(failMaxLine, /var VOICE_CHUNK_FAIL_MAX\s*=\s*(\d+);?$/u))
+  const failAt = chunkAnswerSource.indexOf('voiceChunkFails += 1')
+  const failSlice = failAt < 0 ? '' : chunkAnswerSource.slice(failAt, failAt + 160)
+  const okResetAt = chunkAnswerSource.lastIndexOf('voiceChunkFails = 0')
+  if (failMax === 3 && failSlice.includes('>= VOICE_CHUNK_FAIL_MAX')
+    && okResetAt > chunkAnswerSource.indexOf('payload.failed === true')) {
+    notes.push('ok   连败上限钉 3, 比较式 >=, 成功一块就把连败清零')
+  } else {
+    failures.push(`连败兜底不对: 上限=${String(failMax)} 比较式/清零有一处不对 (改了也全绿等于没这条)`)
+  }
+  if (pumpChunkSource.includes('voiceChunkSeq - voiceChunkSeen >= VOICE_CHUNK_INFLIGHT_MAX')) {
+    notes.push('ok   页面这侧的背压在送块之前 (在途超过 2 块不再送)')
+  } else {
+    failures.push('client.js: 页面没有背压 —— 块比认得快就会一路排队')
+  }
+}
+expect('PortalBridge.kt 认流式那一块', portalBridge, '"voice-chunk" -> PortalVoice.voiceChunk(')
+expect('PortalBridge.kt 块也走同一条回推', portalBridge, '{ answer -> pushVoice(answer) }')
+
+// ⑤ 上限: 两侧同值, 而且**不越过上游** (LwDeepseekAsr 的 120 s / 8 MiB); 节拍也同值
+const deepAsr = read('app/src/main/java/io/github/yuloong07star/luwi/tool/LwDeepseekAsr.kt')
+const jsVoiceMaxS = Number(grab(client, /var VOICE_MAX_MS = (\d+) \* 1000/u))
+const ktVoiceMaxS = Number(grab(portalVoice, /const val MAX_SECONDS = (\d+)/u))
+const upVoiceMaxS = Number(grab(deepAsr, /const val MAX_SECONDS = (\d+)/u))
+const jsChunkMs = Number(grab(client, /var VOICE_CHUNK_MS = (\d+)/u))
+const ktChunkMs = Number(grab(portalVoice, /const val VOICE_CHUNK_MS = (\d+)/u))
+if (jsVoiceMaxS === ktVoiceMaxS && ktVoiceMaxS === upVoiceMaxS && upVoiceMaxS === 120) {
+  notes.push('ok   语音上限三处同一个数 (120 s: client / PortalVoice / LwDeepseekAsr)')
+} else {
+  failures.push(`语音上限对不上: 页面=${String(jsVoiceMaxS)}s 宿主=${String(ktVoiceMaxS)}s 上游=${String(upVoiceMaxS)}s`)
+}
+const ktMaxBytes = (Number(grab(portalVoice, /const val MAX_BYTES = (\d+) \* 1024 \* 1024/u)) || 0) * 1024 * 1024
+const upMaxBytes = (Number(grab(deepAsr, /const val MAX_BYTES = (\d+) \* 1024 \* 1024/u)) || 0) * 1024 * 1024
+if (ktMaxBytes > 0 && ktMaxBytes === upMaxBytes && upMaxBytes === 8 * 1024 * 1024) {
+  notes.push('ok   字节上限与上游同档 (8 MiB): 120 s 的合成音频 3.84 MB 落在里面')
+} else {
+  failures.push(`字节上限越过上游: 宿主=${String(ktMaxBytes)} 上游=${String(upMaxBytes)}`)
+}
+if (jsChunkMs === ktChunkMs && jsChunkMs === 1500) {
+  notes.push('ok   流式节拍两侧同一个数 (1500 ms)')
+} else {
+  failures.push(`流式节拍对不上: 页面=${String(jsChunkMs)}ms 宿主=${String(ktChunkMs)}ms`)
+}
+
+// ⑥ 草稿只认整段转写; 「60 秒以内再说」与滚段那一路都不许回来
+if (!client.includes('60 秒以内再说') && !portalVoice.includes('60 秒以内再说')) {
+  notes.push('ok   两侧都不再有「60 秒以内再说」那句拒绝')
+} else {
+  failures.push('还留着「60 秒以内再说」—— 说 90 秒不该被一句拒绝打回去')
+}
+for (const gone of ['VOICE_SEGMENT_MS', 'commitVoiceSegment', 'commitVoiceLive', 'pumpVoiceSegment']) {
+  if (client.includes(gone)) {
+    failures.push(`client.js: 还留着滚段那一路 ${JSON.stringify(gone)} —— 它会把草稿改成切片拼接`)
+  } else {
+    notes.push(`ok   滚段那一路已经撤干净 (${gone})`)
+  }
+}
+const stopSource = sliceFunction('stopRecording')
+if (stopSource.includes("op: 'transcribe'") && !stopSource.includes("op: 'voice-chunk'")) {
+  notes.push('ok   松手只走整段转写 (op=transcribe), 流式开没开都是这一条')
+} else {
+  failures.push('client.js: 松手那条路被流式改过 —— 草稿必须来自整段那次转写')
+}
+const watchSource = sliceFunction('armVoiceWatch')
+if (watchSource.includes('take !== voiceId') && watchSource.includes('toast(')) {
+  notes.push('ok   看门狗只认这一趟, 兜底落草稿时明说"这是实时层那句"')
+} else {
+  failures.push('client.js: 看门狗跨趟能动手 / 或者在兜底时静默落草稿')
+}
+// **兜底与迟到的整段不许双写** (审查 B1): 兜底那一支落完就抬号 + 记 voiceLanded,
+// 整段分支进来先看 voiceLanded —— 少一处, 45 s 之后同一句会进草稿两遍
+const answerSource = sliceFunction('voiceAnswer')
+const bumpAt = watchSource.indexOf('voiceId += 1')
+const landedAt = watchSource.indexOf('voiceLanded =')
+const hideAt = watchSource.indexOf('hideRecPanel()')
+if (bumpAt < 0 || landedAt < 0 || hideAt < 0 || bumpAt > hideAt || landedAt > hideAt
+  || !answerSource.includes('if (voiceLanded)')) {
+  failures.push('client.js: 兜底那一支没有作废这一趟 —— 迟到的整段会在草稿里把同一句写两遍')
+} else {
+  notes.push('ok   兜底落草稿即作废这一趟 (抬号 + voiceLanded), 迟到的整段一个字都不写')
+}
+// 同步被拒 (桥抛错 / 录音解不开 / 太长) 也要把刚认出来的字接住, 并说出宿主那句原因 (审查 ⑤)
+if (stopSource.includes('answer.error') && stopSource.includes('voiceDraftText(voiceLiveText')
+  && /answer === null \|\| answer\.ok !== true[\s\S]{0,700}?insertDraft\(held\)/u.test(stopSource)) {
+  notes.push('ok   同步被拒: 实时层那句先落草稿, 原因照宿主那一句说出来')
+} else {
+  failures.push('client.js: 同步被拒时把实时层丢了 / 吞了 answer.error —— 屏上刚认出来的字全没了')
+}
+// 计时那条 (审查遗留清单里点过): 90 s 要写 1:30, 不许写 0:90
+const clockSource = sliceFunction('clockOf')
+if (clockSource === '') {
+  failures.push('client.js: 抽不出 clockOf (计时胶囊的换算)')
+} else {
+  const clockOf = new Function(`${clockSource}\nreturn clockOf`)()
+  const clocks = [[0, '0:00'], [3, '0:03'], [59, '0:59'], [90, '1:30'], [120, '2:00']]
+  const wrongClocks = clocks.filter((one) => clockOf(one[0]) !== one[1]).map((one) => `${one[0]}s→${clockOf(one[0])}`)
+  if (wrongClocks.length === 0 && sliceFunction('paintRecTime').includes('clockOf(seconds)')) {
+    notes.push('ok   clockOf: 90 s 写 1:30 (计时胶囊不再出 0:90), paintRecTime 走它')
+  } else {
+    failures.push(`计时换算不对: ${wrongClocks.join(' / ')}`)
+  }
+}
+
 // ── 读数 ──────────────────────────────────────────────────────────────────────
 
 for (const note of notes) console.log(note)
@@ -4023,5 +4472,9 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(`\ncheck-luwi-portal: 全部通过 (${String(notes.length)} 条)`)
+
+
+
+
 
 

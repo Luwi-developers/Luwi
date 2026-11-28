@@ -8,11 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 门户那颗「按住 说话」的纯算术 (2026-11-20)
+ * 门户那颗「按住 说话」的纯算术 (2026-11-20; 2.8.1 #F10 跟着实时文字层一起定上限)
  *
- * 三层都在这一份里钉住: **上限** (60 s / 2 MB, 与 `client.js` 的 `VOICE_MAX_MS` 同一个数)、
- * **wav 认不认** (页面封的头不对时先在这里拦下, 而不是让 `LwSpeech` 抛一句更难懂的话)、
- * **回执长什么样** (页面拿 `{ok, id, error}` 三个字段认人, 少一个就是"按了半天没反应")。
+ * 三层都在这一份里钉住: **上限** (120 s / 8 MiB, 与 `client.js` 的 `VOICE_MAX_MS`、上游
+ * `LwDeepseekAsr` 同一个数; 流式节拍 1500 ms, 与 `VOICE_CHUNK_MS` 同一个数)、**wav 认不认**
+ * (页面封的头不对时先在这里拦下, 而不是让 `LwSpeech` 抛一句更难懂的话)、**回执长什么样**
+ * (页面拿 `{ok, id, error}` 三个字段认人, 少一个就是"按了半天没反应")。
  *
  * 不碰设备、不碰 Android 资源: 这几个函数是纯的
  */
@@ -21,11 +22,17 @@ class PortalVoiceTest {
     /* ── 上限 ─────────────────────────────────────────────────────────────── */
 
     @Test
-    fun `六十秒与两兆是同一档`() {
-        assertEquals(60, PortalVoice.MAX_SECONDS)
-        assertEquals(2 * 1024 * 1024, PortalVoice.MAX_BYTES)
-        // 60 s × 16 kHz × 2 B 正好 1.92 MB, 落在上限之内 (再宽一点就到闸上)
-        assertTrue(60 * 16000 * 2 <= PortalVoice.MAX_BYTES)
+    fun `一百二十秒与八兆是同一档`() {
+        assertEquals(120, PortalVoice.MAX_SECONDS)
+        assertEquals(8 * 1024 * 1024, PortalVoice.MAX_BYTES)
+        // 120 s × 16 kHz × 2 B 是 3.84 MB, 落在上限之内 (再长就得先切)
+        assertTrue(120 * 16000 * 2 <= PortalVoice.MAX_BYTES)
+        // 流式那一块的节拍与页面同一个数 (0 = 关掉流式, 页面一块都不送)
+        assertEquals(1500, PortalVoice.VOICE_CHUNK_MS)
+        // 一块 1.5 s 的 PCM16 约 48 KB, 上限 1 MB 够宽 (超了只可能是页面封错了头)
+        assertTrue(1500 * 16000 / 1000 * 2 < PortalVoice.CHUNK_BYTES)
+        // 在途上限: 认得比送得快才追得上; **取值**要钉住 (审查 B4: 只写 >= 2 的话改成 99 也全绿)
+        assertEquals(3, PortalVoice.MAX_PENDING_CHUNKS)
     }
 
     /* ── 文件名 ───────────────────────────────────────────────────────────── */
@@ -34,6 +41,8 @@ class PortalVoiceTest {
     fun `文件名带那一趟的编号`() {
         assertEquals("say-7.wav", PortalVoice.wavName(7))
         assertTrue(PortalVoice.wavName(0).endsWith(".wav"))
+        // 流式那一块的文件名带"趟号 + 块号": 同一趟里块与块不会撞名 (executor 单线程, 但别留坑)
+        assertEquals("chunk-7-12.wav", PortalVoice.chunkName(7, 12))
     }
 
     /* ── base64 ───────────────────────────────────────────────────────────── */
